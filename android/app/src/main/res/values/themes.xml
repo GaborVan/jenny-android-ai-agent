@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Jenny" parent="Theme.AppCompat.Light.NoActionBar">
+        <!-- Colori di avvio, validi finché la SPA non è pronta: da lì in poi le
+             barre seguono il tema della WebUI (JennyGestureBridge.setThemeBars).
+             Restano il fallback per loading view ed error view. -->
+        <item name="android:statusBarColor">#12121a</item>
+        <item name="android:navigationBarColor">#12121a</item>
+        <!-- Il default di AppCompat.Light è quasi bianco e lampeggia nella
+             starting window, prima che la loading view dipinga. -->
+        <item name="android:windowBackground">#12121a</item>
+    </style>
+</resources>

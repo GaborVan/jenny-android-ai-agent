@@ -1,0 +1,63 @@
+# requirements-android.lock.txt — LOCKFILE GENERATO (non modificare a mano)
+#
+# (a) Provenienza: pin esatti (==) fotografati dalle versioni GIÀ INSTALLATE
+#     nell'ambiente di test funzionante `.venv-test` (quello che oggi passa
+#     `pytest -q`). NON è una risoluzione fresca da PyPI: le versioni qui sono
+#     esattamente quelle contro cui il codice è testato.
+#
+# (b) Rigenerazione (dalle versioni installate/testate, senza rete):
+#       for p in $(grep -vE '^\s*#|^\s*$' requirements-android.txt \
+#                  | sed -E 's/[<>=!~].*//'); do \
+#           .venv-test/bin/python -m pip show "$p" \
+#           | awk '/^Name:/{n=$2}/^Version:/{print n"=="$2}'; done
+#     e aggiungere le dipendenze transitive risolte nello stesso ambiente
+#     (vedi sezione "Transitive" sotto). In alternativa, quando si ha accesso
+#     di rete e si vogliono aggiornare i vincoli:
+#       uv pip compile requirements-android.txt -o requirements-android.lock.txt
+#     (ATTENZIONE: quest'ultimo risolve da PyPI, cambia le versioni).
+#
+# (c) `requirements-android.txt` resta la SORGENTE DEI VINCOLI (range su major).
+#     Questo file è l'OUTPUT rigenerabile con i pin esatti. Se cambi un range
+#     là, rigenera qui. Il build APK (android/app/build.gradle.kts) installa
+#     QUESTO file, così due build a distanza di tempo impacchettano le stesse
+#     wheel.
+#
+# Granularità: a differenza di requirements-android.txt (solo top-level, 12
+#     pacchetti diretti), questo lock include ANCHE le dipendenze transitive
+#     pinnate, perché è ciò che rende il build davvero deterministico (senza
+#     pin sulle transitive, pip le risolverebbe di nuovo a ogni build). Le
+#     transitive elencate sono la chiusura runtime dei top-level nell'ambiente
+#     testato; i pacchetti solo-di-test (pytest, pluggy, iniconfig, packaging,
+#     Pygments, pytest-asyncio) sono esclusi perché non finiscono nell'APK.
+#
+# Uso in CI (.github/workflows/ci.yml) — OPZIONALE, non ancora attivato:
+#     per far testare a CI esattamente ciò che finisce nell'APK, sostituire
+#     `pip install -e .` con:
+#       pip install -r requirements-android.lock.txt -e . --no-deps
+#     NB: i pin qui derivano da Python 3.14 (.venv-test); la matrice CI usa
+#     3.11/3.12. Verificare la disponibilità delle wheel su quelle versioni
+#     prima di attivare lo step (per questo il cambio a ci.yml è lasciato fuori).
+
+# --- Top-level (da requirements-android.txt) ---
+httpx==0.28.1
+websockets==16.0
+loguru==0.7.3
+croniter==6.2.3
+json_repair==0.61.2
+jinja2==3.1.6
+filelock==3.29.5
+markdown==3.10.2
+pyyaml==6.0.3
+pypdf==5.9.0
+typing_extensions==4.16.0
+tzdata==2026.3
+
+# --- Transitive (chiusura runtime, dallo stesso ambiente .venv-test) ---
+anyio==4.14.1              # via httpx
+certifi==2026.6.17         # via httpx, httpcore
+httpcore==1.0.9            # via httpx
+h11==0.16.0                # via httpcore
+idna==3.18                 # via httpx, anyio
+MarkupSafe==3.0.3          # via jinja2
+python-dateutil==2.9.0.post0  # via croniter
+six==1.17.0                # via python-dateutil

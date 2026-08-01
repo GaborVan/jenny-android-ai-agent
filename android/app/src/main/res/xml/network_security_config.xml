@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Cleartext HTTP è permesso SOLO verso il gateway locale.
+     Il gateway serve la SPA e il WebSocket su 127.0.0.1 in chiaro (nessun TLS
+     su loopback), ma l'app naviga anche URL arbitrari con una WebView nascosta
+     (AgenticSearchBridge) e scarica file col tool `download_file`: un
+     `usesCleartextTraffic="true"` globale renderebbe quel traffico
+     declassabile e intercettabile. Qui il default è fail-closed. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+</network-security-config>

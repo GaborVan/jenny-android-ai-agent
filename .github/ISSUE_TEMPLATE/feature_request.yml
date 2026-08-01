@@ -1,0 +1,43 @@
+name: Feature request
+description: Suggest something Jenny should be able to do.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Jenny has a deliberate scope: **Android-only**, local-first, one unified
+        conversation, and no phone-home. Requests that fight those constraints
+        will probably be declined — see
+        [Known limitations](../blob/main/README.md#known-limitations) first.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What can't you do today?
+      description: Describe the situation, not the implementation. What are you trying to get done?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you want instead?
+      description: If you already have an idea of how it should work, say so — including where it would live in the UI.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What did you try?
+      description: |
+        Workarounds you attempted — a skill, a cron job, a mini-app, a prompt. Sometimes
+        the answer is that the agent can already do it and the docs failed to say so.
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: This works on a phone the user owns, with no server-side component.
+          required: true

@@ -1,0 +1,77 @@
+name: Bug report
+description: Something behaves differently from what the docs or the UI promise.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Never paste API keys, tokens, or full conversation history.** Sanitise config
+        snippets and logs before posting — logs can contain message text.
+
+        Setup problems are often already answered in
+        [docs/using/troubleshooting.md](../blob/main/docs/using/troubleshooting.md).
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got instead.
+      placeholder: |
+        1. Asked Jenny to ...
+        2. Expected ...
+        3. Instead ...
+    validations:
+      required: true
+
+  - type: input
+    id: device
+    attributes:
+      label: Device and Android version
+      placeholder: "Pixel 6a, Android 14"
+    validations:
+      required: true
+
+  - type: input
+    id: model
+    attributes:
+      label: Provider and model
+      description: Which LLM was answering. Quality and tool-calling vary a lot by model.
+      placeholder: "OpenRouter, anthropic/claude-sonnet-4.5"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How did you install it?
+      options:
+        - Built the debug APK from source
+        - Other (explain below)
+    validations:
+      required: true
+
+  - type: input
+    id: commit
+    attributes:
+      label: Commit
+      description: "`git rev-parse --short HEAD` in your clone."
+      placeholder: "a1b2c3d"
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        `adb logcat` around the failure, or the gateway output. Sanitised.
+        If the problem is in the WebUI, the WebView console output helps most.
+      render: text
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I removed API keys, tokens and private message text from everything I pasted.
+          required: true
+        - label: This is a bug, not a feature request or a security vulnerability (those go through private reporting).
+          required: true

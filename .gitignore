@@ -1,0 +1,126 @@
+# jenny runtime workspace (config, sessions, memory, cron, media)
+/workspace/
+/data/
+/test-data/
+.venv-test/
+# Project-specific
+.worktrees/
+.worktree/
+.assets
+.docs
+.env
+.web
+.orion
+
+# Claude / AI assistant artifacts
+docs/superpowers/
+docs/plans/
+.claude
+# Piano interno non promesso: resta locale, non è una roadmap pubblica.
+.agent/user_app_skill_marketplace_implementation_plan.md
+
+# Python bytecode & caches
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+__pycache__/
+*.egg-info/
+*.egg
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pytype/
+.dmypy.json
+dmypy.json
+.tox/
+.nox/
+.hypothesis/
+
+# Build & packaging
+# Anchored to the repo root on purpose: unanchored `dist/` and `build/` also match
+# jenny/templates/ui/assets/vendor/<pkg>/dist|build, which silently excluded the
+# vendored KaTeX, Mermaid, highlight.js and Tabler icon-font assets that index.html
+# loads and the APK bundles. Keep these anchored; add explicit paths for nested
+# build outputs instead.
+/dist/
+/build/
+android/**/build/
+.gradle/
+android/.gradle/
+*.manifest
+*.spec
+pip-wheel-metadata/
+share/python-wheels/
+
+# Android local config, signing & build artifacts
+local.properties
+# Release signing credentials (see android/app/build.gradle.kts)
+keystore.properties
+*.keystore
+*.jks
+*.p12
+android/captures/
+.cxx/
+.kotlin/
+*.apk
+*.aab
+
+# Generated test artifacts
+/test-artifacts/
+
+# Test & coverage
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+
+# Lock files (project policy)
+poetry.lock
+uv.lock
+
+# Jupyter
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Linux
+.directory
+
+# Editors & IDEs (local workspace / user settings)
+.vscode/
+.cursor/
+.idea/
+.fleet/
+*.code-workspace
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+nano.*.save
+
+# Environment & secrets (keep examples tracked if needed)
+.env.*
+!.env.example
+
+# Logs & temp
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+exp/
+.playwright-mcp/

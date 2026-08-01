@@ -1,0 +1,98 @@
+"""Layer unico per i knob operativi da variabile d'ambiente (``JENNY_*``).
+
+Questi non sono config utente (non stanno in ``config.json``): sono override
+operativi di tuning (timeout, concorrenza) letti dall'ambiente. Prima erano
+``os.environ.get(...)`` sparsi; qui sono centralizzati con nome/parsing/default
+documentati in un solo posto (Fase 3.2 — "un solo layer env").
+
+Precedenza: default del codice → override ``JENNY_*`` dell'ambiente.
+"""
+
+from __future__ import annotations
+
+import os
+
+from loguru import logger
+
+
+def _float_env(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        logger.warning("Ignoring invalid {}={!r}; using {}", name, raw, default)
+        return default
+
+
+def _int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        logger.warning("Ignoring invalid {}={!r}; using {}", name, raw, default)
+        return default
+
+
+def max_concurrent_requests(default: int = 3) -> int:
+    """Cap sui turni LLM concorrenti. ``<= 0`` = illimitato (deciso dal chiamante).
+
+    Env: ``JENNY_MAX_CONCURRENT_REQUESTS`` (default 3).
+    """
+    return _int_env("JENNY_MAX_CONCURRENT_REQUESTS", default)
+
+
+def llm_timeout_s(default: float = 300.0) -> float:
+    """Timeout hard per singola richiesta LLM (evita starvation del lock di
+    sessione se la rete si blocca). ``<= 0`` = disabilitato (deciso dal chiamante).
+
+    Env: ``JENNY_LLM_TIMEOUT_S`` (default 300).
+    """
+    return _float_env("JENNY_LLM_TIMEOUT_S", default)
+
+
+def ws_send_timeout_s(default: float = 12.0) -> float:
+    """Timeout wall-clock per singolo ``connection.send()`` sul canale WebSocket.
+
+    La libreria ``websockets`` applica backpressure: se il buffer TCP di un client
+    è saturo (rete mobile lenta, app in background) ``send`` si blocca a tempo
+    indeterminato. Il dispatcher outbound è seriale, quindi un client zombie
+    stallerebbe la consegna a *tutti*. Allo scadere, quella connessione viene
+    chiusa e scartata (mai riusata: un send cancellato lascia un frame parziale
+    sul filo). Default generoso per non disconnettere client sani su reti lente.
+
+    Env: ``JENNY_WS_SEND_TIMEOUT_S`` (default 12).
+    """
+    return _float_env("JENNY_WS_SEND_TIMEOUT_S", default)
+
+
+def goal_inactivity_ttl_h(default: float = 12.0) -> float:
+    """TTL (ore) di inattività oltre il quale un goal sostenuto ``active`` viene
+    fatto scadere in modo lazy all'inizio del turno.
+
+    Su Android il kill abrupto del processo è lo scenario normale: un goal lasciato
+    ``active`` da un crash resterebbe zombie per sempre, disabilitando in modo
+    permanente il wall-timeout LLM della sessione (vedi
+    ``jenny.session.goal_state.runner_wall_llm_timeout_s``). L'inattività si misura
+    sul più recente tra ``started_at`` e ``last_turn_at``: un goal che avanza davvero
+    aggiorna ``last_turn_at`` a ogni turno e non scade mai.
+
+    Env: ``JENNY_GOAL_INACTIVITY_TTL_H`` (default 12).
+    """
+    return _float_env("JENNY_GOAL_INACTIVITY_TTL_H", default)
+
+
+def tool_timeout_s(default: float = 300.0) -> float:
+    """Timeout wall-clock per singola esecuzione di un tool.
+
+    Rete di sicurezza contro i tool che non ritornano mai (il caso più comune di
+    turno bloccato con UI ferma su "Agent running"). Allo scadere, l'esecuzione
+    viene interrotta e l'errore è restituito al modello come normale tool-error,
+    così il turno prosegue e si chiude. ``<= 0`` = disabilitato.
+
+    Env: ``JENNY_TOOL_TIMEOUT_S`` (default 300).
+    """
+    return _float_env("JENNY_TOOL_TIMEOUT_S", default)

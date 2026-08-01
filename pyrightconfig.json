@@ -1,0 +1,33 @@
+{
+  // pyright "basic" static type-check. Zero runtime impact: this only gates CI.
+  //
+  // Adoption model (see migliorie/architettura.md §T0 and migliorie/manutenibilita.md §1):
+  //   - This config defines the FULL perimeter ("jenny" minus templates/skills). Running
+  //     `npx pyright` against it is NON-blocking visibility: it surfaces the residual errors
+  //     we intend to tighten over time.
+  //   - CI's BLOCKING step runs pyright only over the already-error-clean subset
+  //     (jenny/bus jenny/command jenny/runtime jenny/session) via CLI path args, which reuse
+  //     the settings below. That subset is 0 errors today and must stay green.
+  //
+  // Tightening waves (promote a directory into the blocking CLI path list once it is
+  // error-clean; do NOT make them blocking yet):
+  //   wave 1 (near-clean, small trivial fixes needed): security, apps, utils   (1-4 errors each)
+  //   wave 2: cron/service.py (~20), providers (~28)
+  //   wave 3: config/schema.py (~36, pydantic_compat BaseModel subclassing), channels (~43),
+  //           webui (~25), agent (~76)
+  //
+  // reportMissingImports is disabled: Android/Chaquopy deps are not installed in CI.
+  // pydantic_compat is dynamic metaprogramming (homemade BaseModel) -> relaxed environment.
+  "typeCheckingMode": "basic",
+  "pythonVersion": "3.11",
+  "include": ["jenny"],
+  "exclude": ["jenny/templates", "jenny/skills", "**/__pycache__"],
+  "reportMissingImports": false,
+  "executionEnvironments": [
+    {
+      "root": "jenny/pydantic_compat",
+      "reportGeneralTypeIssues": "none",
+      "reportAttributeAccessIssue": "none"
+    }
+  ]
+}

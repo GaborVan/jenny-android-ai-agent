@@ -1,0 +1,26 @@
+# Chaquopy installs these into the APK at build time (see android/app/build.gradle.kts).
+# Version bounds are kept in sync with pyproject.toml [project].dependencies so the
+# on-device runtime matches the tested desktop ranges. All are pure-Python (no C
+# bindings) and resolve from public PyPI — nothing local/patched.
+
+# Core runtime (always needed)
+httpx>=0.28.0,<1.0.0
+websockets>=16.0,<17.0.0
+loguru>=0.7.3,<1.0.0
+croniter>=6.0.0,<7.0.0
+json-repair>=0.57.0,<1.0.0
+jinja2>=3.1.0,<4.0.0
+filelock>=3.25.2,<4.0.0
+markdown>=3.5,<4.0.0
+pyyaml>=6.0,<7.0.0
+pypdf>=5.0.0,<6.0.0
+typing-extensions>=4.0.0,<5.0.0
+# Python 3.11+ bundles the zoneinfo *module*, but Android ships no IANA
+# database: without the pure-Python tzdata wheel ZoneInfo(...) raises
+# ZoneInfoNotFoundError for every name, UTC included.
+tzdata>=2025.1
+
+# Optional document support — NOT included in APK, too heavy with C bindings
+# openpyxl
+# python-docx
+# python-pptx

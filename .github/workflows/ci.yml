@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  # Enforces the DCO sign-off promised in CONTRIBUTING.md. Deliberately an
+  # inline check instead of a third-party action: it is ~15 lines of git, and a
+  # marketplace action would add a supply-chain dependency to every PR.
+  dco:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 — the check walks the PR commit range, which shallow
+      # clones do not contain.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check Signed-off-by on every commit
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash scripts/check_dco.sh "$BASE_SHA" "$HEAD_SHA"
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      # CI validates the Android code path on a host runner; Android is the only supported runtime target.
+      - run: pip install -e .
+      - run: pip install ruff pytest pytest-asyncio
+      - run: ruff check jenny/ tests/
+      # pyright is a static check only (zero runtime impact); config in pyrightconfig.json.
+      # BLOCKING: restricted to the already-error-clean subset — must stay green.
+      - run: npx --yes pyright@1.1.411 jenny/bus jenny/command jenny/runtime jenny/session
+      # NON-BLOCKING visibility: full perimeter, surfaces residual errors without failing CI.
+      - run: npx --yes pyright@1.1.411 || true
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      # CI validates the Android code path on a host runner; Android is the only supported runtime target.
+      - run: pip install -e .
+      - run: pip install ruff pytest pytest-asyncio
+      # Backend crypto dev/test per i test del backup cifrato (su Android si
+      # usa javax.crypto: `cryptography` NON va mai nei requirements Android).
+      - run: pip install cryptography
+      - run: pip install pytest-cov
+      # Il report di coverage è informativo (nessuna soglia bloccante): serve
+      # a rendere visibili i moduli scoperti, non a far fallire la build.
+      - run: pytest -q --cov=jenny --cov-report=term-missing:skip-covered

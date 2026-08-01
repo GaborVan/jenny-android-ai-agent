@@ -1,0 +1,496 @@
+"""Canale Telegram: bot personale con pairing a codice e long polling.
+
+Contratto duck-typed del dispatcher (come ``WebSocketChannel``): attributi di
+gating, ``start()``/``stop()`` e ``send()``. Niente streaming: il canale non
+setta ``_wants_stream`` sull'inbound, quindi riceve solo messaggi finali.
+
+Il canale è pura consegna: non conosce il transcript WebUI. La proiezione dei
+turni Telegram sulla vista WebUI è responsabilità del runtime (user echo via
+``WebuiTurnCoordinator``, finale via dispatcher, ``turn_end`` via runtime
+events); qui resta solo il turn-id nei metadata inbound per correlare le righe.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hmac
+import uuid
+from collections.abc import Callable
+from contextlib import suppress
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
+
+from loguru import logger
+
+from jenny.bus.events import COORDINATION_FLAGS, InboundMessage, OutboundMessage
+from jenny.bus.queue import MessageBus
+from jenny.channels.telegram_api import TelegramAPI, TelegramAPIError
+from jenny.channels.telegram_format import markdown_to_telegram_html, split_message
+from jenny.config.schema import TelegramConfig
+from jenny.webui.metadata import WEBUI_TURN_METADATA_KEY
+
+# Limite prudente sul testo grezzo: la conversione HTML può allungare il chunk.
+_RAW_CHUNK_LIMIT = 3500
+_POLL_BACKOFF_MAX_S = 60.0
+_CHUNK_RETRY_DELAYS = (1, 2, 4)
+
+# Estensioni inviabili come foto (anteprima nativa Telegram); tutto il resto
+# (SVG, PDF, ecc.) va come documento. Cap prudente sotto il limite Bot API.
+_RASTER_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+_TG_MEDIA_MAX_BYTES = 10 * 1024 * 1024
+
+# Onboarding in finestra di pairing: budget di risposte di servizio per chat e
+# bound fail-closed sul numero di chat tracciate. Superato il cap (o pieno il
+# dict) la chat diventa INELEGGIBILE al pairing anche col codice giusto: è
+# questo che rende il throttle una difesa reale contro il brute-force del
+# codice a 6 cifre (budget totale ≈ cap × bound su 10^6 per vita del canale).
+_MAX_PAIR_ATTEMPTS = 5
+_MAX_TRACKED_CHATS = 512
+
+# Chiavi di update Telegram che indicano contenuto non testuale (v1: non gestito).
+# ``location``/``venue`` sono gestite a parte (vedi _maybe_handle_location) e
+# restano qui solo per la fallback "media_soon" quando la posizione è off.
+_MEDIA_KEYS = (
+    "photo", "voice", "document", "sticker", "video", "audio",
+    "video_note", "animation", "location", "contact", "poll",
+)
+
+# Contenuto sintetico (LLM-facing, non mostrato all'utente) di un turno
+# innescato da una posizione condivisa: la posizione vera arriva nel runtime
+# context come "User location (shared via Telegram): …".
+_LOCATION_TURN_MARKER = "📍 [The user just shared their current location via Telegram.]"
+
+# Risposte lato bot, localizzate come i WELCOME_TEMPLATES dell'onboarding.
+_BOT_STRINGS: dict[str, dict[str, str]] = {
+    "it": {
+        "paired": "✅ Collegato! Da ora puoi parlare con Jenny da questa chat.",
+        "welcome": (
+            "Scrivimi come in una chat normale e ti risponde Jenny.\n\n"
+            "• /new — inizia una nuova conversazione\n"
+            "• 📎 Foto, vocali e documenti arriveranno presto"
+        ),
+        "start_prompt": (
+            "Per collegarti, inviami il codice a 6 cifre che vedi nella WebUI di Jenny."
+        ),
+        "wrong_code": (
+            "Codice non valido. Controlla il codice a 6 cifre nella WebUI di Jenny e riprova."
+        ),
+        "media_soon": "📎 Foto, vocali e documenti arriveranno presto: per ora solo testo.",
+    },
+    "en": {
+        "paired": "✅ Paired! You can now talk to Jenny from this chat.",
+        "welcome": (
+            "Message me like a normal chat and Jenny replies.\n\n"
+            "• /new — start a new conversation\n"
+            "• 📎 Photos, voice notes and documents are coming soon"
+        ),
+        "start_prompt": (
+            "To pair, send me the 6-digit code shown in Jenny's WebUI."
+        ),
+        "wrong_code": (
+            "Invalid code. Check the 6-digit code in Jenny's WebUI and try again."
+        ),
+        "media_soon": "📎 Photos, voice notes and documents are coming soon: text only for now.",
+    },
+}
+
+
+class TelegramChannel:
+    """Canale bot Telegram con pairing a codice singolo owner."""
+
+    name = "telegram"
+    display_name = "Telegram"
+    send_progress = False
+    send_tool_hints = False
+    show_reasoning = False
+    # I retry sono gestiti per-chunk internamente: un retry esterno del
+    # dispatcher rispedirebbe anche i chunk già consegnati (duplicati).
+    send_max_retries = 1
+
+    def __init__(
+        self,
+        config: TelegramConfig,
+        bus: MessageBus,
+        *,
+        api: TelegramAPI | None = None,
+        on_paired: Callable[[str, str | None], None] | None = None,
+        language: str = "en",
+    ):
+        self.config = config
+        self.bus = bus
+        self.api = api or TelegramAPI(config.bot_token or "")
+        self._on_paired = on_paired
+        self._language = language if language in _BOT_STRINGS else "en"
+        self._paired_chat_id = config.paired_chat_id
+        self._pairing_code = config.pairing_code
+        self._offset: int | None = None
+        self._poll_task: asyncio.Task | None = None
+        # Tentativi di pairing per chat (in-memory: si azzera al reload del
+        # canale, che rigenera comunque il codice nei percorsi che contano).
+        self._pair_attempts: dict[str, int] = {}
+
+    def _t(self, key: str) -> str:
+        return _BOT_STRINGS[self._language][key]
+
+    @property
+    def paired_chat_id(self) -> str | None:
+        """Chat accoppiata corrente (stato vivo, aggiornato al pairing)."""
+        return self._paired_chat_id
+
+    # ------------------------------------------------------------------ #
+    # Lifecycle                                                          #
+    # ------------------------------------------------------------------ #
+
+    async def start(self) -> None:
+        """Avvia il long polling; ritorna quando il task termina (stop)."""
+        self._poll_task = asyncio.create_task(self._poll_loop())
+        logger.info("Telegram channel started (paired={})", bool(self._paired_chat_id))
+        with suppress(asyncio.CancelledError):
+            await self._poll_task
+
+    async def stop(self) -> None:
+        if self._poll_task is not None:
+            self._poll_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._poll_task
+            self._poll_task = None
+        await self.api.close()
+
+    async def _poll_loop(self) -> None:
+        """Long-poll di ``getUpdates`` con backoff su errori di rete.
+
+        Il backoff cresce fino a 60s e si azzera al primo successo: cadute
+        Wi-Fi o doze temporaneo si riassorbono senza intervento.
+        """
+        backoff = 1.0
+        while True:
+            try:
+                updates = await self.api.get_updates(self._offset, self.config.poll_timeout_s)
+                backoff = 1.0
+                for update in updates:
+                    update_id = update.get("update_id")
+                    if isinstance(update_id, int):
+                        self._offset = update_id + 1
+                    try:
+                        await self._handle_update(update)
+                    except Exception:
+                        logger.exception("Telegram: error handling update")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning(
+                    "Telegram poll error ({}), retrying in {:.0f}s", type(e).__name__, backoff
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, _POLL_BACKOFF_MAX_S)
+
+    # ------------------------------------------------------------------ #
+    # Inbound                                                            #
+    # ------------------------------------------------------------------ #
+
+    async def _handle_update(self, update: dict[str, Any]) -> None:
+        message = update.get("message")
+        if not isinstance(message, dict):
+            return
+        chat = message.get("chat") or {}
+        chat_id = str(chat.get("id", ""))
+        if not chat_id:
+            return
+        sender = message.get("from") or {}
+        text = message.get("text")
+
+        if not self._paired_chat_id:
+            await self._maybe_pair(chat_id, sender, text)
+            return
+        if chat_id != str(self._paired_chat_id):
+            # Mittente estraneo: silenzio totale, nessun oracle sull'esistenza
+            # del bot o dello stato di pairing.
+            logger.info("Telegram: ignoring message from unpaired chat {}", chat_id)
+            return
+        if not isinstance(text, str) or not text.strip():
+            if await self._maybe_handle_location(chat_id, sender, message):
+                return
+            if any(key in message for key in _MEDIA_KEYS):
+                await self._send_raw(chat_id, self._t("media_soon"))
+            return
+        if self._parse_start(text) is not None:
+            # /start dal proprietario: guida rapida di servizio, non un turno
+            # LLM (e niente rumore nella vista WebUI). /new e /stop invece
+            # proseguono verso il command router.
+            await self._send_raw(chat_id, self._t("welcome"))
+            return
+
+        # Turn-id per correlare le righe della vista WebUI (user echo, finale,
+        # turn_end) allo stesso turno: stesso ruolo del turn-id dei client WS.
+        metadata: dict[str, Any] = {WEBUI_TURN_METADATA_KEY: str(uuid.uuid4())}
+        await self.bus.publish_inbound(
+            InboundMessage(
+                channel=self.name,
+                sender_id=str(sender.get("id", chat_id)),
+                chat_id=chat_id,
+                content=text,
+                metadata=metadata,
+            )
+        )
+
+    async def _maybe_handle_location(
+        self, chat_id: str, sender: dict[str, Any], message: dict[str, Any]
+    ) -> bool:
+        """Gestisce una posizione condivisa via Telegram (``location``/``venue``).
+
+        La registra come override per-canale (usata solo dalle risposte
+        Telegram entro il TTL) e innesca un turno LLM così Jenny reagisce, con
+        la posizione già iniettata nel runtime context. Ritorna ``False`` se il
+        messaggio non è una posizione o se il toggle posizione è off — in quel
+        caso il chiamante ricade sulla fallback "media_soon".
+        """
+        raw_loc = message.get("location")
+        venue = message.get("venue") if isinstance(message.get("venue"), dict) else None
+        if venue and isinstance(venue.get("location"), dict):
+            raw_loc = venue["location"]
+        if not isinstance(raw_loc, dict):
+            return False
+        try:
+            lat = float(raw_loc["latitude"])
+            lng = float(raw_loc["longitude"])
+        except (KeyError, TypeError, ValueError):
+            return False
+
+        # Toggle posizione: caricato lazy (le condivisioni sono rare). Se off,
+        # non registriamo nulla e lasciamo rispondere la fallback media_soon.
+        try:
+            from jenny.config.loader import load_config
+
+            cfg = load_config().tools.location
+        except Exception:  # noqa: BLE001
+            logger.opt(exception=True).debug("Telegram: could not load location config")
+            cfg = None
+        if cfg is not None and not getattr(cfg, "enable", True):
+            return False
+
+        from dataclasses import replace
+
+        from jenny.runtime.location import build_telegram_fix, record_telegram_location
+
+        fix = await build_telegram_fix(cfg, lat, lng)
+        # Un venue porta già un nome/indirizzo leggibile: preferiamolo al
+        # reverse-geocoding delle coordinate.
+        if venue:
+            label = ", ".join(
+                str(x) for x in (venue.get("title"), venue.get("address")) if x
+            )
+            if label:
+                fix = replace(fix, place=label)
+        record_telegram_location(chat_id, fix)
+
+        metadata: dict[str, Any] = {WEBUI_TURN_METADATA_KEY: str(uuid.uuid4())}
+        await self.bus.publish_inbound(
+            InboundMessage(
+                channel=self.name,
+                sender_id=str(sender.get("id", chat_id)),
+                chat_id=chat_id,
+                content=_LOCATION_TURN_MARKER,
+                metadata=metadata,
+            )
+        )
+        return True
+
+    @staticmethod
+    def _parse_start(text: str) -> str | None:
+        """Riconosce un comando ``/start``; ritorna il payload (anche vuoto).
+
+        Case-insensitive sul comando, con l'eventuale suffisso ``@botusername``
+        rimosso. Ritorna ``None`` se il testo non è un /start.
+        """
+        parts = text.strip().split(maxsplit=1)
+        if not parts:
+            return None
+        command = parts[0].split("@", 1)[0]
+        if command.lower() != "/start":
+            return None
+        return parts[1].strip() if len(parts) > 1 else ""
+
+    async def _maybe_pair(self, chat_id: str, sender: dict[str, Any], text: Any) -> None:
+        """Onboarding in finestra di pairing: solo il codice esatto accoppia.
+
+        Senza ``pairing_code`` attivo il bot resta muto (regola no-oracle,
+        vedi ``.agent/security.md``). In finestra risponde con prompt/feedback
+        entro un budget per chat; una chat oltre il cap (o oltre il bound del
+        dict, fail-closed) è ineleggibile al pairing anche col codice giusto.
+        """
+        if not self._pairing_code or not isinstance(text, str):
+            return
+
+        start_payload = self._parse_start(text)
+        candidate = start_payload if start_payload is not None else text.strip()
+
+        # Eleggibilità PRIMA del confronto col codice: è il blocco del
+        # pairing, non solo del feedback, a fermare il brute-force.
+        attempts = self._pair_attempts.get(chat_id, 0)
+        if attempts >= _MAX_PAIR_ATTEMPTS:
+            logger.info("Telegram: chat {} exceeded pairing attempts, ignoring", chat_id)
+            return
+        if chat_id not in self._pair_attempts and len(self._pair_attempts) >= _MAX_TRACKED_CHATS:
+            logger.warning("Telegram: pairing attempt table full, ignoring chat {}", chat_id)
+            return
+
+        if candidate and hmac.compare_digest(candidate, self._pairing_code):
+            username = sender.get("username")
+            self._paired_chat_id = chat_id
+            self._pairing_code = None
+            self._pair_attempts.clear()
+            if self._on_paired is not None:
+                try:
+                    self._on_paired(chat_id, username if isinstance(username, str) else None)
+                except Exception:
+                    logger.exception("Telegram: on_paired callback failed")
+            logger.info("Telegram: paired with chat {}", chat_id)
+            await self._send_raw(
+                chat_id, self._t("paired") + "\n\n" + self._t("welcome")
+            )
+            return
+
+        self._pair_attempts[chat_id] = attempts + 1
+        if start_payload == "":
+            # /start nudo: è l'inizio dell'onboarding, chiedi il codice.
+            logger.info("Telegram: /start during pairing window from chat {}", chat_id)
+            await self._send_raw(chat_id, self._t("start_prompt"))
+        else:
+            logger.info("Telegram: pairing attempt with wrong code from chat {}", chat_id)
+            await self._send_raw(chat_id, self._t("wrong_code"))
+
+    # ------------------------------------------------------------------ #
+    # Outbound                                                           #
+    # ------------------------------------------------------------------ #
+
+    async def send(
+        self,
+        msg: OutboundMessage,
+        *,
+        only_conns: list[Any] | None = None,
+        skip_persist: bool = False,
+    ) -> list[Any]:
+        """Consegna un messaggio finale al chat accoppiato.
+
+        Ritorna sempre ``[]``: non esiste fan-out parziale su Telegram.
+        Gli eventi di solo coordinamento WebUI vengono ignorati.
+        """
+        meta = msg.metadata or {}
+        if self._is_webui_only_event(meta):
+            return []
+        if not self._paired_chat_id:
+            logger.warning("Telegram: dropping outbound, no paired chat")
+            return []
+        content = msg.content or ""
+        media = [m for m in (msg.media or []) if isinstance(m, str) and m.strip()]
+        if not content.strip() and not media:
+            return []
+
+        chat_id = str(self._paired_chat_id)
+        if content.strip():
+            for chunk in split_message(content, _RAW_CHUNK_LIMIT):
+                await self._send_chunk(chat_id, chunk)
+        # Gli allegati seguono il testo, ciascuno come foto (raster) o documento
+        # (SVG e formati non-foto). Un media non inviabile viene loggato e
+        # saltato, senza abbattere la consegna del resto.
+        for item in media:
+            await self._send_media_item(chat_id, item)
+        return []
+
+    async def _send_media_item(self, chat_id: str, path: str) -> None:
+        """Invia un singolo allegato come foto o documento, best-effort."""
+        is_url = path.startswith(("http://", "https://"))
+        ext = Path(urlparse(path).path if is_url else path).suffix.lower()
+        as_photo = ext in _RASTER_EXTS
+        method = "sendPhoto" if as_photo else "sendDocument"
+        field = "photo" if as_photo else "document"
+        try:
+            if is_url:
+                await self.api.send_media_url(
+                    chat_id, method=method, field=field, url=path
+                )
+                return
+            p = Path(path)
+            if not p.is_file():
+                logger.warning("Telegram: media not found, skipping: {}", path)
+                return
+            data = await asyncio.to_thread(p.read_bytes)
+            if len(data) > _TG_MEDIA_MAX_BYTES:
+                logger.warning(
+                    "Telegram: media too large ({} bytes), skipping: {}", len(data), path
+                )
+                return
+            try:
+                await self.api.send_media_file(
+                    chat_id, method=method, field=field, filename=p.name, data=data
+                )
+            except TelegramAPIError as e:
+                # Un raster rifiutato dall'elaborazione foto (400) passa come
+                # documento: meglio consegnare il file che perderlo.
+                if as_photo and e.status_code == 400:
+                    await self.api.send_media_file(
+                        chat_id, method="sendDocument", field="document",
+                        filename=p.name, data=data,
+                    )
+                else:
+                    raise
+        except Exception as e:
+            logger.error("Telegram: media send failed for {}: {}", path, type(e).__name__)
+
+    @staticmethod
+    def _is_webui_only_event(meta: dict[str, Any]) -> bool:
+        return any(meta.get(key) for key in COORDINATION_FLAGS)
+
+    async def _send_chunk(self, chat_id: str, chunk: str) -> None:
+        """Invia un chunk con retry interno; HTML → fallback plain su 400."""
+        last_error: Exception | None = None
+        for attempt, delay in enumerate((0, *_CHUNK_RETRY_DELAYS)):
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                try:
+                    await self.api.send_message(
+                        chat_id, markdown_to_telegram_html(chunk), parse_mode="HTML"
+                    )
+                except TelegramAPIError as e:
+                    if e.status_code != 400:
+                        raise
+                    # HTML rifiutato (tag spezzati da chunking o markdown
+                    # inatteso): il testo grezzo passa sempre.
+                    await self.api.send_message(chat_id, chunk)
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    "Telegram send failed (attempt {}): {}", attempt + 1, type(e).__name__
+                )
+        logger.error("Telegram: giving up on chunk after retries: {}", last_error)
+
+    async def _send_raw(self, chat_id: str, text: str) -> None:
+        """Risposta di servizio (pairing/media): best-effort, senza transcript."""
+        try:
+            await self.api.send_message(chat_id, text)
+        except Exception:
+            logger.exception("Telegram: service reply failed")
+
+    # ------------------------------------------------------------------ #
+    # No-op per il contratto dispatcher (nessuno streaming su Telegram)  #
+    # ------------------------------------------------------------------ #
+
+    async def send_delta(self, *args: Any, **kwargs: Any) -> list[Any]:
+        return []
+
+    async def send_reasoning_delta(self, *args: Any, **kwargs: Any) -> list[Any]:
+        return []
+
+    async def send_reasoning_end(self, *args: Any, **kwargs: Any) -> list[Any]:
+        return []
+
+    async def send_file_edit_events(self, *args: Any, **kwargs: Any) -> list[Any]:
+        return []
+
+    def discard_stream_buffer(self, *args: Any, **kwargs: Any) -> None:
+        return None

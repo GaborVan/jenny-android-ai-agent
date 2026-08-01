@@ -1,0 +1,11 @@
+# Blank issues stay enabled on purpose: the README asks people to report where
+# onboarding confused them, and a required form is friction on exactly that
+# feedback.
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability (private)
+    url: https://github.com/flagdizero/jenny-android-ai-agent/security/advisories/new
+    about: Never report a vulnerability in a public issue. This channel is private.
+  - name: Setup and troubleshooting
+    url: https://github.com/flagdizero/jenny-android-ai-agent/blob/main/docs/using/troubleshooting.md
+    about: Gateway won't start, provider errors, WebView blank, sessions missing.

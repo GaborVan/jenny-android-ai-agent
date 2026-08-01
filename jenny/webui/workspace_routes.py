@@ -1,0 +1,324 @@
+"""Adapter di route HTTP per il file-manager del workspace (estratto da ws_http).
+
+Stesso pattern router di ``SkillsRoutes``/``WikiRoutes``. Le operazioni su file
+passano tutte per ``webui.workspace_files.validate_path`` (che delega al gate
+unico symlink-safe/fail-closed del core — Fase 2).
+"""
+
+from __future__ import annotations
+
+import json
+import mimetypes
+from collections.abc import Callable
+from pathlib import Path
+
+from websockets.datastructures import Headers
+from websockets.http11 import Request as WsRequest
+from websockets.http11 import Response
+
+from jenny.channels.http_utils import (
+    case_insensitive_header,
+    http_error,
+    http_json_response,
+    parse_query,
+    query_first,
+)
+
+QueryParams = dict[str, list[str]]
+
+
+class WorkspaceRoutes:
+    """Route ``/api/workspace/*`` (CRUD file del workspace)."""
+
+    def __init__(
+        self,
+        *,
+        check_api_token: Callable[[WsRequest], bool],
+        get_workspace_root: Callable[[], Path],
+    ) -> None:
+        self._check_api_token = check_api_token
+        self._get_workspace_root = get_workspace_root
+
+    def _require_workspace_flag(
+        self, attr: str, status: int, message: str
+    ) -> Response | None:
+        """Verifica un flag booleano di ``config.workspace``, fail-closed.
+
+        Ritorna una ``Response`` di errore se il flag è disattivato oppure se
+        ``load_config()`` solleva: in quest'ultimo caso NON si prosegue mai
+        verso l'operazione filesystem (503), così un errore di config non
+        scavalca silenziosamente il gate di sicurezza.
+        """
+        from jenny.config.loader import load_config
+
+        try:
+            allowed = bool(getattr(load_config().workspace, attr))
+        except Exception:
+            return http_error(503, "workspace configuration unavailable")
+        if not allowed:
+            return http_error(status, message)
+        return None
+
+    def _check_workspace_enabled(self) -> Response | None:
+        return self._require_workspace_flag("enabled", 503, "workspace is disabled")
+
+    async def dispatch(self, request: WsRequest, path: str) -> Response | None:
+        handlers = {
+            "/api/workspace/list": self._list,
+            "/api/workspace/read": self._read,
+            "/api/workspace/write": self._write,
+            "/api/workspace/mkdir": self._mkdir,
+            "/api/workspace/rename": self._rename,
+            "/api/workspace/delete": self._delete,
+            "/api/workspace/copy": self._copy,
+            "/api/workspace/download": self._download,
+        }
+        handler = handlers.get(path)
+        if handler is None:
+            return None
+        return await handler(request)
+
+    async def _list(self, request: WsRequest) -> Response:
+        if not self._check_api_token(request):
+            return http_error(401, "Unauthorized")
+        err = self._check_workspace_enabled()
+        if err:
+            return err
+        from jenny.webui.workspace_files import list_directory, validate_path
+
+        query = parse_query(request.path)
+        rel_path = query_first(query, "path") or ""
+        workspace_root = self._get_workspace_root()
+        try:
+            full_path = validate_path(workspace_root, rel_path)
+            items = list_directory(full_path, workspace_root=workspace_root)
+            return http_json_response({"items": items, "path": rel_path})
+        except ValueError as e:
+            return http_error(400, str(e))
+        except FileNotFoundError:
+            return http_error(404, "path not found")
+        except PermissionError:
+            return http_error(403, "permission denied")
+        except OSError as e:
+            return http_error(400, str(e))
+
+    async def _read(self, request: WsRequest) -> Response:
+        if not self._check_api_token(request):
+            return http_error(401, "Unauthorized")
+        err = self._check_workspace_enabled()
+        if err:
+            return err
+        from jenny.webui.workspace_files import (
+            WorkspaceBinaryFileError,
+            read_file,
+            validate_path,
+        )
+
+        query = parse_query(request.path)
+        rel_path = query_first(query, "path") or ""
+        workspace_root = self._get_workspace_root()
+        try:
+            full_path = validate_path(workspace_root, rel_path)
+            from jenny.config.loader import load_config
+
+            try:
+                max_size = load_config().workspace.max_file_size
+            except Exception:
+                max_size = 1_000_000
+            content = read_file(full_path, max_size=max_size)
+            return http_json_response({"content": content, "path": rel_path})
+        except WorkspaceBinaryFileError:
+            # 415: il client (viewer workspace) reagisce delegando
+            # l'apertura all'app di sistema via bridge nativo.
+            return http_error(415, "binary file")
+        except ValueError as e:
+            return http_error(400, str(e))
+        except FileNotFoundError:
+            return http_error(404, "path not found")
+        except PermissionError:
+            return http_error(403, "permission denied")
+        except OSError as e:
+            return http_error(400, str(e))
+
+    async def _write(self, request: WsRequest) -> Response:
+        if not self._check_api_token(request):
+            return http_error(401, "Unauthorized")
+        err = self._check_workspace_enabled()
+        if err:
+            return err
+        err = self._require_workspace_flag(
+            "allow_write", 403, "workspace writes are disabled"
+        )
+        if err:
+            return err
+        from jenny.webui.workspace_files import validate_path, write_file
+
+        raw = case_insensitive_header(request.headers, "X-Jenny-Workspace-Data")
+        if not raw:
+            return http_error(400, "missing workspace data header")
+        try:
+            data = json.loads(raw)
+        except Exception:
+            return http_error(400, "invalid JSON in workspace data header")
+        rel_path = data.get("path", "")
+        content = data.get("content", "")
+        workspace_root = self._get_workspace_root()
+        try:
+            full_path = validate_path(workspace_root, rel_path)
+            write_file(full_path, content)
+            return http_json_response({"success": True, "path": rel_path})
+        except ValueError as e:
+            return http_error(400, str(e))
+        except FileNotFoundError:
+            return http_error(404, "path not found")
+        except PermissionError:
+            return http_error(403, "permission denied")
+        except OSError as e:
+            return http_error(400, str(e))
+
+    async def _mkdir(self, request: WsRequest) -> Response:
+        if not self._check_api_token(request):
+            return http_error(401, "Unauthorized")
+        err = self._check_workspace_enabled()
+        if err:
+            return err
+        err = self._require_workspace_flag(
+            "allow_write", 403, "workspace writes are disabled"
+        )
+        if err:
+            return err
+        from jenny.webui.workspace_files import create_directory, validate_path
+
+        query = parse_query(request.path)
+        rel_path = query_first(query, "path") or ""
+        workspace_root = self._get_workspace_root()
+        try:
+            full_path = validate_path(workspace_root, rel_path)
+            create_directory(full_path)
+            return http_json_response({"success": True, "path": rel_path})
+        except ValueError as e:
+            return http_error(400, str(e))
+        except FileNotFoundError:
+            return http_error(404, "path not found")
+        except PermissionError:
+            return http_error(403, "permission denied")
+        except OSError as e:
+            return http_error(400, str(e))
+
+    async def _rename(self, request: WsRequest) -> Response:
+        if not self._check_api_token(request):
+            return http_error(401, "Unauthorized")
+        err = self._check_workspace_enabled()
+        if err:
+            return err
+        from jenny.webui.workspace_files import rename_path, validate_path
+
+        query = parse_query(request.path)
+        old_rel = query_first(query, "oldPath") or ""
+        new_rel = query_first(query, "newPath") or ""
+        workspace_root = self._get_workspace_root()
+        try:
+            old_path = validate_path(workspace_root, old_rel)
+            new_path = validate_path(workspace_root, new_rel)
+            rename_path(old_path, new_path)
+            return http_json_response({"success": True})
+        except ValueError as e:
+            return http_error(400, str(e))
+        except FileNotFoundError:
+            return http_error(404, "path not found")
+        except PermissionError:
+            return http_error(403, "permission denied")
+        except OSError as e:
+            return http_error(400, str(e))
+
+    async def _delete(self, request: WsRequest) -> Response:
+        if not self._check_api_token(request):
+            return http_error(401, "Unauthorized")
+        err = self._check_workspace_enabled()
+        if err:
+            return err
+        err = self._require_workspace_flag(
+            "allow_delete", 403, "workspace deletes are disabled"
+        )
+        if err:
+            return err
+        from jenny.webui.workspace_files import delete_path, validate_path
+
+        query = parse_query(request.path)
+        rel_path = query_first(query, "path") or ""
+        workspace_root = self._get_workspace_root()
+        try:
+            full_path = validate_path(workspace_root, rel_path)
+            delete_path(full_path)
+            return http_json_response({"success": True, "path": rel_path})
+        except ValueError as e:
+            return http_error(400, str(e))
+        except FileNotFoundError:
+            return http_error(404, "path not found")
+        except PermissionError:
+            return http_error(403, "permission denied")
+        except OSError as e:
+            return http_error(400, str(e))
+
+    async def _copy(self, request: WsRequest) -> Response:
+        if not self._check_api_token(request):
+            return http_error(401, "Unauthorized")
+        err = self._check_workspace_enabled()
+        if err:
+            return err
+        from jenny.webui.workspace_files import copy_path, validate_path
+
+        query = parse_query(request.path)
+        src_rel = query_first(query, "path") or ""
+        dest_rel = query_first(query, "dest") or ""
+        workspace_root = self._get_workspace_root()
+        try:
+            src_path = validate_path(workspace_root, src_rel)
+            dest_path = validate_path(workspace_root, dest_rel)
+            copy_path(src_path, dest_path)
+            return http_json_response({"success": True})
+        except ValueError as e:
+            return http_error(400, str(e))
+        except FileNotFoundError:
+            return http_error(404, "path not found")
+        except PermissionError:
+            return http_error(403, "permission denied")
+        except OSError as e:
+            return http_error(400, str(e))
+
+    async def _download(self, request: WsRequest) -> Response:
+        if not self._check_api_token(request):
+            return http_error(401, "Unauthorized")
+        err = self._check_workspace_enabled()
+        if err:
+            return err
+        from jenny.webui.workspace_files import validate_path
+
+        query = parse_query(request.path)
+        rel_path = query_first(query, "path") or ""
+        workspace_root = self._get_workspace_root()
+        try:
+            full_path = validate_path(workspace_root, rel_path)
+        except ValueError as e:
+            return http_error(400, str(e))
+        if not full_path.exists():
+            return http_error(404, "path not found")
+        if full_path.is_dir():
+            return http_error(400, "cannot download a directory")
+        try:
+            data = full_path.read_bytes()
+        except FileNotFoundError:
+            return http_error(404, "path not found")
+        except PermissionError:
+            return http_error(403, "permission denied")
+        except OSError as e:
+            return http_error(400, str(e))
+
+        content_type = mimetypes.guess_type(full_path.name)[0] or "application/octet-stream"
+        headers = Headers(
+            [
+                ("Content-Type", content_type),
+                ("Content-Disposition", f'attachment; filename="{full_path.name}"'),
+            ]
+        )
+        return Response(200, "OK", headers, data)

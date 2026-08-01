@@ -1,0 +1,5 @@
+# Jenny Apps
+
+Workspace apps the user sees in the WebUI grid. Each app's typed actions are available to you as native tools (named `<slug>_<action>`). Before working with an app, read its `AGENT.md` context file. Always change app data through the app's tools, never by editing files in `data/` directly — the tools validate and never corrupt records.
+
+{{ apps_summary }}

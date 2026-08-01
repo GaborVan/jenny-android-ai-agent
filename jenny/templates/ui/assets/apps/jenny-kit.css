@@ -1,0 +1,264 @@
+/* ── Jenny Kit — shared design system for Jenny Apps ──
+   Apps run in sandboxed iframes with an opaque origin: CSS custom properties
+   do NOT cross the iframe boundary, so this file carries its own copies of
+   the SPA theme tokens (source of truth: mobile-style.css). jenny-sdk.js
+   stamps data-theme on <html> from the iframe query string. */
+
+@import url("/html-mobile/assets/vendor/fonts/google-fonts.css");
+@import url("/html-mobile/assets/vendor/@tabler/icons-webfont@3.19.0/dist/tabler-icons.min.css");
+
+:root, [data-theme="dark"] {
+  --bg:          rgba(18, 18, 26, 0.72);
+  --bg2:         rgba(26, 26, 38, 0.60);
+  --bg3:         rgba(14, 14, 20, 0.78);
+  --border:      rgba(255, 255, 255, 0.06);
+  --border2:     rgba(255, 255, 255, 0.10);
+  --text:        #d4d4d8;
+  --text2:       #8b8b96;
+  --text3:       #52525e;
+  --accent:      #818cf8;
+  --accent-hover:#a5b4fc;
+  --accent-subtle: rgba(129, 140, 248, 0.15);
+  --on-accent:   #ffffff;
+  --green:       #22c55e;
+  --success-bg:  rgba(34,197,94,.10);
+  --error:       #ef4444;
+  --error-bg:    rgba(239,68,68,.10);
+  --warning:     #f59e0b;
+  --warning-bg:  rgba(245,158,11,.10);
+  --heading:     #e4e4e7;
+  --hover-bg:    rgba(255, 255, 255, 0.05);
+  --glass:       rgba(255, 255, 255, 0.03);
+  --glass-strong:rgba(255, 255, 255, 0.06);
+  --glass-border:rgba(255, 255, 255, 0.08);
+  --bg-solid:    #0c0c12;
+  --bg-pattern:  linear-gradient(135deg, rgba(129,140,248,0.03) 0%, transparent 50%, rgba(129,140,248,0.02) 100%);
+  --radius:      10px;
+  --radius-sm:   6px;
+  --radius-pill: 999px;
+  --font-sans:   'Inter', system-ui, sans-serif;
+  --font-mono:   'Fira Code', monospace;
+}
+
+[data-theme="light"] {
+  --bg:          rgba(250, 250, 252, 0.72);
+  --bg2:         rgba(240, 240, 245, 0.60);
+  --bg3:         rgba(232, 232, 238, 0.75);
+  --border:      rgba(0, 0, 0, 0.06);
+  --border2:     rgba(0, 0, 0, 0.10);
+  --text:        #1a1a22;
+  --text2:       #6b6b78;
+  --text3:       #9b9ba8;
+  --accent:      #6366f1;
+  --accent-hover:#4f46e5;
+  --accent-subtle: rgba(99, 102, 241, 0.10);
+  --on-accent:   #ffffff;
+  --green:       #16a34a;
+  --success-bg:  rgba(22,163,74,.08);
+  --error:       #dc2626;
+  --error-bg:    rgba(220,38,38,.08);
+  --warning:     #d97706;
+  --warning-bg:  rgba(217,119,6,.08);
+  --heading:     #0f0f14;
+  --hover-bg:    rgba(0, 0, 0, 0.04);
+  --glass:       rgba(255, 255, 255, 0.45);
+  --glass-strong:rgba(255, 255, 255, 0.65);
+  --glass-border:rgba(255, 255, 255, 0.55);
+  --bg-solid:    #f0f0f4;
+  --bg-pattern:  linear-gradient(135deg, rgba(99,102,241,0.04) 0%, transparent 50%, rgba(99,102,241,0.03) 100%);
+}
+
+/* ── Classless base: semantic HTML looks native with zero classes ── */
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  min-height: 100vh;
+  background: var(--bg-solid);
+  background-image: var(--bg-pattern);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.5;
+  padding: 14px 14px calc(14px + env(safe-area-inset-bottom, 0px));
+}
+
+h1, h2, h3 { color: var(--heading); line-height: 1.25; }
+h1 { font-size: 19px; font-weight: 650; }
+h2 { font-size: 16px; font-weight: 600; margin: 18px 0 8px; }
+h3 { font-size: 14px; font-weight: 600; margin: 14px 0 6px; }
+p { margin: 8px 0; }
+small { color: var(--text2); font-size: 12px; }
+a { color: var(--accent); text-decoration: none; }
+code, pre { font-family: var(--font-mono); font-size: 12.5px; }
+pre {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  overflow-x: auto;
+  margin: 8px 0;
+}
+hr { border: 0; border-top: 1px solid var(--border); margin: 14px 0; }
+
+button {
+  appearance: none;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 550;
+  color: var(--text);
+  background: var(--glass-strong);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius);
+  padding: 9px 16px;
+  cursor: pointer;
+  transition: background .15s, transform .1s;
+}
+button:active { transform: scale(.97); }
+button:disabled { opacity: .5; cursor: default; }
+
+input, select, textarea {
+  appearance: none;
+  font: inherit;
+  font-size: 15px;
+  width: 100%;
+  color: var(--text);
+  background: var(--glass);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  margin: 4px 0 10px;
+  outline: none;
+  transition: border-color .15s, box-shadow .15s;
+}
+input:focus, select:focus, textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-subtle);
+}
+input::placeholder, textarea::placeholder { color: var(--text3); }
+label { display: block; font-size: 12px; font-weight: 550; color: var(--text2); margin-top: 8px; }
+
+table { width: 100%; border-collapse: collapse; font-size: 13.5px; margin: 8px 0; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+th { color: var(--text2); font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+
+dialog {
+  margin: auto;
+  width: min(92vw, 420px);
+  color: var(--text);
+  background: var(--bg-solid);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  padding: 18px;
+}
+dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
+
+/* ── Component vocabulary (the only classes apps should use) ── */
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: -14px -14px 12px;
+  padding: 12px 16px;
+  padding-top: calc(12px + env(safe-area-inset-top, 0px));
+  background: var(--bg);
+  backdrop-filter: blur(18px) saturate(180%);
+  -webkit-backdrop-filter: blur(18px) saturate(180%);
+  border-bottom: 1px solid var(--border);
+}
+.topbar h1 { flex: 1; }
+.topbar button { padding: 7px 10px; }
+
+.card {
+  background: var(--bg2);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  padding: 14px;
+  margin: 10px 0;
+}
+.card > :first-child { margin-top: 0; }
+.card > :last-child { margin-bottom: 0; }
+
+.list { margin: 8px 0; }
+.list-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 4px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  transition: background .15s;
+}
+.list-row:active { background: var(--hover-bg); }
+.list-row > div { flex: 1; min-width: 0; }
+.list-row small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.badge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 9px;
+  border-radius: var(--radius-pill);
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+.badge-ok   { background: var(--success-bg); color: var(--green); }
+.badge-warn { background: var(--warning-bg); color: var(--warning); }
+.badge-err  { background: var(--error-bg); color: var(--error); }
+
+.stat { text-align: center; padding: 10px 4px; }
+.stat b {
+  display: block;
+  font-size: 26px;
+  font-weight: 650;
+  color: var(--heading);
+  line-height: 1.15;
+}
+.stat small { text-transform: uppercase; letter-spacing: .05em; font-size: 10.5px; }
+
+.btn-primary {
+  background: var(--accent);
+  border-color: transparent;
+  color: var(--on-accent, #fff);
+}
+.btn-primary:active { background: var(--accent-hover); }
+
+.fab {
+  position: fixed;
+  right: 18px;
+  bottom: calc(18px + env(safe-area-inset-bottom, 0px));
+  z-index: 20;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  border: none;
+  background: var(--accent);
+  color: var(--on-accent, #fff);
+  font-size: 24px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+}
+.fab:active { background: var(--accent-hover); }
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+}
+.grid .card { margin: 0; }
+
+.empty {
+  padding: 36px 16px;
+  text-align: center;
+  color: var(--text3);
+  font-style: italic;
+}

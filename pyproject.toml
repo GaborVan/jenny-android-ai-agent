@@ -1,0 +1,95 @@
+[project]
+name = "jenny"
+version = "0.3.0"
+description = "Jenny - AI agent framework (fork of nanobot)"
+readme = { file = "README.md", content-type = "text/markdown" }
+requires-python = ">=3.11"
+license = {text = "AGPL-3.0-only"}
+authors = [
+    {name = "flagdizero"},
+    {name = "Xubin Ren"},
+    {name = "the nanobot contributors"}
+]
+keywords = ["ai", "agent", "chatbot"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+license-files = [
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+]
+
+dependencies = [
+    "httpx>=0.28.0,<1.0.0",
+    "websockets>=16.0,<17.0.0",
+    "loguru>=0.7.3,<1.0.0",
+    "croniter>=6.0.0,<7.0.0",
+    "json-repair>=0.57.0,<1.0.0",
+    "jinja2>=3.1.0,<4.0.0",
+    "filelock>=3.25.2,<4.0.0",
+    "markdown>=3.5,<4.0.0",
+    "pypdf>=5.0.0,<6.0.0",
+    "pyyaml>=6.0,<7.0.0",
+    "typing-extensions>=4.0.0,<5.0.0",
+    "tzdata>=2025.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build]
+include = [
+    "jenny/**/*.py",
+    "jenny/templates/**/*.md",
+    "jenny/skills/**/*.md",
+    "jenny/skills/**/*.py",
+    "jenny/templates/ui/**/*",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["jenny"]
+
+[tool.hatch.build.targets.wheel.sources]
+"jenny" = "jenny"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "jenny/",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "pyproject.toml",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["jenny"]
+omit = ["tests/*", "**/tests/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]

@@ -1,0 +1,210 @@
+"""Test unitari mirati per ``jenny.webui.transcript_replay``.
+
+`test_webui_transcript.py` copre gia estesamente il fold (delta, reasoning,
+tool_hint/progress, file_edit, media, turn_end) tramite `replay_transcript_to_ui_messages`;
+qui si aggiungono i rami rimasti scoperti: eventi sconosciuti/malformati (chiavi
+mancanti, tipi inattesi) e la soppressione post-media fino a `turn_end`.
+"""
+
+from __future__ import annotations
+
+from jenny.webui.transcript_replay import replay_transcript_to_ui_messages
+
+
+def test_unknown_event_type_is_ignored() -> None:
+    lines = [{"event": "something_unexpected", "text": "noise"}]
+    assert replay_transcript_to_ui_messages(lines) == []
+
+
+def test_record_missing_event_key_is_ignored() -> None:
+    lines = [{"chat_id": "c1", "text": "no event field at all"}]
+    assert replay_transcript_to_ui_messages(lines) == []
+
+
+def test_user_event_with_non_string_text_defaults_to_empty_content() -> None:
+    lines = [{"event": "user", "chat_id": "c1", "text": 12345}]
+    messages = replay_transcript_to_ui_messages(lines)
+    assert len(messages) == 1
+    assert messages[0]["role"] == "user"
+    assert messages[0]["content"] == ""
+
+
+def test_user_event_with_non_list_media_paths_ignored() -> None:
+    lines = [{"event": "user", "chat_id": "c1", "text": "hi", "media_paths": "not-a-list"}]
+    messages = replay_transcript_to_ui_messages(lines)
+    assert len(messages) == 1
+    assert "media" not in messages[0]
+
+
+def test_delta_with_non_string_text_is_ignored() -> None:
+    lines = [{"event": "delta", "text": 42}]
+    assert replay_transcript_to_ui_messages(lines) == []
+
+
+def test_delta_after_user_builds_streaming_assistant_message() -> None:
+    lines = [
+        {"event": "user", "chat_id": "c1", "text": "hi"},
+        {"event": "delta", "text": "Hel"},
+        {"event": "delta", "text": "lo"},
+    ]
+    messages = replay_transcript_to_ui_messages(lines)
+    assert messages[-1]["role"] == "assistant"
+    assert messages[-1]["content"] == "Hello"
+    # isStreaming e' un campo interno di fold, rimosso a fine replay.
+    assert "isStreaming" not in messages[-1]
+
+
+def test_file_edit_with_non_list_edits_is_ignored() -> None:
+    lines = [{"event": "file_edit", "edits": "not-a-list"}]
+    assert replay_transcript_to_ui_messages(lines) == []
+
+
+def test_file_edit_with_empty_edits_is_ignored() -> None:
+    lines = [{"event": "file_edit", "edits": []}]
+    assert replay_transcript_to_ui_messages(lines) == []
+
+
+def test_reasoning_delta_empty_chunk_is_ignored() -> None:
+    lines = [{"event": "reasoning_delta", "text": ""}]
+    assert replay_transcript_to_ui_messages(lines) == []
+
+
+def test_reasoning_delta_non_string_chunk_is_ignored() -> None:
+    lines = [{"event": "reasoning_delta", "text": None}]
+    assert replay_transcript_to_ui_messages(lines) == []
+
+
+def test_message_tool_hint_without_text_or_events_is_ignored() -> None:
+    lines = [{"event": "message", "kind": "tool_hint"}]
+    assert replay_transcript_to_ui_messages(lines) == []
+
+
+def test_message_tool_hint_with_plain_text_creates_trace() -> None:
+    lines = [{"event": "message", "kind": "tool_hint", "text": "Reading file.py"}]
+    messages = replay_transcript_to_ui_messages(lines)
+    assert len(messages) == 1
+    assert messages[0]["kind"] == "trace"
+    assert messages[0]["content"] == "Reading file.py"
+
+
+def test_negative_latency_ms_is_not_stamped() -> None:
+    lines = [
+        {"event": "user", "chat_id": "c1", "text": "hi"},
+        {"event": "message", "text": "answer"},
+        {"event": "turn_end", "latency_ms": -5},
+    ]
+    messages = replay_transcript_to_ui_messages(lines)
+    assistant = [m for m in messages if m.get("role") == "assistant"][0]
+    assert "latencyMs" not in assistant
+
+
+def test_positive_latency_ms_is_stamped_on_turn_end() -> None:
+    lines = [
+        {"event": "user", "chat_id": "c1", "text": "hi"},
+        {"event": "message", "text": "answer"},
+        {"event": "turn_end", "latency_ms": 250},
+    ]
+    messages = replay_transcript_to_ui_messages(lines)
+    assistant = [m for m in messages if m.get("role") == "assistant"][0]
+    assert assistant["latencyMs"] == 250
+
+
+def test_media_answer_suppresses_deltas_until_turn_end() -> None:
+    """Un messaggio finale con media sospende le delta successive fino a turn_end.
+
+    Copre il ramo ``suppress_until_turn_end`` che altrimenti non e' esercitato
+    dagli scenari gia' presenti in ``test_webui_transcript.py``.
+    """
+    lines = [
+        {"event": "user", "chat_id": "c1", "text": "send me a picture"},
+        {
+            "event": "message",
+            "text": "here you go",
+            "media_urls": [{"url": "/api/media/sig/p", "name": "photo.png"}],
+        },
+        # Questa delta orfana arriva prima del turn_end: deve essere scartata.
+        {"event": "delta", "text": "stray-chunk"},
+        {"event": "reasoning_delta", "text": "stray-reasoning"},
+        {"event": "turn_end"},
+        # Dopo turn_end, una nuova delta ricomincia un nuovo messaggio.
+        {"event": "delta", "text": "fresh-start"},
+    ]
+    messages = replay_transcript_to_ui_messages(lines)
+    contents = [m.get("content") for m in messages if m.get("role") == "assistant"]
+    assert "stray-chunk" not in contents
+    assert any(c == "fresh-start" for c in contents)
+
+
+def test_stream_end_during_suppression_clears_buffer_without_new_message() -> None:
+    lines = [
+        {"event": "user", "chat_id": "c1", "text": "hi"},
+        {
+            "event": "message",
+            "text": "answer with media",
+            "media_urls": [{"url": "/api/media/sig/p", "name": "clip.mp4"}],
+        },
+        {"event": "stream_end", "text": "ignored-during-suppression"},
+        {"event": "turn_end"},
+    ]
+    messages = replay_transcript_to_ui_messages(lines)
+    contents = [m.get("content") for m in messages if m.get("role") == "assistant"]
+    assert "ignored-during-suppression" not in contents
+
+
+def test_turn_fields_alias_reused_turn_id_after_close() -> None:
+    """Un turn_id riutilizzato dopo il proprio turn_end riceve un alias univoco."""
+    lines = [
+        {"event": "user", "chat_id": "c1", "text": "first", "turn_id": "t1", "turn_phase": "user"},
+        {"event": "turn_end", "turn_id": "t1"},
+        # Stesso turn_id riusato: deve generare un turnId alias, non collassare
+        # nello stesso turno gia' chiuso.
+        {"event": "user", "chat_id": "c1", "text": "second", "turn_id": "t1", "turn_phase": "user"},
+    ]
+    messages = replay_transcript_to_ui_messages(lines)
+    user_messages = [m for m in messages if m.get("role") == "user"]
+    assert len(user_messages) == 2
+    assert user_messages[0]["turnId"] == "t1"
+    assert user_messages[1]["turnId"] != "t1"
+    assert user_messages[1]["turnId"].startswith("t1:replay:")
+
+
+def test_augment_assistant_text_applied_only_to_non_trace_assistant_messages() -> None:
+    lines = [
+        {"event": "user", "chat_id": "c1", "text": "hi"},
+        {"event": "message", "kind": "tool_hint", "text": "Reading file"},
+        {"event": "message", "text": "final answer"},
+    ]
+    messages = replay_transcript_to_ui_messages(
+        lines,
+        augment_assistant_text=lambda text: f"[[{text}]]",
+    )
+    trace = [m for m in messages if m.get("kind") == "trace"][0]
+    assistant = [m for m in messages if m.get("role") == "assistant" and m.get("kind") != "trace"][0]
+    assert trace["content"] == "Reading file"  # non toccato dall'hook
+    assert assistant["content"] == "[[final answer]]"
+
+
+def test_empty_input_returns_empty_list() -> None:
+    assert replay_transcript_to_ui_messages([]) == []
+
+
+def test_session_boundary_survives_replay() -> None:
+    """`/new` deve restare un separatore anche dopo un reload.
+
+    Regressione trovata on-device: il flag era scritto nel transcript e gestito dal
+    client sul percorso live, ma il replay ricostruisce i messaggi campo per campo e
+    non lo copiava — dopo un riavvio dell'app il confine tornava a essere una bolla
+    normale col testo "New session started." al posto della riga di separazione.
+    """
+    lines = [
+        {"event": "message", "chat_id": "c1", "text": "New session started.", "session_boundary": True},
+    ]
+    messages = replay_transcript_to_ui_messages(lines)
+    assert len(messages) == 1
+    assert messages[0]["session_boundary"] is True
+
+
+def test_ordinary_message_carries_no_session_boundary_flag() -> None:
+    lines = [{"event": "message", "chat_id": "c1", "text": "ciao"}]
+    messages = replay_transcript_to_ui_messages(lines)
+    assert "session_boundary" not in messages[0]

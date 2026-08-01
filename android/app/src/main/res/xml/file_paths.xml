@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Path esposti dal FileProvider per l'apertura dei file del workspace col
+     viewer di sistema (JennyNative.openFile). Copre l'intero filesDir: la
+     validazione anti-traversal è fatta a monte nel bridge. Il cache-path
+     espone i file temporanei dello scatto foto (EXTRA_OUTPUT verso l'app
+     fotocamera di sistema). -->
+<paths>
+    <files-path name="internal_files" path="." />
+    <cache-path name="camera_temp" path="camera/" />
+</paths>

@@ -1,0 +1,150 @@
+# Settings
+
+Every control in the Settings screen, what it does, and its default value.
+
+Settings is a single accordion of 6 sections — Personalization, Model, Tools, Telegram, Backup & restore, System — all collapsed the first time you open the screen. There is no global Save button: almost every field saves itself, with a "Saved!" toast confirming the write. A few controls (theme, mascot, language, Developer mode) live entirely on the device and never touch `config.json` at all — those are called out explicitly below.
+
+## How saving works
+
+Text and number fields (bot name, the advanced model parameters, the web search fields) save on a **600 ms debounce** after you stop typing — not on every keystroke, and not only on blur. Toggles, the theme picker, the model catalog, and the language switch save immediately on click, no debounce. Every successful write shows a **"Saved!"** toast; a failed write shows the error message instead (and toggles roll back visually to their previous state).
+
+There is no confirmation step anywhere in Settings except for two destructive actions (deleting a provider, restoring a backup) — everything else takes effect the instant you interact with it.
+
+**Silent restarts (important):** a few fields — timezone, bot name, bot icon, `tool_hint_max_length` — flip a `requires_restart` flag on the backend when changed. The current WebUI never reads or shows that flag: you get the same "Saved!" toast as any other field, with no indication that the change won't fully apply until you restart the app. If you rename the bot and it still introduces itself with the old name, restart Jenny.
+
+## Personalization
+
+| Control | Effect | Default |
+|---|---|---|
+| **Theme** | Tap a card to switch instantly across the whole UI (7 named themes, each card is a live preview). See [Themes and mascot](../using/themes-mascot.md). | Chanel |
+| **Mascot** — Show mascot | Toggle the floating companion on/off. | On |
+| **Mascot** — Mascot position | Left / Right, shown only while the mascot is visible. | Right |
+| **Mascot** — Color mascot | Off switches the mascot to black-and-white artwork. | On |
+| **Bot Name** | Free-text field for the assistant's name used in chat and the welcome message. Saves with the 600 ms debounce. Changing it flips `requires_restart` server-side, but the UI never tells you — see above. | "Jenny" |
+| **Language** | Segmented Italian/English switch. Changes the UI's own strings instantly; does **not** change `agents.defaults.language` in `config.json` (that field is only ever written once, during onboarding, and drives backend-generated text like the welcome message). | Detected from the browser/WebView locale at first launch |
+
+Theme, mascot preferences, and UI language all live in the browser's `localStorage`, per device — they are **not** part of `config.json` and are **not** included in encrypted backups. Reinstalling the app, or clearing app data, resets all of them to their defaults.
+
+## Model
+
+### In use
+
+A card showing the active model name and `via <provider> · <format>`. Next to it, a **Change model** button opens the unified catalog.
+
+Model and provider are chosen **together, as one decision**: there is no separate "which provider" step. The catalog groups models by configured provider; each group is fetched live from that provider's model-list endpoint, includes a search box ("Search all models…") that filters across every group, and ends with a manual **"Custom model ID…"** field (press Enter to confirm) for providers with no list endpoint. Tapping any model in the catalog, or confirming a custom ID, immediately sends both `model` and `default_provider` in a single request and reloads settings — there is no confirmation dialog, and the change is applied to the running agent right away (hot-reload, no app restart).
+
+If a provider's model list fails to load or comes back empty, the group shows the backend's diagnostic message instead of a model list; these messages currently come through in English regardless of UI language (e.g. "Could not fetch models").
+
+### API keys
+
+Below the catalog, "API keys" is a plain credential keychain — it does not indicate which key is "in use" (that's the In use card above). Each provider gets a card showing:
+
+- Name, and a format badge (OpenAI Compatible / Anthropic Compatible)
+- Base URL, or "(default)" if unset
+- A masked key hint: the first 4 and last 4 characters of the stored key, joined with `...` (e.g. `sk-a...j8f9`) — the full key is never sent back to the browser
+- Edit and Delete actions
+
+**Add provider** opens a dialog with Name, Format, API Key, and Base URL. The base URL placeholder switches automatically with the format (`https://api.openai.com/v1` for OpenAI-compatible, `https://api.anthropic.com` for Anthropic).
+
+The UI refuses to delete the last remaining provider ("Cannot delete the last provider") — but this check is client-side only; there is no equivalent guard on the backend, so this protection exists only inside the WebUI, not as a data-level invariant.
+
+**Editing a provider — read before you touch this dialog.** The Edit dialog pre-fills the API Key field with the *masked hint string itself* (e.g. `sk-a...j8f9`), not the real key and not a blank field. If you edit only the Format or Base URL and press Save without retyping the key, the dialog submits that masked hint text as the new API key — overwriting your real key with the literal placeholder string. There is currently no "leave unchanged" behavior: to safely edit anything about an existing provider, retype the full API key every time you save. <!-- verified in code: jenny/templates/ui/assets/mobile-settings.js (provider edit dialog) + jenny/webui/settings_api.py update_provider -->
+
+### Advanced parameters
+
+A collapsed disclosure under API keys with three fields:
+
+| Field | Range | Default |
+|---|---|---|
+| Max Tokens | any integer | 8192 |
+| Temperature | 0.0 – 2.0 | 0.1 |
+| Reasoning Effort | empty / low / medium / high | empty (model/provider decides) |
+
+**These three fields do not save.** The UI sends them to the same settings-update endpoint as Bot Name, and shows the same "Saved!" toast — but the backend handler that processes that endpoint only reads `model`, `default_provider`, `context_window_tokens`, `timezone`, `bot_name`, `bot_icon`, and `tool_hint_max_length`. Max Tokens, Temperature, and Reasoning Effort are silently dropped; nothing is written to `config.json`, and the field reverts to its previous value the next time Settings reloads. The toast is a false positive.
+
+Today, the only way to actually change these three values is to edit `agents.defaults.max_tokens` / `agents.defaults.temperature` / `agents.defaults.reasoning_effort` directly in `workspace/config.json` (see [Configuration](configuration.md)), or to define a [model preset](configuration.md) with its own override and switch to it with `/model`.
+
+Reasoning Effort also has two provider-only values not offered by this select: `none` (disable thinking explicitly) and `adaptive` (Anthropic adaptive thinking) — these can only be set in `config.json`.
+
+## Tools
+
+### Web Search
+
+| Field | Range | Default |
+|---|---|---|
+| Search engine | dropdown | bing |
+| Max results | 1 – 10 | 5 |
+| Timeout (sec) | 1 – 120 | 30 |
+| Fetch max chars | 1000 – 200000 | 50000 |
+
+The Search engine dropdown looks like a choice but currently has exactly one working option: the on-device web search tool only supports Bing, and the backend rejects any other value outright. All four fields save together with the 600 ms debounce.
+
+### Location
+
+A single toggle, **"Share my location"**, default **on**. Its hint text explains the model in full: a recent last-known position is injected into the conversation context on every message (free, no GPS fix), and a precise fix is only requested on demand. It applies immediately on toggle (no debounce), with a toast confirming "Location enabled"/"Location disabled" and an automatic rollback if the request fails.
+
+This toggle is a software gate only — it does **not** request or manage the Android location permission. If the OS permission was never granted, turning this toggle on does nothing by itself; both the toggle and the Android permission have to be satisfied for location to actually reach the agent. <!-- TODO: verify on-device (O-10): UI state when the Android permission is denied while the toggle is on -->
+
+Two related values exist only in `config.json`, with no UI control: `tools.location.telegram_ttl_s` (default 3600 — how long a location shared from Telegram stays valid) and `tools.location.fresh_timeout_s` (default 15 — how long Jenny waits for a fresh GPS fix). See [Location](../using/location.md).
+
+## Telegram
+
+Bot pairing lives in its own section, sharing the same widget used during onboarding: paste a BotFather token, get a 6-digit pairing code, send it to the bot from Telegram. All changes here (connecting, changing token, unpairing, disabling) apply immediately with no app restart. Full walkthrough: [Telegram bridge](../using/telegram.md).
+
+## Backup & restore
+
+Three blocks: **Export encrypted backup** (passphrase-protected, includes memory, conversations, settings, and API keys), **Restore from file** (replaces all current data, applied on next app restart), and **Local history** — automatic workspace snapshots with a retention selector (1 week / 1 month / 1 year / Forever, default **Forever**) and a manual "Create snapshot now" button. Full details, including the irrecoverable-passphrase warning and snapshot retention behavior: [Backup and restore](../using/backup.md).
+
+## System
+
+| Item | Shows |
+|---|---|
+| Version | The installed app version string. |
+| Developer mode | Toggle, default **off**. See below. |
+| Token Usage | 7 local usage statistics. See below. |
+
+### Developer mode
+
+A single toggle with the hint: *"Also shows what Jenny uses to work: system skills and internal files (memory, configuration) appear in the lists. Only useful for looking under the hood."*
+
+This is a **client-side display filter only**, stored in `localStorage` (`jenny-advanced-mode`), default off. The backend already tags every skill and file with an `internal` flag; this toggle only decides whether the WebUI shows or hides items carrying that flag in the Skills and Workspace lists. It does **not** change any permission, does **not** unlock any tool, and does **not** affect what the agent itself can see or do — the agent already has full access to its own internals regardless of this toggle. Being in `localStorage`, it resets to off if you clear app data or reinstall, and it is **not** included in encrypted backups.
+
+### Token usage
+
+Seven statistics, all computed from data stored locally on the device (no external usage-tracking service):
+
+| Stat | Meaning |
+|---|---|
+| Total Tokens | Lifetime total. |
+| Last 30 Days | Tokens used in the trailing 30 days. |
+| Last 365 Days | Tokens used in the trailing 365 days. |
+| Peak Day | The single highest-usage day on record. |
+| Current Streak | Consecutive days with at least one turn. |
+| Active Days (30d) | Number of days used out of the last 30. |
+| Requests (30d) | Number of LLM requests in the last 30 days. |
+
+If no usage has been recorded yet, the block shows "No usage data yet" instead of zeros.
+
+## What's only in config.json
+
+Settings intentionally does not expose everything the backend supports. The following exist and work, but have no UI control anywhere in Settings — they must be edited directly in `workspace/config.json` (see [Configuration](configuration.md) for the full reference):
+
+- `agents.defaults.timezone` — has a working update endpoint but no field in the UI; empty string means "use the device's timezone"
+- `agents.defaults.bot_icon` — the emoji shown next to the bot's name; has a working update endpoint but no field in the UI
+- `agents.defaults.context_window_tokens` — has a working update endpoint but no field in the UI (valid values: 65536 or 262144)
+- `agents.defaults.tool_hint_max_length` — has a working update endpoint but no field in the UI (default 40, range 20–500)
+- `agents.defaults.max_tokens`, `agents.defaults.temperature`, `agents.defaults.reasoning_effort` — the Advanced Parameters fields exist in the UI but currently do not save (see above); config.json is the only thing that actually works today
+- `gateway.heartbeat.*` — the proactive Heartbeat cadence and behavior
+- `agents.defaults.dream.*` — Dream memory-consolidation schedule
+- `websocket.show_reasoning` — whether the "reasoning" pill is shown/recorded at all for the WebUI channel (default true); no toggle in Settings
+- `tools.*.enable` toggles for individual tools (file tools, `python_exec`, `my`, introspection, diagnostics, etc.) — only Web Search and Location get a Tools-section UI; everything else is config-only
+- `tools.location.telegram_ttl_s`, `tools.location.fresh_timeout_s` — see Location above
+- `security.restrict_to_workspace`, `security.ssrf_whitelist` — sandboxing and network policy
+
+## Cross-references
+
+- [Configuration (config.json)](configuration.md) — full key-by-key reference for everything above and beyond the UI
+- [Themes and mascot](../using/themes-mascot.md)
+- [Telegram bridge](../using/telegram.md)
+- [Backup and restore](../using/backup.md)
+- [Location](../using/location.md)
