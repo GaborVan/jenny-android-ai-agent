@@ -116,6 +116,14 @@ class SnapshotService:
         non producono mai scan sovrapposti.
         """
         async with self._lock:
+            # Il fingerprint si legge PRIMA di creare lo snapshot. Leggerlo dopo
+            # assorbe come "già noto" qualunque modifica arrivata *durante* la
+            # creazione, che quindi non innesca più il debounce e resta fuori
+            # dagli snapshot fino al cambiamento successivo o al safety daily.
+            # L'errore opposto è innocuo: se una modifica arriva fra la lettura
+            # e la creazione, il tick successivo vede un cambiamento già
+            # catturato, `create_snapshot` ritorna None e si spreca uno scan.
+            fingerprint = await asyncio.to_thread(self._engine.fingerprint)
             manifest = await asyncio.to_thread(
                 self._engine.create_snapshot, trigger=trigger, label=label
             )
@@ -124,7 +132,7 @@ class SnapshotService:
             self._last_snapshot_at_ms = _now_ms()
             self._pending_changes = False
             if manifest is not None:
-                self._last_fingerprint = await asyncio.to_thread(self._engine.fingerprint)
+                self._last_fingerprint = fingerprint
                 removed = await asyncio.to_thread(
                     self._engine.apply_retention,
                     keep_recent=self._cfg.retention_recent,

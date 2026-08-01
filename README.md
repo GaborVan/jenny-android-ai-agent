@@ -213,7 +213,7 @@ would want it — GitHub's search ranks on them, and this project has no marketi
 A native Android app with an embedded CPython 3.11 (Chaquopy 17), `minSdk 26` /
 `targetSdk 34`. The agent runs as a persistent foreground service and serves a mobile-first
 SPA over loopback. Messages flow through an async bus that decouples the channel from the
-core. 3,501 tests; CI runs `ruff`, `pytest` on 3.11 and 3.12, and `pyright` — blocking on the
+core. Over 3,500 tests; CI runs `ruff`, `pytest` on 3.11 and 3.12, and `pyright` — blocking on the
 subsystems that are already type-clean, advisory on the rest, which is the honest state of a
 codebase being tightened rather than one pretending to be finished.
 

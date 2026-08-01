@@ -22,6 +22,22 @@ async def _wait_until(predicate, *, timeout: float = 15.0, interval: float = 0.0
     assert predicate()
 
 
+async def _wait_for_baseline(engine: SnapshotEngine, service: SnapshotService) -> None:
+    """Aspetta la baseline *e* la contabilità che il servizio le fa attorno.
+
+    Lo snapshot diventa visibile su disco dentro ``create_snapshot``, mentre
+    ``_last_snapshot_at_ms`` viene aggiornato solo quando ``snapshot_now``
+    riprende dopo il thread. Guardare solo il disco fa ripartire il test *in
+    mezzo* allo snapshot, e ogni stato che il test tocca lì viene poi
+    sovrascritto dal servizio: sotto carico è esattamente come il safety daily
+    perdeva il suo riavvolgimento e il test moriva sul timeout.
+    """
+    await _wait_until(
+        lambda: len(engine.list_snapshots()) == 1
+        and service.status()["last_snapshot_at_ms"] > 0
+    )
+
+
 def _setup(tmp_path: Path, **cfg_kwargs) -> tuple[SnapshotEngine, SnapshotService, Path]:
     ws = tmp_path / "ws"
     ws.mkdir()
@@ -36,7 +52,7 @@ async def test_baseline_snapshot_on_first_start(tmp_path: Path) -> None:
     engine, service, _ws = _setup(tmp_path)
     await service.start()
     try:
-        await _wait_until(lambda: len(engine.list_snapshots()) == 1)
+        await _wait_for_baseline(engine, service)
         assert engine.list_snapshots()[0]["label"] == "baseline"
     finally:
         service.stop()
@@ -46,7 +62,7 @@ async def test_debounce_snapshots_after_quiet_window(tmp_path: Path) -> None:
     engine, service, ws = _setup(tmp_path)
     await service.start()
     try:
-        await _wait_until(lambda: len(engine.list_snapshots()) == 1)  # baseline
+        await _wait_for_baseline(engine, service)
         (ws / "SOUL.md").write_text("anima modificata", encoding="utf-8")
         # Il tick rileva la modifica, poi serve la finestra di quiete.
         await _wait_until(
@@ -62,7 +78,7 @@ async def test_no_snapshot_without_changes(tmp_path: Path) -> None:
     engine, service, _ws = _setup(tmp_path)
     await service.start()
     try:
-        await _wait_until(lambda: len(engine.list_snapshots()) == 1)
+        await _wait_for_baseline(engine, service)
         await asyncio.sleep(0.4)  # diverse finestre di quiete senza modifiche
         assert len(engine.list_snapshots()) == 1
     finally:
@@ -73,7 +89,7 @@ async def test_daily_safety_snapshot_fires_when_overdue(tmp_path: Path) -> None:
     engine, service, ws = _setup(tmp_path)
     await service.start()
     try:
-        await _wait_until(lambda: len(engine.list_snapshots()) == 1)
+        await _wait_for_baseline(engine, service)
         # Simula "ultimo snapshot 25 ore fa" + una modifica mai quietata
         # (il fingerprint cambia a ogni tick non serve: basta una modifica
         # singola, il daily scatta indipendentemente dalla quiete).
