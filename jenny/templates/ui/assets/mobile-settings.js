@@ -9,6 +9,7 @@ import { THEMES, DEFAULT_THEME, setTheme } from './shared/theme.js';
 import { advancedMode, setAdvancedMode } from './shared/advanced-mode.js';
 import { mascotVisible, setMascotVisible, mascotSide, setMascotSide,
   mascotColor, setMascotColor } from './shared/mascot.js';
+import { homeView, setHomeView, HOME_VIEW_CHOICES } from './shared/home-view.js';
 import { TelegramPairingWidget } from './shared/telegram-pairing.js';
 import {
   runExportFlow,
@@ -100,6 +101,7 @@ export class SettingsController {
     const a = d.agent || {};
     return `
       ${this._renderTheme()}
+      ${this._renderHomeView()}
       <div class="theme-strip-eyebrow">${i18n.t('settings.botName')}</div>
       <div class="settings-field">
         <input type="text" class="settings-input" data-key="bot_name" value="${escapeHtml(a.bot_name || '')}" />
@@ -283,6 +285,31 @@ export class SettingsController {
         </label>
       </div>
       ${sideBlock}`;
+  }
+
+  // ── Tasto Home ─────────────────────────────────────────────────────
+
+  /* Da launcher, Home significa "torna alla schermata iniziale": qui si sceglie
+     quale sia. Select e non segmented: quattro voci non stanno in riga su un
+     telefono. Le etichette delle viste sono quelle del dock (nav.*), così
+     restano allineate a quello che si vede nella barra. */
+  _renderHomeView() {
+    const current = homeView();
+    const labels = {
+      chat: i18n.t('nav.chat'),
+      apps: i18n.t('nav.apps'),
+      workspace: i18n.t('nav.workspace'),
+      last: i18n.t('settings.homeLast'),
+    };
+    const options = HOME_VIEW_CHOICES.map(id =>
+      `<option value="${id}"${id === current ? ' selected' : ''}>${escapeHtml(labels[id])}</option>`
+    ).join('');
+    return `
+      <div class="theme-strip-eyebrow">${i18n.t('settings.homeSection')}</div>
+      <div class="settings-field">
+        <select class="settings-select" id="home-view-select">${options}</select>
+        <p class="settings-hint" style="margin:6px 0 0;font-size:12px;color:var(--text-faint)">${i18n.t('settings.homeHint')}</p>
+      </div>`;
   }
 
   // ── Language ───────────────────────────────────────────────────────
@@ -598,6 +625,12 @@ export class SettingsController {
     const mascotColorToggle = this.contentEl.querySelector('#mascot-color-toggle');
     if (mascotColorToggle) {
       mascotColorToggle.addEventListener('change', () => setMascotColor(mascotColorToggle.checked));
+    }
+
+    // Tasto Home: nessun re-render, il valore serve solo a goHome()
+    const homeSelect = this.contentEl.querySelector('#home-view-select');
+    if (homeSelect) {
+      homeSelect.addEventListener('change', () => setHomeView(homeSelect.value));
     }
 
     // Theme selector — tap a card to switch theme

@@ -17,6 +17,7 @@ import { OnboardingController } from './mobile-onboarding.js';
 import { JennyCompanion } from './mobile-jenny.js';
 import { UiQueryResponder } from './mobile-ui-query.js';
 import { keyboard } from './shared/keyboard.js';
+import { homeView } from './shared/home-view.js';
 import './shared/theme.js';
 
 export { showToast };
@@ -319,14 +320,19 @@ class MobileApp {
   }
 
   // Android Home button / home gesture. This app is the device launcher, so
-  // Home means "collapse to the home screen": close any open Jenny mini-app,
-  // dismiss transient UI (drawer, dialogs), and land on chat (✿). A no-op when
-  // already home. Called from MainActivity.onNewIntent.
+  // Home means "collapse to the home screen": close any open Jenny mini-app and
+  // dismiss transient UI (drawer, dialogs). A no-op when already home. Called
+  // from MainActivity.onNewIntent.
+  //
+  // Which view counts as "home" is a preference (default chat ✿, as it always
+  // was). 'last' means the user asked to be left wherever they were, so the
+  // overlays close and the view stays put.
   goHome() {
     this.controllers.apps?.closeApp();
     this.drawer.closeAll();
     document.querySelectorAll('dialog[open]').forEach(d => d.close());
-    this.switchMode('chat');
+    const target = homeView();
+    if (target !== 'last') this.switchMode(target);
   }
 
   // Un'app di sistema è stata installata o disinstallata (kind: 'added' |
