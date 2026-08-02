@@ -41,6 +41,10 @@
   --radius-seg:    999px;
   --dock-height:   56px;
   --dock-icon:     22px;
+  /* Lato del canvas quadrato della mascotte. Default = taglia media; le altre
+     taglie la riscrivono su <html> (v. shared/mascot.js). Tutta la geometria
+     di .jenny-duo e delle bolle minichat ne deriva. */
+  --jenny-size:    160px;
   --font-sans:     'Inter', system-ui, sans-serif;
   --font-display:  'Tenor Sans', var(--font-sans);
   --font-mono:     'Fira Code', monospace;
@@ -3199,6 +3203,12 @@ body {
 }
 .settings-seg .settings-seg-btn:hover { transform: none; }
 
+/* Opzione visibile ma inerte: la usa il blocco mascotte a mascotte spenta, per
+   mostrare cosa si potrebbe regolare senza far credere che sia regolabile ora. */
+.settings-field[data-settings-off] { opacity: 0.45; }
+.settings-field[data-settings-off] .settings-seg-btn,
+.settings-field[data-settings-off] .toggle-switch { pointer-events: none; }
+
 .settings-seg-btn {
   display: flex;
   align-items: center;
@@ -4463,12 +4473,15 @@ body {
   position: absolute;
   /* L'arte è il canvas QUADRATO 3000² intero (nessun crop): il personaggio
      occupa ~45% del quadrato, i margini sono trasparenti. 160px di quadrato
-     ≈ 72px di personaggio visibile; gli offset compensano i margini. */
-  right: -75px;
+     ≈ 72px di personaggio visibile; gli offset compensano i margini.
+     Tutta la geometria deriva da --jenny-size (impostata su :root da
+     shared/mascot.js, default 160px): i rapporti qui sotto valgono a ogni
+     taglia, quindi cambiarne una non richiede di ritoccare gli offset. */
+  right: calc(var(--jenny-size) * -0.469);
   /* Fissa per tutti gli stati: appena sopra la barra di input (dock +
      altezza #input-bar). Non deve mai cambiare in Y. */
   bottom: calc(var(--dock-height) + 58px);
-  width: 160px;
+  width: var(--jenny-size);
   z-index: 120;
   background: none;
   border: none;
@@ -4490,7 +4503,7 @@ body {
   pointer-events: none;
   -webkit-user-drag: none;
 }
-.jenny-duo.out { right: -40px; }
+.jenny-duo.out { right: calc(var(--jenny-size) * -0.25); }
 .jenny-duo.out img {
   animation: jenny-bob 3.4s ease-in-out infinite;
   transform-origin: 50% 100%;
@@ -4514,11 +4527,11 @@ body {
    stesso offset di destra ma ancorato a left invece che a right. L'arte si
    specchia così Jenny guarda verso l'interno dello schermo. */
 .jenny-duo.side-left {
-  left: -75px;
+  left: calc(var(--jenny-size) * -0.469);
   right: auto;
   transition: left 0.3s cubic-bezier(0.2, 0.8, 0.3, 1.15);
 }
-.jenny-duo.side-left.out { left: -40px; }
+.jenny-duo.side-left.out { left: calc(var(--jenny-size) * -0.25); }
 .jenny-duo.side-left img.jenny-art { transform: scaleX(-1); }
 
 /* Volo Pegman: durante il grab il layer .jenny-fly (una posa per fase:
@@ -4580,7 +4593,7 @@ body {
   /* right tale che la coda (right 12 + mezza base 6) cada sull'asse di Jenny */
   right: 14px;
   /* la coda deve galleggiare sopra l'ahoge, non poggiare sulla testa */
-  bottom: calc(var(--dock-height) + 214px);
+  bottom: calc(var(--dock-height) + 58px + var(--jenny-size) - 4px);
   max-width: 74%;
   background: var(--accent);
   color: var(--on-accent);
@@ -4614,7 +4627,7 @@ body {
   display: none;
   position: absolute;
   right: 30px;
-  bottom: calc(var(--dock-height) + 214px);
+  bottom: calc(var(--dock-height) + 58px + var(--jenny-size) - 4px);
   font-family: var(--font-mono);
   font-size: 14px;
   color: var(--text);

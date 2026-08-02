@@ -8,7 +8,8 @@ import { confirmDialog } from './shared/dialog.js';
 import { THEMES, DEFAULT_THEME, setTheme } from './shared/theme.js';
 import { advancedMode, setAdvancedMode } from './shared/advanced-mode.js';
 import { mascotVisible, setMascotVisible, mascotSide, setMascotSide,
-  mascotColor, setMascotColor } from './shared/mascot.js';
+  mascotColor, setMascotColor, mascotSize, setMascotSize,
+  MASCOT_SIZES } from './shared/mascot.js';
 import { homeView, setHomeView, HOME_VIEW_CHOICES } from './shared/home-view.js';
 import { TelegramPairingWidget } from './shared/telegram-pairing.js';
 import {
@@ -248,33 +249,29 @@ export class SettingsController {
   // ── Mascotte ───────────────────────────────────────────────────────
 
   /* Blocco della sezione "Personalizzazione", sotto la passerella dei temi:
-     mini-label, toggle di visibilità + scelta del lato (segmented
-     orizzontale), mostrata solo se visibile. */
+     mini-label, toggle di visibilità, taglia, lato e variante colore.
+     Le opzioni restano SEMPRE a schermo: nasconderle a mascotte spenta faceva
+     sembrare che l'unica scelta fosse tenerla o buttarla via — chi la spegneva
+     subito non scopriva mai che era personalizzabile. Da spenta si vedono
+     inerti (attributo `disabled`), come promessa di cosa si ottiene
+     riaccendendola. */
   _renderMascot() {
     const visible = mascotVisible();
     const side = mascotSide();
     const color = mascotColor();
-    const sideBlock = visible ? `
-      <div class="settings-field">
-        <label class="settings-label">${i18n.t('settings.mascotSide')}</label>
-        <div class="settings-seg">
-          <button class="settings-seg-btn${side === 'left' ? ' active' : ''}" data-mascot-side="left">
-            ${i18n.t('settings.mascotSideLeft')}
-            ${side === 'left' ? '<i class="ti ti-check"></i>' : ''}
-          </button>
-          <button class="settings-seg-btn${side === 'right' ? ' active' : ''}" data-mascot-side="right">
-            ${i18n.t('settings.mascotSideRight')}
-            ${side === 'right' ? '<i class="ti ti-check"></i>' : ''}
-          </button>
-        </div>
-      </div>
-      <div class="settings-field settings-toggle-row">
-        <label class="settings-label">${i18n.t('settings.mascotColor')}</label>
-        <label class="toggle-switch">
-          <input type="checkbox" id="mascot-color-toggle" ${color ? 'checked' : ''}>
-          <span class="toggle-slider"></span>
-        </label>
-      </div>` : '';
+    const size = mascotSize();
+    const off = visible ? '' : ' disabled';
+    const sizeLabels = {
+      sm: i18n.t('settings.mascotSizeSmall'),
+      md: i18n.t('settings.mascotSizeMedium'),
+      lg: i18n.t('settings.mascotSizeLarge'),
+    };
+    const sizeButtons = Object.keys(MASCOT_SIZES).map(id =>
+      `<button class="settings-seg-btn${id === size ? ' active' : ''}" data-mascot-size="${id}"${off}>
+        ${escapeHtml(sizeLabels[id])}
+        ${id === size ? '<i class="ti ti-check"></i>' : ''}
+      </button>`
+    ).join('');
     return `
       <div class="theme-strip-eyebrow">${i18n.t('settings.mascotSection')}</div>
       <div class="settings-field settings-toggle-row">
@@ -284,7 +281,30 @@ export class SettingsController {
           <span class="toggle-slider"></span>
         </label>
       </div>
-      ${sideBlock}`;
+      <div class="settings-field"${visible ? '' : ' data-settings-off'}>
+        <label class="settings-label">${i18n.t('settings.mascotSize')}</label>
+        <div class="settings-seg">${sizeButtons}</div>
+      </div>
+      <div class="settings-field"${visible ? '' : ' data-settings-off'}>
+        <label class="settings-label">${i18n.t('settings.mascotSide')}</label>
+        <div class="settings-seg">
+          <button class="settings-seg-btn${side === 'left' ? ' active' : ''}" data-mascot-side="left"${off}>
+            ${i18n.t('settings.mascotSideLeft')}
+            ${side === 'left' ? '<i class="ti ti-check"></i>' : ''}
+          </button>
+          <button class="settings-seg-btn${side === 'right' ? ' active' : ''}" data-mascot-side="right"${off}>
+            ${i18n.t('settings.mascotSideRight')}
+            ${side === 'right' ? '<i class="ti ti-check"></i>' : ''}
+          </button>
+        </div>
+      </div>
+      <div class="settings-field settings-toggle-row"${visible ? '' : ' data-settings-off'}>
+        <label class="settings-label">${i18n.t('settings.mascotColor')}</label>
+        <label class="toggle-switch">
+          <input type="checkbox" id="mascot-color-toggle" ${color ? 'checked' : ''}${off}>
+          <span class="toggle-slider"></span>
+        </label>
+      </div>`;
   }
 
   // ── Tasto Home ─────────────────────────────────────────────────────
@@ -617,6 +637,12 @@ export class SettingsController {
     this.contentEl.querySelectorAll('[data-mascot-side]').forEach(btn => {
       btn.addEventListener('click', () => {
         setMascotSide(btn.dataset.mascotSide);
+        this.render();
+      });
+    });
+    this.contentEl.querySelectorAll('[data-mascot-size]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        setMascotSize(btn.dataset.mascotSize);
         this.render();
       });
     });

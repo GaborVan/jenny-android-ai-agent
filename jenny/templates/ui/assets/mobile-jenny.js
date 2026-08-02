@@ -13,7 +13,7 @@ import { AppState } from './shared/state.js';
 import { wsManager } from './shared/ws-manager.js';
 import { sessionManager } from './shared/session-manager.js';
 import { i18n } from './shared/i18n.js';
-import { mascotVisible, mascotSide, poseUrl } from './shared/mascot.js';
+import { mascotVisible, mascotSide, poseUrl, applyMascotSize } from './shared/mascot.js';
 
 const ART = {
   idle: '/html-mobile/assets/jenny-idle.webp',
@@ -136,6 +136,7 @@ export class JennyCompanion {
     window.addEventListener('mascotchange', this._onMascotChange);
 
     AppState.on('currentMode', (mode) => this.setMode(mode));
+    applyMascotSize();
     this._applySide();
     this.setMode(this.mode);
 
