@@ -53,10 +53,10 @@ class NotifierBridge(context: Context) {
         val manager = appContext.getSystemService(NotificationManager::class.java) ?: return
         val channel = NotificationChannel(
             CHANNEL_ID,
-            "Jenny · avvisi",
+            appContext.getString(R.string.alerts_channel_name),
             NotificationManager.IMPORTANCE_HIGH
         ).apply {
-            description = "Promemoria e avvisi proattivi di Jenny"
+            description = appContext.getString(R.string.alerts_channel_description)
         }
         manager.createNotificationChannel(channel)
     }

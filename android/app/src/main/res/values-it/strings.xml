@@ -1,0 +1,9 @@
+<resources>
+    <string name="gateway_notification_title">Jenny è attiva</string>
+    <string name="gateway_notification_text">Pronta a rispondere e a eseguire le attività programmate</string>
+    <string name="gateway_channel_name">Servizio in background</string>
+    <string name="gateway_channel_description">Mostrata mentre Jenny è attiva in background. Android la richiede e resta finché Jenny non viene fermata. Toccala per aprire Jenny.</string>
+
+    <string name="alerts_channel_name">Avvisi</string>
+    <string name="alerts_channel_description">Promemoria e messaggi che Jenny manda di sua iniziativa</string>
+</resources>

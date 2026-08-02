@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -33,6 +34,9 @@ class GatewayService : Service() {
         private const val TAG = "Jenny"
         private const val NOTIFICATION_CHANNEL_ID = "jenny_gateway"
         private const val NOTIFICATION_ID = 1
+        // Distinto dai request code degli alert (NotifierBridge usa tag.hashCode()),
+        // così i due PendingIntent non si sovrascrivono a vicenda.
+        private const val OPEN_UI_REQUEST_CODE = 1001
     }
 
     private var gatewayStarted = false
@@ -78,23 +82,45 @@ class GatewayService : Service() {
         val manager = getSystemService(NotificationManager::class.java)
         val channel = NotificationChannel(
             NOTIFICATION_CHANNEL_ID,
-            "Jenny",
+            getString(R.string.gateway_channel_name),
             NotificationManager.IMPORTANCE_LOW
         ).apply {
-            description = "Jenny resta accesa in sottofondo"
+            description = getString(R.string.gateway_channel_description)
             setSound(null, null)
             enableVibration(false)
         }
         manager.createNotificationChannel(channel)
 
         return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setContentTitle("Jenny ✦ online")
-            .setContentText("Gateway attivo · sempre sul pezzo")
+            .setContentTitle(getString(R.string.gateway_notification_title))
+            .setContentText(getString(R.string.gateway_notification_text))
             .setSmallIcon(R.drawable.ic_stat_jenny)
             .setLargeIcon(BitmapFactory.decodeResource(resources, R.drawable.ic_notification_large))
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setContentIntent(openUiIntent())
             .build()
+    }
+
+    /**
+     * Tap sulla notifica → apre Jenny. È l'unica via di rientro sempre visibile
+     * quando l'app non è il launcher attivo, e senza questo intent la notifica
+     * persistente non fa assolutamente niente al tocco.
+     *
+     * Intent esplicito e senza categoria: MainActivity è `singleTask` e riporta
+     * a galla il task esistente via `onNewIntent`, che simula la pressione di
+     * Home (tornando in chat) solo per gli intent con `CATEGORY_HOME`. Toccare
+     * la notifica lascia quindi l'utente dov'era.
+     */
+    private fun openUiIntent(): PendingIntent {
+        val intent = Intent(this, MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        return PendingIntent.getActivity(
+            this,
+            OPEN_UI_REQUEST_CODE,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
     }
 
     private fun startForegroundCompat(id: Int, notification: Notification) {

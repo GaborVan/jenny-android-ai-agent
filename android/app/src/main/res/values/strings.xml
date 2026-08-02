@@ -1,3 +1,16 @@
 <resources>
     <string name="app_name">Jenny</string>
+
+    <!-- Foreground service: the ongoing notification Android requires while the
+         gateway runs. Wording has to answer "what is this and why can't I
+         dismiss it?", because that is the only question it ever raises. -->
+    <string name="gateway_notification_title">Jenny is running</string>
+    <string name="gateway_notification_text">Ready to reply and to run scheduled tasks</string>
+    <string name="gateway_channel_name">Background service</string>
+    <string name="gateway_channel_description">Shown while Jenny runs in the background. Android requires it, and it stays until Jenny is stopped. Tap it to open Jenny.</string>
+
+    <!-- Proactive alerts posted by the agent (the message itself comes from
+         Python; only the channel is described here). -->
+    <string name="alerts_channel_name">Alerts</string>
+    <string name="alerts_channel_description">Reminders and messages Jenny sends on her own initiative</string>
 </resources>
