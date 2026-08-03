@@ -53,6 +53,12 @@ WEBUI_TRANSCRIPT_SCHEMA_VERSION = 3
 _WEBUI_FORK_MARKER_EVENT = "fork_marker"
 _DEFAULT_TRANSCRIPT_PAGE_LIMIT = 160
 _MAX_TRANSCRIPT_PAGE_LIMIT = 1000
+# Tetto sui record grezzi caricati in una pagina, indipendente da quello sui
+# messaggi: è il costo reale della lettura, che il limite in messaggi non
+# esprime. Dimensionato sopra il fabbisogno di una pagina piena scritta col
+# reasoning coalescato (~2-3k record per ~160 messaggi), così nell'uso normale
+# non morde mai, e limita i transcript vecchi scritti un chunk per volta.
+_MAX_TRANSCRIPT_PAGE_RECORDS = 20_000
 _TURN_DISPLAY_EVENTS: frozenset[str] = frozenset({
     "reasoning_delta",
     "reasoning_end",
@@ -113,8 +119,33 @@ def _coerce_page_limit(limit: int | None) -> int:
     return max(1, min(_MAX_TRANSCRIPT_PAGE_LIMIT, int(limit)))
 
 
-def _chunk_turn_refs(session_key: str) -> list[_TranscriptChunkRef]:
+class _ChunkCache:
+    """Legge i chunk del transcript una volta sola per richiesta.
+
+    ``_read_chunk_turns`` rilegge e ri-parsa il file a ogni chiamata, e in una
+    singola richiesta lo stesso chunk attivo veniva letto due volte: una da
+    ``_chunk_turn_refs`` per contare i turni, una da ``_select_transcript_page``
+    per averli. Lo scope è la richiesta, quindi non serve invalidazione: non
+    esiste un istante in cui questa cache possa diventare stantia.
+    """
+
+    def __init__(self, session_key: str) -> None:
+        self._session_key = session_key
+        self._turns: dict[str, list[list[dict[str, Any]]]] = {}
+
+    def turns(self, chunk_id: str) -> list[list[dict[str, Any]]]:
+        cached = self._turns.get(chunk_id)
+        if cached is None:
+            cached = _read_chunk_turns(self._session_key, chunk_id)
+            self._turns[chunk_id] = cached
+        return cached
+
+
+def _chunk_turn_refs(
+    session_key: str, cache: _ChunkCache | None = None
+) -> list[_TranscriptChunkRef]:
     _rotate_active_transcript_if_needed(session_key)
+    cache = cache or _ChunkCache(session_key)
     refs: list[_TranscriptChunkRef] = []
     ordinal = 0
     for entry in _read_segment_manifest_entries(session_key):
@@ -125,7 +156,7 @@ def _chunk_turn_refs(session_key: str) -> list[_TranscriptChunkRef]:
         refs.append(_TranscriptChunkRef(chunk_id, ordinal, turn_count, int(entry["user_count"])))
         ordinal += turn_count
     if webui_transcript_path(session_key).is_file():
-        active_turns = _read_chunk_turns(session_key, _TRANSCRIPT_ACTIVE_CHUNK_ID)
+        active_turns = cache.turns(_TRANSCRIPT_ACTIVE_CHUNK_ID)
         active_turn_count = len(active_turns)
         if active_turn_count > 0:
             refs.append(
@@ -139,12 +170,35 @@ def _chunk_turn_refs(session_key: str) -> list[_TranscriptChunkRef]:
     return refs
 
 
+def _count_anchor_messages(turn: list[dict[str, Any]]) -> int:
+    """Stima quanti messaggi UI produrrà *turn*, senza costruirli.
+
+    Serve solo a dimensionare la pagina: il conteggio vero lo calcola
+    ``build_webui_thread_response`` dal replay e sovrascrive
+    ``loaded_message_count``. Prima questa stima si otteneva con un
+    ``len(replay_transcript_to_ui_messages(turn))`` — l'intero fold costruito e
+    buttato via per un numero, e poi rifatto a valle sugli stessi record.
+
+    Conta i record che *ancorano* un messaggio; reasoning, delta e file_edit si
+    attaccano a un messaggio esistente. È una sottostima per difetto, quindi al
+    più include qualche turno in più: mai meno contenuto del richiesto.
+    """
+    total = 0
+    for record in turn:
+        event = record.get("event")
+        if event in ("user", "stream_end", "message"):
+            total += 1
+    return total
+
+
 def _count_user_messages_before_ordinal(
     session_key: str,
     chunks: list[_TranscriptChunkRef],
     before_ordinal: int,
+    cache: _ChunkCache | None = None,
 ) -> int:
     total = 0
+    cache = cache or _ChunkCache(session_key)
     for chunk in chunks:
         if before_ordinal <= chunk.start_ordinal:
             break
@@ -154,7 +208,7 @@ def _count_user_messages_before_ordinal(
         if local_end >= chunk.turn_count:
             total += chunk.user_count
             continue
-        turns = _read_chunk_turns(session_key, chunk.chunk_id)
+        turns = cache.turns(chunk.chunk_id)
         total += sum(
             1
             for turn in turns[:local_end]
@@ -172,12 +226,14 @@ def _select_transcript_page(
     _manifest_rebuilt: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     page_limit = _coerce_page_limit(limit)
-    chunks = _chunk_turn_refs(session_key)
+    cache = _ChunkCache(session_key)
+    chunks = _chunk_turn_refs(session_key, cache)
     total_turns = sum(chunk.turn_count for chunk in chunks)
     before_ordinal = _decode_page_cursor(before)
     upper_ordinal = total_turns if before_ordinal is None else min(before_ordinal, total_turns)
     selected: list[_TranscriptTurnRef] = []
     selected_message_count = 0
+    selected_record_count = 0
 
     for chunk in reversed(chunks):
         if chunk.start_ordinal >= upper_ordinal:
@@ -185,7 +241,7 @@ def _select_transcript_page(
         local_upper = min(chunk.turn_count, upper_ordinal - chunk.start_ordinal)
         if local_upper <= 0:
             continue
-        turns = _read_chunk_turns(session_key, chunk.chunk_id)
+        turns = cache.turns(chunk.chunk_id)
         if (
             chunk.chunk_id != _TRANSCRIPT_ACTIVE_CHUNK_ID
             and len(turns) != chunk.turn_count
@@ -203,10 +259,23 @@ def _select_transcript_page(
             ordinal = chunk.start_ordinal + turn_index
             turn = turns[turn_index]
             selected.append(_TranscriptTurnRef(ordinal, turn))
-            selected_message_count += len(replay_transcript_to_ui_messages(turn))
+            selected_message_count += _count_anchor_messages(turn)
+            selected_record_count += len(turn)
             if selected_message_count >= page_limit:
                 break
-        if selected_message_count >= page_limit:
+            # Secondo tetto, sui record grezzi. Il limite in messaggi non dice
+            # nulla sul costo: un transcript scritto prima della coalescenza del
+            # reasoning porta ~1400 record per segmento pensato, e una pagina da
+            # 160 messaggi arrivava a 111k record che ogni passata a valle
+            # riattraversava. Il turno in corso non si spezza mai a metà — si
+            # smette di aggiungerne altri, e il client chiede il resto con
+            # ``before_cursor``.
+            if selected_record_count >= _MAX_TRANSCRIPT_PAGE_RECORDS:
+                break
+        if (
+            selected_message_count >= page_limit
+            or selected_record_count >= _MAX_TRANSCRIPT_PAGE_RECORDS
+        ):
             break
 
     selected_chronological = list(reversed(selected))
@@ -229,6 +298,7 @@ def _select_transcript_page(
             session_key,
             chunks,
             first_ref.ordinal,
+            cache,
         ),
     }
     return lines, page

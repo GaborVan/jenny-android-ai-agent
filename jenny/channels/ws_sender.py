@@ -31,6 +31,12 @@ _SEND_TIMEOUT_S: float = ws_send_timeout_s()
 class OutboundSenderMixin:
     """Metodi di consegna outbound (mixin di WebSocketChannel)."""
 
+    # Stato posseduto da ``WebSocketChannel.__init__`` e usato da questo mixin.
+    # Annotato qui (senza assegnazione, nessun effetto a runtime) perché il
+    # contratto fra i due sia esplicito e verificabile invece che implicito
+    # nell'MRO.
+    _reasoning_text_buffers: dict[tuple[str, str], list[str]]
+
     def _drop_stalled_connection(self, connection: Any, *, label: str = "") -> None:
         """Close and discard a connection whose ``send`` timed out (backpressure).
 
@@ -102,6 +108,64 @@ class OutboundSenderMixin:
             return False
         await self._send_event(connection, "ui_query", correlation_id=correlation_id)
         return True
+
+    # -- Reasoning: un record per segmento, non per chunk --------------------
+
+    @staticmethod
+    def _reasoning_key(chat_id: str, stream_id: Any) -> tuple[str, str]:
+        return (chat_id, str(stream_id or ""))
+
+    def _reasoning_buffer_for(self, chat_id: str, stream_id: Any) -> list[str]:
+        return self._reasoning_text_buffers.setdefault(
+            self._reasoning_key(chat_id, stream_id), []
+        )
+
+    def _flush_reasoning_buffer(
+        self,
+        chat_id: str,
+        stream_id: Any,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Persisti il segmento accumulato come singolo ``reasoning_delta``.
+
+        Idempotente: svuota il buffer, quindi una seconda chiamata (o un
+        ``reasoning_end`` doppio) non duplica il record. Il record mantiene la
+        forma ``reasoning_delta`` di sempre, così nessun lettore cambia — un
+        transcript vecchio pieno di chunk continua a renderizzare identico.
+        """
+        buffered = self._reasoning_text_buffers.pop(
+            self._reasoning_key(chat_id, stream_id), None
+        )
+        if not buffered:
+            return
+        text = "".join(buffered)
+        if not text:
+            return
+        body: dict[str, Any] = {
+            "event": "reasoning_delta",
+            "chat_id": chat_id,
+            "text": text,
+        }
+        if stream_id is not None:
+            body["stream_id"] = stream_id
+        self._transcripts.prepare_and_append(
+            chat_id,
+            body,
+            metadata=metadata or {},
+            phase="reasoning",
+        )
+
+    def _flush_all_reasoning_buffers(self, chat_id: str) -> None:
+        """Scarica ogni segmento ancora aperto per questa chat.
+
+        Rete di sicurezza per i turni che finiscono senza ``reasoning_end``
+        (errore del provider, cancellazione): senza questo il pensiero
+        accumulato resterebbe solo in memoria e il transcript perderebbe un
+        segmento che prima, un chunk per volta, veniva salvato comunque.
+        """
+        for key in [k for k in self._reasoning_text_buffers if k[0] == chat_id]:
+            self._flush_reasoning_buffer(key[0], key[1] or None)
 
     def discard_stream_buffer(self, chat_id: str, stream_id: Any) -> None:
         """Drop a stream's buffered text once delivery is permanently abandoned.
@@ -330,6 +394,11 @@ class OutboundSenderMixin:
         clients receive a stream that opens, updates in place, and closes —
         rendered above the active assistant bubble with a shimmer header
         until the matching ``reasoning_end`` arrives.
+
+        Il chunk va live ai client ma **non** finisce da solo nel transcript: si
+        accumula e viene persistito in un record unico da ``send_reasoning_end``.
+        Un pensiero lungo arrivava a ~1400 chunk per segmento, e ogni lettura del
+        thread li ripercorreva tutti — 97% dei record di un transcript reale.
         """
         if not delta:
             return []
@@ -343,12 +412,7 @@ class OutboundSenderMixin:
         if stream_id is not None:
             body["stream_id"] = stream_id
         if not skip_persist:
-            self._transcripts.prepare_and_append(
-                chat_id,
-                body,
-                metadata=meta,
-                phase="reasoning",
-            )
+            self._reasoning_buffer_for(chat_id, stream_id).append(delta)
         conns = only_conns if only_conns is not None else list(self._subs.get(chat_id, ()))
         if not conns:
             return []
@@ -363,7 +427,13 @@ class OutboundSenderMixin:
         only_conns: list[Any] | None = None,
         skip_persist: bool = False,
     ) -> list[Any]:
-        """Close the current reasoning stream segment for in-place renderers."""
+        """Close the current reasoning stream segment for in-place renderers.
+
+        È qui che il segmento accumulato da ``send_reasoning_delta`` diventa un
+        record solo. Il replay lo fold identico: ``attach_reasoning_chunk``
+        accumula, quindi un record col testo intero e N record coi pezzi
+        producono lo stesso messaggio.
+        """
         meta = metadata or {}
         body: dict[str, Any] = {
             "event": "reasoning_end",
@@ -373,6 +443,7 @@ class OutboundSenderMixin:
         if stream_id is not None:
             body["stream_id"] = stream_id
         if not skip_persist:
+            self._flush_reasoning_buffer(chat_id, stream_id, metadata=meta)
             self._transcripts.prepare_and_append(
                 chat_id,
                 body,
@@ -481,6 +552,10 @@ class OutboundSenderMixin:
         if latency_ms is not None:
             body["latency_ms"] = int(latency_ms)
         if not skip_persist:
+            # Prima del marcatore di fine turno: un segmento di reasoning rimasto
+            # aperto va scritto *dentro* il suo turno, non nel successivo — è
+            # ``turn_end`` che delimita i turni per lo split del transcript.
+            self._flush_all_reasoning_buffers(chat_id)
             self._transcripts.prepare_and_append(
                 chat_id,
                 body,
