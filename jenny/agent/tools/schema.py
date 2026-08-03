@@ -16,6 +16,35 @@ from typing import Any
 
 from jenny.agent.tools.base import Schema
 
+# Tetto per ogni vincolo di ripetizione (`maxLength`, `maxItems`, e i rispettivi
+# minimi) che finisce nello schema JSON inviato al provider.
+#
+# I server che vincolano il tool-calling con una grammatica — llama.cpp in testa
+# — espandono quei vincoli in regole di ripetizione *letterali*, e llama.cpp ha
+# due guard in `src/llama-grammar.cpp`, entrambi contro `MAX_REPETITION_THRESHOLD
+# = 2000`:
+#
+#   1. `min_times > 2000 || max_times > 2000` → "number of repetitions exceeds
+#      sane defaults";
+#   2. `n_prev_rules * total_rules >= 2000` → "number of rules that are going to
+#      be repeated multiplied by the new repetition exceeds sane defaults".
+#
+# Il secondo è quello che conta: moltiplica la ripetizione per la complessità
+# della regola ripetuta, quindi il valore utile NON è 2000 ma una frazione che
+# dipende dal resto della grammatica. Misurato contro llama-server b10210 con
+# Qwen2.5-3B: `long_task` da solo passa con `goal` a 1000 e fallisce a 2000.
+#
+# Attenzione: essendo `n_prev_rules` cumulativo e la grammatica compilata
+# dall'UNIONE di tutti i tool, restare sotto questa soglia è necessario ma non
+# sufficiente — oltre una quindicina di tool la richiesta fallisce comunque, per
+# complessità totale. Vedi `docs/reference/local-models.md`.
+#
+# Il limite è un vincolo di interoperabilità, non un'opinione di design:
+# ``tests/agent/tools/test_schema_wire_limits.py`` lo verifica su tutti i tool
+# registrati. Serve un campo più capiente? Va tolto il vincolo dallo schema e
+# controllato in ``execute()`` (v. ``long_task``), non alzato oltre la soglia.
+WIRE_STRING_LIMIT = 1000
+
 
 class StringSchema(Schema):
     """String parameter: ``description`` documents the field; optional length bounds and enum."""

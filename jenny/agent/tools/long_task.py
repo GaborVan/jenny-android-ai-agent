@@ -37,6 +37,16 @@ def _iso_now() -> str:
     return datetime.now().isoformat()
 
 
+# Tetti di lunghezza per i due campi di testo libero, applicati in ``execute()``
+# e NON dichiarati come ``maxLength`` nello schema. Un `maxLength` su un campo
+# così capiente diventa una regola di ripetizione enorme nelle grammatiche di
+# tool-calling e fa rifiutare l'intera richiesta (v. WIRE_STRING_LIMIT in
+# ``schema.py``). Controllandoli qui il limite resta identico per il modello, ma
+# non costa nulla sul filo.
+_GOAL_MAX_CHARS = 12_000
+_RECAP_MAX_CHARS = 8_000
+
+
 class _GoalToolsMixin(ContextAware):
     """Shared routing context + Session lookup."""
 
@@ -69,8 +79,8 @@ class _GoalToolsMixin(ContextAware):
             "Sustained objective for this chat thread. First read the built-in **long-goal** skill, "
             "especially its Start fast section, then call this promptly once the user's intent is clear. "
             "The goal must still be idempotent, self-contained, bounded, and explicit about done-ness; "
-            "do not delay this tool call to over-plan, research, or decide execution details.",
-            max_length=12_000,
+            "do not delay this tool call to over-plan, research, or decide execution details. "
+            "Keep it under 12000 characters.",
         ),
         ui_summary=StringSchema(
             "Optional one-line label for session lists / logs (≤120 chars).",
@@ -118,6 +128,11 @@ class LongTaskTool(Tool, _GoalToolsMixin):
             return (
                 "Error: long_task requires an active chat session (missing routing context)."
             )
+        if len(goal) > _GOAL_MAX_CHARS:
+            return (
+                f"Error: goal must be at most {_GOAL_MAX_CHARS} characters "
+                f"(got {len(goal)}). Tighten it and call again."
+            )
         prior = parse_goal_state(goal_state_raw(sess.metadata))
         if isinstance(prior, dict) and prior.get("status") == "active":
             return (
@@ -146,8 +161,8 @@ class LongTaskTool(Tool, _GoalToolsMixin):
     tool_parameters_schema(
         recap=StringSchema(
             "Brief recap for the user (plain text). When the goal succeeded, confirm outcomes; "
-            "if the user cancelled, pivoted, or replaced the objective, say so honestly.",
-            max_length=8000,
+            "if the user cancelled, pivoted, or replaced the objective, say so honestly. "
+            "Keep it under 8000 characters.",
             nullable=True,
         ),
         required=[],
@@ -187,6 +202,11 @@ class CompleteGoalTool(Tool, _GoalToolsMixin):
         sess = self._session()
         if sess is None:
             return "Error: complete_goal requires an active chat session."
+        if recap is not None and len(recap) > _RECAP_MAX_CHARS:
+            return (
+                f"Error: recap must be at most {_RECAP_MAX_CHARS} characters "
+                f"(got {len(recap)}). Shorten it and call again."
+            )
         prior = parse_goal_state(goal_state_raw(sess.metadata))
         if not isinstance(prior, dict) or prior.get("status") != "active":
             return "No active goal to complete."

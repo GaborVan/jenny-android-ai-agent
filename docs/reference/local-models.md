@@ -35,6 +35,26 @@ Jenny has an SSRF (server-side request forgery) protection layer that blocks its
 
 If you've seen `10.0.2.2` in older examples pointing at a host machine's Ollama or vLLM instance, that address only means anything inside the Android emulator — it's the emulator's special alias for "the machine running the emulator." On a real phone, `10.0.2.2` is just an unreachable address like any other; it resolves to nothing on your actual network. On a real device you need the model server's actual LAN IP (or a Tailscale/VPN address, or a public hostname), reachable per the HTTPS rule above.
 
+## Tool calling and grammars
+
+Jenny sends its full tool set on every request, and some self-hosted servers constrain the model's output to those schemas with a generated grammar rather than trusting the model to emit valid JSON. llama.cpp does this whenever tools are present; Ollama, LM Studio and vLLM take other routes.
+
+That conversion has limits Jenny has to stay inside. llama.cpp expands string and array length bounds into literal repetition rules, and guards them twice against `MAX_REPETITION_THRESHOLD` (2000, in `src/llama-grammar.cpp`): once on the repetition count itself, and once on `n_prev_rules * total_rules` — the count multiplied by the complexity of the rule being repeated. The second guard is the one that bites, because it makes the usable ceiling a fraction of 2000 rather than 2000, and the fraction depends on the rest of the grammar. Either way you get:
+
+```
+parse: error parsing grammar: number of repetitions exceeds sane defaults, please reduce the number of repetitions
+```
+
+surfacing to Jenny as `HTTP 400: Failed to initialize samplers: failed to parse grammar`. The failure is all-or-nothing: llama-server compiles **one** grammar from the union of every tool schema, so a single out-of-range field breaks every request that carries tools, including a bare "hi". It is not a symptom of a bad model, a bad prompt, or a missing `--jinja`.
+
+Measured against llama-server b10210 with Qwen2.5-3B-Instruct: Jenny's two long free-text fields (`long_task.goal`, `complete_goal.recap`) failed even when lowered to 2000, and passed at 1000. Rather than pick a number that happens to fit today, both dropped their schema-level bound entirely and check the length in `execute` instead — the limit the model sees is unchanged, and it costs nothing on the wire. With that in place the full 22-tool set compiles and answers normally. A test in `tests/agent/tools/test_schema_wire_limits.py` fails the build if any schema drifts back over the cap.
+
+Re-checked on-device against b10229 built from source in Termux, same model, `llama-server -m … --host 127.0.0.1 --port 8080`: the pre-fix schemas return the grammar error, the same schemas capped at 2000/1500 still return it, and the current ones answer HTTP 200 with all 22 tools present.
+
+If you write your own tool ([Write a tool](../contribute/write-a-tool.md)), the same applies: keep length and item bounds small, or leave them out of the schema and validate inside `execute`.
+
+One thing that has nothing to do with grammars but shows up as the same HTTP 400: Jenny's tool schemas alone are around 5,800 tokens, before the system prompt. Start `llama-server` with a context well above that (`-c 16384` or more) or every request fails with `exceeds the available context size` — which reads like a Jenny bug and is not one.
+
 ## Configuring it
 
 Same provider entry shape as any other `openai_compat` provider — via Settings → Model → API keys, or directly in `config.json`:
