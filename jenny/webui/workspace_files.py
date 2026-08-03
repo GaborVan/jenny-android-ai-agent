@@ -19,8 +19,14 @@ from jenny.utils.path import atomic_write
 # possono comparire il backup ``config.json.bak`` e i temporanei di
 # ``atomic_write``, che contengono le stesse chiavi API e lo stesso secret.
 # Nascondere solo il nome esatto li avrebbe esposti nel browser file.
+#
+# ``*.tmp``: il temporaneo di ``atomic_write`` è invisibile solo per il tempo
+# di una scrittura, ma un processo ucciso in quel momento lo lascia lì per
+# sempre. È un residuo del runtime, non un file dell'utente, e mostrarlo
+# accanto all'originale invita solo ad aprire quello sbagliato.
 _DEFAULT_INTERNAL_PATTERNS = [
     ".*",
+    "*.tmp",
     "config.json*",
     "config.corrupt-*.json",
     "agent", "agent/**",

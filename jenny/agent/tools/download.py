@@ -16,7 +16,6 @@ direttamente come i provider.
 from __future__ import annotations
 
 import mimetypes
-import os
 import re
 import uuid
 from pathlib import Path
@@ -31,6 +30,7 @@ from jenny.agent.tools.schema import StringSchema, tool_parameters_schema
 from jenny.security.network import validate_url_target
 from jenny.security.workspace_policy import _safe_expanduser
 from jenny.utils.helpers import detect_image_mime, ensure_dir, safe_filename
+from jenny.utils.path import atomic_write
 
 # Limiti operativi.
 TIMEOUT_S = 60.0
@@ -190,12 +190,9 @@ class DownloadFileTool(Tool):
 
         downloads_dir = ensure_dir(self._workspace / DOWNLOADS_SUBDIR)
         target = _unique_path(downloads_dir, name)
-        tmp = downloads_dir / f".{target.name}.{uuid.uuid4().hex}.tmp"
         try:
-            tmp.write_bytes(data)
-            os.replace(tmp, target)
+            atomic_write(target, data)
         except OSError as e:
-            tmp.unlink(missing_ok=True)
             return f"Error: could not save file: {e}"
 
         mime = (

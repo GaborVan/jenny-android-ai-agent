@@ -12,7 +12,6 @@ import json
 import os
 import re
 import shutil
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -175,16 +174,10 @@ def _write_segment_manifest(session_key: str, segment_ids: list[str]) -> None:
         "segments": [_segment_manifest_entry(session_key, segment_id) for segment_id in segment_ids],
     }
     path = _webui_transcript_manifest_path(session_key)
-    # Nome tmp unico per chiamata: due scrittori concorrenti sullo stesso
-    # manifest non condividono il temporaneo (stessa scelta di ``atomic_write``).
-    # I tmp restano invisibili a ``_segment_ids_on_disk``, che filtra per regex.
-    tmp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        os.replace(tmp_path, path)
-    except BaseException:
-        tmp_path.unlink(missing_ok=True)
-        raise
+    # Il temporaneo di ``atomic_write`` ha nome unico per chiamata (due scrittori
+    # concorrenti sullo stesso manifest non se lo portano via a vicenda) e resta
+    # invisibile a ``_segment_ids_on_disk``, che filtra per regex.
+    atomic_write(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
 
 
 def _rebuild_segment_manifest(session_key: str) -> list[str]:

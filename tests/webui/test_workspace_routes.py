@@ -149,6 +149,8 @@ async def test_list_marks_default_runtime_dirs_internal_without_manifest(
     # vedrebbe nel browser senza developer mode.
     (workspace_root / "config.json.bak").write_text("{}", encoding="utf-8")
     (workspace_root / "config.corrupt-20260803T120000Z.json").write_text("x", encoding="utf-8")
+    # Residuo di un ``atomic_write`` interrotto: runtime, non contenuto utente.
+    (workspace_root / "note.txt.abc123.tmp").write_text("x", encoding="utf-8")
     (workspace_root / "agent").mkdir()
     (workspace_root / "agent" / "identity.md").write_text("x", encoding="utf-8")
     (workspace_root / "cron").mkdir()
@@ -163,6 +165,7 @@ async def test_list_marks_default_runtime_dirs_internal_without_manifest(
         "config.json": True,
         "config.json.bak": True,
         "config.corrupt-20260803T120000Z.json": True,
+        "note.txt.abc123.tmp": True,
         "agent": True,
         "cron": True,
         "sessions": True,
