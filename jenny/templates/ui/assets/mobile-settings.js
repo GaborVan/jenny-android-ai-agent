@@ -686,13 +686,16 @@ export class SettingsController {
     this._showAddProviderDialog(p);
   }
 
-  _deleteProvider(name) {
+  async _deleteProvider(name) {
     const providers = this.data?.providers || [];
     if (providers.length <= 1) {
       showToast(i18n.t('settings.cannotDeleteLast'), 'error');
       return;
     }
-    if (!confirm(i18n.t('settings.deleteProviderConfirm', { name }))) return;
+    // `confirmDialog`, non la confirm() nativa: nella WebView dell'app quella
+    // non mostra niente e ritorna false, quindi il tasto elimina non faceva
+    // assolutamente nulla — nessun dialogo, nessuna richiesta, nessun errore.
+    if (!await confirmDialog(i18n.t('settings.deleteProviderConfirm', { name }))) return;
     api.deleteProvider({ name })
       .then(() => {
         showToast(i18n.t('settings.providerDeleted'));

@@ -2,7 +2,7 @@
 
 import { api } from './shared/api-client.js';
 import { escapeHtml, getFileExtension, showToast } from './shared/utils.js';
-import { confirmDialog } from './shared/dialog.js';
+import { confirmDialog, promptDialog } from './shared/dialog.js';
 import { i18n } from './shared/i18n.js';
 import { currentTheme } from './shared/theme.js';
 import { advancedMode } from './shared/advanced-mode.js';
@@ -496,7 +496,10 @@ export class WorkspaceController {
         break;
       }
       case 'rename': {
-        const newName = prompt(i18n.t('workspace.newName'), info.name);
+        // `promptDialog`, non la prompt() nativa: nella WebView dell'app i
+        // dialoghi JS nativi non compaiono e ritornano null, quindi rinominare
+        // non faceva niente — senza nemmeno un messaggio.
+        const newName = await promptDialog(i18n.t('workspace.newName'), { initial: info.name });
         if (!newName || newName === info.name) return;
         const base = parentPath(path);
         const newPath = base ? `${base}/${newName}` : newName;
@@ -507,7 +510,7 @@ export class WorkspaceController {
           }
           await this.navigateTo(this.currentDir);
         } catch (err) {
-          alert(i18n.t('workspace.error') + err.message);
+          showToast(i18n.t('workspace.error') + err.message, 'error');
         }
         break;
       }
@@ -516,7 +519,7 @@ export class WorkspaceController {
           await api.copyWorkspace(path);
           await this.navigateTo(this.currentDir);
         } catch (err) {
-          alert(i18n.t('workspace.error') + err.message);
+          showToast(i18n.t('workspace.error') + err.message, 'error');
         }
         break;
       }
@@ -532,7 +535,7 @@ export class WorkspaceController {
           }
           await this.navigateTo(this.currentDir);
         } catch (err) {
-          alert(i18n.t('workspace.error') + err.message);
+          showToast(i18n.t('workspace.error') + err.message, 'error');
         }
         break;
       }
@@ -818,7 +821,10 @@ export class WorkspaceController {
   /** Crea un nuovo file o cartella sotto `baseDir` chiedendo il nome all'utente. */
   async _createEntry(action, baseDir) {
     const isFile = action === 'newFile';
-    const name = prompt(i18n.t(isFile ? 'workspace.fileName' : 'workspace.folderName'), '');
+    // Come per il rename: la prompt() nativa non compare nella WebView.
+    const name = await promptDialog(
+      i18n.t(isFile ? 'workspace.fileName' : 'workspace.folderName'),
+    );
     if (!name) return;
     const newPath = baseDir ? `${baseDir}/${name}` : name;
     try {
@@ -829,7 +835,7 @@ export class WorkspaceController {
       }
       await this.navigateTo(this.currentDir);
     } catch (err) {
-      alert(i18n.t('workspace.error') + err.message);
+      showToast(i18n.t('workspace.error') + err.message, 'error');
     }
   }
 }
