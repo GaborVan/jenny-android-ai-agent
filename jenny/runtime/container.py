@@ -82,10 +82,24 @@ class GatewayContainer:
             old_provider = getattr(self._agent, "provider", None)
             old_base = getattr(old_provider, "api_base", None)
             new_base = getattr(new_provider, "api_base", None)
-            if new_model == old_model and new_base == old_base:
+            # GenerationSettings è un dataclass frozen, quindi il confronto è per
+            # valore: serve perché un cambio di max_tokens / temperature /
+            # reasoning_effort lascia model e api_base identici, e senza questo
+            # la guardia scartava proprio l'aggiornamento richiesto.
+            old_generation = getattr(old_provider, "generation", None)
+            new_generation = getattr(new_provider, "generation", None)
+            if (
+                new_model == old_model
+                and new_base == old_base
+                and new_generation == old_generation
+            ):
                 return
             self._agent._apply_provider_switch(
                 new_provider, new_model, new_ctx,
+                # Un cambio dei soli parametri di generazione non è un cambio di
+                # modello: pubblicarlo come tale farebbe annunciare alla UI uno
+                # switch verso il modello che era già attivo.
+                publish_update=new_model != old_model,
             )
             logger.info(
                 "Hot-reloaded after settings change: model={!r} provider={!r}",
