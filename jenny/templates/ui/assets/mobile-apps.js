@@ -560,8 +560,9 @@ export class AppsController {
       // Da "Info app" si può disinstallare: al rientro la lista va riallineata.
       this._reloadAndroidAppsOnReturn();
     } else if (action === 'uninstall') {
-      const ok = await confirmDialog(i18n.t('apps.uninstallConfirm', { name: app.label }));
-      if (!ok) return;
+      // Nessuna conferma nostra: quella di Android arriva comunque e non è
+      // aggirabile, quindi la nostra era solo un tap in più prima della
+      // domanda vera. Stesso comportamento dei launcher di sistema.
       try { await api.uninstallAndroidApp(pkg); } catch {}
       this._reloadAndroidAppsOnReturn();
     } else if (action === 'hide') {

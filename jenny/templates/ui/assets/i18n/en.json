@@ -221,7 +221,6 @@
     "search": "Search...",
     "brokenConfirm": "The app \"{name}\" is broken: {error}. Ask Jenny to fix it?",
     "brokenPrompt": "The app \"{slug}\" is broken with this error: {error}. Can you fix it?",
-    "uninstallConfirm": "Uninstall \"{name}\"?",
     "uninstalled": "{name} uninstalled",
     "uninstalledMany": "Uninstalled: {names}",
     "deleteSkillConfirm": "Delete skill \"{name}\"?",

@@ -221,7 +221,6 @@
     "search": "Cerca...",
     "brokenConfirm": "L'app \"{name}\" è rotta: {error}. Chiedo a Jenny di sistemarla?",
     "brokenPrompt": "L'app \"{slug}\" risulta rotta con questo errore: {error}. Puoi sistemarla?",
-    "uninstallConfirm": "Disinstallare \"{name}\"?",
     "uninstalled": "{name} disinstallata",
     "uninstalledMany": "Disinstallate: {names}",
     "deleteSkillConfirm": "Eliminare la skill \"{name}\"?",
