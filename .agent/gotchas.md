@@ -59,3 +59,25 @@ manifests** in `jenny/utils/android_assets.py` (`_TEMPLATES_MANIFEST`, `_SKILLS_
 and for UI assets the SPA fallback in `_serve_static` masks the failure by returning
 `index.html` with a 200 for the missing path. When adding bundled files, add them to the
 matching manifest and verify by checking the extracted file's *content*, not the HTTP status.
+
+## Native JS dialogs do not work in the app WebView
+
+`confirm()`, `prompt()` and `alert()` **never appear** in Jenny's WebView and resolve as
+if the user had dismissed them — `confirm()` returns `false`, `prompt()` returns `null`.
+The `WebChromeClient` in `MainActivity.loadWebView` only implements `onShowFileChooser`,
+and nothing handles the JS-dialog callbacks.
+
+The failure mode is the worst kind: the guarded action simply never runs. No dialog, no
+request, no error, no log. Three features shipped broken this way — deleting a provider
+from Settings, renaming a workspace entry, creating a file or folder — plus four error
+messages that went nowhere. Note it works fine in a desktop browser pointed at the
+gateway, so it survives any testing that is not done on the device.
+
+Use the helpers in `jenny/templates/ui/assets/shared/dialog.js` — `confirmDialog()` and
+`promptDialog()`, both `async`, with their markup already in `index.html` — and
+`showToast(msg, 'error')` for failures. Grep before adding a new one:
+
+```bash
+grep -rn --include="*.js" -E "(^|[^.[:alnum:]_])(confirm|alert|prompt)\(" \
+  jenny/templates/ui/assets/ | grep -vE "confirmDialog|promptDialog"
+```

@@ -27,3 +27,5 @@ A bugfix should make the protected invariant clear, change the smallest surface 
 ## Explicit over magical
 
 Configuration must be declared explicitly in `config/schema.py` Pydantic models. Error handling should raise clear exceptions rather than silently correcting bad input. Provider auto-detection exists, but every resolution path must be traceable from the factory to the concrete provider class.
+
+One deliberate exception, worth knowing so it doesn't read as a lapse: loading `config.json` does **not** raise on an unusable file. It falls back to the `.bak`, or sets the file aside and starts on defaults. Raising was the honest choice right up until you remember where this runs — on a phone, a config the gateway refuses to load is an app the user cannot start *and* cannot repair, because the file lives in storage they cannot reach. The principle is kept where it can be: the fallback is loud (ERROR + WARNING in the log, a notice in Settings, the broken file preserved), never silent. Correcting bad input without telling anyone is still forbidden.
