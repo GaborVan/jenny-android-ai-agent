@@ -481,6 +481,14 @@ export class ChatController {
   async loadMoreHistory() {
     if (this.isLoadingHistory || !this.hasMoreHistory) return;
     if (!sessionManager.currentKey) return;
+    // Senza cursore la thread API restituisce la pagina *più recente*, non
+    // quella precedente: paginare indietro con before=null riporterebbe in cima
+    // i messaggi già a schermo invece di quelli vecchi. Se il server dichiara
+    // has_more_before senza darci un cursore, non c'è nulla da paginare.
+    if (!this.historyCursor) {
+      this.hasMoreHistory = false;
+      return;
+    }
     this.isLoadingHistory = true;
     const scrollHeightBefore = this.chatArea.scrollHeight;
     try {
@@ -1312,8 +1320,18 @@ export class ChatController {
       this.chatArea.innerHTML = '';
       this.identityEl = null;
       this._ensureIdentity();
+      // Lo schermo pulito resta pulito per tutta la sessione della WebUI.
+      // Svuotare la lista porta scrollTop a 0, e il browser emette uno scroll
+      // event sintetico: con hasMoreHistory ancora true l'infinite scroll
+      // (setupInfiniteScroll) ricaricava subito l'ultima pagina di storico e la
+      // chat riappariva tutta un istante dopo il "Chat cancellata.".
+      // Disarmare la paginazione è l'unico modo per fermarla, perché dopo il
+      // wipe la chat non è nemmeno più scrollabile: nessun gesto dell'utente
+      // potrebbe distinguersi da quell'evento sintetico. Lo storico torna
+      // disponibile alla prossima loadInitialHistory() (riapertura dell'app o
+      // invalidateHistory()).
       this.historyCursor = null;
-      this.hasMoreHistory = true;
+      this.hasMoreHistory = false;
       const el = document.createElement('div');
       el.className = 'chat-sys';
       el.textContent = i18n.t('chat.cleared');
