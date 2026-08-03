@@ -23,6 +23,7 @@ from markdown import Markdown
 from markdown.extensions import Extension
 from markdown.preprocessors import Preprocessor
 
+from jenny.utils.path import atomic_write
 from jenny.webui.audit import (
     AuditEntry,
     compute_anchor,
@@ -642,7 +643,7 @@ def create_audit(
         status="open",
         body=f"# Comment\n\n{comment.strip()}\n\n# Resolution\n\n<!-- filled in when the audit is processed -->\n",
     )
-    out_path.write_text(to_markdown(entry), "utf-8")
+    atomic_write(out_path, to_markdown(entry))
     return {
         "id": audit_id,
         "filename": filename,
@@ -681,7 +682,9 @@ def resolve_audit(wiki_root: Path, audit_id: str, resolution: str | None = None)
     entry.body = new_body
 
     resolved_path = resolved_dir / candidate.name
-    resolved_path.write_text(to_markdown(entry), "utf-8")
+    # Prima la copia risolta, poi la cancellazione dell'aperta: se il processo
+    # muore in mezzo resta un duplicato (recuperabile), non un audit perso.
+    atomic_write(resolved_path, to_markdown(entry))
     open_path.unlink()
     # Path relativi a wiki_root: non esporre il layout assoluto dell'host al
     # client (coerente con create_audit).

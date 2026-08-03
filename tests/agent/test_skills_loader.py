@@ -385,3 +385,29 @@ def test_get_skill_metadata_handles_yaml_types(tmp_path: Path) -> None:
     assert meta.get("always") is True
     # metadata is a parsed dict, not a JSON string
     assert isinstance(meta.get("metadata"), dict)
+
+
+def test_update_skill_failed_write_leaves_the_skill_intact(tmp_path: Path) -> None:
+    """update_skill riscrive SKILL.md intero: deve farlo atomicamente.
+
+    Con un write_text nudo, un processo ucciso a metà lasciava un frontmatter
+    troncato — cioè una skill che non si carica più. Il raise finto dimostra sia
+    che l'helper atomico è sulla strada, sia che la versione precedente resta.
+    """
+    workspace = tmp_path / "ws"
+    ws_skills = workspace / "skills"
+    ws_skills.mkdir(parents=True)
+    skill_path = _write_skill(ws_skills, "alpha", body="# Alpha original")
+    before = skill_path.read_text(encoding="utf-8")
+
+    def boom(*_args, **_kwargs):
+        raise OSError("no space left on device")
+
+    loader = SkillsLoader(workspace)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("jenny.agent.skills.atomic_write", boom)
+        with pytest.raises(OSError):
+            loader.update_skill("alpha", description="new description")
+
+    assert skill_path.read_text(encoding="utf-8") == before
+    assert loader.load_skill("alpha") is not None

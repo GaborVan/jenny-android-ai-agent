@@ -6,6 +6,8 @@ import re
 import shutil
 from pathlib import Path
 
+from jenny.utils.path import atomic_write
+
 _ANDROID_SKILL_NOTE = (
     "\n\n[Platform compatibility note: Android is the only supported runtime. "
     "There is no shell, no pip, and no CLI tools; use python_exec as the only "
@@ -263,7 +265,10 @@ class SkillsLoader:
         else:
             import json
             frontmatter = json.dumps(meta, indent=2)
-        skill_path.write_text(f"---\n{frontmatter}---\n{body}", encoding="utf-8")
+        # Scrittura piena del file della skill: un processo ucciso a metà
+        # lascerebbe un SKILL.md troncato — frontmatter a metà, quindi una skill
+        # che non si carica più. Da qui l'helper unico invece di write_text.
+        atomic_write(skill_path, f"---\n{frontmatter}---\n{body}")
 
     def delete_skill(self, name: str) -> None:
         """Delete a workspace skill directory.

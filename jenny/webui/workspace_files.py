@@ -8,6 +8,8 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
+from jenny.utils.path import atomic_write
+
 # Oltre ai dotfile, questi sono stato/implementazione del runtime (non
 # contenuto dell'utente): config.json contiene un secret e si edita dalle
 # Impostazioni, agent/ e ui/ sono bundle rigenerati ad ogni avvio, cron/ e
@@ -131,8 +133,10 @@ def read_file(path: Path, max_size: int = 1_000_000) -> str:
 
 def write_file(path: Path, content: str) -> None:
     """Write content to file."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    # Salvataggio dall'editor della WebUI: riscrive il file intero, quindi un
+    # processo ucciso a metà lo troncherebbe. Il contenuto vecchio resta valido
+    # fino al rename finale.
+    atomic_write(path, content)
 
 
 def create_directory(path: Path) -> None:
