@@ -53,6 +53,11 @@ _MIMO_THINKING_MODELS: frozenset[str] = frozenset({
     "mimo-v2-omni",
 })
 _OPENAI_COMPAT_REQUEST_TIMEOUT_S = 120.0
+# Un model server in loopback macina il prompt prima di emettere il primo
+# token, e in quella fase la connessione resta muta: su llama.cpp on-device i
+# soli schemi tool sono ~5.800 token, cioè minuti di prompt processing. Il
+# limite dei provider remoti taglierebbe ogni richiesta prima della risposta.
+_LOCAL_REQUEST_TIMEOUT_S = 600.0
 
 # Maps thinking_style → extra_body builder.
 # Each builder takes a bool (thinking_enabled) and returns the dict to
@@ -110,9 +115,15 @@ def _thinking_extra_body(style: str, thinking_enabled: bool) -> dict[str, Any] |
     return builder(thinking_enabled) if builder else None
 
 
-def _openai_compat_timeout_s() -> float:
-    """Return the bounded request timeout used for OpenAI-compatible providers."""
-    return _float_env("JENNY_OPENAI_COMPAT_TIMEOUT_S", _OPENAI_COMPAT_REQUEST_TIMEOUT_S)
+def _openai_compat_timeout_s(*, local: bool = False) -> float:
+    """Return the bounded request timeout used for OpenAI-compatible providers.
+
+    *local* alza il limite per gli endpoint in loopback, dove il silenzio
+    prima del primo token è prompt processing e non un blocco. L'override via
+    env vale per entrambi i casi.
+    """
+    default = _LOCAL_REQUEST_TIMEOUT_S if local else _OPENAI_COMPAT_REQUEST_TIMEOUT_S
+    return _float_env("JENNY_OPENAI_COMPAT_TIMEOUT_S", default)
 
 
 def _float_env(name: str, default: float) -> float:

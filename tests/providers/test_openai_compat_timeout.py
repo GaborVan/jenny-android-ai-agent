@@ -1,5 +1,9 @@
 from unittest.mock import patch, sentinel
 
+from jenny.providers.openai_compat_helpers import (
+    _LOCAL_REQUEST_TIMEOUT_S,
+    _OPENAI_COMPAT_REQUEST_TIMEOUT_S,
+)
 from jenny.providers.openai_compat_provider import OpenAICompatProvider
 
 
@@ -25,9 +29,26 @@ async def test_openai_compat_provider_sets_timeout_on_http_client() -> None:
         await provider._ensure_client()
 
     client_kwargs = mock_http_client.call_args.kwargs
-    assert client_kwargs["timeout"] == 120.0
+    # Endpoint in loopback: il limite è quello lungo, perché il prompt
+    # processing di un model server locale può durare minuti.
+    assert client_kwargs["timeout"] == _LOCAL_REQUEST_TIMEOUT_S
     assert client_kwargs["limits"].keepalive_expiry == 0
     assert provider._http_client is sentinel.http_client
+
+
+async def test_openai_compat_provider_keeps_the_tight_timeout_for_remote() -> None:
+    with patch(
+        "httpx.AsyncClient",
+        return_value=sentinel.http_client,
+    ) as mock_http_client:
+        provider = OpenAICompatProvider(
+            api_key="test-key",
+            api_base="https://api.groq.com/openai/v1",
+            default_model="test",
+        )
+        await provider._ensure_client()
+
+    assert mock_http_client.call_args.kwargs["timeout"] == _OPENAI_COMPAT_REQUEST_TIMEOUT_S
 
 
 async def test_openai_compat_provider_timeout_can_be_overridden_by_env(monkeypatch) -> None:

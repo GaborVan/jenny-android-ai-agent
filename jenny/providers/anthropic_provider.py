@@ -17,6 +17,7 @@ from jenny.providers.base import (
     LLMProvider,
     LLMResponse,
     ToolCallRequest,
+    resolve_first_output_timeout_s,
     resolve_stream_idle_timeout_s,
     tool_arguments_object_for_replay,
 )
@@ -352,6 +353,10 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
         )
         kwargs["stream"] = True
         idle_timeout_s = resolve_stream_idle_timeout_s()
+        first_output_timeout_s = max(resolve_first_output_timeout_s(), idle_timeout_s)
+        # Prima del primo blocco di contenuto vale il budget lungo: il modello
+        # sta ancora ragionando e il silenzio è previsto.
+        saw_output = False
 
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
@@ -365,11 +370,18 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
                 sse_iter = self._iter_anthropic_sse(response).__aiter__()
                 while True:
                     try:
-                        event = await asyncio.wait_for(sse_iter.__anext__(), timeout=idle_timeout_s)
+                        event = await asyncio.wait_for(
+                            sse_iter.__anext__(),
+                            timeout=idle_timeout_s if saw_output else first_output_timeout_s,
+                        )
                     except StopAsyncIteration:
                         break
 
                     event_type = event.get("_event_type") or event.get("type")
+                    if not saw_output and event_type in (
+                        "content_block_start", "content_block_delta",
+                    ):
+                        saw_output = True
                     if event_type == "content_block_start":
                         block = event.get("content_block") or {}
                         index = event.get("index", 0)
@@ -428,10 +440,14 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
                             }
 
         except asyncio.TimeoutError:
+            waited_s = idle_timeout_s if saw_output else first_output_timeout_s
             return LLMResponse(
                 content=(
                     f"Error calling LLM: stream stalled for more than "
-                    f"{idle_timeout_s:g} seconds"
+                    f"{waited_s:g} seconds"
+                    if saw_output
+                    else f"Error calling LLM: no output from the model within "
+                    f"{waited_s:g} seconds"
                 ),
                 finish_reason="error",
                 error_kind="timeout",

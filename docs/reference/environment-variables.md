@@ -29,8 +29,9 @@ These exist outside `runtime_env.py`'s centralized layer, so the "single layer" 
 
 | Variable | Default | Effect |
 |---|---|---|
-| `JENNY_STREAM_IDLE_TIMEOUT_S` | `90` (seconds), clamped to a maximum of `3600` | Idle timeout between chunks while streaming a response from either the Anthropic or the OpenAI-compatible provider. A non-positive or unparseable value is ignored (default kept); a value above the maximum is silently clamped down to it. |
-| `JENNY_OPENAI_COMPAT_TIMEOUT_S` | `120` (seconds) | Request timeout used only for OpenAI-compatible provider calls (not Anthropic). |
+| `JENNY_STREAM_IDLE_TIMEOUT_S` | `90` (seconds), clamped to a maximum of `3600` | Idle timeout between chunks while streaming a response, once the model has produced its first output — before that, the variable below applies. Used by both the Anthropic and the OpenAI-compatible provider. A non-positive or unparseable value is ignored (default kept); a value above the maximum is silently clamped down to it. |
+| `JENNY_STREAM_FIRST_OUTPUT_TIMEOUT_S` | `600` (seconds) for a loopback endpoint, `300` otherwise; clamped to a maximum of `3600` | How long to wait for the model's *first* content, thinking or tool-call delta. Kept separate from the idle timeout because a server is legitimately silent while it reads the prompt — see [Local models](./local-models.md#the-first-token-takes-as-long-as-the-prompt). Never lower than `JENNY_STREAM_IDLE_TIMEOUT_S`. |
+| `JENNY_OPENAI_COMPAT_TIMEOUT_S` | `600` (seconds) for a loopback endpoint, `120` otherwise | Request timeout used only for OpenAI-compatible provider calls (not Anthropic). Set explicitly, it overrides both defaults. |
 | `JENNY_WORKSPACE_SANDBOX_ENFORCED`, `JENNY_SANDBOX_ENFORCED` (legacy alias, checked if the first is unset), `JENNY_WORKSPACE_SANDBOX_PROVIDER` | unset | Markers used to detect that the process is running inside an external dev/CI sandbox and, optionally, which one. Not relevant to the Android runtime and not something an app user would ever set. |
 
 ## Release signing variables

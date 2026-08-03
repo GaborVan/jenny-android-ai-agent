@@ -18,8 +18,11 @@ la fixture `loop_factory` disponibile solo in tests/agent/) è caratterizzato in
 from __future__ import annotations
 
 from jenny.providers.base import (
+    DEFAULT_FIRST_OUTPUT_TIMEOUT_S,
+    DEFAULT_LOCAL_FIRST_OUTPUT_TIMEOUT_S,
     DEFAULT_STREAM_IDLE_TIMEOUT_S,
     MAX_STREAM_IDLE_TIMEOUT_S,
+    resolve_first_output_timeout_s,
     resolve_stream_idle_timeout_s,
 )
 
@@ -34,6 +37,28 @@ def test_stream_idle_timeout_defaults_and_clamps() -> None:
     assert resolve_stream_idle_timeout_s(env_value="") == DEFAULT_STREAM_IDLE_TIMEOUT_S
     assert resolve_stream_idle_timeout_s(env_value="-1") == DEFAULT_STREAM_IDLE_TIMEOUT_S
     assert resolve_stream_idle_timeout_s(env_value="999999") == MAX_STREAM_IDLE_TIMEOUT_S
+
+
+def test_first_output_timeout_reads_env(monkeypatch) -> None:
+    monkeypatch.setenv("JENNY_STREAM_FIRST_OUTPUT_TIMEOUT_S", "42")
+    assert resolve_first_output_timeout_s() == 42.0
+    assert resolve_first_output_timeout_s(local=True) == 42.0
+
+
+def test_first_output_timeout_defaults_and_clamps() -> None:
+    assert resolve_first_output_timeout_s(env_value=None) == DEFAULT_FIRST_OUTPUT_TIMEOUT_S
+    assert (
+        resolve_first_output_timeout_s(local=True, env_value=None)
+        == DEFAULT_LOCAL_FIRST_OUTPUT_TIMEOUT_S
+    )
+    assert resolve_first_output_timeout_s(env_value="-1") == DEFAULT_FIRST_OUTPUT_TIMEOUT_S
+    assert resolve_first_output_timeout_s(env_value="999999") == MAX_STREAM_IDLE_TIMEOUT_S
+
+
+def test_first_output_budget_is_longer_than_the_inter_chunk_idle() -> None:
+    """Il silenzio prima del primo token non va misurato come uno stallo."""
+    assert DEFAULT_FIRST_OUTPUT_TIMEOUT_S > DEFAULT_STREAM_IDLE_TIMEOUT_S
+    assert DEFAULT_LOCAL_FIRST_OUTPUT_TIMEOUT_S > DEFAULT_FIRST_OUTPUT_TIMEOUT_S
 
 
 def test_config_schema_resolves_tool_subconfigs() -> None:

@@ -55,6 +55,22 @@ If you write your own tool ([Write a tool](../contribute/write-a-tool.md)), the 
 
 One thing that has nothing to do with grammars but shows up as the same HTTP 400: Jenny's tool schemas alone are around 5,800 tokens, before the system prompt. Start `llama-server` with a context well above that (`-c 16384` or more) or every request fails with `exceeds the available context size` — which reads like a Jenny bug and is not one.
 
+## The first token takes as long as the prompt
+
+A hosted provider answers in a second or two. A model server on the phone has to read the whole prompt first, and while it does the connection stays completely silent — no tokens, no keep-alives. With Jenny's tool set that prompt is ~5,850 tokens: on a Titan 2 (MediaTek mt6878) running Qwen2.5-3B Q4_K_M that measured **217 s at ~27 tok/s**, thread count and batch size making no difference — it's memory-bound, not core-bound. Once the first token lands, generation is steady, and a second turn on the same prefix is near-instant because the server keeps the KV cache.
+
+So the wait *before* the first token and a gap *inside* a running stream are different things, and Jenny times them differently:
+
+| | Loopback endpoint | Everything else |
+|---|---|---|
+| Wait for the model's first output | 600 s | 300 s, but capped by the request timeout below |
+| Gap after the first output (stall) | 90 s | 90 s |
+| HTTP request/read timeout | 600 s | 120 s |
+
+Two consequences worth knowing. A self-hosted server that is *not* on loopback — a LAN or Tailscale box behind HTTPS — is treated like any other remote endpoint, so its effective first-token budget is the 120 s request timeout; if it needs longer, that has to be raised. And the knobs (`JENNY_STREAM_FIRST_OUTPUT_TIMEOUT_S`, `JENNY_STREAM_IDLE_TIMEOUT_S`, `JENNY_OPENAI_COMPAT_TIMEOUT_S`) are read from the environment, which the Android runtime has no way to set — on a phone the defaults in that table are what you get.
+
+Before this split, every path shared the 90 s stall timeout, so a local 3B never survived its own first turn: the grammar compiled, the server started working, and Jenny gave up with `stream stalled for more than 90 seconds` at 0 tokens received.
+
 ## Configuring it
 
 Same provider entry shape as any other `openai_compat` provider — via Settings → Model → API keys, or directly in `config.json`:

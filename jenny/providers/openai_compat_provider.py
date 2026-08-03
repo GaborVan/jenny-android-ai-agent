@@ -18,6 +18,8 @@ from loguru import logger
 from jenny.providers.base import (
     LLMProvider,
     LLMResponse,
+    StreamTimeout,
+    resolve_first_output_timeout_s,
     resolve_stream_idle_timeout_s,
     tool_arguments_json_for_replay,
 )
@@ -93,7 +95,7 @@ class OpenAICompatProvider(ResponseParsingMixin, LLMProvider):
 
     def _build_http_client(self) -> None:
         """Create a plain httpx client for the SDK-free path."""
-        timeout_s = _openai_compat_timeout_s()
+        timeout_s = _openai_compat_timeout_s(local=self._is_local)
         if self._is_local:
             _local_limits = httpx.Limits(keepalive_expiry=0)
             self._http_client = httpx.AsyncClient(
@@ -142,7 +144,7 @@ class OpenAICompatProvider(ResponseParsingMixin, LLMProvider):
             raise RuntimeError("HTTP client not initialized")
         url = self._api_url(path)
         headers = self._auth_headers()
-        timeout = _openai_compat_timeout_s()
+        timeout = _openai_compat_timeout_s(local=self._is_local)
         request = self._http_client.build_request(
             "POST", url, headers=headers, json=body, timeout=timeout,
             params=self._extra_query or None,
@@ -683,14 +685,22 @@ class OpenAICompatProvider(ResponseParsingMixin, LLMProvider):
         body = self._merge_extra_body(kwargs)
 
         idle_timeout_s = resolve_stream_idle_timeout_s()
+        first_output_timeout_s = max(
+            resolve_first_output_timeout_s(local=self._is_local), idle_timeout_s
+        )
         response = await self._http_request("/chat/completions", body, stream=True)
         chunks: list[Any] = []
+        # Finché il modello non ha emesso nulla vale il budget lungo: il
+        # silenzio è prompt processing, non uno stallo. Dopo il primo output
+        # torna in vigore l'idle inter-chunk, più stretto.
+        saw_output = False
         sse_iter = self._iter_chat_completion_sse(response).__aiter__()
         try:
             while True:
                 try:
                     chunk = await asyncio.wait_for(
-                        sse_iter.__anext__(), timeout=idle_timeout_s
+                        sse_iter.__anext__(),
+                        timeout=idle_timeout_s if saw_output else first_output_timeout_s,
                     )
                 except StopAsyncIteration:
                     break
@@ -702,6 +712,14 @@ class OpenAICompatProvider(ResponseParsingMixin, LLMProvider):
                     continue
                 delta = choices[0].get("delta") or {}
                 raw_delta_content = delta.get("content")
+                if not saw_output and (
+                    raw_delta_content
+                    or delta.get("reasoning_content")
+                    or delta.get("reasoning")
+                    or delta.get("tool_calls")
+                    or delta.get("function_call")
+                ):
+                    saw_output = True
                 if on_content_delta:
                     text = self._extract_text_content(raw_delta_content)
                     if text:
@@ -730,8 +748,13 @@ class OpenAICompatProvider(ResponseParsingMixin, LLMProvider):
                             "name": str(function_call.get("name") or ""),
                             "arguments_delta": str(function_call.get("arguments") or ""),
                         })
-        except asyncio.TimeoutError:
-            raise
+        except asyncio.TimeoutError as exc:
+            # Quale dei due budget è scaduto lo sa solo questo frame: il
+            # chiamante formatta il messaggio, quindi glielo passiamo.
+            raise StreamTimeout(
+                idle_timeout_s if saw_output else first_output_timeout_s,
+                saw_output=saw_output,
+            ) from exc
         except Exception as exc:
             # Preserve whatever text was already streamed to the user before
             # this exception aborted the stream, by attaching it to the raised
@@ -882,11 +905,16 @@ class OpenAICompatProvider(ResponseParsingMixin, LLMProvider):
                 on_thinking_delta=on_thinking_delta,
                 on_tool_call_delta=on_tool_call_delta,
             )
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as e:
+            waited_s = e.waited_s if isinstance(e, StreamTimeout) else idle_timeout_s
+            saw_output = e.saw_output if isinstance(e, StreamTimeout) else True
             return LLMResponse(
                 content=(
                     f"Error calling LLM: stream stalled for more than "
-                    f"{idle_timeout_s:g} seconds"
+                    f"{waited_s:g} seconds"
+                    if saw_output
+                    else f"Error calling LLM: no output from the model within "
+                    f"{waited_s:g} seconds"
                 ),
                 finish_reason="error",
                 error_kind="timeout",
