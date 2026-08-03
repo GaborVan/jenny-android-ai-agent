@@ -71,6 +71,7 @@ export class SettingsController {
     // Sei sezioni tematiche, una per asse mentale: preferenze d'interfaccia,
     // motore LLM, capacità dell'agente, canali, dati, diagnostica.
     this.contentEl.innerHTML = [
+      this._renderConfigRecovery(d),
       this._section('personalization', 'ti-palette', i18n.t('settings.personalization'), this._renderPersonalization(d)),
       this._section('models', 'ti-cpu', i18n.t('settings.model'), this._renderModelSettings(d)),
       this._section('tools', 'ti-tool', i18n.t('settings.tools'), this._renderTools(d)),
@@ -80,6 +81,29 @@ export class SettingsController {
     ].join('');
 
     this._wireSections();
+  }
+
+  /* Avviso di config recuperata all'avvio. Silenzioso nel caso normale: se
+     compare, l'utente sta usando impostazioni che non sono quelle che aveva
+     scelto — e con restored_from = "defaults" deve rimettere anche la chiave
+     API. Farglielo scoprire da solo sarebbe la sorpresa peggiore. */
+  _renderConfigRecovery(d) {
+    const info = d.config_recovery;
+    if (!info) return '';
+    const fromDefaults = info.restored_from === 'defaults';
+    const text = fromDefaults
+      ? i18n.t('settings.configRecoveredDefaults')
+      : i18n.t('settings.configRecoveredBackup');
+    const where = info.broken_file
+      ? `<div class="settings-notice-path">${escapeHtml(info.broken_file)}</div>`
+      : '';
+    return `<div class="settings-notice${fromDefaults ? ' settings-notice-strong' : ''}">
+      <i class="ti ti-alert-triangle"></i>
+      <div>
+        <div>${text}</div>
+        ${where}
+      </div>
+    </div>`;
   }
 
   _section(id, icon, title, body) {
@@ -721,13 +745,16 @@ export class SettingsController {
     this._showAddProviderDialog(p);
   }
 
-  _deleteProvider(name) {
+  async _deleteProvider(name) {
     const providers = this.data?.providers || [];
     if (providers.length <= 1) {
       showToast(i18n.t('settings.cannotDeleteLast'), 'error');
       return;
     }
-    if (!confirm(i18n.t('settings.deleteProviderConfirm', { name }))) return;
+    // `confirmDialog`, non la confirm() nativa: nella WebView dell'app quella
+    // non mostra niente e ritorna false, quindi il tasto elimina non faceva
+    // assolutamente nulla — nessun dialogo, nessuna richiesta, nessun errore.
+    if (!await confirmDialog(i18n.t('settings.deleteProviderConfirm', { name }))) return;
     api.deleteProvider({ name })
       .then(() => {
         showToast(i18n.t('settings.providerDeleted'));

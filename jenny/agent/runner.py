@@ -951,11 +951,26 @@ class AgentRunner(RequestExecutionMixin, ToolExecutionMixin):
 
             # Try to extract the model's real limit from the error message
             detected_limit = self._extract_context_limit(response)
-            if detected_limit and detected_limit < spec.context_window_tokens:
+            current_window = spec.context_window_tokens
+            if detected_limit and (current_window is None or detected_limit < current_window):
                 new_window = detected_limit
-            else:
+            elif current_window is not None:
                 # Shrink by 50% as a heuristic
-                new_window = max(2048, int(spec.context_window_tokens * 0.5))
+                new_window = max(2048, int(current_window * 0.5))
+            else:
+                # Finestra non dichiarata e nessun limite nell'errore: non c'è
+                # niente da dimezzare. Prima questo ramo faceva aritmetica su
+                # None e sollevava TypeError *dentro* il recovery, trasformando
+                # un overflow recuperabile in un errore di tipo. Inventare una
+                # finestra sarebbe peggio: si arrende e lascia emergere l'errore
+                # vero del provider, che almeno dice cos'è successo.
+                logger.warning(
+                    "Context length overflow on turn {} for {} with no declared "
+                    "context window and no limit in the error; cannot shrink",
+                    iteration,
+                    spec.session_key or "default",
+                )
+                return "proceed"
 
             logger.warning(
                 "Context length overflow on turn {} for {} ({}/{}): "
@@ -1271,7 +1286,11 @@ class AgentRunner(RequestExecutionMixin, ToolExecutionMixin):
         for tool_call in tool_calls:
             get_tool = getattr(spec.tools, "get", None)
             tool = get_tool(tool_call.name) if callable(get_tool) else None
-            can_batch = bool(tool and tool.concurrency_safe)
+            # getattr con default, coerente col lookup difensivo della riga sopra:
+            # ``spec.tools.get`` non ha un tipo noto, quindi il tool che restituisce
+            # non è tipabile — e un tool senza l'attributo non deve far esplodere
+            # il batching, deve solo non essere batchabile.
+            can_batch = bool(tool is not None and getattr(tool, "concurrency_safe", False))
             if can_batch:
                 current.append(tool_call)
                 continue

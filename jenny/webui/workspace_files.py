@@ -8,13 +8,27 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
+from jenny.utils.path import atomic_write
+
 # Oltre ai dotfile, questi sono stato/implementazione del runtime (non
 # contenuto dell'utente): config.json contiene un secret e si edita dalle
 # Impostazioni, agent/ e ui/ sono bundle rigenerati ad ogni avvio, cron/ e
 # sessions/ sono storage interno dei rispettivi motori.
+#
+# ``config.json*`` con la stella, non il nome esatto: accanto al file vivo
+# possono comparire il backup ``config.json.bak`` e i temporanei di
+# ``atomic_write``, che contengono le stesse chiavi API e lo stesso secret.
+# Nascondere solo il nome esatto li avrebbe esposti nel browser file.
+#
+# ``*.tmp``: il temporaneo di ``atomic_write`` è invisibile solo per il tempo
+# di una scrittura, ma un processo ucciso in quel momento lo lascia lì per
+# sempre. È un residuo del runtime, non un file dell'utente, e mostrarlo
+# accanto all'originale invita solo ad aprire quello sbagliato.
 _DEFAULT_INTERNAL_PATTERNS = [
     ".*",
-    "config.json",
+    "*.tmp",
+    "config.json*",
+    "config.corrupt-*.json",
     "agent", "agent/**",
     "cron", "cron/**",
     "sessions", "sessions/**",
@@ -125,8 +139,10 @@ def read_file(path: Path, max_size: int = 1_000_000) -> str:
 
 def write_file(path: Path, content: str) -> None:
     """Write content to file."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    # Salvataggio dall'editor della WebUI: riscrive il file intero, quindi un
+    # processo ucciso a metà lo troncherebbe. Il contenuto vecchio resta valido
+    # fino al rename finale.
+    atomic_write(path, content)
 
 
 def create_directory(path: Path) -> None:

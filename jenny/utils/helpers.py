@@ -5,7 +5,6 @@ import json
 import re
 import shutil
 import time
-import uuid
 from contextlib import suppress
 from datetime import datetime, tzinfo
 from datetime import timezone as dt_timezone
@@ -14,6 +13,8 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from loguru import logger
+
+from jenny.utils.path import atomic_write
 
 
 def strip_think(text: str) -> str:
@@ -458,16 +459,6 @@ def _cleanup_tool_result_buckets(root: Path, current_bucket: Path) -> None:
         shutil.rmtree(path, ignore_errors=True)
 
 
-def _write_text_atomic(path: Path, content: str) -> None:
-    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        tmp.write_text(content, encoding="utf-8")
-        tmp.replace(path)
-    finally:
-        if tmp.exists():
-            tmp.unlink(missing_ok=True)
-
-
 def maybe_persist_tool_result(
     workspace: Path | None,
     session_key: str | None,
@@ -504,9 +495,9 @@ def maybe_persist_tool_result(
     path = bucket / f"{safe_filename(tool_call_id)}.{suffix}"
     if not path.exists():
         if suffix == "json" and isinstance(content, list):
-            _write_text_atomic(path, json.dumps(content, ensure_ascii=False, indent=2))
+            atomic_write(path, json.dumps(content, ensure_ascii=False, indent=2))
         else:
-            _write_text_atomic(path, text_payload)
+            atomic_write(path, text_payload)
 
     preview = text_payload[:_TOOL_RESULT_PREVIEW_CHARS]
     return _render_tool_result_reference(

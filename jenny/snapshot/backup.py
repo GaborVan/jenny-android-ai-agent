@@ -79,14 +79,15 @@ class BackupManager:
     async def set_retention_max_age(self, max_age_days: int) -> dict[str, Any]:
         """Persiste il nuovo orizzonte di retention e lo applica subito."""
 
-        def _persist() -> None:
-            from jenny.config.loader import load_config, save_config
+        # Passa dal funnel come ogni altra scrittura di config: prima leggeva e
+        # riscriveva in un thread separato, dove il lock asincrono non arriva —
+        # e una modifica fatta altrove nel frattempo veniva cancellata.
+        from jenny.config import store
 
-            config = load_config()
+        def _apply(config: Any) -> None:
             config.snapshots.retention_max_age_days = max_age_days
-            save_config(config)
 
-        await asyncio.to_thread(_persist)
+        await store.mutate(_apply)
         # La config viva del service è lo stesso oggetto costruito al boot:
         # set_retention_max_age la aggiorna e applica retention+gc sotto lock.
         removed = await self._service.set_retention_max_age(max_age_days)

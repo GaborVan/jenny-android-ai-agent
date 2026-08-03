@@ -31,9 +31,31 @@ Anything written into memory, session history, or prompt inputs can be replayed 
 
 Built-in skills live in `jenny/skills/` (markdown + YAML frontmatter format). Agent capabilities that are "know-how" rather than code should be added as skills, not hardcoded into the agent loop. External skills can be published to and installed from ClawHub.
 
-## Atomic Session Writes
+## Atomic writes: one helper, `utils/path.py::atomic_write`
 
-`agent/memory.py` writes `history.jsonl` atomically (temp file + fsync + rename + directory fsync). This guarantees durability across crashes. Do not replace this with a plain `open(..., "w")` write.
+Any write that replaces a **whole file of state Jenny reads back herself** — cursors,
+skills, wiki entries, manifests, snapshot blobs, config — goes through
+`jenny/utils/path.py::atomic_write` (unique temp file + fsync + rename + tolerant directory
+fsync). Android kills processes freely, so a plain `write_text`/`open(..., "w")` leaves a
+*visible* truncated file: a skill whose frontmatter no longer parses, a cursor that reads
+back as 0, an unreadable manifest.
+
+Two things that keep going wrong here, both already fixed once:
+
+- **Do not hand-roll temp-file + `os.replace`.** Five places had done it, each subtly
+  different and every one of them missing the `fsync` — atomic against a killed process,
+  but not against power loss. If you need different behaviour, add a keyword argument to
+  the helper; do not write a sixth copy.
+- **Orphan temps are hidden, not absent.** A process killed mid-write leaves
+  `name.ext.<hex>.tmp` behind for good; `*.tmp` is in `_DEFAULT_INTERNAL_PATTERNS`
+  (`webui/workspace_files.py`) so the file browser does not offer it next to the real file.
+
+The exception is deliberate: the agent's own file tools (`tools/filesystem.py`,
+`apply_patch.py`, `python_exec_builtins.py`) write the *user's* files, where the write is
+the requested effect and replacing the inode would change semantics (`apply_patch` keeps
+`newline=""`, permissions and hardlinks must survive). Appends (`history.jsonl`,
+transcripts, app collections, the cron action log) are a different failure mode — a partial
+trailing line, which every reader already skips — and are not atomic-write candidates.
 
 ## Android WebView search/fetch
 
@@ -59,3 +81,25 @@ manifests** in `jenny/utils/android_assets.py` (`_TEMPLATES_MANIFEST`, `_SKILLS_
 and for UI assets the SPA fallback in `_serve_static` masks the failure by returning
 `index.html` with a 200 for the missing path. When adding bundled files, add them to the
 matching manifest and verify by checking the extracted file's *content*, not the HTTP status.
+
+## Native JS dialogs do not work in the app WebView
+
+`confirm()`, `prompt()` and `alert()` **never appear** in Jenny's WebView and resolve as
+if the user had dismissed them — `confirm()` returns `false`, `prompt()` returns `null`.
+The `WebChromeClient` in `MainActivity.loadWebView` only implements `onShowFileChooser`,
+and nothing handles the JS-dialog callbacks.
+
+The failure mode is the worst kind: the guarded action simply never runs. No dialog, no
+request, no error, no log. Three features shipped broken this way — deleting a provider
+from Settings, renaming a workspace entry, creating a file or folder — plus four error
+messages that went nowhere. Note it works fine in a desktop browser pointed at the
+gateway, so it survives any testing that is not done on the device.
+
+Use the helpers in `jenny/templates/ui/assets/shared/dialog.js` — `confirmDialog()` and
+`promptDialog()`, both `async`, with their markup already in `index.html` — and
+`showToast(msg, 'error')` for failures. Grep before adding a new one:
+
+```bash
+grep -rn --include="*.js" -E "(^|[^.[:alnum:]_])(confirm|alert|prompt)\(" \
+  jenny/templates/ui/assets/ | grep -vE "confirmDialog|promptDialog"
+```

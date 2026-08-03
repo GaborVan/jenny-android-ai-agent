@@ -3,6 +3,8 @@ import json
 import secrets
 from pathlib import Path
 
+from jenny.utils.path import atomic_write
+
 _TOKEN_ISSUE_SECRET_KEYS = ("token_issue_secret", "tokenIssueSecret")
 
 
@@ -16,6 +18,12 @@ def ensure_minimal_config(workspace_path: Path) -> None:
     secret is generated once and persisted into ``config.json`` (workspace
     storage, private to this app's Android UID), so it survives restarts and
     is never sent back out over the network by this function.
+
+    Resta fuori dal funnel di :mod:`jenny.config.store`: gira **prima**
+    dell'event loop del gateway, quando nessun altro scrittore esiste, quindi
+    non serve il lock asincrono. Le scritture sono comunque atomiche, e
+    lavorano sul JSON grezzo — così non toccano le chiavi che lo schema non
+    conosce.
     """
     config_path = workspace_path / "config.json"
 
@@ -28,11 +36,11 @@ def ensure_minimal_config(workspace_path: Path) -> None:
                 "token_issue_secret": secrets.token_urlsafe(32),
             },
         }
-        config_path.write_text(json.dumps(minimal, indent=2), encoding="utf-8")
-        _restrict_permissions(config_path)
+        atomic_write(config_path, json.dumps(minimal, indent=2))
+        restrict_config_permissions(config_path)
         return
 
-    _restrict_permissions(config_path)
+    restrict_config_permissions(config_path)
     _backfill_token_issue_secret(config_path)
 
 
@@ -65,15 +73,19 @@ def _backfill_token_issue_secret(config_path: Path) -> None:
     websocket["token_issue_secret"] = secrets.token_urlsafe(32)
     data["websocket"] = websocket
     try:
-        config_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        atomic_write(config_path, json.dumps(data, indent=2))
     except OSError:
         return
-    _restrict_permissions(config_path)
+    restrict_config_permissions(config_path)
 
 
-def _restrict_permissions(config_path: Path) -> None:
+def restrict_config_permissions(config_path: Path) -> None:
     """Best-effort: keep config.json (holds the bootstrap secret) unreadable
     by other local users. A no-op quirk on some filesystems (e.g. FAT); the
-    real isolation boundary on Android is the per-app UID sandbox."""
+    real isolation boundary on Android is the per-app UID sandbox.
+
+    Va richiamata dopo *ogni* scrittura del file: ``atomic_write`` sostituisce
+    l'inode, quindi i permessi del file precedente non si conservano da soli.
+    Vale anche per il backup, che porta gli stessi segreti."""
     with contextlib.suppress(OSError):
         config_path.chmod(0o600)

@@ -1,13 +1,24 @@
-"""Configuration loading utilities."""
+"""Configuration loading utilities.
+
+Questo modulo possiede la *fedeltà del file*: come `config.json` viene letto,
+riscritto senza perdere pezzi, e recuperato quando è illeggibile. La
+serializzazione delle modifiche concorrenti sta invece in
+:mod:`jenny.config.store`, che orchestra queste primitive sotto un lock.
+"""
 
 import json
 import os
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
+from jenny.config.bootstrap import restrict_config_permissions
 from jenny.config.schema import Config
 from jenny.pydantic_compat import BaseModel, ValidationError
+from jenny.utils.path import atomic_write
 
 
 def get_config_path() -> Path:
@@ -35,22 +46,114 @@ def load_config(config_path: Path | None = None) -> Config:
     Returns:
         Loaded configuration object.
     """
-    path = config_path or get_config_path()
+    return load_config_with_raw(config_path)[0]
 
-    config = Config()
-    if path.exists():
-        try:
-            with open(path, encoding="utf-8") as f:
-                data = json.load(f)
-            config = Config.model_validate(data)
-        except (json.JSONDecodeError, ValueError, ValidationError) as e:
-            raise ValueError(f"Failed to load config from {path}: {e}") from e
-    else:
-        pass  # Config file doesn't exist; defaults from schema will be used
+
+def load_config_with_raw(
+    config_path: Path | None = None,
+) -> tuple[Config, dict[str, Any]]:
+    """Come :func:`load_config`, ma restituisce anche il JSON grezzo letto.
+
+    Il grezzo serve a :func:`save_config` per non cancellare le chiavi che lo
+    schema non conosce (vedi ``preserve_unknown_from``). Chi deve solo leggere
+    usa ``load_config``.
+    """
+    path = config_path or get_config_path()
+    raw, config = _load_with_recovery(path)
+
+    unknown = _unknown_key_paths(raw, config.model_dump(mode="json", by_alias=True))
+    if unknown:
+        # Non è un errore: possono essere impostazioni di una versione più
+        # nuova. Ma se è un refuso, questo è l'unico posto dove l'utente può
+        # accorgersene — prima sparivano senza dire niente.
+        logger.warning(
+            "Config keys not recognised by this version (kept in the file, ignored at runtime): {}",
+            ", ".join(unknown),
+        )
 
     _apply_ssrf_whitelist(config)
     _resolve_default_timezone(config)
-    return config
+    return config, raw
+
+
+def _load_with_recovery(path: Path) -> tuple[dict[str, Any], Config]:
+    """Legge e valida *path*, ripiegando su backup o default se è illeggibile.
+
+    Su Android un `config.json` illeggibile bloccava l'avvio del gateway, e
+    l'utente non ha modo di ripararlo: preferiamo partire sempre, dicendolo.
+    """
+    if not path.exists():
+        return {}, Config()
+
+    try:
+        raw = _read_raw(path)
+        return raw, Config.model_validate(raw)
+    except (json.JSONDecodeError, ValueError, ValidationError) as primary_error:
+        logger.error("Config at {} is unusable: {}", path, primary_error)
+
+    backup = _backup_path(path)
+    if backup.exists():
+        try:
+            raw = _read_raw(backup)
+            config = Config.model_validate(raw)
+        except (json.JSONDecodeError, ValueError, ValidationError) as backup_error:
+            logger.error("Config backup at {} is unusable too: {}", backup, backup_error)
+        else:
+            quarantined = _quarantine(path)
+            # Promuoviamo il backup a file vivo: senza questo passo ogni avvio
+            # rifarebbe il recupero, e la prima scrittura riuscita partirebbe
+            # da un grezzo rotto.
+            atomic_write(path, json.dumps(raw, indent=2, ensure_ascii=False))
+            restrict_config_permissions(path)
+            _record_recovery("backup", quarantined)
+            logger.warning("Config recovered from {}; broken file kept at {}", backup, quarantined)
+            return raw, config
+
+    quarantined = _quarantine(path)
+    _record_recovery("defaults", quarantined)
+    logger.warning(
+        "Config could not be recovered; starting on defaults. Broken file kept at {}",
+        quarantined,
+    )
+    return {}, Config()
+
+
+def _read_raw(path: Path) -> dict[str, Any]:
+    """Legge il JSON grezzo, pretendendo un oggetto in radice."""
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError(f"config root must be a JSON object, got {type(data).__name__}")
+    return data
+
+
+def _backup_path(path: Path) -> Path:
+    return path.with_name(path.name + ".bak")
+
+
+def _quarantine(path: Path) -> Path:
+    """Sposta di lato il file rotto, senza distruggerlo: serve per capire cosa è successo."""
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    target = path.with_name(f"{path.stem}.corrupt-{stamp}{path.suffix}")
+    try:
+        os.replace(path, target)
+    except OSError as e:
+        logger.error("Could not set aside the broken config at {}: {}", path, e)
+        return path
+    return target
+
+
+def _record_recovery(kind: str, quarantined: Path) -> None:
+    """Segna sul RuntimeContext che la config è stata recuperata.
+
+    La WebUI legge questo flag e lo mostra: ripartire con impostazioni diverse
+    da quelle scelte dall'utente senza dirglielo sarebbe la sorpresa peggiore.
+    """
+    from jenny.runtime.context import get_runtime_context
+
+    ctx = get_runtime_context()
+    ctx.config_recovered_from = kind
+    ctx.config_quarantine_path = quarantined
 
 
 def _resolve_default_timezone(config: Config) -> None:
@@ -74,22 +177,99 @@ def _apply_ssrf_whitelist(config: Config) -> None:
     configure_ssrf_whitelist(config.security.ssrf_whitelist)
 
 
-def save_config(config: Config, config_path: Path | None = None) -> None:
+def save_config(
+    config: Config,
+    config_path: Path | None = None,
+    *,
+    preserve_unknown_from: dict[str, Any] | None = None,
+) -> None:
     """
     Save configuration to file.
+
+    La scrittura è atomica (temporaneo + ``os.replace`` + fsync via
+    :func:`jenny.utils.path.atomic_write`): un processo ucciso a metà lasciava
+    un JSON troncato, e con esso un gateway che non parte più.
 
     Args:
         config: Configuration to save.
         config_path: Optional path to save to. Uses default if not provided.
+        preserve_unknown_from: JSON grezzo da cui riportare le chiavi che lo
+            schema non conosce, così un salvataggio non le cancella. Lo passa
+            :mod:`jenny.config.store`; chi riscrive tutto di proposito (il
+            ripristino da backup) lo lascia a None.
     """
     path = config_path or get_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
 
     data = config.model_dump(mode="json", by_alias=True)
     _unresolve_default_timezone(data)
+    if preserve_unknown_from:
+        data = _merge_unknown(preserve_unknown_from, data)
 
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    _rotate_backup(path)
+    atomic_write(path, json.dumps(data, indent=2, ensure_ascii=False))
+    restrict_config_permissions(path)
+
+
+def _rotate_backup(path: Path) -> None:
+    """Conserva l'ultimo contenuto *valido* come ``<nome>.bak``.
+
+    Solo se il file attuale si legge come JSON: altrimenti un salvataggio
+    partito da una config già rotta distruggerebbe l'ultimo backup buono.
+    """
+    if not path.exists():
+        return
+    try:
+        content = path.read_text(encoding="utf-8")
+        json.loads(content)
+    except (OSError, json.JSONDecodeError):
+        return
+    try:
+        backup = _backup_path(path)
+        atomic_write(backup, content, fsync_dir=False)
+        restrict_config_permissions(backup)
+    except OSError as e:
+        # Il backup è una rete di sicurezza, non un requisito: se non si può
+        # scrivere, il salvataggio vero deve comunque procedere.
+        logger.warning("Could not refresh the config backup: {}", e)
+
+
+def _merge_unknown(raw: Any, dumped: Any) -> Any:
+    """Restituisce *dumped* con le chiavi presenti solo in *raw* riportate dentro.
+
+    Ricorsivo sui dizionari. Le liste vengono sostituite in blocco: allineare
+    gli elementi richiederebbe una nozione di identità (quale provider è
+    quale) che qui non abbiamo, e indovinarla è peggio che perdere una chiave
+    ignota dentro un elemento di array — caso segnalato comunque dal warning
+    in ``load_config_with_raw``.
+    """
+    if not isinstance(raw, dict) or not isinstance(dumped, dict):
+        return dumped
+    merged = dict(dumped)
+    for key, raw_value in raw.items():
+        if key not in merged:
+            merged[key] = raw_value
+        else:
+            merged[key] = _merge_unknown(raw_value, merged[key])
+    return merged
+
+
+def _unknown_key_paths(raw: Any, dumped: Any, prefix: str = "") -> list[str]:
+    """Elenca i percorsi delle chiavi presenti in *raw* ma non nel dump del modello."""
+    if not isinstance(raw, dict) or not isinstance(dumped, dict):
+        return []
+    unknown: list[str] = []
+    for key, raw_value in raw.items():
+        where = f"{prefix}{key}"
+        if key not in dumped:
+            unknown.append(where)
+            continue
+        if isinstance(raw_value, dict):
+            unknown.extend(_unknown_key_paths(raw_value, dumped[key], f"{where}."))
+        elif isinstance(raw_value, list) and isinstance(dumped.get(key), list):
+            for i, (raw_item, dumped_item) in enumerate(zip(raw_value, dumped[key])):
+                unknown.extend(_unknown_key_paths(raw_item, dumped_item, f"{where}[{i}]."))
+    return unknown
 
 
 def _unresolve_default_timezone(data: dict[str, Any]) -> None:

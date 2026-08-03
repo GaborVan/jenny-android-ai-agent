@@ -44,7 +44,7 @@ Messages flow through an async `MessageBus` (`jenny/bus/queue.py`) that decouple
 - **Tools** (`jenny/agent/tools/`): Agent capabilities exposed to the LLM: filesystem (read/write/edit/list), `python_exec` for code execution, Android web search/fetch (`android_web.py`), cron, subagent spawning, long-running tasks / sustained goals (`long_task.py`), and self-modification. Tools are explicitly registered: `loader.py` imports a fixed module list (`_HARDCODED_TOOL_MODULES`) and each module declares `TOOLS = [...]`. A name collision — like a module without `TOOLS` — raises `ToolLoadError` and aborts startup; a failing `enabled()`/`create()` only disables that one tool, logged at ERROR and recorded in `ToolLoader.failures`.
 - **Memory** (`jenny/agent/memory.py`): Session history persistence with Dream two-phase memory consolidation. Uses atomic writes with fsync for durability.
 - **Session Management** (`jenny/session/`): History persistence, context compaction, TTL-based auto-compaction (`manager.py`), and sustained goal state tracking (`goal_state.py`). The user conversation is a **single unified session** (`unified:default`, see `keys.py`); internal work (cron, Dream, heartbeat) uses separate internal keys via `session_key_override`.
-- **Config** (`jenny/config/schema.py`, `loader.py`): Pydantic-*style* configuration (`jenny/pydantic_compat/`, stdlib-only — see [`FORK_BOUNDARY.md`](./FORK_BOUNDARY.md)) loaded from `workspace/config.json` inside the project root. Supports camelCase aliases for JSON compatibility.
+- **Config** (`jenny/config/schema.py`, `loader.py`, `store.py`): Pydantic-*style* configuration (`jenny/pydantic_compat/`, stdlib-only — see [`FORK_BOUNDARY.md`](./FORK_BOUNDARY.md)) loaded from `workspace/config.json` inside the project root. Supports camelCase aliases for JSON compatibility. **Every write goes through `store.mutate()`** — see the rule under [Config & security](#config--security); calling `save_config()` directly reintroduces a silent data-loss bug that no test will catch for you.
 - **WebUI** (`jenny/templates/ui/`): Mobile-first HTML/JS SPA served by the gateway. It talks to the gateway over the same WebSocket used for chat, plus HTTP routes under `/api/`.
 - **WebUI HTTP API** (`jenny/webui/`): The `/api/` route handlers backing the SPA (apps, settings, media, skills, transcript, token usage, workspaces, file preview, etc.), plus gateway service/token wiring.
 - **Jenny Apps** (`jenny/apps/`): Runtime for user-authored mini-apps — `manifest.py`, `executor.py`, `storage.py`, `summary.py`. See [`.agent/jenny-apps.md`](.agent/jenny-apps.md).
@@ -65,6 +65,7 @@ Large classes are split into focused mixins/leaf modules composed via MRO (behav
 
 ### Config & security
 
+- **Never write `config.json` outside `config/store.py::mutate()`.** It reads the file *inside* the lock it writes under, so no caller can hold a stale copy; `save_config()` rewrites the whole file, so a stale copy silently erases whatever another writer just changed. Slow I/O (network, subprocess) belongs **before** entering `mutate`, never inside the callback — the lock is held for its whole duration. `mutate` also carries through keys this version's schema does not know, keeps a `.bak`, writes atomically and restores `chmod 600`; none of that happens if you bypass it. Two documented exceptions, both commented on the spot: `config/bootstrap.py` (runs before the event loop) and any wholesale restore.
 - `config/schema.py::SecurityConfig` (`config.security`) is the canonical home for `restrict_to_workspace`/`ssrf_whitelist` (`ToolsConfig` mirrors them for the tool layer; a validator migrates legacy config).
 - `config/runtime_env.py` is the single layer for operational `JENNY_*` env knobs.
 - Tools are registered via an explicit `TOOLS = [...]` list per module (read by `agent/tools/loader.py`); name collisions and missing `TOOLS` raise `ToolLoadError` at startup, a failing `enabled()`/`create()` disables only that tool.
@@ -118,7 +119,7 @@ ruff check jenny/ tests/ && npx pyright jenny/bus jenny/command jenny/runtime je
 
 ## Common File Locations
 
-- Config schema: `jenny/config/schema.py`
+- Config schema: `jenny/config/schema.py`; **write funnel: `jenny/config/store.py`** (file fidelity — atomicity, backup, recovery — in `jenny/config/loader.py`)
 - Provider base / new provider template: `jenny/providers/base.py`
 - WebSocket channel + dispatcher: `jenny/channels/websocket.py`, `jenny/channels/dispatcher.py`
 - Tool registry: `jenny/agent/tools/registry.py`; explicit registration lists: `TOOLS` in each `jenny/agent/tools/*.py`, read by `loader.py`

@@ -7,10 +7,10 @@ alla lettura. La deduplica è implicita (stesso contenuto → stesso path).
 from __future__ import annotations
 
 import hashlib
-import os
-import uuid
 import zlib
 from pathlib import Path
+
+from jenny.utils.path import atomic_write
 
 
 class BlobCorruptError(Exception):
@@ -30,26 +30,26 @@ def object_path(objects_dir: Path, hash_hex: str) -> Path:
 def put_blob(objects_dir: Path, content: bytes) -> str:
     """Scrive il blob se assente e ritorna il suo hash.
 
-    La scrittura passa da un file temporaneo + ``os.replace`` così un crash a
-    metà non lascia mai un blob parziale con il nome definitivo.
+    La scrittura è atomica, così un crash a metà non lascia mai un blob
+    parziale con il nome definitivo.
     """
     hash_hex = hash_content(content)
     dest = object_path(objects_dir, hash_hex)
     if dest.is_file():
         return hash_hex
 
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    # Nome tmp unico per chiamata: due scrittori concorrenti dello stesso blob
-    # non condividono mai il temporaneo, altrimenti l'``os.replace`` del primo
-    # porta via l'inode mentre il secondo ci sta ancora scrivendo (blob troncato
-    # o FileNotFoundError). Stessa scelta di ``atomic_write``.
-    tmp = dest.with_name(f"{dest.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        tmp.write_bytes(zlib.compress(content))
-        os.replace(tmp, dest)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
+    # ``atomic_write`` per il temporaneo con nome unico (due scrittori dello
+    # stesso blob non se lo portano via a vicenda), il rename atomico e la
+    # pulizia; il suo suffisso ``.tmp`` è già filtrato da ``iter_blob_hashes``.
+    #
+    # Senza fsync, e non per distrazione: questo è l'unico punto sulla strada
+    # calda — ``put_blob`` viene chiamato una volta per file tracciato a ogni
+    # snapshot. Misurato sul Titan 2 (f2fs, ``fsync_mode=nobarrier``): ~4 ms per
+    # fsync, cioè secondi interi su un workspace di qualche migliaio di file. Il
+    # rename resta atomico, quindi un processo ucciso non lascia mai un blob
+    # parziale col nome definitivo; a cadere è solo la garanzia contro la
+    # perdita di corrente, che è dove stava anche prima di questa modifica.
+    atomic_write(dest, zlib.compress(content), fsync_file=False, fsync_dir=False)
     return hash_hex
 
 

@@ -8,13 +8,13 @@ Most people never need this page: the [Settings screen](./settings.md) covers th
 
 On Android the file is `<data_dir>/workspace/config.json`, inside the app's private storage (`<filesDir>/workspace/`). It is created on first boot with a minimal skeleton — a `gateway.host` and a per-install `websocket.token_issue_secret` — and then filled in by the onboarding wizard.
 
-The Workspace file browser **hides `config.json` by default**. That is deliberate: it holds your API keys and the WebUI bootstrap secret, and it is the one file in the workspace that can stop the app from booting. Turn on **Developer mode** in Settings → System to see it.
+The Workspace file browser **hides `config.json` by default**, along with its backup and any quarantined copy (see below) — they carry the same secrets. That is deliberate: the file holds your API keys and the WebUI bootstrap secret. Turn on **Developer mode** in Settings → System to see them.
 
 Three things to know before you hand-edit it:
 
 - **Changes need an app restart.** The only hot-reload path in the app is the WebUI settings screen, which reloads model and provider on the fly after it writes. Nothing watches `config.json` for external edits.
-- **Broken JSON blocks boot.** Config load raises on a malformed or invalid file, and the gateway retries three times before giving up — the WebUI never comes online, and there is no in-app editor to fix it from. Keep a copy of a known-good file before editing.
-- **Prefer Settings when the setting exists there.** The UI validates ranges and writes atomically.
+- **Broken JSON no longer blocks boot.** Jenny keeps the last good copy as `config.json.bak` and refreshes it before every successful save. If the live file cannot be read at startup, the backup is used and promoted; if there is no usable backup either, the unreadable file is set aside as `config.corrupt-<timestamp>.json` and Jenny starts on defaults — which means the API key has to be set up again. Either way the gateway comes online, and Settings shows a notice saying what happened and where the broken file went. Keep your own copy anyway before editing by hand.
+- **Prefer Settings when the setting exists there.** The UI validates ranges, serialises concurrent writes, and writes atomically (temp file + rename + fsync), so a save interrupted by the OS killing the app cannot leave a half-written file.
 
 ## Key naming
 
@@ -22,7 +22,7 @@ Jenny writes camelCase (`apiKey`, `maxTokens`, `intervalS`), and this page uses 
 
 Two more parsing rules worth knowing:
 
-- **Unknown keys are ignored silently.** A typo in a key name does not raise; the setting simply never applies. If an edit seems to do nothing, check the spelling first.
+- **Unknown keys are kept, not applied.** A typo in a key name does not raise, and the setting never applies — but the key survives in the file (a save from the UI no longer erases it) and startup logs a warning listing every key this version does not recognise. If an edit seems to do nothing, check that warning, then the spelling. The same rule is what lets a config written by a newer Jenny survive a downgrade. One limit: unknown keys *inside array items* — an extra field on a single provider entry, say — are not preserved, because merging list items would need a notion of which entry is which.
 - **`${VAR_NAME}` in any string value is resolved from the environment at startup**, in memory only. Resolved values are never written back, so editing through the WebUI preserves the placeholder. A referenced variable that is not set aborts startup with `Environment variable 'NAME' referenced in config is not set`. On Android there is no practical way to set environment variables for the app process, so this is a desktop/testing feature — on the phone, secrets live in the file (see [Security model](../internals/security-model.md)).
 
 ## providers

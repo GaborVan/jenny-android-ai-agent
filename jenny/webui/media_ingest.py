@@ -14,8 +14,6 @@ direttamente come i provider e ``apps/http.py``.
 from __future__ import annotations
 
 import hashlib
-import os
-import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -24,6 +22,7 @@ import httpx
 
 from jenny.security.network import validate_url_target
 from jenny.utils.helpers import detect_image_mime, ensure_dir
+from jenny.utils.path import atomic_write
 
 MediaDirProvider = Callable[[str | None], Path]
 
@@ -182,16 +181,10 @@ async def ingest_remote_image(
         return None
 
     target = remote_dir / f"{stem}{_MIME_EXT[mime]}"
-    tmp = remote_dir / f".{stem}.{uuid.uuid4().hex}.tmp"
     try:
-        tmp.write_bytes(data)
-        os.replace(tmp, target)
+        atomic_write(target, data)
     except OSError as exc:
         logger.warning("media ingest: failed to persist {}: {}", url, exc)
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
         return None
 
     _enforce_remote_budget(remote_dir, logger=logger)

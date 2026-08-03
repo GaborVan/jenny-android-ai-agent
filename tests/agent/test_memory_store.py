@@ -420,3 +420,21 @@ class TestDreamCursor:
         store.set_last_dream_cursor(3)
         store2 = MemoryStore(store.workspace)
         assert store2.get_last_dream_cursor() == 3
+
+    def test_failed_write_leaves_previous_cursor_readable(self, store, monkeypatch):
+        """La scrittura passa dall'helper atomico, non da un write_text nudo.
+
+        Con write_text, il file veniva troncato prima di fallire e il cursore
+        tornava 0: Dream ricominciava da capo su tutta la storia. Il raise finto
+        qui dimostra entrambe le cose — che l'helper è sulla strada, e che il
+        contenuto precedente sopravvive a una scrittura fallita.
+        """
+        store.set_last_dream_cursor(3)
+
+        def boom(*_args, **_kwargs):
+            raise OSError("no space left on device")
+
+        monkeypatch.setattr("jenny.agent.memory.atomic_write", boom)
+        with pytest.raises(OSError):
+            store.set_last_dream_cursor(9)
+        assert store.get_last_dream_cursor() == 3

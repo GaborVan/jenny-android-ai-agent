@@ -318,7 +318,11 @@ class MemoryStore:
         return 0
 
     def set_last_dream_cursor(self, cursor: int) -> None:
-        self._dream_cursor_file.write_text(str(cursor), encoding="utf-8")
+        # Stesso helper del cursore di history (vedi ``append``): un
+        # write_text nudo qui lascerebbe, se il processo muore a metà, un file
+        # vuoto o parziale — cioè un cursore che ``get_last_dream_cursor``
+        # legge come 0 e Dream ricomincia da capo su tutta la storia.
+        atomic_write(self._dream_cursor_file, str(cursor))
 
     def build_dream_prompt(self, *, max_entries: int = 20) -> tuple[str, int] | None:
         """Build the Dream prompt with unprocessed history context.

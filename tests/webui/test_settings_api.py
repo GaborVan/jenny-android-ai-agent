@@ -138,7 +138,7 @@ async def test_update_provider_still_replaces_key_when_retyped(
     assert saved.api_key == "sk-new-secret-key-9999"
 
 
-def test_update_agent_settings_accepts_context_window_options(
+async def test_update_agent_settings_accepts_context_window_options(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -147,14 +147,14 @@ def test_update_agent_settings_accepts_context_window_options(
     save_config(config, config_path)
     monkeypatch.setattr(get_runtime_context(), "config_path", config_path)
 
-    payload = update_agent_settings({"context_window_tokens": ["262144"]})
+    payload = await update_agent_settings({"context_window_tokens": ["262144"]})
 
     assert payload["agent"]["context_window_tokens"] == 262144
     saved = load_config(config_path)
     assert saved.agents.defaults.context_window_tokens == 262144
 
 
-def test_update_context_window_rejects_unknown_values(
+async def test_update_context_window_rejects_unknown_values(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -163,10 +163,10 @@ def test_update_context_window_rejects_unknown_values(
     monkeypatch.setattr(get_runtime_context(), "config_path", config_path)
 
     with pytest.raises(WebUISettingsError, match="context_window_tokens must be 65536 or 262144"):
-        update_agent_settings({"context_window_tokens": ["128000"]})
+        await update_agent_settings({"context_window_tokens": ["128000"]})
 
 
-def test_update_timezone_rejects_unknown_name(
+async def test_update_timezone_rejects_unknown_name(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -176,10 +176,10 @@ def test_update_timezone_rejects_unknown_name(
     monkeypatch.setattr(get_runtime_context(), "config_path", config_path)
 
     with pytest.raises(WebUISettingsError, match="unknown timezone 'Not/AZone'"):
-        update_agent_settings({"timezone": ["Not/AZone"]})
+        await update_agent_settings({"timezone": ["Not/AZone"]})
 
 
-def test_update_timezone_accepts_valid_name_and_requires_restart(
+async def test_update_timezone_accepts_valid_name_and_requires_restart(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -187,7 +187,7 @@ def test_update_timezone_accepts_valid_name_and_requires_restart(
     save_config(Config(), config_path)
     monkeypatch.setattr(get_runtime_context(), "config_path", config_path)
 
-    payload = update_agent_settings({"timezone": ["Asia/Shanghai"]})
+    payload = await update_agent_settings({"timezone": ["Asia/Shanghai"]})
 
     assert payload["requires_restart"] is True
     saved = load_config(config_path)
@@ -448,3 +448,28 @@ async def test_save_onboarding_welcome_is_localized_to_english(
     assert "Hi, I'm Jenny" in session.messages[0]["content"]
     saved = load_config(config_path)
     assert saved.agents.defaults.language == "en"
+
+
+async def test_short_api_key_is_shown_as_present(tmp_path, monkeypatch) -> None:
+    """`EMPTY` è il segnaposto che i docs raccomandano per i server locali.
+
+    La maschera restituiva stringa vuota per chiavi ≤ 8 caratteri, quindi la UI
+    la annunciava come "(no key)": chi seguiva le istruzioni pensava di aver
+    sbagliato qualcosa.
+    """
+    config_path = tmp_path / "config.json"
+    save_config(Config(), config_path)
+    monkeypatch.setattr(get_runtime_context(), "config_path", config_path)
+
+    await update_provider({
+        "name": "local-llama",
+        "format": "openai_compat",
+        "api_key": "EMPTY",
+        "api_base": "http://127.0.0.1:8080/v1",
+    })
+    payload = settings_payload()
+
+    provider = next(p for p in payload["providers"] if p["name"] == "local-llama")
+    assert provider["api_key_hint"]
+    assert "EMPTY" not in provider["api_key_hint"]
+    assert provider["configured"] is True

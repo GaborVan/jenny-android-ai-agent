@@ -28,6 +28,12 @@ class RuntimeContext:
     # IANA ID rilevato dal dispositivo (es. "Europe/Rome"), scritto una volta
     # al boot da ``android_entry``; None su host o se il rilevamento fallisce.
     device_timezone: str | None = None
+    # Impostato da ``config.loader`` quando `config.json` era illeggibile e si è
+    # dovuto ripiegare: "backup" (recuperato dal .bak) o "defaults" (ripartiti
+    # da zero). La WebUI lo mostra: ripartire con impostazioni diverse da quelle
+    # scelte dall'utente senza dirglielo sarebbe la sorpresa peggiore.
+    config_recovered_from: str | None = None
+    config_quarantine_path: Path | None = None
 
 
 _CONTEXT = RuntimeContext()

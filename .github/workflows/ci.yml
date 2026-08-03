@@ -15,8 +15,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # fetch-depth: 0 — the check walks the PR commit range, which shallow
-      # clones do not contain.
-      - uses: actions/checkout@v4
+      # clones do not contain. Still needed on checkout v7: the default is
+      # depth 1, and v7's only behaviour change is blocking fork checkouts for
+      # pull_request_target / workflow_run, neither of which this workflow uses.
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Check Signed-off-by on every commit
@@ -28,13 +30,15 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - uses: actions/setup-node@v4
+      # Node 24, not 20: Node 20 went end-of-life in April 2026. It only has to
+      # run the pinned pyright below, which is version-pinned separately.
+      - uses: actions/setup-node@v7
         with:
-          node-version: "20"
+          node-version: "24"
       # CI validates the Android code path on a host runner; Android is the only supported runtime target.
       - run: pip install -e .
       - run: pip install ruff pytest pytest-asyncio
@@ -51,8 +55,8 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       # CI validates the Android code path on a host runner; Android is the only supported runtime target.

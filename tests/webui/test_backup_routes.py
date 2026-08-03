@@ -132,19 +132,19 @@ async def test_snapshot_create_and_list(env) -> None:
     assert [s["id"] for s in snapshots] == [created["id"]]
 
 
-async def test_retention_update_persists_and_applies(env, monkeypatch) -> None:
+async def test_retention_update_persists_and_applies(env, tmp_path, monkeypatch) -> None:
     """La route valida l'input, aggiorna la config viva, persiste su disco e
     applica subito la retention (snapshot oltre l'orizzonte rimossi)."""
-    saved: dict = {}
+    # Config vera su file: la retention passa dal funnel di scrittura, quindi
+    # un monkeypatch di load_config/save_config non intercetterebbe più nulla
+    # (e non verificherebbe la persistenza reale).
+    from jenny.config.loader import load_config, save_config
+    from jenny.config.schema import Config
+    from jenny.runtime.context import get_runtime_context
 
-    def _fake_load():
-        return SimpleNamespace(snapshots=SimpleNamespace(retention_max_age_days=0))
-
-    def _fake_save(config, config_path=None):
-        saved["value"] = config.snapshots.retention_max_age_days
-
-    monkeypatch.setattr("jenny.config.loader.load_config", _fake_load)
-    monkeypatch.setattr("jenny.config.loader.save_config", _fake_save)
+    config_path = tmp_path / "retention-config.json"
+    save_config(Config(), config_path)
+    monkeypatch.setattr(get_runtime_context(), "config_path", config_path)
 
     # Uno snapshot antico (oltre l'orizzonte) + abbastanza recenti da non
     # farlo rientrare nella protezione keep_recent.
@@ -165,7 +165,7 @@ async def test_retention_update_persists_and_applies(env, monkeypatch) -> None:
     body = _json(response)
     assert body["retention_max_age_days"] == 7
     assert body["removed"] == 1
-    assert saved["value"] == 7
+    assert load_config(config_path).snapshots.retention_max_age_days == 7
     assert env.service.config.retention_max_age_days == 7
 
     listing = await env.handler.backup_routes.dispatch(

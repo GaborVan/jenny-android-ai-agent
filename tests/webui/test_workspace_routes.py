@@ -144,6 +144,13 @@ async def test_list_marks_default_runtime_dirs_internal_without_manifest(
     # dell'utente: nascosti di default come i dotfile, senza bisogno di un
     # manifest esplicito.
     (workspace_root / "config.json").write_text("{}", encoding="utf-8")
+    # Il backup e il file messo in quarantena portano le stesse chiavi API e lo
+    # stesso secret del file vivo: vanno nascosti anche loro, altrimenti li si
+    # vedrebbe nel browser senza developer mode.
+    (workspace_root / "config.json.bak").write_text("{}", encoding="utf-8")
+    (workspace_root / "config.corrupt-20260803T120000Z.json").write_text("x", encoding="utf-8")
+    # Residuo di un ``atomic_write`` interrotto: runtime, non contenuto utente.
+    (workspace_root / "note.txt.abc123.tmp").write_text("x", encoding="utf-8")
     (workspace_root / "agent").mkdir()
     (workspace_root / "agent" / "identity.md").write_text("x", encoding="utf-8")
     (workspace_root / "cron").mkdir()
@@ -156,6 +163,9 @@ async def test_list_marks_default_runtime_dirs_internal_without_manifest(
     by_name = {item["name"]: item["internal"] for item in _json(response)["items"]}
     assert by_name == {
         "config.json": True,
+        "config.json.bak": True,
+        "config.corrupt-20260803T120000Z.json": True,
+        "note.txt.abc123.tmp": True,
         "agent": True,
         "cron": True,
         "sessions": True,
@@ -390,6 +400,32 @@ async def test_write_happy_path(
     )
     assert response.status_code == 200
     assert (workspace_root / "new" / "note.txt").read_text(encoding="utf-8") == "ciao"
+
+
+async def test_write_that_fails_keeps_the_previous_content(
+    routes: WorkspaceRoutes, workspace_root: Path, config_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Salvare dall'editor riscrive il file intero: deve essere atomico.
+
+    Con un write_text nudo il vecchio contenuto era già perso nel momento in cui
+    la scrittura si interrompeva; con il rename finale il file resta quello di
+    prima finché il nuovo non è completo su disco.
+    """
+    target = workspace_root / "note.txt"
+    target.write_text("originale", encoding="utf-8")
+
+    def boom(*_args, **_kwargs):
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr("jenny.webui.workspace_files.atomic_write", boom)
+    response = await routes.dispatch(
+        _request("/api/workspace/write", data={"path": "note.txt", "content": "nuovo"}),
+        "/api/workspace/write",
+    )
+    # 400 e non 500: la route mappa lì ogni OSError (comportamento preesistente).
+    assert response.status_code == 400
+    assert target.read_text(encoding="utf-8") == "originale"
 
 
 async def test_write_rejects_path_traversal(

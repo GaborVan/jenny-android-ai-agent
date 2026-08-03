@@ -448,6 +448,64 @@ class TestAudit:
         assert len(resolved_audits) == 1
         assert resolved_audits[0].status == "resolved"
 
+    def test_failed_write_leaves_no_half_written_audit(
+        self, wikis_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Una scrittura fallita non deve lasciare un audit troncato sul disco.
+
+        Un audit a metà è illeggibile da ``load_audits`` ma occupa il suo id: il
+        rename finale dell'helper atomico rende il file visibile solo completo.
+        """
+        wiki_root = _make_wiki(wikis_dir, "main", {"index.md": "# Home\ncontent here"})
+
+        def boom(*_args, **_kwargs):
+            raise OSError("no space left on device")
+
+        monkeypatch.setattr("jenny.webui.wiki.atomic_write", boom)
+        with pytest.raises(OSError):
+            create_audit(
+                wiki_root=wiki_root,
+                target="index.md",
+                raw_markdown="# Home\ncontent here",
+                sel_start=8,
+                sel_end=15,
+                comment="typo",
+                severity="warn",
+                author="test",
+            )
+        assert load_audits(wiki_root, mode="all") == []
+
+    def test_failed_resolve_keeps_the_open_audit(
+        self, wikis_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Se la copia risolta non riesce, l'audit aperto resta dov'è.
+
+        ``resolve_audit`` scrive la copia *prima* di cancellare l'originale, così
+        il caso peggiore è un duplicato — mai un audit perso.
+        """
+        wiki_root = _make_wiki(wikis_dir, "main", {"index.md": "# Home\ncontent here"})
+        created = create_audit(
+            wiki_root=wiki_root,
+            target="index.md",
+            raw_markdown="# Home\ncontent here",
+            sel_start=8,
+            sel_end=15,
+            comment="typo",
+            severity="warn",
+            author="test",
+        )
+
+        def boom(*_args, **_kwargs):
+            raise OSError("no space left on device")
+
+        monkeypatch.setattr("jenny.webui.wiki.atomic_write", boom)
+        with pytest.raises(OSError):
+            resolve_audit(wiki_root, created["id"], "fixed")
+
+        open_audits = load_audits(wiki_root, mode="open")
+        assert len(open_audits) == 1
+        assert load_audits(wiki_root, mode="resolved") == []
+
     def test_list_audits_mode_all(self, wikis_dir: Path):
         wiki_root = _make_wiki(wikis_dir, "main", {
             "index.md": "# Home\ncontent here",
