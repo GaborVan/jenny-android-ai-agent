@@ -15,7 +15,9 @@ import httpx
 
 from jenny import __version__
 from jenny.agent.token_usage import token_usage_payload
-from jenny.config.loader import get_config_path, load_config, save_config
+from jenny.config import store
+from jenny.config.loader import get_config_path, load_config
+from jenny.config.schema import Config
 from jenny.security.workspace_access import workspace_sandbox_status
 from jenny.security.workspace_policy import _safe_expanduser
 from jenny.session.keys import UNIFIED_SESSION_KEY
@@ -285,15 +287,25 @@ def _is_first_run(config: Any = None) -> bool:
         return True
 
 
+# Mostrato al posto di una chiave troppo corta per essere mascherata senza
+# rivelarne una parte sproporzionata. Non è vuoto perché una chiave corta
+# esiste: i nostri docs raccomandano il segnaposto "EMPTY" per i server locali
+# (5 caratteri), e prima la UI la annunciava come "(no key)" — chi seguiva le
+# istruzioni pensava di aver sbagliato qualcosa.
+_SHORT_KEY_HINT = "••••"
+
+
 def _mask_api_key(api_key: str | None) -> str:
     """Suggerimento offuscato mostrato dalla UI al posto della chiave vera.
 
-    Stringa vuota se la chiave è assente o troppo corta perché la maschera
-    non ne riveli una parte sproporzionata.
+    Stringa vuota solo se la chiave è assente: una chiave corta viene
+    annunciata come presente, senza rivelarne il contenuto.
     """
-    if api_key and len(api_key) > 8:
+    if not api_key:
+        return ""
+    if len(api_key) > 8:
         return api_key[:4] + "..." + api_key[-4:]
-    return ""
+    return _SHORT_KEY_HINT
 
 
 def _provider_list_simple(config: Any = None) -> list[dict[str, Any]]:
@@ -334,43 +346,42 @@ async def save_onboarding(
     if not model:
         raise WebUISettingsError("model is required")
 
-    config = load_config()
+    def _apply(config: Config) -> None:
+        # Set up the provider
+        from jenny.config.schema import ProviderConfig
 
-    # Set up the provider
-    from jenny.config.schema import ProviderConfig
+        config.providers.providers = [
+            ProviderConfig(
+                name=provider_name,
+                format=provider_format,
+                api_key=api_key or None,
+                api_base=api_base or None,
+            )
+        ]
+        config.providers.default = provider_name
 
-    config.providers.providers = [
-        ProviderConfig(
-            name=provider_name,
-            format=provider_format,
-            api_key=api_key or None,
-            api_base=api_base or None,
-        )
-    ]
-    config.providers.default = provider_name
+        # Set the model and persona
+        config.agents.defaults.model = model
+        config.agents.defaults.bot_name = bot_name
+        config.agents.defaults.bot_icon = bot_icon
 
-    # Set the model and persona
-    config.agents.defaults.model = model
-    config.agents.defaults.bot_name = bot_name
-    config.agents.defaults.bot_icon = bot_icon
+        # Persist the user's language preference for future backend-localized messages.
+        locale = (data.get("locale") or "it").strip().lower()
+        config.agents.defaults.language = locale if locale in WELCOME_TEMPLATES else "it"
 
-    # Persist the user's language preference for future backend-localized messages.
-    locale = (data.get("locale") or "it").strip().lower()
-    config.agents.defaults.language = locale if locale in WELCOME_TEMPLATES else "it"
+        # Fase 6.7: valida il provider PRIMA di persistere/segnalare. Se la config
+        # non produce un provider valido, l'errore torna subito alla WebUI di
+        # onboarding invece di fallire in modo asincrono e silenzioso nel
+        # GatewayContainer (che reloada la stessa config e resterebbe senza agent).
+        # Sollevare qui lascia il file intatto: ``store.mutate`` non salva.
+        from jenny.providers.factory import make_provider
 
-    # Fase 6.7: valida il provider PRIMA di persistere/segnalare. Se la config
-    # non produce un provider valido, l'errore torna subito alla WebUI di
-    # onboarding invece di fallire in modo asincrono e silenzioso nel
-    # GatewayContainer (che reloada la stessa config e resterebbe senza agent).
-    # Non salviamo una config con provider inutilizzabile.
-    from jenny.providers.factory import make_provider
+        try:
+            make_provider(config)
+        except (ValueError, RuntimeError) as exc:
+            raise WebUISettingsError(f"Provider configuration is invalid: {exc}") from exc
 
-    try:
-        make_provider(config)
-    except (ValueError, RuntimeError) as exc:
-        raise WebUISettingsError(f"Provider configuration is invalid: {exc}") from exc
-
-    save_config(config)
+    config = await store.mutate(_apply)
 
     # Il saluto di benvenuto finisce nell'unica sessione unificata,
     # la stessa che la chat rilegge all'attach.
@@ -455,12 +466,49 @@ def settings_payload(
         },
         "requires_restart": requires_restart,
         "version": _version_payload(),
+        "config_recovery": _config_recovery_payload(),
     }
     return payload
 
 
-def update_agent_settings(query: QueryParams) -> dict[str, Any]:
-    config = load_config()
+def _config_recovery_payload() -> dict[str, Any] | None:
+    """Segnala alla UI che `config.json` è stato recuperato all'avvio.
+
+    None nel caso normale. Quando c'è, la UI deve dirlo: ripartire con
+    impostazioni diverse da quelle scelte dall'utente — o peggio, dai default —
+    senza avvisare sarebbe la sorpresa peggiore, e con `restoredFrom` a
+    "defaults" significa che va rimessa anche la chiave API.
+    """
+    from jenny.runtime.context import get_runtime_context
+
+    ctx = get_runtime_context()
+    if not ctx.config_recovered_from:
+        return None
+    quarantine = ctx.config_quarantine_path
+    return {
+        "restored_from": ctx.config_recovered_from,
+        "broken_file": str(_safe_expanduser(quarantine)) if quarantine else None,
+    }
+
+
+async def update_agent_settings(query: QueryParams) -> dict[str, Any]:
+    """Aggiorna le impostazioni dell'agente dentro il funnel della config."""
+    restart: dict[str, bool] = {}
+
+    def _apply(config: Config) -> bool:
+        changed, restart["required"] = _apply_agent_settings(config, query)
+        return changed
+
+    await store.mutate(_apply)
+    return settings_payload(requires_restart=restart.get("required", False))
+
+
+def _apply_agent_settings(config: Config, query: QueryParams) -> tuple[bool, bool]:
+    """Applica le impostazioni agente a *config*; ritorna (modificato, richiede-riavvio).
+
+    Riceve la config invece di leggerla: la lettura deve avvenire dentro il
+    lock di ``store.mutate``, altrimenti si torna al lost update.
+    """
     defaults = config.agents.defaults
     changed = False
     restart_required = False
@@ -547,14 +595,11 @@ def update_agent_settings(query: QueryParams) -> dict[str, Any]:
             changed = True
             restart_required = True
 
-    if changed:
-        save_config(config)
-    return settings_payload(requires_restart=restart_required)
+    return changed, restart_required
 
 
 async def update_provider(data: dict[str, Any]) -> dict[str, Any]:
     """Create or update a provider in the providers array."""
-    config = load_config()
     name = (data.get("name") or "").strip()
     if not name:
         raise WebUISettingsError("name is required")
@@ -566,6 +611,21 @@ async def update_provider(data: dict[str, Any]) -> dict[str, Any]:
     api_key = (data.get("api_key") or "").strip() or None
     api_base = (data.get("api_base") or "").strip() or None
 
+    def _apply(config: Config) -> None:
+        _upsert_provider(config, name, fmt, api_key, api_base)
+
+    await store.mutate(_apply)
+    return settings_payload()
+
+
+def _upsert_provider(
+    config: Config,
+    name: str,
+    fmt: str,
+    api_key: str | None,
+    api_base: str | None,
+) -> None:
+    """Inserisce o aggiorna il provider *name* dentro *config*."""
     providers = config.providers.providers
 
     for p in providers:
@@ -592,32 +652,35 @@ async def update_provider(data: dict[str, Any]) -> dict[str, Any]:
     if not config.providers.default:
         config.providers.default = name
 
-    save_config(config)
-    return settings_payload()
-
 
 async def delete_provider(data: dict[str, Any]) -> dict[str, Any]:
     """Remove a provider from the array."""
-    config = load_config()
     name = (data.get("name") or "").strip()
 
-    config.providers.providers = [
-        p for p in config.providers.providers if p.name != name
-    ]
+    def _apply(config: Config) -> None:
+        config.providers.providers = [
+            p for p in config.providers.providers if p.name != name
+        ]
 
-    if config.providers.default == name:
-        config.providers.default = (
-            config.providers.providers[0].name
-            if config.providers.providers
-            else None
-        )
+        if config.providers.default == name:
+            config.providers.default = (
+                config.providers.providers[0].name
+                if config.providers.providers
+                else None
+            )
 
-    save_config(config)
+    await store.mutate(_apply)
     return settings_payload()
 
 
-def update_web_search_settings(query: QueryParams) -> dict[str, Any]:
-    config = load_config()
+async def update_web_search_settings(query: QueryParams) -> dict[str, Any]:
+    """Aggiorna le impostazioni di ricerca/fetch web dentro il funnel della config."""
+    await store.mutate(lambda config: _apply_web_search_settings(config, query))
+    return settings_payload()
+
+
+def _apply_web_search_settings(config: Config, query: QueryParams) -> bool:
+    """Applica le impostazioni web a *config*; ritorna True se qualcosa è cambiato."""
     search_config = config.tools.android_web.search
     fetch_config = config.tools.android_web.fetch
     changed = False
@@ -671,31 +734,29 @@ def update_web_search_settings(query: QueryParams) -> dict[str, Any]:
             raise WebUISettingsError("fetch_max_chars must be between 1000 and 200000")
         set_fetch_value("max_chars", parsed_fetch_max_chars)
 
-    if changed:
-        save_config(config)
-    return settings_payload()
+    return changed
 
 
-def update_location_settings(query: QueryParams) -> dict[str, Any]:
+async def update_location_settings(query: QueryParams) -> dict[str, Any]:
     """Aggiorna il toggle posizione (``tools.location.enable``).
 
     Solo il toggle è esposto in UI: gli altri campi (TTL Telegram, timeout fix
     fresco) restano config-only. Il gate reale resta comunque il permesso
     runtime Android; questo toggle spegne l'iniezione anche a permesso concesso.
     """
-    config = load_config()
-    loc = config.tools.location
-    changed = False
 
-    enabled = _query_first(query, "enabled")
-    if enabled is not None:
+    def _apply(config: Config) -> bool:
+        loc = config.tools.location
+        enabled = _query_first(query, "enabled")
+        if enabled is None:
+            return False
         value = enabled.strip().lower() in ("1", "true", "yes", "on")
-        if loc.enable != value:
-            loc.enable = value
-            changed = True
+        if loc.enable == value:
+            return False
+        loc.enable = value
+        return True
 
-    if changed:
-        save_config(config)
+    await store.mutate(_apply)
     return settings_payload()
 
 

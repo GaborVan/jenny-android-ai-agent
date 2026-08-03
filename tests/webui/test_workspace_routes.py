@@ -144,6 +144,11 @@ async def test_list_marks_default_runtime_dirs_internal_without_manifest(
     # dell'utente: nascosti di default come i dotfile, senza bisogno di un
     # manifest esplicito.
     (workspace_root / "config.json").write_text("{}", encoding="utf-8")
+    # Il backup e il file messo in quarantena portano le stesse chiavi API e lo
+    # stesso secret del file vivo: vanno nascosti anche loro, altrimenti li si
+    # vedrebbe nel browser senza developer mode.
+    (workspace_root / "config.json.bak").write_text("{}", encoding="utf-8")
+    (workspace_root / "config.corrupt-20260803T120000Z.json").write_text("x", encoding="utf-8")
     (workspace_root / "agent").mkdir()
     (workspace_root / "agent" / "identity.md").write_text("x", encoding="utf-8")
     (workspace_root / "cron").mkdir()
@@ -156,6 +161,8 @@ async def test_list_marks_default_runtime_dirs_internal_without_manifest(
     by_name = {item["name"]: item["internal"] for item in _json(response)["items"]}
     assert by_name == {
         "config.json": True,
+        "config.json.bak": True,
+        "config.corrupt-20260803T120000Z.json": True,
         "agent": True,
         "cron": True,
         "sessions": True,

@@ -62,7 +62,7 @@ class WebUISettingsRouter:
         if path == "/api/settings":
             return self._handle_settings(request)
         if path == "/api/settings/update":
-            return self._handle_settings_update(request)
+            return await self._handle_settings_update(request)
         if path == "/api/settings/provider/update":
             return await self._handle_settings_provider_update(request)
         if path == "/api/settings/provider/delete":
@@ -70,9 +70,9 @@ class WebUISettingsRouter:
         if path == "/api/settings/provider-models":
             return await self._handle_settings_provider_models(request)
         if path == "/api/settings/web-search/update":
-            return self._handle_settings_web_search_update(request)
+            return await self._handle_settings_web_search_update(request)
         if path == "/api/settings/location/update":
-            return self._handle_settings_location_update(request)
+            return await self._handle_settings_location_update(request)
         if path == "/api/onboarding/save":
             return await self._handle_onboarding_save(request)
         if path == "/api/telegram/status":
@@ -80,9 +80,9 @@ class WebUISettingsRouter:
         if path == "/api/telegram/save":
             return await self._handle_telegram_save(request)
         if path == "/api/telegram/unpair":
-            return self._handle_telegram_unpair(request)
+            return await self._handle_telegram_unpair(request)
         if path == "/api/telegram/disable":
-            return self._handle_telegram_disable(request)
+            return await self._handle_telegram_disable(request)
         return None
 
     def _query(self, request: WsRequest) -> QueryParams:
@@ -106,12 +106,12 @@ class WebUISettingsRouter:
             return self._unauthorized()
         return self._json_response(settings_payload())
 
-    def _handle_settings_update(self, request: WsRequest) -> Response:
+    async def _handle_settings_update(self, request: WsRequest) -> Response:
         if not self._authorized(request):
             return self._unauthorized()
         try:
             query = self._query(request)
-            payload = update_agent_settings(query)
+            payload = await update_agent_settings(query)
         except WebUISettingsError as e:
             return self._error_response(e.status, e.message)
         if "model" in query or "default_provider" in query:
@@ -173,11 +173,11 @@ class WebUISettingsRouter:
         )
         return self._json_response(payload)
 
-    def _handle_settings_web_search_update(self, request: WsRequest) -> Response:
+    async def _handle_settings_web_search_update(self, request: WsRequest) -> Response:
         if not self._authorized(request):
             return self._unauthorized()
         try:
-            payload = update_web_search_settings(self._query(request))
+            payload = await update_web_search_settings(self._query(request))
         except WebUISettingsError as e:
             return self._error_response(e.status, e.message)
         except Exception:
@@ -185,11 +185,11 @@ class WebUISettingsRouter:
             return self._error_response(500, "failed to update web search settings")
         return self._json_response(payload)
 
-    def _handle_settings_location_update(self, request: WsRequest) -> Response:
+    async def _handle_settings_location_update(self, request: WsRequest) -> Response:
         if not self._authorized(request):
             return self._unauthorized()
         try:
-            payload = update_location_settings(self._query(request))
+            payload = await update_location_settings(self._query(request))
         except WebUISettingsError as e:
             return self._error_response(e.status, e.message)
         except Exception:
@@ -276,13 +276,13 @@ class WebUISettingsRouter:
         self._fire_telegram_changed()
         return self._json_response(payload)
 
-    def _handle_telegram_unpair(self, request: WsRequest) -> Response:
+    async def _handle_telegram_unpair(self, request: WsRequest) -> Response:
         if not self._authorized(request):
             return self._unauthorized()
         from jenny.webui.telegram_api import unpair_telegram
 
         try:
-            payload = unpair_telegram()
+            payload = await unpair_telegram()
         except WebUISettingsError as e:
             return self._error_response(e.status, e.message)
         except Exception:
@@ -291,13 +291,13 @@ class WebUISettingsRouter:
         self._fire_telegram_changed()
         return self._json_response(payload)
 
-    def _handle_telegram_disable(self, request: WsRequest) -> Response:
+    async def _handle_telegram_disable(self, request: WsRequest) -> Response:
         if not self._authorized(request):
             return self._unauthorized()
         from jenny.webui.telegram_api import disable_telegram
 
         try:
-            payload = disable_telegram()
+            payload = await disable_telegram()
         except WebUISettingsError as e:
             return self._error_response(e.status, e.message)
         except Exception:

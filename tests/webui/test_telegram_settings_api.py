@@ -156,21 +156,21 @@ async def test_save_token_survives_set_my_commands_failure(tmp_path, monkeypatch
 # --- pairing / unpair / disable ----------------------------------------------
 
 
-def test_record_paired_persists_and_clears_code(tmp_path, monkeypatch) -> None:
+async def test_record_paired_persists_and_clears_code(tmp_path, monkeypatch) -> None:
     _configure(tmp_path, monkeypatch, enabled=True, bot_token=TOKEN, pairing_code="123456")
-    record_paired("42", "utente")
+    await record_paired("42", "utente")
     config = load_config()
     assert config.telegram.paired_chat_id == "42"
     assert config.telegram.paired_username == "utente"
     assert config.telegram.pairing_code is None
 
 
-def test_unpair_regenerates_code(tmp_path, monkeypatch) -> None:
+async def test_unpair_regenerates_code(tmp_path, monkeypatch) -> None:
     _configure(
         tmp_path, monkeypatch,
         enabled=True, bot_token=TOKEN, paired_chat_id="42", paired_username="me",
     )
-    payload = unpair_telegram()
+    payload = await unpair_telegram()
     assert payload["paired"] is False
     assert len(payload["pairing_code"]) == 6
     config = load_config()
@@ -178,16 +178,57 @@ def test_unpair_regenerates_code(tmp_path, monkeypatch) -> None:
     assert config.telegram.pairing_code == payload["pairing_code"]
 
 
-def test_unpair_without_token_raises(tmp_path, monkeypatch) -> None:
+async def test_unpair_without_token_raises(tmp_path, monkeypatch) -> None:
     _configure(tmp_path, monkeypatch)
     with pytest.raises(WebUISettingsError, match="not configured"):
-        unpair_telegram()
+        await unpair_telegram()
 
 
-def test_disable_keeps_token(tmp_path, monkeypatch) -> None:
+async def test_disable_keeps_token(tmp_path, monkeypatch) -> None:
     _configure(tmp_path, monkeypatch, enabled=True, bot_token=TOKEN)
-    payload = disable_telegram()
+    payload = await disable_telegram()
     assert payload["enabled"] is False
     config = load_config()
     assert config.telegram.bot_token == TOKEN
     assert config.telegram.enabled is False
+
+
+# --- concorrenza col resto delle impostazioni ------------------------------
+
+
+async def test_provider_added_during_pairing_is_not_lost(tmp_path, monkeypatch) -> None:
+    """La regressione che ha motivato la 0.3.2.
+
+    ``save_telegram_token`` faceva tre chiamate di rete tenendo in mano la
+    config letta *prima*: qualunque impostazione salvata in quei secondi veniva
+    riportata indietro dal suo salvataggio finale. Qui un provider viene
+    aggiunto mentre il pairing è a metà rete; deve sopravvivere.
+    """
+    import asyncio
+
+    from jenny.webui.settings_api import update_provider
+
+    _configure(tmp_path, monkeypatch)
+    provider_added = asyncio.Event()
+
+    class SlowAPI(FakeAPI):
+        async def get_me(self):
+            # Mentre il pairing è in attesa della rete, un altro handler salva.
+            await update_provider({
+                "name": "local-llama",
+                "format": "openai_compat",
+                "api_key": "EMPTY",
+                "api_base": "http://127.0.0.1:8080/v1",
+            })
+            provider_added.set()
+            return {"username": "jenny_bot"}
+
+    monkeypatch.setattr("jenny.channels.telegram_api.TelegramAPI", SlowAPI)
+
+    payload = await save_telegram_token(TOKEN)
+
+    assert provider_added.is_set()
+    assert payload["configured"] is True
+    config = load_config()
+    assert config.telegram.bot_token == TOKEN
+    assert [p.name for p in config.providers.providers] == ["local-llama"]

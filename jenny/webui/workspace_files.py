@@ -12,9 +12,15 @@ from typing import Any
 # contenuto dell'utente): config.json contiene un secret e si edita dalle
 # Impostazioni, agent/ e ui/ sono bundle rigenerati ad ogni avvio, cron/ e
 # sessions/ sono storage interno dei rispettivi motori.
+#
+# ``config.json*`` con la stella, non il nome esatto: accanto al file vivo
+# possono comparire il backup ``config.json.bak`` e i temporanei di
+# ``atomic_write``, che contengono le stesse chiavi API e lo stesso secret.
+# Nascondere solo il nome esatto li avrebbe esposti nel browser file.
 _DEFAULT_INTERNAL_PATTERNS = [
     ".*",
-    "config.json",
+    "config.json*",
+    "config.corrupt-*.json",
     "agent", "agent/**",
     "cron", "cron/**",
     "sessions", "sessions/**",

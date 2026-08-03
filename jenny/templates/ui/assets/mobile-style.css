@@ -2893,6 +2893,47 @@ body {
   font-size: 13px;
 }
 
+/* Avviso di config recuperata: compare solo dopo un avvio in cui config.json
+   non era leggibile, quindi deve farsi notare senza urlare. La variante
+   -strong è per il caso peggiore (ripartiti dai default, chiave API da
+   rimettere). */
+.settings-notice {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 12px 14px;
+  border: 0.5px solid var(--border);
+  border-left: 3px solid var(--text-muted);
+  border-radius: var(--radius);
+  background: rgba(255,255,255,0.04);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
+  flex-shrink: 0;
+}
+
+.settings-notice i {
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: var(--text-muted);
+}
+
+.settings-notice-strong {
+  border-left-color: var(--danger, #e5484d);
+}
+
+.settings-notice-strong i {
+  color: var(--danger, #e5484d);
+}
+
+.settings-notice-path {
+  margin-top: 6px;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  color: var(--text-faint);
+  word-break: break-all;
+}
+
 .settings-section {
   border: 0.5px solid var(--border);
   border-radius: var(--radius);

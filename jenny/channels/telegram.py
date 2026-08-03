@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -114,7 +114,7 @@ class TelegramChannel:
         bus: MessageBus,
         *,
         api: TelegramAPI | None = None,
-        on_paired: Callable[[str, str | None], None] | None = None,
+        on_paired: Callable[[str, str | None], Awaitable[None]] | None = None,
         language: str = "en",
     ):
         self.config = config
@@ -342,7 +342,9 @@ class TelegramChannel:
             self._pair_attempts.clear()
             if self._on_paired is not None:
                 try:
-                    self._on_paired(chat_id, username if isinstance(username, str) else None)
+                    await self._on_paired(
+                        chat_id, username if isinstance(username, str) else None
+                    )
                 except Exception:
                     logger.exception("Telegram: on_paired callback failed")
             logger.info("Telegram: paired with chat {}", chat_id)
