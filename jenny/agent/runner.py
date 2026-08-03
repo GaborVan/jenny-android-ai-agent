@@ -28,7 +28,12 @@ from jenny.agent.history_repair import (
     microcompact,
 )
 from jenny.agent.hook import AgentHook, AgentHookContext, AgentRunHookContext
-from jenny.agent.request_execution import RequestExecutionMixin
+from jenny.agent.request_execution import RequestExecutionMixin, RequestOverrides
+from jenny.agent.response_outcome import (
+    ResponseOutcome,
+    classify_response,
+    reported_completion_tokens,
+)
 from jenny.agent.tool_error_policy import (
     SSRF_BOUNDARY_NOTE,
     SSRF_MARKERS,
@@ -55,6 +60,7 @@ from jenny.utils.helpers import (
 )
 from jenny.utils.runtime import (
     EMPTY_FINAL_RESPONSE_MESSAGE,
+    OUTPUT_TRUNCATED_MESSAGE,
     build_goal_continue_message,
     build_length_recovery_message,
     ensure_nonempty_tool_result,
@@ -73,6 +79,18 @@ _PERSISTED_MODEL_ERROR_PLACEHOLDER = "[Assistant reply unavailable due to model 
 _PARTIAL_CONTENT_INTERRUPTED_MARKER = "[response was interrupted by an error]"
 _MAX_EMPTY_RETRIES = 2
 _MAX_LENGTH_RECOVERIES = 3
+# Tentativi per il troncamento a contenuto vuoto. Ogni tentativo deve differire
+# dal precedente (budget raddoppiato, poi anche effort abbassato): ripetere una
+# richiesta identica contro lo stesso tetto non può che ri-troncare.
+_MAX_BLANK_TRUNCATION_RETRIES = 2
+# Effort di fallback, per impedire al thinking di rimangiarsi tutto il budget.
+# Normalmente applicato dal secondo tentativo (così, se il gateway rifiuta il
+# parametro, un tentativo col solo budget alzato è già stato speso), ma subito
+# quando la finestra non lascia spazio per alzare il budget.
+_TRUNCATION_FALLBACK_EFFORT = "low"
+_TRUNCATION_LOW_EFFORTS = frozenset({"none", "minimal", "minimum", "low"})
+# Margine lasciato libero nella finestra quando si alza il budget di output.
+_OUTPUT_BUDGET_HEADROOM = 2048
 _MAX_INJECTIONS_PER_TURN = 3
 _MAX_INJECTION_CYCLES = 5
 # read_file is the recovery path for persisted results; exempting it prevents persist->read->persist loops.
@@ -164,7 +182,11 @@ class _RunCounters:
     workspace_violation_counts: dict[str, int] = field(default_factory=dict)
     empty_content_retries: int = 0
     length_recovery_count: int = 0
+    blank_truncation_retries: int = 0
     context_length_retries: int = 0
+    # Override di generazione per la prossima richiesta (budget/effort alzati dal
+    # recovery del troncamento). Resettato coi contatori dopo una fase tool.
+    request_overrides: RequestOverrides | None = None
     had_injections: bool = False
     injection_cycles: int = 0
     images_stripped: bool = False
@@ -390,7 +412,14 @@ class AgentRunner(RequestExecutionMixin, ToolExecutionMixin):
                 session_key=spec.session_key,
             )
             await hook.before_iteration(context)
-            response = await self._request_model(spec, messages_for_model, hook, context)
+            # Il budget effettivo va catturato *prima* della chiamata: è quello
+            # che il classificatore confronta con l'usage riportato per capire se
+            # la risposta è finita contro il tetto.
+            request_overrides = state.request_overrides
+            output_budget = self._effective_max_tokens(spec, request_overrides)
+            response = await self._request_model(
+                spec, messages_for_model, hook, context, request_overrides
+            )
             context.response = response
             context.tool_calls = list(response.tool_calls)
             if response.images_stripped:
@@ -427,19 +456,33 @@ class AgentRunner(RequestExecutionMixin, ToolExecutionMixin):
 
             clean = hook.finalize_content(context, response.content)
 
-            # --- Empty-content retry + finalization retry ---
-            verdict, response, clean = await self._recover_empty_content(
-                spec, hook, context, response, clean, raw_usage, state,
-                messages_for_model, iteration,
-            )
-            if verdict == "continue":
-                continue
+            # Esito nominale: il dispatch sotto è uno switch su questo, non una
+            # catena di guardie che si escludono per accidente (vedi
+            # ``agent/response_outcome.py``).
+            outcome = classify_response(response, clean, max_tokens=output_budget)
 
-            # --- Length recovery (output troncato) ---
-            if await self._recover_length(
-                spec, hook, context, response, clean, messages, state, iteration
-            ) == "continue":
-                continue
+            # --- Troncamento senza testo utile: ritenta con parametri diversi ---
+            if outcome is ResponseOutcome.TRUNCATED_BLANK:
+                if await self._recover_blank_truncation(
+                    spec, hook, context, response, state, raw_usage, output_budget, iteration
+                ) == "continue":
+                    continue
+
+            # --- Empty-content retry + finalization retry ---
+            if outcome is ResponseOutcome.EMPTY:
+                verdict, response, clean = await self._recover_empty_content(
+                    spec, hook, context, response, clean, raw_usage, state,
+                    messages_for_model, iteration,
+                )
+                if verdict == "continue":
+                    continue
+
+            # --- Length recovery (output troncato con testo parziale) ---
+            if outcome is ResponseOutcome.TRUNCATED_WITH_TEXT:
+                if await self._recover_length(
+                    spec, hook, context, response, clean, messages, state, iteration
+                ) == "continue":
+                    continue
 
             assistant_message: dict[str, Any] | None = None
             if response.finish_reason != "error" and not is_blank_text(clean):
@@ -484,7 +527,8 @@ class AgentRunner(RequestExecutionMixin, ToolExecutionMixin):
             # --- Terminal: blank final response ---
             if is_blank_text(clean):
                 if await self._finish_on_blank(
-                    spec, hook, context, messages, state
+                    spec, hook, context, messages, state,
+                    truncated=outcome is ResponseOutcome.TRUNCATED_BLANK,
                 ) == "continue":
                     continue
                 break
@@ -659,6 +703,12 @@ class AgentRunner(RequestExecutionMixin, ToolExecutionMixin):
         )
         state.empty_content_retries = 0
         state.length_recovery_count = 0
+        # Il contatore si azzera (l'iterazione può ri-escalare se serve) ma
+        # ``request_overrides`` no: il budget più alto è una proprietà di quanto
+        # è verboso *questo turno*, non del singolo fallimento risolto. Ributtarlo
+        # al valore di partenza garantirebbe di ri-sbattere sullo stesso muro,
+        # sprecando un'altra chiamata per riscoprire ciò che già sappiamo.
+        state.blank_truncation_retries = 0
         # Checkpoint 1: drain injections after tools, before next LLM call
         _drained, state.injection_cycles = await self._try_drain_injections(
             spec, messages, None, state.injection_cycles,
@@ -704,7 +754,7 @@ class AgentRunner(RequestExecutionMixin, ToolExecutionMixin):
             if hook.wants_streaming():
                 await hook.on_stream_end(context, resuming=False)
             response, retry_messages = await self._request_finalization_retry(
-                spec, messages_for_model
+                spec, messages_for_model, state.request_overrides
             )
             retry_usage = self._usage_or_estimate(spec, retry_messages, response)
             self._accumulate_usage(state.usage, retry_usage)
@@ -726,15 +776,21 @@ class AgentRunner(RequestExecutionMixin, ToolExecutionMixin):
         state: _RunCounters,
         iteration: int,
     ) -> Literal["continue", "proceed"]:
-        if response.finish_reason == "length" and not is_blank_text(clean):
+        # Il troncamento lo stabilisce il chiamante via ``classify_response``, che
+        # riconosce anche i provider che non riportano ``finish_reason == "length"``.
+        # Qui resta solo l'invariante di questo ramo: c'è testo da continuare.
+        if not is_blank_text(clean):
             state.length_recovery_count += 1
             if state.length_recovery_count <= _MAX_LENGTH_RECOVERIES:
                 logger.info(
-                    "Output truncated on turn {} for {} ({}/{}); continuing",
+                    "Output truncated on turn {} for {} ({}/{}, finish_reason='{}', "
+                    "completion={}); continuing",
                     iteration,
                     spec.session_key or "default",
                     state.length_recovery_count,
                     _MAX_LENGTH_RECOVERIES,
+                    response.finish_reason,
+                    reported_completion_tokens(response),
                 )
                 if hook.wants_streaming():
                     await hook.on_stream_end(context, resuming=True)
@@ -747,6 +803,134 @@ class AgentRunner(RequestExecutionMixin, ToolExecutionMixin):
                 await hook.after_iteration(context)
                 return "continue"
         return "proceed"
+
+    def _effective_max_tokens(
+        self, spec: AgentRunSpec, overrides: RequestOverrides | None
+    ) -> int | None:
+        """Tetto di output effettivo per la prossima richiesta.
+
+        Quando ``spec.max_tokens`` è ``None`` il tetto reale è quello del
+        provider: senza questo fallback il rilevamento del troncamento sarebbe
+        cieco proprio nelle configurazioni che non impostano ``maxTokens``.
+        """
+        if overrides is not None and overrides.max_tokens is not None:
+            return overrides.max_tokens
+        if spec.max_tokens is not None:
+            return spec.max_tokens
+        generation = getattr(self.provider, "generation", None)
+        fallback = getattr(generation, "max_tokens", None)
+        return fallback if isinstance(fallback, int) and fallback > 0 else None
+
+    def _escalated_output_budget(
+        self,
+        spec: AgentRunSpec,
+        current: int | None,
+        raw_usage: dict[str, int],
+    ) -> int | None:
+        """Budget di output raddoppiato, o ``None`` se non c'è spazio per crescere.
+
+        Il vincolo è la finestra di contesto residua: alzare il tetto oltre lo
+        spazio disponibile scambierebbe un troncamento con un errore di context
+        length.
+        """
+        if not current or current <= 0:
+            return None
+        target = current * 2
+        window = spec.context_window_tokens
+        if window is None:
+            # Finestra non dichiarata (costruzione diretta dello spec): senza
+            # finestra non si può affermare che lo spazio manchi, quindi si alza
+            # comunque. Un eventuale overflow resta coperto da
+            # ``_recover_context_overflow``.
+            return target
+        prompt_tokens = max(0, raw_usage.get("prompt_tokens", 0))
+        room = window - prompt_tokens - _OUTPUT_BUDGET_HEADROOM
+        if room <= current:
+            return None
+        return min(target, room)
+
+    async def _recover_blank_truncation(
+        self,
+        spec: AgentRunSpec,
+        hook: AgentHook,
+        context: AgentHookContext,
+        response: LLMResponse,
+        state: _RunCounters,
+        raw_usage: dict[str, int],
+        output_budget: int | None,
+        iteration: int,
+    ) -> Literal["continue", "proceed"]:
+        """Ritenta un troncamento a contenuto vuoto cambiando i *parametri*.
+
+        Non tocca la conversazione, di proposito: qui il modello non ha prodotto
+        niente di visibile, quindi non c'è nessun output parziale da continuare —
+        e siccome diverse API scartano il ``reasoning_content`` dei turni
+        precedenti, chiedere di "continuare da dove eri" sarebbe un'istruzione
+        che il modello non può soddisfare. Cambia invece ciò che ha causato il
+        muro: prima il budget, poi anche l'effort del reasoning.
+        """
+        if state.blank_truncation_retries >= _MAX_BLANK_TRUNCATION_RETRIES:
+            logger.warning(
+                "Output truncated with no usable content on turn {} for {} after {} "
+                "retries (finish_reason='{}', completion={}, budget={}); giving up",
+                iteration,
+                spec.session_key or "default",
+                state.blank_truncation_retries,
+                response.finish_reason,
+                reported_completion_tokens(response),
+                output_budget,
+            )
+            return "proceed"
+
+        state.blank_truncation_retries += 1
+        previous = state.request_overrides
+        new_budget = self._escalated_output_budget(spec, output_budget, raw_usage)
+        effort = previous.reasoning_effort if previous is not None else None
+        # L'effort si abbassa dal secondo tentativo: se il gateway rifiuta il
+        # parametro, un tentativo col solo budget alzato è già stato speso. Ma se
+        # il budget non può crescere (finestra piena) quello stadio non esiste, e
+        # l'effort è l'unica leva: usarla subito invece di arrendersi.
+        staged = state.blank_truncation_retries >= 2 or new_budget is None
+        if staged and effort is None:
+            current_effort = (spec.reasoning_effort or "").lower()
+            if current_effort not in _TRUNCATION_LOW_EFFORTS:
+                effort = _TRUNCATION_FALLBACK_EFFORT
+        if new_budget is None and effort is None:
+            logger.warning(
+                "Output truncated with no usable content on turn {} for {} "
+                "(finish_reason='{}', completion={}, budget={}); no headroom to "
+                "raise the output budget, giving up",
+                iteration,
+                spec.session_key or "default",
+                response.finish_reason,
+                reported_completion_tokens(response),
+                output_budget,
+            )
+            return "proceed"
+
+        state.request_overrides = RequestOverrides(
+            max_tokens=new_budget if new_budget is not None else (
+                previous.max_tokens if previous is not None else None
+            ),
+            reasoning_effort=effort,
+        )
+        logger.warning(
+            "Output truncated with no usable content on turn {} for {} ({}/{}, "
+            "finish_reason='{}', completion={}); retrying with max_tokens={} "
+            "reasoning_effort={}",
+            iteration,
+            spec.session_key or "default",
+            state.blank_truncation_retries,
+            _MAX_BLANK_TRUNCATION_RETRIES,
+            response.finish_reason,
+            reported_completion_tokens(response),
+            state.request_overrides.max_tokens,
+            state.request_overrides.reasoning_effort,
+        )
+        if hook.wants_streaming():
+            await hook.on_stream_end(context, resuming=True)
+        await hook.after_iteration(context)
+        return "continue"
 
     async def _recover_context_overflow(
         self,
@@ -844,9 +1028,16 @@ class AgentRunner(RequestExecutionMixin, ToolExecutionMixin):
         context: AgentHookContext,
         messages: list[dict[str, Any]],
         state: _RunCounters,
+        *,
+        truncated: bool = False,
     ) -> Literal["continue", "break"]:
-        state.final_content = EMPTY_FINAL_RESPONSE_MESSAGE
-        state.stop_reason = "empty_final_response"
+        # Due esiti distinti sotto lo stesso sintomo (contenuto vuoto): dirlo
+        # all'utente, invece di collassarli sul messaggio generico, è ciò che
+        # rende il limite di token diagnosticabile senza leggere i log.
+        state.final_content = (
+            OUTPUT_TRUNCATED_MESSAGE if truncated else EMPTY_FINAL_RESPONSE_MESSAGE
+        )
+        state.stop_reason = "output_truncated" if truncated else "empty_final_response"
         state.error = state.final_content
         self._append_final_message(messages, state.final_content)
         context.final_content = state.final_content

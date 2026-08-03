@@ -46,11 +46,18 @@ class AgentDefaults(Base):
     """Default agent configuration."""
 
     model: str = ""
-    max_tokens: int = 8192
+    # Tetto per singola risposta. Sui reasoning model il thinking pesa su questo
+    # stesso budget: con 8192 un turno che pianifica a lungo lo consumava tutto
+    # prima di dire qualcosa. 16384 lascia margine restando dentro la finestra
+    # anche coi prompt più grossi osservati (~38k su 65536).
+    max_tokens: int = 16384
     context_window_tokens: int = 65536
     context_block_limit: int | None = None
     temperature: float = 0.1
-    reasoning_effort: str | None = None
+    # Esplicito invece di lasciare il default del provider: un reasoning model a
+    # briglia sciolta consuma tutto il budget di output in ragionamento su un
+    # compito aperto. "medium" limita il thinking senza appiattirlo.
+    reasoning_effort: str | None = "medium"
     max_tool_iterations: int = 200
     max_concurrent_subagents: int = Field(default=1, ge=1)
     max_tool_result_chars: int = 16000
