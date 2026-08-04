@@ -41,15 +41,20 @@ While waiting for a reply she switches between a "thinking" pose and, once text 
 
 Drag her instead of tapping and she takes flight: she hangs from your finger with a bit of pendulum physics, and on release falls, bounces, gets up, and walks back home to her docked position. It's a pure fidget interaction with no functional effect — dragging her doesn't send anything or change any setting.
 
-Three preferences control her, all in **Settings → Personalization → Mascot**:
+Four preferences control her, all in **Settings → Personalization → Mascot**:
 
 | Setting | Options | Default |
 |---|---|---|
 | Show mascot | on / off | On |
+| Mascot size | Small / Medium / Large | Medium |
 | Mascot position | Left / Right | Right |
 | Color mascot | color / black-and-white | Color |
 
-Like the theme, these three preferences are stored in this device's local storage — not in `config.json`, not in your encrypted backup. A reinstall brings her back showing, on the right, in color.
+Size is the side of the square she occupies — 120, 160 or 210 px. Medium is the size she has always been, so choosing nothing changes nothing. The rest of her geometry follows from it, including where the minichat bubble sits relative to her head, so she stays coherent at every size rather than growing out of her own speech balloon.
+
+The last three options stay on screen when she's switched off, greyed out and inert rather than removed. It reads oddly at first — controls you can see but not use — and it's on purpose: turning her off is exactly the moment you'd go looking for a way to keep her but calm her down, and hiding the options at that moment hid the answer to the question. Greyed-out is a promise about what you get back if you switch her on again.
+
+Like the theme, these four preferences are stored in this device's local storage — not in `config.json`, not in your encrypted backup. A reinstall brings her back showing, medium, on the right, in color.
 
 If your phone has "reduce motion" turned on at the OS level, Jenny respects it: the animated mouth-flap while she talks is skipped in favor of a static pose. The drag-to-fly gesture itself is a direct manipulation you control with your finger, so it still works if you choose to use it.
 

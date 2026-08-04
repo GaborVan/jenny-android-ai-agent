@@ -44,6 +44,19 @@ WELCOME_TEMPLATES: dict[str, str] = {
 
 _CONTEXT_WINDOW_TOKEN_OPTIONS = {65_536, 262_144}
 _ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+# Vocabolario accettato dal layer provider (``openai_compat_provider._build_kwargs``
+# normalizza "minimum" in "minimal"). La select della WebUI ne espone un
+# sottoinsieme; l'API accetta tutto ciò che il provider sa gestire.
+_REASONING_EFFORT_VALUES = frozenset(
+    {"none", "minimal", "minimum", "low", "medium", "high"}
+)
+
+
+class _Unset:
+    """Sentinella per "campo assente dalla richiesta" dove ``None`` è un valore."""
+
+
+_UNSET = _Unset()
 
 
 class WebUISettingsError(ValueError):
@@ -272,6 +285,53 @@ def _parse_context_window_tokens(value: str | None) -> int | None:
     if parsed not in _CONTEXT_WINDOW_TOKEN_OPTIONS:
         raise WebUISettingsError("context_window_tokens must be 65536 or 262144")
     return parsed
+
+
+def _parse_max_tokens(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        parsed = int(value.strip())
+    except ValueError:
+        raise WebUISettingsError("max_tokens must be an integer") from None
+    if parsed < 1:
+        raise WebUISettingsError("max_tokens must be at least 1")
+    return parsed
+
+
+def _parse_temperature(value: str | None) -> float | None:
+    if value is None:
+        return None
+    # Un ``input type=number`` su locale italiano può arrivare con la virgola
+    # come separatore decimale; rifiutarlo trasformerebbe un campo legittimo in
+    # un errore che l'utente non sa spiegare.
+    normalized = value.strip().replace(",", ".")
+    try:
+        parsed = float(normalized)
+    except ValueError:
+        raise WebUISettingsError("temperature must be a number") from None
+    if not 0.0 <= parsed <= 2.0:
+        raise WebUISettingsError("temperature must be between 0 and 2")
+    return parsed
+
+
+def _parse_reasoning_effort(value: str | None) -> str | None | _Unset:
+    """Valida l'effort, distinguendo "non inviato" da "azzerato".
+
+    La select manda la stringa vuota per l'opzione "—", che significa "lascia
+    decidere al provider" e va scritta come ``None``. ``_UNSET`` è il caso in
+    cui il campo non è nella richiesta: senza questa distinzione un update di un
+    altro campo azzererebbe l'effort come effetto collaterale.
+    """
+    if value is None:
+        return _UNSET
+    normalized = value.strip().lower()
+    if not normalized:
+        return None
+    if normalized not in _REASONING_EFFORT_VALUES:
+        allowed = ", ".join(sorted(_REASONING_EFFORT_VALUES))
+        raise WebUISettingsError(f"reasoning_effort must be one of: {allowed}")
+    return normalized
 
 
 def _is_first_run(config: Any = None) -> bool:
@@ -545,6 +605,30 @@ def _apply_agent_settings(config: Config, query: QueryParams) -> tuple[bool, boo
         and defaults.context_window_tokens != context_window_tokens
     ):
         defaults.context_window_tokens = context_window_tokens
+        changed = True
+
+    # I tre parametri di generazione. La WebUI li agganciava già all'auto-save
+    # ma qui non c'era nessun ramo a raccoglierli: la richiesta arrivava,
+    # ``changed`` restava False, e il client mostrava "Saved!" perché la risposta
+    # è 200 comunque. Erano campi decorativi.
+    max_tokens = _parse_max_tokens(_query_first_alias(query, "max_tokens", "maxTokens"))
+    if max_tokens is not None and defaults.max_tokens != max_tokens:
+        defaults.max_tokens = max_tokens
+        changed = True
+
+    temperature = _parse_temperature(_query_first(query, "temperature"))
+    if temperature is not None and defaults.temperature != temperature:
+        defaults.temperature = temperature
+        changed = True
+
+    reasoning_effort = _parse_reasoning_effort(
+        _query_first_alias(query, "reasoning_effort", "reasoningEffort")
+    )
+    if (
+        not isinstance(reasoning_effort, _Unset)
+        and defaults.reasoning_effort != reasoning_effort
+    ):
+        defaults.reasoning_effort = reasoning_effort
         changed = True
 
     timezone = _query_first(query, "timezone")

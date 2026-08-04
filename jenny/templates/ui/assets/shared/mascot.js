@@ -9,6 +9,12 @@
 const VISIBLE_KEY = 'jenny-mascotte-visible';
 const SIDE_KEY = 'jenny-mascotte-side';
 const COLOR_KEY = 'jenny-mascotte-color';
+const SIZE_KEY = 'jenny-mascotte-size';
+
+/** Lato del canvas quadrato per ogni taglia. 'md' è il valore storico e resta
+ *  il default; la geometria in mobile-style.css deriva tutta da --jenny-size,
+ *  quindi qui basta scrivere il pixel. */
+export const MASCOT_SIZES = { sm: 120, md: 160, lg: 210 };
 
 export function mascotVisible() {
   const v = localStorage.getItem(VISIBLE_KEY);
@@ -50,6 +56,31 @@ export function setMascotColor(on) {
     detail: { visible: mascotVisible(), side: mascotSide(), color: !!on },
   }));
   return !!on;
+}
+
+export function mascotSize() {
+  const s = localStorage.getItem(SIZE_KEY);
+  return s in MASCOT_SIZES ? s : 'md'; // default: media (comportamento storico)
+}
+
+export function setMascotSize(size) {
+  const normalized = size in MASCOT_SIZES ? size : 'md';
+  localStorage.setItem(SIZE_KEY, normalized);
+  applyMascotSize();
+  window.dispatchEvent(new CustomEvent('mascotchange', {
+    detail: {
+      visible: mascotVisible(), side: mascotSide(), color: mascotColor(), size: normalized,
+    },
+  }));
+  return normalized;
+}
+
+/** Scrive la taglia attiva su <html> come --jenny-size. Da chiamare anche
+ *  all'avvio: il default CSS copre solo 'md'. */
+export function applyMascotSize() {
+  document.documentElement.style.setProperty(
+    '--jenny-size', `${MASCOT_SIZES[mascotSize()]}px`
+  );
 }
 
 /** Rimappa il path base di una posa (jenny-<name>.webp) alla variante attiva.

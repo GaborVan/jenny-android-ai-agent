@@ -383,3 +383,19 @@ async def test_onboarding_save_unexpected_error_maps_to_500(config_path, monkeyp
     )
     assert response.status_code == 500
     assert b"kaboom" not in response.body
+
+
+async def test_settings_update_fires_on_settings_changed_for_generation_params(
+    config_path,
+) -> None:
+    """I parametri di generazione vivono in ``provider.generation``, costruito una
+    volta in ``factory.make_provider``: senza rebuild resterebbero scritti nel
+    config e inerti fino al riavvio, e la UI non mostra ``requires_restart``."""
+    for field in ("max_tokens=16384", "temperature=0.5", "reasoning_effort=medium"):
+        on_changed = MagicMock()
+        router = _router(on_settings_changed=on_changed)
+        response = await router.dispatch(
+            _request(f"/api/settings/update?{field}"), "/api/settings/update"
+        )
+        assert response.status_code == 200, field
+        on_changed.assert_called_once()

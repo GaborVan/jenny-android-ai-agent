@@ -114,7 +114,18 @@ class WebUISettingsRouter:
             payload = await update_agent_settings(query)
         except WebUISettingsError as e:
             return self._error_response(e.status, e.message)
-        if "model" in query or "default_provider" in query:
+        # I parametri di generazione vivono in provider.generation, costruito una
+        # volta in factory.make_provider: senza rebuild resterebbero scritti nel
+        # config e inerti fino al riavvio, e la UI non mostra requires_restart.
+        if any(
+            key in query
+            for key in (
+                "model", "default_provider",
+                "max_tokens", "maxTokens",
+                "temperature",
+                "reasoning_effort", "reasoningEffort",
+            )
+        ):
             self._fire_settings_changed()
         return self._json_response(payload)
 

@@ -108,6 +108,7 @@ _UI_MANIFEST = [
     "assets/shared/api-client.js",
     "assets/shared/backup-flow.js",
     "assets/shared/dialog.js",
+    "assets/shared/home-view.js",
     "assets/shared/i18n.js",
     "assets/shared/image-handler.js",
     "assets/shared/image-lightbox.js",

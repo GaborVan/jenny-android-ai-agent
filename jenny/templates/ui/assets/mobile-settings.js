@@ -8,7 +8,9 @@ import { confirmDialog } from './shared/dialog.js';
 import { THEMES, DEFAULT_THEME, setTheme } from './shared/theme.js';
 import { advancedMode, setAdvancedMode } from './shared/advanced-mode.js';
 import { mascotVisible, setMascotVisible, mascotSide, setMascotSide,
-  mascotColor, setMascotColor } from './shared/mascot.js';
+  mascotColor, setMascotColor, mascotSize, setMascotSize,
+  MASCOT_SIZES } from './shared/mascot.js';
+import { homeView, setHomeView, HOME_VIEW_CHOICES } from './shared/home-view.js';
 import { TelegramPairingWidget } from './shared/telegram-pairing.js';
 import {
   runExportFlow,
@@ -124,6 +126,7 @@ export class SettingsController {
     const a = d.agent || {};
     return `
       ${this._renderTheme()}
+      ${this._renderHomeView()}
       <div class="theme-strip-eyebrow">${i18n.t('settings.botName')}</div>
       <div class="settings-field">
         <input type="text" class="settings-input" data-key="bot_name" value="${escapeHtml(a.bot_name || '')}" />
@@ -270,33 +273,29 @@ export class SettingsController {
   // ── Mascotte ───────────────────────────────────────────────────────
 
   /* Blocco della sezione "Personalizzazione", sotto la passerella dei temi:
-     mini-label, toggle di visibilità + scelta del lato (segmented
-     orizzontale), mostrata solo se visibile. */
+     mini-label, toggle di visibilità, taglia, lato e variante colore.
+     Le opzioni restano SEMPRE a schermo: nasconderle a mascotte spenta faceva
+     sembrare che l'unica scelta fosse tenerla o buttarla via — chi la spegneva
+     subito non scopriva mai che era personalizzabile. Da spenta si vedono
+     inerti (attributo `disabled`), come promessa di cosa si ottiene
+     riaccendendola. */
   _renderMascot() {
     const visible = mascotVisible();
     const side = mascotSide();
     const color = mascotColor();
-    const sideBlock = visible ? `
-      <div class="settings-field">
-        <label class="settings-label">${i18n.t('settings.mascotSide')}</label>
-        <div class="settings-seg">
-          <button class="settings-seg-btn${side === 'left' ? ' active' : ''}" data-mascot-side="left">
-            ${i18n.t('settings.mascotSideLeft')}
-            ${side === 'left' ? '<i class="ti ti-check"></i>' : ''}
-          </button>
-          <button class="settings-seg-btn${side === 'right' ? ' active' : ''}" data-mascot-side="right">
-            ${i18n.t('settings.mascotSideRight')}
-            ${side === 'right' ? '<i class="ti ti-check"></i>' : ''}
-          </button>
-        </div>
-      </div>
-      <div class="settings-field settings-toggle-row">
-        <label class="settings-label">${i18n.t('settings.mascotColor')}</label>
-        <label class="toggle-switch">
-          <input type="checkbox" id="mascot-color-toggle" ${color ? 'checked' : ''}>
-          <span class="toggle-slider"></span>
-        </label>
-      </div>` : '';
+    const size = mascotSize();
+    const off = visible ? '' : ' disabled';
+    const sizeLabels = {
+      sm: i18n.t('settings.mascotSizeSmall'),
+      md: i18n.t('settings.mascotSizeMedium'),
+      lg: i18n.t('settings.mascotSizeLarge'),
+    };
+    const sizeButtons = Object.keys(MASCOT_SIZES).map(id =>
+      `<button class="settings-seg-btn${id === size ? ' active' : ''}" data-mascot-size="${id}"${off}>
+        ${escapeHtml(sizeLabels[id])}
+        ${id === size ? '<i class="ti ti-check"></i>' : ''}
+      </button>`
+    ).join('');
     return `
       <div class="theme-strip-eyebrow">${i18n.t('settings.mascotSection')}</div>
       <div class="settings-field settings-toggle-row">
@@ -306,7 +305,55 @@ export class SettingsController {
           <span class="toggle-slider"></span>
         </label>
       </div>
-      ${sideBlock}`;
+      <div class="settings-field"${visible ? '' : ' data-settings-off'}>
+        <label class="settings-label">${i18n.t('settings.mascotSize')}</label>
+        <div class="settings-seg">${sizeButtons}</div>
+      </div>
+      <div class="settings-field"${visible ? '' : ' data-settings-off'}>
+        <label class="settings-label">${i18n.t('settings.mascotSide')}</label>
+        <div class="settings-seg">
+          <button class="settings-seg-btn${side === 'left' ? ' active' : ''}" data-mascot-side="left"${off}>
+            ${i18n.t('settings.mascotSideLeft')}
+            ${side === 'left' ? '<i class="ti ti-check"></i>' : ''}
+          </button>
+          <button class="settings-seg-btn${side === 'right' ? ' active' : ''}" data-mascot-side="right"${off}>
+            ${i18n.t('settings.mascotSideRight')}
+            ${side === 'right' ? '<i class="ti ti-check"></i>' : ''}
+          </button>
+        </div>
+      </div>
+      <div class="settings-field settings-toggle-row"${visible ? '' : ' data-settings-off'}>
+        <label class="settings-label">${i18n.t('settings.mascotColor')}</label>
+        <label class="toggle-switch">
+          <input type="checkbox" id="mascot-color-toggle" ${color ? 'checked' : ''}${off}>
+          <span class="toggle-slider"></span>
+        </label>
+      </div>`;
+  }
+
+  // ── Tasto Home ─────────────────────────────────────────────────────
+
+  /* Da launcher, Home significa "torna alla schermata iniziale": qui si sceglie
+     quale sia. Select e non segmented: quattro voci non stanno in riga su un
+     telefono. Le etichette delle viste sono quelle del dock (nav.*), così
+     restano allineate a quello che si vede nella barra. */
+  _renderHomeView() {
+    const current = homeView();
+    const labels = {
+      chat: i18n.t('nav.chat'),
+      apps: i18n.t('nav.apps'),
+      workspace: i18n.t('nav.workspace'),
+      last: i18n.t('settings.homeLast'),
+    };
+    const options = HOME_VIEW_CHOICES.map(id =>
+      `<option value="${id}"${id === current ? ' selected' : ''}>${escapeHtml(labels[id])}</option>`
+    ).join('');
+    return `
+      <div class="theme-strip-eyebrow">${i18n.t('settings.homeSection')}</div>
+      <div class="settings-field">
+        <select class="settings-select" id="home-view-select">${options}</select>
+        <p class="settings-hint" style="margin:6px 0 0;font-size:12px;color:var(--text-faint)">${i18n.t('settings.homeHint')}</p>
+      </div>`;
   }
 
   // ── Language ───────────────────────────────────────────────────────
@@ -617,11 +664,23 @@ export class SettingsController {
         this.render();
       });
     });
+    this.contentEl.querySelectorAll('[data-mascot-size]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        setMascotSize(btn.dataset.mascotSize);
+        this.render();
+      });
+    });
     // Mascotte: variante colore <-> bianco/nero (la companion ri-risolve le
     // pose via l'evento 'mascotchange', v. shared/mascot.js)
     const mascotColorToggle = this.contentEl.querySelector('#mascot-color-toggle');
     if (mascotColorToggle) {
       mascotColorToggle.addEventListener('change', () => setMascotColor(mascotColorToggle.checked));
+    }
+
+    // Tasto Home: nessun re-render, il valore serve solo a goHome()
+    const homeSelect = this.contentEl.querySelector('#home-view-select');
+    if (homeSelect) {
+      homeSelect.addEventListener('change', () => setHomeView(homeSelect.value));
     }
 
     // Theme selector — tap a card to switch theme

@@ -212,7 +212,7 @@ No skills available.
 
 - Wipes the rendered message list from the screen.
 - Prints a local system line: `Chat cleared.`
-- Resets the WebUI's own scroll/history cursor so older messages reload from the beginning on scroll-up.
+- Disarms the WebUI's own history pagination, so the cleared screen stays cleared: scrolling up does not pull the older messages back. They reappear the next time the chat view loads its history from scratch — reopening the app, or reloading the WebUI.
 
 It never reaches the gateway. The server-side session, the model's context, and the persisted transcript are all completely untouched.
 
@@ -224,11 +224,11 @@ These two commands are easy to confuse and do genuinely different things — and
 |---|---|---|
 | Where it runs | Server (gateway) | Client (WebUI only, never sent) |
 | What it clears | The model's context (what the LLM remembers) | Only what's drawn on your screen right now |
-| Effect on the visible chat | Nothing is erased; adds a "New session started." separator | Wipes the screen; next scroll-up reloads history from the server |
+| Effect on the visible chat | Nothing is erased; adds a "New session started." separator | Wipes the screen; stays wiped until the app is reopened |
 | Effect on the persisted transcript | Untouched — it's a separate, permanent log | Untouched |
 | In `/help`? | Yes | No |
 
-In short: **`/new` changes what the model remembers but leaves everything on screen; `/clear` changes what you see but leaves everything the model remembers and everything stored on the server untouched.** If you want a genuinely blank-looking chat that the model has also forgotten, you need `/new` — `/clear` alone will just come back the moment you scroll up or reopen the app. If you want to actually forget content, `/new` is still not permanent deletion: the discarded messages are archived for Dream, not destroyed, and the full transcript with everything before the separator is still visible on screen.
+In short: **`/new` changes what the model remembers but leaves everything on screen; `/clear` changes what you see but leaves everything the model remembers and everything stored on the server untouched.** If you want a genuinely blank-looking chat that the model has also forgotten, you need `/new` — `/clear` alone hides nothing permanently, and everything comes back the next time you reopen the app. If you want to actually forget content, `/new` is still not permanent deletion: the discarded messages are archived for Dream, not destroyed, and the full transcript with everything before the separator is still visible on screen.
 
 ## Periodic tasks (HEARTBEAT.md)
 

@@ -10,6 +10,7 @@ import runtime verso ``runner`` → nessun ciclo.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -33,6 +34,20 @@ if TYPE_CHECKING:
     from jenny.agent.runner import AgentRunSpec
 
 
+@dataclass(frozen=True, slots=True)
+class RequestOverrides:
+    """Parametri di generazione che sovrascrivono lo ``spec`` per una richiesta.
+
+    Esiste perché i recovery devono poter cambiare *i parametri* della richiesta
+    (non solo la conversazione) senza mutare lo ``spec``, che è la config del
+    chiamante e vale per tutto il run. Portata da ``_RunCounters`` e resettata
+    coi contatori dopo una fase tool riuscita.
+    """
+
+    max_tokens: int | None = None
+    reasoning_effort: str | None = None
+
+
 class RequestExecutionMixin:
     """Chiamata modello + finalizzazione (mixin di AgentRunner)."""
 
@@ -42,6 +57,7 @@ class RequestExecutionMixin:
         messages: list[dict[str, Any]],
         *,
         tools: list[dict[str, Any]] | None,
+        overrides: RequestOverrides | None = None,
     ) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
             "messages": messages,
@@ -50,12 +66,19 @@ class RequestExecutionMixin:
             "retry_mode": spec.provider_retry_mode,
             "on_retry_wait": spec.retry_wait_callback,
         }
+        max_tokens = spec.max_tokens
+        reasoning_effort = spec.reasoning_effort
+        if overrides is not None:
+            if overrides.max_tokens is not None:
+                max_tokens = overrides.max_tokens
+            if overrides.reasoning_effort is not None:
+                reasoning_effort = overrides.reasoning_effort
         if spec.temperature is not None:
             kwargs["temperature"] = spec.temperature
-        if spec.max_tokens is not None:
-            kwargs["max_tokens"] = spec.max_tokens
-        if spec.reasoning_effort is not None:
-            kwargs["reasoning_effort"] = spec.reasoning_effort
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+        if reasoning_effort is not None:
+            kwargs["reasoning_effort"] = reasoning_effort
         if spec.tool_choice is not None:
             kwargs["tool_choice"] = spec.tool_choice
         return kwargs
@@ -66,6 +89,7 @@ class RequestExecutionMixin:
         messages: list[dict[str, Any]],
         hook: AgentHook,
         context: AgentHookContext,
+        overrides: RequestOverrides | None = None,
     ):
         timeout_s: float | None = spec.llm_timeout_s
         if timeout_s is None:
@@ -82,6 +106,7 @@ class RequestExecutionMixin:
             spec,
             messages,
             tools=spec.tools.get_definitions(),
+            overrides=overrides,
         )
         wants_streaming = hook.wants_streaming()
         wants_progress_streaming = (
@@ -198,9 +223,10 @@ class RequestExecutionMixin:
         self,
         spec: AgentRunSpec,
         messages: list[dict[str, Any]],
+        overrides: RequestOverrides | None = None,
     ) -> tuple[LLMResponse, list[dict[str, Any]]]:
         retry_messages = self._finalization_retry_messages(messages)
-        response = await self._request_no_tools(spec, retry_messages)
+        response = await self._request_no_tools(spec, retry_messages, overrides)
         return response, retry_messages
 
     @staticmethod
@@ -254,8 +280,9 @@ class RequestExecutionMixin:
         self,
         spec: AgentRunSpec,
         messages: list[dict[str, Any]],
+        overrides: RequestOverrides | None = None,
     ) -> LLMResponse:
-        kwargs = self._build_request_kwargs(spec, messages, tools=None)
+        kwargs = self._build_request_kwargs(spec, messages, tools=None, overrides=overrides)
         return await self.provider.chat_with_retry(**kwargs)
 
     @staticmethod

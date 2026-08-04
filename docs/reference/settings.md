@@ -2,7 +2,7 @@
 
 Every control in the Settings screen, what it does, and its default value.
 
-Settings is a single accordion of 6 sections — Personalization, Model, Tools, Telegram, Backup & restore, System — all collapsed the first time you open the screen. There is no global Save button: almost every field saves itself, with a "Saved!" toast confirming the write. A few controls (theme, mascot, language, Developer mode) live entirely on the device and never touch `config.json` at all — those are called out explicitly below.
+Settings is a single accordion of 6 sections — Personalization, Model, Tools, Telegram, Backup & restore, System — all collapsed the first time you open the screen. There is no global Save button: almost every field saves itself, with a "Saved!" toast confirming the write. A few controls (theme, mascot, Home button, language, Developer mode) live entirely on the device and never touch `config.json` at all — those are called out explicitly below.
 
 ## How saving works
 
@@ -18,12 +18,16 @@ There is no confirmation step anywhere in Settings except for two destructive ac
 |---|---|---|
 | **Theme** | Tap a card to switch instantly across the whole UI (7 named themes, each card is a live preview). See [Themes and mascot](../using/themes-mascot.md). | Chanel |
 | **Mascot** — Show mascot | Toggle the floating companion on/off. | On |
-| **Mascot** — Mascot position | Left / Right, shown only while the mascot is visible. | Right |
+| **Mascot** — Mascot size | Small / Medium / Large — the side of her square, 120 / 160 / 210 px. | Medium |
+| **Mascot** — Mascot position | Left / Right. | Right |
 | **Mascot** — Color mascot | Off switches the mascot to black-and-white artwork. | On |
+| **Home button** | Which view Android's Home button lands on when Jenny is your launcher: Chat, Apps, Workspace, or "Wherever I was". See [Launcher setup](../start/launcher-setup.md). | Chat |
 | **Bot Name** | Free-text field for the assistant's name used in chat and the welcome message. Saves with the 600 ms debounce. Changing it flips `requires_restart` server-side, but the UI never tells you — see above. | "Jenny" |
 | **Language** | Segmented Italian/English switch. Changes the UI's own strings instantly; does **not** change `agents.defaults.language` in `config.json` (that field is only ever written once, during onboarding, and drives backend-generated text like the welcome message). | Detected from the browser/WebView locale at first launch |
 
-Theme, mascot preferences, and UI language all live in the browser's `localStorage`, per device — they are **not** part of `config.json` and are **not** included in encrypted backups. Reinstalling the app, or clearing app data, resets all of them to their defaults.
+The three mascot options below the toggle stay on screen when she's switched off — greyed out and inert, not removed. That's deliberate: hiding them meant that turning her off, which is exactly what someone does right before going looking for a way to tame her, deleted the answer to the question from the page.
+
+Theme, mascot preferences, the Home button destination, and UI language all live in the browser's `localStorage`, per device — they are **not** part of `config.json` and are **not** included in encrypted backups. Reinstalling the app, or clearing app data, resets all of them to their defaults.
 
 ## Model
 
@@ -56,15 +60,21 @@ A collapsed disclosure under API keys with three fields:
 
 | Field | Range | Default |
 |---|---|---|
-| Max Tokens | any integer | 8192 |
+| Max Tokens | integer ≥ 1 | 16384 |
 | Temperature | 0.0 – 2.0 | 0.1 |
-| Reasoning Effort | empty / low / medium / high | empty (model/provider decides) |
+| Reasoning Effort | empty / low / medium / high | medium |
 
-**These three fields do not save.** The UI sends them to the same settings-update endpoint as Bot Name, and shows the same "Saved!" toast — but the backend handler that processes that endpoint only reads `model`, `default_provider`, `context_window_tokens`, `timezone`, `bot_name`, `bot_icon`, and `tool_hint_max_length`. Max Tokens, Temperature, and Reasoning Effort are silently dropped; nothing is written to `config.json`, and the field reverts to its previous value the next time Settings reloads. The toast is a false positive.
+All three save, with the same 600 ms debounce as Bot Name. (In 0.3.x they did not: the UI sent them and showed "Saved!", but no backend branch read them. If you remember typing into these fields and finding your value gone, that's why — the toast was a false positive.)
 
-Today, the only way to actually change these three values is to edit `agents.defaults.max_tokens` / `agents.defaults.temperature` / `agents.defaults.reasoning_effort` directly in `workspace/config.json` (see [Configuration](configuration.md)), or to define a [model preset](configuration.md) with its own override and switch to it with `/model`.
+Max Tokens is the ceiling for a single reply. On a reasoning model the thinking counts against that same budget, which is why the default is 16384 rather than the 8192 of earlier versions: a turn that planned at length could spend the whole allowance before saying anything. Reasoning Effort defaults to `medium` instead of leaving the provider to decide, for the same reason — an unbridled reasoning model will happily spend the entire output budget thinking about an open-ended task.
 
-Reasoning Effort also has two provider-only values not offered by this select: `none` (disable thinking explicitly) and `adaptive` (Anthropic adaptive thinking) — these can only be set in `config.json`.
+A rejected value comes back as an error rather than being silently clamped: Max Tokens must parse as an integer of at least 1, and Temperature must land inside 0.0–2.0. Temperature accepts a comma as the decimal separator, since that is what an Italian-locale number input produces.
+
+Saving any of the three also rebuilds the provider, so the new value applies to your very next message. Nothing needs restarting — which matters, because these fields don't flip the `requires_restart` flag and the UI would never have told you.
+
+Reasoning Effort has values beyond the four in the select. The API accepts `none` (disable thinking explicitly) and `minimal` (plus `minimum`, a DashScope-native alias normalized to `minimal`), so those reach `config.json` if you write them through the endpoint — the select simply doesn't offer them. `adaptive` (Anthropic adaptive thinking) is the exception: the endpoint **rejects** it, so it can only be set by editing `config.json` directly. Note also that the select can't represent a value it doesn't list — if `config.json` holds `adaptive`, the field renders blank, and touching it replaces the value. <!-- verified in code: jenny/webui/settings_api.py (_parse_max_tokens / _parse_temperature / _parse_reasoning_effort) + jenny/webui/settings_routes.py (provider rebuild) + jenny/providers/anthropic_provider.py (adaptive) -->
+
+You can still set all three per-model instead of globally, by defining a [model preset](configuration.md) with its own override and switching to it with `/model`.
 
 ## Tools
 
@@ -133,7 +143,7 @@ Settings intentionally does not expose everything the backend supports. The foll
 - `agents.defaults.bot_icon` — the emoji shown next to the bot's name; has a working update endpoint but no field in the UI
 - `agents.defaults.context_window_tokens` — has a working update endpoint but no field in the UI (valid values: 65536 or 262144)
 - `agents.defaults.tool_hint_max_length` — has a working update endpoint but no field in the UI (default 40, range 20–500)
-- `agents.defaults.max_tokens`, `agents.defaults.temperature`, `agents.defaults.reasoning_effort` — the Advanced Parameters fields exist in the UI but currently do not save (see above); config.json is the only thing that actually works today
+- `agents.defaults.reasoning_effort` = `adaptive` — the Advanced Parameters select saves the effort (see above), but `adaptive` is not one of the values the endpoint accepts, so that one value is config-only
 - `gateway.heartbeat.*` — the proactive Heartbeat cadence and behavior
 - `agents.defaults.dream.*` — Dream memory-consolidation schedule
 - `websocket.show_reasoning` — whether the "reasoning" pill is shown/recorded at all for the WebUI channel (default true); no toggle in Settings

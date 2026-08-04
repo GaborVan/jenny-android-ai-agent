@@ -23,7 +23,8 @@ def _reset_recovery_flags() -> None:
 def test_load_config_missing_file_uses_defaults(tmp_path) -> None:
     config = load_config(tmp_path / "missing.json")
 
-    assert config.agents.defaults.max_tokens == 8192
+    assert config.agents.defaults.max_tokens == 16384
+    assert config.agents.defaults.reasoning_effort == "medium"
 
 
 def test_load_config_invalid_json_falls_back_to_defaults(tmp_path) -> None:
@@ -33,7 +34,7 @@ def test_load_config_invalid_json_falls_back_to_defaults(tmp_path) -> None:
 
     config = load_config(config_path)
 
-    assert config.agents.defaults.max_tokens == 8192
+    assert config.agents.defaults.max_tokens == 16384
     ctx = get_runtime_context()
     assert ctx.config_recovered_from == "defaults"
     # Il file rotto non viene distrutto: serve per capire cosa è successo.

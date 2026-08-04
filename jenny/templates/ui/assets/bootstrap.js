@@ -24,4 +24,13 @@
   if (mascotVisible === '0') {
     document.documentElement.setAttribute('data-mascotte-hidden', '1');
   }
+  // Taglia: stesso anti-flash. Il default CSS vale solo per 'md', quindi senza
+  // questo chi ha scelto un'altra taglia vedrebbe Jenny comparire media e poi
+  // ridimensionarsi. Le misure sono duplicate da MASCOT_SIZES in
+  // shared/mascot.js — qui non si possono importare moduli.
+  var mascotSizes = { sm: '120px', md: '160px', lg: '210px' };
+  var mascotSize = mascotSizes[localStorage.getItem('jenny-mascotte-size')];
+  if (mascotSize) {
+    document.documentElement.style.setProperty('--jenny-size', mascotSize);
+  }
 })();

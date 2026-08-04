@@ -161,6 +161,10 @@ class WebSocketChannel(OutboundSenderMixin):
         self._transcripts = gateway.transcripts
 
         self._stream_text_buffers: dict[tuple[str, str], list[str]] = {}
+        # Il reasoning si persiste una volta per segmento, non per chunk: qui si
+        # accumula il testo fra ``reasoning_delta`` e ``reasoning_end``. Vedi
+        # ``ws_sender.send_reasoning_delta``.
+        self._reasoning_text_buffers: dict[tuple[str, str], list[str]] = {}
 
     # -- BaseChannel methods inlined ----------------------------------------
 

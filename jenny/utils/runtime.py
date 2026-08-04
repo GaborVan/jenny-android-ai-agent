@@ -20,6 +20,17 @@ EMPTY_FINAL_RESPONSE_MESSAGE = (
     "Please try again or narrow the task."
 )
 
+# Distinto da EMPTY_FINAL_RESPONSE_MESSAGE: qui il modello ha prodotto output, ma
+# lo ha consumato tutto prima di dire qualcosa di utile (tipicamente reasoning
+# che riempie l'intero budget). Dirlo esplicitamente rende il caso
+# autodiagnosticabile: il messaggio generico "non ho prodotto una risposta"
+# nasconde la causa e manda a caccia del bug sbagliato.
+OUTPUT_TRUNCATED_MESSAGE = (
+    "I hit the per-response output token limit before producing an answer. "
+    "Raise the model's max output tokens, lower its reasoning effort, or ask for "
+    "a smaller piece of the task."
+)
+
 FINALIZATION_RETRY_PROMPT = (
     "Please provide your response to the user based on the conversation above."
 )
