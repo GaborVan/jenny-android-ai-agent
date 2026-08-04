@@ -18,6 +18,21 @@ It is also what makes the "dedicated device" use case work: a spare Android phon
 
 If you don't want the chooser to appear at all yet, just don't press Home after installing — Jenny only takes over the role once you actively pick it.
 
+## Where the Home button lands
+
+Once Jenny is your launcher, every press of Home arrives inside the app and means "collapse back to the home screen": any open mini-app closes, the drawer closes, any open dialog closes. What counts as the home screen is yours to choose, in **Settings → Personalization → Home button**:
+
+| Choice | What Home does |
+|---|---|
+| Chat | Lands on the chat (✿). The historical behavior, and still the default. |
+| Apps | Lands on the Apps tab. |
+| Workspace | Lands on the Workspace tab. |
+| Wherever I was | Changes no view at all — it closes the mini-app, drawer and dialogs and leaves you on whichever tab you were reading. |
+
+Earlier versions always went to chat, which is fine if you chat all day and less fine if you mostly use Jenny for mini-apps or files: every Home press threw away where you were. Leave the setting alone and nothing changes from before.
+
+This is separate from what happens on a cold start. When the app is launched fresh it reopens on the tab you last used, regardless of this setting — the setting governs the Home button specifically.
+
 ## Reverting to your normal launcher
 
 Android's Home-app selection is a system setting, not something Jenny controls once you've picked "Always." To change it back:
@@ -26,6 +41,8 @@ Android's Home-app selection is a system setting, not something Jenny controls o
 2. Select your previous launcher (Nova, the stock launcher, whatever you used before).
 
 Uninstalling Jenny also removes it from the list of launcher candidates automatically, but you don't need to uninstall it just to stop using it as Home — you can keep the app, keep your memory and conversation, and simply launch it like a normal app from your regular home screen instead.
+
+Used that way, Jenny sits in the app switcher like any other app, so swiping through Recents brings you back to it without going through the drawer. (Up to 0.3.0 it didn't: the activity declared `excludeFromRecents`, which earns nothing in launcher mode — the system already keeps the active home task out of Recents — and only ever applied to the case it hurt. Tapping the ongoing notification also brings you back.)
 
 ## A note on screen shape
 
