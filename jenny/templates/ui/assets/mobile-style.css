@@ -1481,6 +1481,20 @@ body {
   display: contents;
 }
 
+/* Hint testuale senza tool_events (transizioni dei subagent): stessa taglia e
+   stessa gerarchia dei chip dei tool, ma senza icona né interazione. */
+.chat-trace {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 9px;
+  background: var(--overlay);
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius-seg);
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+}
+
 .chat-tool {
   display: contents;
 }
@@ -1821,6 +1835,260 @@ body {
   font-size: 11px;
   color: var(--text-faint);
 }
+
+/* ── Subagent panel ──
+   Sta fra .chat-area e #input-bar: resta visibile mentre la chat scorre, così
+   con cinque job in parallelo si vede sempre chi sta lavorando e chi è fermo.
+   Su uno schermo quadrato (Titan 2) l'altezza è LA risorsa scarsa, quindi con
+   più di un subagent le card non si impilano: stanno su una riga sola che
+   scorre di lato (v. .is-carousel). Il pannello ha così un'altezza costante,
+   che non cresce dal primo al quinto subagent.
+   Tutta la compattezza si paga su padding e corpo del testo, mai sui bottoni:
+   restano 40px, perché Stop è il motivo per cui il pannello esiste. Il pannello
+   mostra solo lavoro vivo (+ i terminati del turno corrente), quindi a riposo
+   non esiste affatto: l'elemento è `hidden` e non occupa nemmeno l'header. */
+.subagents {
+  flex-shrink: 0;
+  border-top: 0.5px solid var(--border);
+  background: var(--bg);
+}
+
+/* Collassato è lo stato normale, quindi questi 34px sono il costo fisso del
+   pannello: erano 44, ma la barra è larga tutto lo schermo e resta comoda. */
+.subagents-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 34px;
+  padding: 0 12px;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.subagents-head:active { background: var(--active); }
+.subagents-head-icon { font-size: 14px; }
+.subagents-head-title { color: var(--text); }
+.subagents-head-count {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-faint);
+}
+.subagents-head-chevron {
+  margin-left: auto;
+  font-size: 15px;
+  transition: transform 0.15s ease;
+}
+.subagents-head[aria-expanded="false"] .subagents-head-chevron { transform: rotate(180deg); }
+
+/* Un job fermo si vede anche a pannello chiuso: l'header prende il colore
+   d'allarme, altrimenti "Jenny è muta da 4 minuti" resta indistinguibile da
+   "Jenny sta lavorando da 4 minuti". */
+.subagents.has-stalled .subagents-head { color: var(--warning); }
+.subagents.has-stalled .subagents-head-title { color: var(--warning); }
+
+.subagents-body {
+  padding: 0 12px 8px;
+}
+
+/* Carosello (più di un subagent): una riga, scorrimento laterale con snap.
+   La card sta all'82% così la successiva sbuca dal bordo — senza quel lembo
+   visibile nessuno scopre che si scorre. Barra di scorrimento nascosta: su
+   Android è solo rumore, il lembo è già l'affordance. I running vengono
+   spinti per primi dal renderer, quindi l'ordine di lettura è quello. */
+.subagents-body.is-carousel {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scroll-snap-type: x mandatory;
+  /* Pari al padding orizzontale: senza, ogni snap sfalsa la card di 12px. */
+  scroll-padding-left: 12px;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+}
+.subagents-body.is-carousel::-webkit-scrollbar { display: none; }
+.subagents-body.is-carousel > .sa-row {
+  flex: 0 0 82%;
+  scroll-snap-align: start;
+}
+
+/* Un subagent solo: non c'è niente da scorrere, la riga prende tutta la
+   larghezza e il carosello sparisce (nessuno swipe a vuoto). */
+.subagents-body.is-single { display: block; }
+
+/* Va dopo le due regole sopra: `hidden` è la chiusura del pannello, e un
+   `display` d'autore — anche a specificità pari — batte il `display:none` che
+   il browser dà a [hidden]. Senza questa riga il pannello si "chiude" solo
+   nella freccia e il corpo resta lì. */
+.subagents-body[hidden] { display: none; }
+
+/* Card compatta a due colonne: a sinistra il testo su righe corte, a destra i
+   controlli — se lo stato ne ammette (v. shared/subagent-policy.js). Su running
+   e stalled i 40px dei bottoni fanno da altezza alla card e una terza riga di
+   testo a sinistra costa zero; su done/cancelled/failed la colonna destra non
+   c'è e l'altezza scende al minimo qui sotto.
+
+   Il min-height non è cosmetico: da quando un tap sulla card apre il dettaglio,
+   la card *è* il bersaglio, e senza questo una card di solo testo scenderebbe
+   sotto i 40px di target. */
+.sa-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 44px;
+  box-sizing: border-box;
+  border: 0.5px solid var(--border);
+  border-left: 2px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--overlay);
+  padding: 5px 8px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+/* Il feedback al tap sta sulla card, non sul bordo colorato: quello codifica lo
+   stato e cambiarlo al tocco farebbe sembrare che il job sia cambiato. */
+.sa-row:active { background: var(--active); }
+.sa-row:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+.sa-row.state-running { border-left-color: var(--ok); }
+.sa-row.state-stalled {
+  border-left-color: var(--warning);
+  background: rgba(255, 255, 255, 0.02);
+}
+.sa-row.state-failed, .sa-row.state-cancelled { border-left-color: var(--error); }
+.sa-row.state-done { border-left-color: var(--text-faint); }
+
+.sa-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.sa-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.sa-label {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.25;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Il tipo di agente sta in testa alla riga meta, non più come pillola accanto
+   all'etichetta: la pillola costava 50px di larghezza (bordo + padding) a
+   un'etichetta che in carosello ne ha ~130. Qui è testo, non si comprime. */
+.sa-type {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.sa-state {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+.state-running .sa-state { color: var(--ok); }
+.state-stalled .sa-state { color: var(--warning); }
+.state-failed .sa-state,
+.state-cancelled .sa-state { color: var(--error); }
+
+/* Riga meta: i due orologi in testa e non comprimibili, il resto troncabile.
+   Prima l'idle era un flex item a sé fuori dalla meta; adesso apre la riga
+   insieme all'elapsed, che è la protezione più forte — l'ellipsis mangia
+   sempre la coda, e "fermo da 4 minuti" contro "al lavoro da 4 minuti" si
+   legge sui due numeri accostati. Troncabile è solo .sa-rest. */
+.sa-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.3;
+  color: var(--text-faint);
+}
+.sa-meta > * + *::before { content: "·"; margin-right: 5px; }
+.sa-clock, .sa-idle { flex-shrink: 0; white-space: nowrap; }
+.sa-idle-warn { color: var(--warning); }
+.sa-rest {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Consiglio sullo stallo: tronca senza pietà se la card è stretta, perché
+   l'allarme vero è l'ambra (bordo, stato, idle) più il pannello che si apre da
+   sé; questa riga è il suggerimento, non il segnale. */
+.sa-hint {
+  font-size: 10px;
+  line-height: 1.3;
+  color: var(--warning);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Una riga sola (prima erano due): in carosello l'altezza di tutte le card la
+   decide la più alta, e il riassunto è un promemoria, non il contenuto. */
+.sa-summary {
+  font-size: 10.5px;
+  line-height: 1.3;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sa-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+/* Icona sola, ma target pieno da 40px: l'etichetta resta in aria-label/title,
+   così il bottone è nominato per lo screen reader e sul long-press. Questi
+   40px non si toccano nemmeno se la card si accorcia ancora. */
+.sa-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  background: var(--overlay-strong);
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.sa-btn:active { background: var(--active); }
+.sa-btn[disabled] { opacity: 0.45; cursor: default; }
+.sa-btn i { font-size: 17px; }
+.sa-btn-stop { color: var(--error); }
 
 /* Media */
 .chat-media {
@@ -2721,6 +2989,634 @@ body {
 .oc-btn-confirm:active {
   filter: brightness(1.15);
   transform: scale(0.97);
+}
+
+/* ── Detail Dialog (dialog.js::detailDialog) ──
+   È un bottom sheet, non una card centrata. Ogni altra superficie di dettaglio
+   della UI — contesto workspace, app Android, skill, app Jenny — è un
+   `.oc-sheet`: piena larghezza, ancorata in basso, che sale dal bordo. Questa
+   era nata come variante del confirm (92vw sospesi in mezzo allo schermo) ed era
+   la sola eccezione: compariva di colpo con un margine per lato, e quel margine
+   lo pagavano le righe di attività, che sono testo monospazio dove ogni carattere
+   in meno tronca un nome di file o un path.
+
+   Del confirm resta solo la riga di bottoni in fondo (`.oc-dialog-buttons`).
+
+   Il tetto in altezza sta qui e non su `.oc-sheet` perché il sheet non ne ha
+   bisogno: gli altri contengono una lista corta e finita, questo un flusso che
+   cresce da sé mentre il subagent lavora. Senza tetto crescerebbe oltre il
+   viewport e — essendo ancorato in basso — spingerebbe fuori schermo la testata,
+   cioè la X: l'unica via d'uscita esplicita. In vh e non in px: su uno schermo
+   quadrato (Titan 2) un tetto in pixel è una scommessa sulla forma del display.
+
+   Specificità doppia su `.oc-detail-inner`: `.oc-sheet-inner` sta più in basso
+   nel file, quindi a pari specificità vincerebbe lui. */
+.oc-detail {
+  max-height: 92vh;
+}
+.oc-detail .oc-detail-inner {
+  display: flex;
+  flex-direction: column;
+  /* Il gap del sheet è tarato su una lista di bottoni; qui le zone del corpo
+     portano già i propri margini. */
+  gap: 0;
+  max-height: 92vh;
+  /* Meno del padding standard del sheet (20/24): ogni pixel tolto alla cornice
+     lo prende la lista di attività, che su un telaio da 430px vale una riga. */
+  padding: 16px 16px 18px;
+  box-sizing: border-box;
+}
+.oc-detail-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.oc-detail-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.35;
+  color: var(--text);
+  /* Nessun ellipsis: il titolo è l'etichetta del job, ed è la prima cosa per cui
+     si apre la modale — la card l'ha già troncata una volta. */
+  word-break: break-word;
+}
+/* 40px come i bottoni della card: è la via d'uscita principale su telefono. */
+.oc-detail-close {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  margin: -8px -8px 0 0;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.oc-detail-close:active { color: var(--text); }
+.oc-detail-close i { font-size: 19px; }
+/* Il corpo è un TELAIO, non una pagina: colonna flex con quattro zone, e una
+   sola di esse (la lista di attività) è elastica e scorre. `overflow-y: auto`
+   resta come rete — una piega aperta su un incarico lungo può sfondare il tetto
+   della modale — ma nel caso normale qui non si scorre affatto, ed è ciò che
+   toglie il ballo fra tre scroll annidati della prima versione. */
+.oc-detail-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+.oc-detail-actions { margin-top: 14px; }
+.oc-detail-actions:empty { margin-top: 0; }
+
+/* ── Zona 1: riepilogo ──
+   Una riga per stato, orologi e tipo. Erano cinque righe chiave/valore in cima
+   alla modale: incolonnate costavano mezzo schermo per dire quello che accostato
+   si legge in un colpo. Il pallino è lo stato in forma prima che in lettere, e
+   pulsa solo quando c'è davvero qualcosa in corso. */
+.sa-sum {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 7px;
+  flex-shrink: 0;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+.sa-sum > * + *:not(.sa-sum-hint)::before {
+  content: "·";
+  margin-right: 6px;
+  color: var(--text-faint);
+}
+.sa-sum-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text);
+}
+.sa-sum-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+.sa-sum.is-running .sa-sum-dot {
+  background: var(--ok);
+  animation: sa-dot-pulse 1.6s ease-in-out infinite;
+}
+.sa-sum.is-stalled .sa-sum-dot { background: var(--warning); }
+.sa-sum.is-stalled .sa-sum-state,
+.sa-sum.is-stalled .sa-idle { color: var(--warning); }
+.sa-sum.is-failed .sa-sum-dot,
+.sa-sum.is-cancelled .sa-sum-dot { background: var(--error); }
+.sa-sum.is-failed .sa-sum-state { color: var(--error); }
+/* Su base intera: la riga di stallo non è una voce del riepilogo, è la frase che
+   spiega perché è ambra — e lo spiega senza far a capo in mezzo ai numeri. */
+.sa-sum-hint {
+  flex-basis: 100%;
+  color: var(--warning);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+/* ── Zona 2: esito ──
+   Compare solo a lavoro finito, e allora è LA risposta: 13px sans, non 11px
+   monospazio in fondo alla modale come prima. La barra a sinistra ripete l'esito
+   in colore, così "andata bene" e "fallita" si distinguono senza leggere. */
+.sa-focus {
+  flex-shrink: 0;
+  padding: 8px 10px;
+  max-height: 26vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--overlay);
+  border-left: 2px solid var(--border-strong);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+.sa-focus[hidden] { display: none; }
+.sa-focus.is-ok { border-left-color: var(--ok); }
+.sa-focus.is-error { border-left-color: var(--error); }
+.sa-focus-key {
+  margin-bottom: 3px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.sa-focus-text {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ── Zona 4: pieghe (incarico, diagnostica) ──
+   `<details>` nativo: tiene da sé lo stato aperto/chiuso, quindi sopravvive al
+   refresh dello snapshot senza che il refresh debba saperlo. Chiuse costano una
+   riga da 34px ciascuna — aperte in cima costavano la metà utile della modale. */
+.sa-more { flex-shrink: 0; }
+.sa-fold { border-top: 0.5px solid var(--border); }
+.sa-fold-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  list-style: none;
+  cursor: pointer;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  -webkit-tap-highlight-color: transparent;
+}
+.sa-fold-head::-webkit-details-marker { display: none; }
+.sa-fold-head:active { color: var(--text); }
+.sa-fold-chevron {
+  flex-shrink: 0;
+  font-size: 14px;
+  color: var(--text-faint);
+  transition: transform 0.15s ease;
+}
+.sa-fold[open] > .sa-fold-head { color: var(--text); }
+.sa-fold[open] > .sa-fold-head .sa-fold-chevron { transform: rotate(90deg); }
+/* Il tetto è sulla piega, non sul `<pre>`: un solo contenitore di scroll per
+   contenuto, che è l'intera differenza fra questa modale e la precedente. */
+.sa-fold-body {
+  padding-bottom: 8px;
+  max-height: 26vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* Righe chiave/valore: la chiave a larghezza fissa così i valori si incolonnano
+   e "fase" si legge sotto "tentativo" senza cercarlo. Vivono solo nella piega
+   della diagnostica: è il posto dove una griglia da leggere con l'indice va
+   bene, perché la si apre quando qualcosa non torna. */
+.sa-detail-row {
+  display: flex;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+.sa-detail-key {
+  flex: 0 0 92px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.sa-detail-val {
+  flex: 1;
+  min-width: 0;
+  color: var(--text);
+  word-break: break-word;
+}
+/* pre + pre-wrap: il task è testo dell'utente, gli a capo sono informazione, ma
+   una riga lunghissima non deve poter allargare la modale. Il tetto in altezza
+   l'ha la piega che lo contiene. */
+.sa-detail-pre {
+  margin: 0;
+  padding: 8px 10px;
+  background: var(--overlay);
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+/* Nota sul tetto dei tentativi automatici: sta in fondo, accanto ai bottoni che
+   spiega, e qui va a capo quanto serve — era sulla card che dovevo tarare il
+   testo su due righe. */
+.sa-detail-note {
+  margin: 8px 0 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--warning);
+}
+.sa-detail-note[hidden] { display: none; }
+
+/* ── Zona 3: stream di attività ──
+   La parte viva — una riga per tool, per run di ragionamento, per iterazione —
+   dai frame `subagent_activity`, due volte al secondo. È la ragione per cui la
+   modale si apre, quindi nel telaio è l'unica zona ELASTICA: prende tutta
+   l'altezza che le altre tre non usano, e ci scorre dentro.
+
+   Il minimo sta QUI e non sulla lista, e non è un dettaglio: un `min-height` sul
+   figlio che scorre non lo fa scorrere, lo fa *sfondare* il riquadro del padre
+   (che non ritaglia) e finire sopra le pieghe. Sul contenitore invece è il corpo
+   — che è un contenitore di scroll — a farsene carico. In vh e non in px: su uno
+   schermo quadrato (Titan 2) un minimo in pixel è una scommessa sulla forma del
+   display. Non è monospazio a tutta larghezza — il nome del tool sì, la frase no,
+   perché è la frase che si legge. */
+.sa-stream {
+  flex: 1 1 auto;
+  /* 18vh ≈ tre righe su un Titan 2: è il pavimento, non la misura normale —
+     `flex-grow` le dà tutto lo spazio che le altre zone non usano. Tarato in
+     basso di proposito: con una piega aperta le zone fisse crescono, e un
+     pavimento alto qui sfonderebbe il corpo tagliando l'ultima riga utile
+     (la nota sul tetto dei rilanci, che spiega il bottone). */
+  min-height: 18vh;
+  display: flex;
+  flex-direction: column;
+  border-top: 0.5px solid var(--border);
+  padding-top: 8px;
+}
+.sa-stream-head {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.sa-stream-title {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.sa-stream-count {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-faint);
+}
+/* Indicatore di stato: pallino + parola. Il pallino pulsa SOLO in diretta —
+   un pallino fermo su una vista ferma è l'unica cosa onesta da mostrare, ed è
+   ciò che distingue "sta arrivando roba" da "stai guardando una fotografia". */
+.sa-stream-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+}
+.sa-stream-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+.sa-stream-live.is-live { color: var(--ok); }
+.sa-stream-live.is-live .sa-stream-dot {
+  background: var(--ok);
+  animation: sa-dot-pulse 1.6s ease-in-out infinite;
+}
+.sa-stream-live.is-frozen { color: var(--warning); }
+.sa-stream-live.is-frozen .sa-stream-dot { background: var(--warning); }
+@keyframes sa-dot-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.8); }
+}
+
+.sa-stream-note {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 10.5px;
+  line-height: 1.35;
+  color: var(--warning);
+}
+.sa-stream-note[hidden] { display: none; }
+/* Il bottone che rimette in moto la vista: 32px non 40 perché non è un'azione
+   sul lavoro (Stop lo è), è un rimedio a una vista ferma. */
+.sa-stream-resume {
+  flex-shrink: 0;
+  min-height: 32px;
+  padding: 0 10px;
+  background: var(--overlay-strong);
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  cursor: pointer;
+}
+.sa-stream-resume:active { background: var(--active); }
+.sa-stream-resume[hidden] { display: none; }
+
+/* La lista è l'unico contenitore di scroll del corpo, e prende esattamente lo
+   spazio che il telaio le concede: `min-height: 0` perché il pavimento è del
+   contenitore (v. sopra) — qui sarebbe la cosa che rompe il telaio invece di
+   difenderlo. `contain` sull'overscroll perché uno swipe in fondo alla lista non
+   deve trascinare la modale. */
+.sa-stream-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+.sa-stream-wait {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 0;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.sa-stream-wait .sa-ev-icon { animation: spin 1s linear infinite; }
+/* Job concluso senza traccia: nessuno spinner. Un'icona che gira su un lavoro
+   finito promette qualcosa che non arriverà mai. */
+.sa-stream-wait.is-over .sa-ev-icon { animation: none; }
+
+/* Pillola "roba nuova": compare solo quando l'utente è risalito a leggere, che
+   è l'unico caso in cui l'auto-scroll si ferma. */
+.sa-stream-jump {
+  display: block;
+  flex-shrink: 0;
+  width: 100%;
+  margin-top: 6px;
+  min-height: 30px;
+  background: var(--overlay-strong);
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius-seg);
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: 10.5px;
+  cursor: pointer;
+}
+.sa-stream-jump i { margin-right: 4px; font-size: 12px; }
+.sa-stream-jump:active { background: var(--active); }
+.sa-stream-jump[hidden] { display: none; }
+
+/* Riga di evento. L'icona a sinistra è la lettura a colpo d'occhio (che *tipo*
+   di cosa sta succedendo), la frase è quella del server e non viene mai
+   ricostruita qui, la durata sta a destra dove si incolonna. */
+.sa-ev {
+  padding: 3px 0;
+  border-bottom: 0.5px solid transparent;
+}
+.sa-ev-line {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+}
+.sa-ev-icon {
+  flex-shrink: 0;
+  width: 13px;
+  font-size: 12px;
+  color: var(--text-faint);
+  text-align: center;
+}
+.sa-ev-body {
+  flex: 1;
+  min-width: 0;
+}
+.sa-ev-main {
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--text);
+  /* Nessun ellipsis: la frase del server È l'informazione, e troncarla a metà
+     ("grepping src for \"fo") lascia l'utente a indovinare. Va a capo. */
+  word-break: break-word;
+}
+.sa-ev-name {
+  margin-right: 5px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+}
+.sa-ev-out {
+  font-size: 10.5px;
+  line-height: 1.35;
+  color: var(--text-muted);
+  word-break: break-word;
+}
+.sa-ev-out::before { content: "→ "; color: var(--text-faint); }
+.sa-ev-dur {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+/* In corso ≠ finito, e deve vedersi senza leggere: l'icona gira e il testo
+   prende il colore d'accento finché il `tool_end` non arriva. È la risposta a
+   "cosa sta facendo ADESSO", che era la domanda senza risposta. */
+/* Sfondo appena accennato sulla riga in corso: su temi in cui --accent coincide
+   col colore del testo (la palette di default) l'icona che gira è l'unico segnale,
+   e "cosa sta facendo adesso" deve trovarsi con un colpo d'occhio, non leggendo. */
+.sa-ev.is-pending {
+  background: var(--overlay);
+  border-radius: var(--radius-sm);
+}
+.sa-ev.is-pending .sa-ev-icon {
+  color: var(--accent);
+  animation: spin 1s linear infinite;
+}
+.sa-ev.is-pending .sa-ev-main { color: var(--text); }
+.sa-ev.is-pending .sa-ev-dur { color: var(--text-muted); }
+/* Il ragionamento non gira (non è una chiamata che finisce): pulsa, e la sua
+   durata ticchetta da sola perché il server la rimanda a ogni aggiornamento. */
+.sa-ev.kind-thinking.is-pending .sa-ev-icon,
+.sa-ev.kind-writing.is-pending .sa-ev-icon {
+  animation: sa-dot-pulse 1.6s ease-in-out infinite;
+}
+.sa-ev.kind-thinking .sa-ev-main,
+.sa-ev.kind-writing .sa-ev-main {
+  color: var(--text-muted);
+  font-style: italic;
+}
+.sa-ev.kind-iteration,
+.sa-ev.kind-phase {
+  padding: 2px 0;
+}
+.sa-ev.kind-iteration .sa-ev-main,
+.sa-ev.kind-phase .sa-ev-main {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-faint);
+}
+/* Esito ignoto (solo nel digest): ambra e ferma. Non è un errore e non è in
+   corso — è una chiamata di cui non sapremo mai com'è andata. */
+.sa-ev.is-unknown .sa-ev-icon { color: var(--warning); }
+.sa-ev.is-unknown .sa-ev-main { color: var(--text-muted); }
+.sa-ev.is-ok .sa-ev-icon { color: var(--ok); }
+.sa-ev.is-ok .sa-ev-main { color: var(--text); }
+.sa-ev.is-error .sa-ev-icon { color: var(--error); }
+.sa-ev.is-error .sa-ev-out { color: var(--error); }
+
+/* Buco nello stream: una riga che si vede, in ambra, con quanti eventi mancano.
+   Uno stream bucato che si presenta integro è peggio di un pannello statico,
+   perché si guadagna una fiducia che non merita — quindi il buco si disegna. */
+.sa-ev-hole {
+  margin: 6px 0 4px;
+  padding: 2px 0;
+  border-top: 0.5px dashed var(--warning);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: var(--warning);
+}
+
+/* ── Blocco "cosa ha fatto davvero" (chat) ──
+   Vive sotto la riga di trace della transizione di un subagent finito, nella
+   meta-row del turno: stessa gerarchia dei chip dei tool, subordinata alla
+   risposta. Chiuso per default e vuoto: il digest viene chiesto al gateway solo
+   al primo tap (la maggior parte di questi blocchi non viene mai aperta).
+
+   `display: contents` è l'idioma della meta-row, non un trucco: quella riga è un
+   flex-wrap di chip (v. `.chat-turn-meta`), e un wrapper con un box proprio vi
+   entra come *un* elemento — testata e corpo confinati in una colonna larga
+   quanto l'etichetta. Era il difetto: aperto, il digest restava un francobollo
+   accanto a "Show thinking" invece di prendere la riga come fanno il corpo del
+   thinking e i blocchi di output dei tool, che si sciolgono allo stesso modo
+   (`.chat-thinking`, `.chat-tool`, `.chat-tools`). Senza il wrapper la testata è
+   un chip come gli altri e il corpo un elemento a `width: 100%`, che nel wrap va
+   a capo da sé. Vale anche fuori dalla meta-row (il fallback in coda alla chat):
+   lì i due figli si impilano comunque. */
+.sa-digest {
+  display: contents;
+}
+/* Chip: stessa taglia e stessa forma di `.chat-thinking-header`. Sta nella stessa
+   riga e apre la stessa specie di cosa — se si distingue, si distingue a caso. */
+.sa-digest-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  /* Il chip non può essere più larga della riga: è ciò che dà a `.sa-digest-sub`
+     un limite contro cui troncare quando l'etichetta del job è lunga. */
+  max-width: 100%;
+  /* Sciolto il wrapper, il chip è figlia diretta del contenitore: nella meta-row
+     (flex a riga) è indifferente, ma nel fallback in coda alla chat — che è un
+     flex a colonna — senza questo lo `stretch` di default la allargherebbe a
+     tutta la chat, cioè l'opposto della gerarchia che deve avere. */
+  align-self: flex-start;
+  padding: 3px 9px;
+  background: var(--overlay);
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius-seg);
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: 10px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.sa-digest-head:active { background: var(--active); }
+.sa-digest-head > i:first-child {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--accent);
+}
+.sa-digest-label {
+  color: var(--text-muted);
+  font-weight: 400;
+  white-space: nowrap;
+}
+/* L'etichetta del job (o il conteggio dei passi dopo il caricamento) è la parte
+   sacrificabile: tronca lei, non "Cosa ha fatto davvero". */
+.sa-digest-sub {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sa-digest-chevron {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-faint);
+  transition: transform 0.15s ease;
+}
+.sa-digest.collapsed .sa-digest-chevron { transform: rotate(-90deg); }
+.sa-digest.collapsed .sa-digest-body { display: none; }
+.sa-digest.is-error .sa-digest-head > i:first-child { color: var(--error); }
+/* Aperto prende la riga intera, come il corpo del thinking: stessa larghezza,
+   stesso filetto a sinistra, stesso rientro. Il box che prima stava sul wrapper
+   vive qui — è il corpo che ha bisogno di un contorno, il chip ha già il suo. */
+.sa-digest-body {
+  width: 100%;
+  margin: 2px 0;
+  padding: 6px 12px;
+  border-left: 2px solid var(--accent);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: rgba(var(--accent-rgb), 0.04);
+  /* Un digest può avere decine di righe: scorre dentro sé invece di allungare
+     la chat di uno schermo intero. */
+  max-height: 40vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.sa-digest.is-error .sa-digest-body { border-left-color: var(--error); }
+.sa-digest-msg {
+  padding: 4px 0;
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+.sa-digest-msg.is-error { color: var(--error); }
+.sa-digest-live {
+  margin-bottom: 4px;
+  font-size: 10px;
+  line-height: 1.35;
+  color: var(--warning);
 }
 
 /* ══ Bottom Sheet ══ */

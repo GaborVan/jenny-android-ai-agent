@@ -26,7 +26,10 @@ from jenny.agent.subagent import SubagentManager
 from jenny.agent.tools.context import (
     RequestContext,
     bind_request_context,
+    bind_turn_id,
+    current_turn_id,
     reset_request_context,
+    reset_turn_id,
 )
 from jenny.agent.tools.file_state import FileStateStore, bind_file_states, reset_file_states
 from jenny.agent.tools.message import MessageTool
@@ -81,6 +84,14 @@ if TYPE_CHECKING:
     from jenny.cron.service import CronService
 
 
+def _new_turn_id(session_key: str) -> str:
+    """Identita di un turno: session key + istante d'avvio in nanosecondi.
+
+    Unico posto in cui si conia. La forma e quella che compare nei log
+    (``unified:default:1785845855643649792``), cosi l'identita che i tool vedono
+    in ``RequestContext.turn_id`` e letteralmente il turno tracciato nei log.
+    """
+    return f"{session_key}:{time.time_ns()}"
 
 
 class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, LoopTasksMixin):
@@ -134,6 +145,8 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
         model: str | None = None,
         max_iterations: int | None = None,
         max_concurrent_subagents: int | None = None,
+        subagent_stall_threshold_seconds: float | None = None,
+        subagent_tool_error_budget: int | None = None,
         context_window_tokens: int | None = None,
         context_block_limit: int | None = None,
         max_tool_result_chars: int | None = None,
@@ -154,6 +167,7 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
         model_presets_config: dict[str, Any] | None = None,
         initial_model_preset: str | None = None,
         ui_query: Any | None = None,
+        orchestrator_mode: bool | None = None,
     ):
         from jenny.config.schema import ToolsConfig
 
@@ -192,6 +206,13 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
         self.android_web_config = _tc.android_web
         self.exec_config = _tc.python_exec
         self.tool_choice = defaults.tool_choice
+        # Scope del registry principale: "orchestrator" (delega, nessun tool che
+        # gonfia la sessione) oppure "core" (comportamento storico). Il default
+        # viene da AgentDefaults, unica fonte del valore.
+        self.orchestrator_mode = (
+            orchestrator_mode if orchestrator_mode is not None
+            else defaults.orchestrator_mode
+        )
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
         self.extract_document_text = extract_document_text
@@ -203,7 +224,12 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
         self._last_usage: dict[str, int] = {}
         self._extra_hooks: list[AgentHook] = hooks or []
 
-        self.context = ContextBuilder(workspace, timezone=timezone, disabled_skills=disabled_skills)
+        self.context = ContextBuilder(
+            workspace,
+            timezone=timezone,
+            disabled_skills=disabled_skills,
+            orchestrator=self.orchestrator_mode,
+        )
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
         # One file-read/write tracker per logical session. The tool registry is
@@ -220,7 +246,14 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             disabled_skills=disabled_skills,
             max_iterations=self.max_iterations,
             max_concurrent_subagents=max_concurrent_subagents,
+            stall_threshold_s=subagent_stall_threshold_seconds,
+            tool_error_budget=subagent_tool_error_budget,
             llm_wall_timeout_for_session=lambda sk: runner_wall_llm_timeout_s(self.sessions, sk),
+            # LO STESSO SessionManager del loop, non uno nuovo: la storia Tier-2
+            # dei subagent (``subagent:<lineage_id>``) vive nella stessa
+            # directory delle sessioni, e due istanze avrebbero due cache
+            # divergenti sugli stessi file.
+            session_manager=self.sessions,
         )
         self._max_messages = max_messages if max_messages > 0 else 120
         self._running = False
@@ -319,6 +352,8 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             model=model,
             max_iterations=defaults.max_tool_iterations,
             max_concurrent_subagents=defaults.max_concurrent_subagents,
+            subagent_stall_threshold_seconds=defaults.subagent_stall_threshold_seconds,
+            subagent_tool_error_budget=defaults.subagent_tool_error_budget,
             context_window_tokens=context_window_tokens,
             context_block_limit=defaults.context_block_limit,
             max_tool_result_chars=defaults.max_tool_result_chars,
@@ -334,9 +369,15 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             tools_config=config.tools,
             model_presets_config=config.model_presets,
             initial_model_preset=initial_model_preset,
+            orchestrator_mode=defaults.orchestrator_mode,
             **extra,
         )
 
+
+    @property
+    def tool_scope(self) -> str:
+        """Scope con cui viene caricato il registry dell'agente principale."""
+        return "orchestrator" if self.orchestrator_mode else "core"
 
     def _register_default_tools(self) -> None:
         """Register the default set of tools via plugin loader."""
@@ -357,7 +398,7 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             ui_query_service=self._ui_query,
         )
         loader = ToolLoader()
-        registered = loader.load(ctx, self.tools)
+        registered = loader.load(ctx, self.tools, scope=self.tool_scope)
 
         # MyTool needs runtime state reference — manual registration
         if self.tools_config.my.enable:
@@ -391,6 +432,10 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             message_id=message_id,
             session_key=effective_key,
             metadata=dict(metadata or {}),
+            # Letta dal ContextVar e non dai parametri: questo metodo viene
+            # richiamato anche dal progress hook a ogni iterazione, che non ha
+            # (e non deve avere) l'identita del turno nella propria firma.
+            turn_id=current_turn_id(),
         )
 
         for name in self.tools.tool_names:
@@ -671,6 +716,7 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             message_id=message_id,
             session_key=active_session_key,
             metadata=dict(metadata or {}),
+            turn_id=current_turn_id(),
         )
         file_state_token = bind_file_states(self._file_state_store.for_session(active_session_key))
         request_token = bind_request_context(request_ctx)
@@ -914,6 +960,13 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             self._turn_tokens_by_task[current_task] = turn_token
         lock = self._session_locks.get(session_key)
         gate = self._concurrency_gate or nullcontext()
+        # Identita del turno visibile ai tool (``RequestContext.turn_id``).
+        # Legata qui perche _dispatch e il punto da cui passa *ogni* turno che
+        # arriva dal bus — WebUI, Telegram, cron, annunci di subagent — mentre
+        # ``process_direct`` e l'altro ingresso e la lega per conto suo. Le
+        # guardie per-turno dei tool non possono dipendere dal ``message_id``:
+        # il canale WebSocket non lo manda (vedi bind_turn_id).
+        turn_id_token = bind_turn_id(_new_turn_id(session_key))
 
         try:
             async with lock, gate:
@@ -1069,6 +1122,7 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
                             self._runtime_events().clear_turn(session_key)
                         await self._cron_turns.publish_next_deferred(session_key)
         finally:
+            reset_turn_id(turn_id_token)
             if current_task is not None:
                 self._turn_tokens_by_task.pop(current_task, None)
             if pending is None and self._turn_epochs.is_current(turn_token):
@@ -1215,7 +1269,11 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             session=None,
             session_key=key,
             state=TurnState.RESTORE,
-            turn_id=f"{key}:{time.time_ns()}",
+            # Stessa identita che i tool vedono in ``RequestContext.turn_id``:
+            # il turno nei log e il turno su cui si delimitano le guardie sono
+            # la stessa cosa, non due numerazioni parallele. Il fallback copre i
+            # chiamanti diretti (test), che non passano da _dispatch.
+            turn_id=current_turn_id() or _new_turn_id(key),
             turn_wall_started_at=t0,
             visible_run_started_at=turn_continuation.internal_continuation_run_started_at(
                 msg.metadata,
@@ -1346,6 +1404,11 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
         )
         # Share the dispatch lock so direct calls serialize with bus turns.
         lock = self._session_locks.get(session_key)
+        # Secondo (e ultimo) ingresso di turno: cron e i comandi che rilanciano
+        # l'agente passano da qui, non dal bus. Anche questi turni devono avere
+        # un'identita, altrimenti le guardie per-turno dei tool si troverebbero
+        # disarmate proprio nei turni interni.
+        turn_id_token = bind_turn_id(_new_turn_id(session_key))
         try:
             async with lock:
                 kwargs: dict[str, Any] = {
@@ -1362,5 +1425,6 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
                     **kwargs,
                 )
         finally:
+            reset_turn_id(turn_id_token)
             await self._runtime_events().run_status_changed(msg, session_key, "idle")
             self._runtime_events().clear_turn(session_key)

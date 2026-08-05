@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from jenny.agent.loop import AgentLoop
-from jenny.agent.subagent import SubagentManager, SubagentStatus
+from jenny.agent.subagent import SubagentManager, SubagentSpec, SubagentStatus
 from jenny.agent.tools.search import FindFilesTool, GrepTool
 from jenny.bus.queue import MessageBus
 
@@ -288,14 +288,32 @@ async def test_search_tools_reject_paths_outside_workspace(tmp_path: Path) -> No
 
 
 def test_agent_loop_registers_grep(tmp_path: Path) -> None:
+    """I tool di ricerca stanno nello scope "core": l'orchestratore li delega."""
     bus = MessageBus()
     provider = MagicMock()
     provider.get_default_model.return_value = "test-model"
 
-    loop = AgentLoop(bus=bus, provider=provider, workspace=tmp_path, model="test-model")
+    loop = AgentLoop(
+        bus=bus, provider=provider, workspace=tmp_path, model="test-model",
+        orchestrator_mode=False,
+    )
 
     assert "find_files" in loop.tools.tool_names
     assert "grep" in loop.tools.tool_names
+
+
+def test_orchestrator_loop_does_not_register_grep(tmp_path: Path) -> None:
+    bus = MessageBus()
+    provider = MagicMock()
+    provider.get_default_model.return_value = "test-model"
+
+    loop = AgentLoop(
+        bus=bus, provider=provider, workspace=tmp_path, model="test-model",
+        orchestrator_mode=True,
+    )
+
+    assert "find_files" not in loop.tools.tool_names
+    assert "grep" not in loop.tools.tool_names
 
 
 @pytest.mark.asyncio
@@ -324,7 +342,7 @@ async def test_subagent_registers_grep(tmp_path: Path) -> None:
     mgr._announce_result = AsyncMock()
 
     status = SubagentStatus(task_id="sub-1", label="label", task_description="search task", started_at=time.monotonic())
-    await mgr._run_subagent("sub-1", "search task", "label", {"channel": "internal", "chat_id": "direct"}, status)
+    await mgr._run_subagent("sub-1", SubagentSpec(task="search task", label="label"), status)
 
     assert "find_files" in captured["tool_names"]
     assert "grep" in captured["tool_names"]

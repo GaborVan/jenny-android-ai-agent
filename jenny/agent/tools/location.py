@@ -38,7 +38,7 @@ from jenny.config.tool_schemas import LocationConfig
 class GetLocationTool(Tool):
     """Return the device's current geographic location."""
 
-    _scopes = {"core", "subagent"}
+    _scopes = {"core", "orchestrator", "subagent"}
 
     name = "get_location"
     description = (

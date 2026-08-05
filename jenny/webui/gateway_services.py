@@ -23,6 +23,13 @@ class GatewayServices:
     transcripts: WebUITranscriptRecorder
     workspaces: WebUIWorkspaceController
     session_manager: Any | None
+    # Getter late-binding del ``SubagentManager``, lo stesso che ricevono le
+    # route HTTP. Serve anche al canale WebSocket: il pump dell'attività dei
+    # subagent legge ``manager.activity``, e passarglielo da qui evita sia un
+    # global sia un secondo parametro nel costruttore del canale. Resta un
+    # getter (non l'oggetto) perché durante l'onboarding l'agente non esiste
+    # ancora e il gateway serve già la WebUI.
+    get_subagent_manager: Callable[[], Any | None] | None = None
 
 
 def build_gateway_services(
@@ -35,6 +42,10 @@ def build_gateway_services(
     runtime_model_name: Any | None,
     disabled_skills: set[str] | None = None,
     snapshot_service: Any | None = None,
+    # Getter late-binding del ``SubagentManager`` (attributo ``subagents``
+    # dell'AgentLoop). Non un global: l'agente può essere creato dopo il
+    # gateway (onboarding), quindi la route lo risolve a ogni chiamata.
+    get_subagent_manager: Callable[[], Any | None] | None = None,
     logger: Any = default_logger,
     onboarding_event: Any | None = None,
     on_settings_changed: Callable[[], None] | None = None,
@@ -60,6 +71,7 @@ def build_gateway_services(
         skills_workspace_path=workspace_path,
         disabled_skills=disabled_skills,
         snapshot_service=snapshot_service,
+        get_subagent_manager=get_subagent_manager,
         log=logger,
         onboarding_event=onboarding_event,
         on_settings_changed=on_settings_changed,
@@ -71,4 +83,5 @@ def build_gateway_services(
         transcripts=transcripts,
         workspaces=workspaces,
         session_manager=session_manager,
+        get_subagent_manager=get_subagent_manager,
     )

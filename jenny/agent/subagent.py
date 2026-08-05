@@ -1,22 +1,60 @@
 """Subagent manager for background task execution."""
 
 import asyncio
+import contextlib
 import json
+import re
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from loguru import logger
 
-from jenny.agent.hook import AgentHook, AgentHookContext
+from jenny.agent.agent_types import AgentType, get_agent_type
+from jenny.agent.hook import AgentHook, AgentHookContext, ToolResultHookContext
 from jenny.agent.runner import AgentRunner, AgentRunSpec
+from jenny.agent.subagent_activity import (
+    KIND_ERROR,
+    KIND_ITERATION,
+    KIND_MESSAGE_IN,
+    KIND_PHASE,
+    KIND_RESULT,
+    KIND_THINKING,
+    KIND_TOOL_END,
+    KIND_TOOL_START,
+    STATUS_ERROR,
+    STATUS_OK,
+    DigestMeta,
+    SubagentActivityLog,
+    SubagentDigestStore,
+    classify_tool_result,
+    format_tool_end,
+    format_tool_start,
+)
+from jenny.agent.subagent_history import SubagentHistoryStore
+from jenny.agent.subagent_records import (
+    CANCEL_REASON_SHUTDOWN,
+    CANCEL_REASON_SUPERSEDED,
+    CANCEL_REASON_USER,
+    DEFAULT_AGENT_TYPE,
+    MAX_RESULT_SUMMARY_CHARS,
+    SubagentRecord,
+    SubagentRecordStore,
+    SubagentSpec,
+    cancellation_stop_reason,
+    cancellation_summary,
+)
 from jenny.agent.tools.context import ToolContext
 from jenny.agent.tools.file_state import FileStates
 from jenny.agent.tools.loader import ToolLoader
 from jenny.agent.tools.registry import ToolRegistry
-from jenny.bus.events import InboundMessage
+from jenny.bus.events import (
+    OUTBOUND_META_SUBAGENT_STATUS,
+    InboundMessage,
+    OutboundMessage,
+)
 from jenny.bus.queue import MessageBus
 from jenny.config.schema import AgentDefaults, ToolsConfig
 from jenny.providers.base import LLMProvider
@@ -26,7 +64,105 @@ from jenny.security.workspace_access import (
     enter_workspace_scope,
     workspace_sandbox_status,
 )
+from jenny.utils.helpers import truncate_text
 from jenny.utils.prompt_templates import render_template
+
+if TYPE_CHECKING:  # pragma: no cover - solo per i type checker
+    from jenny.session.manager import SessionManager
+
+# Tentativi massimi per lineage nei rilanci *automatici* (orchestratore/codice).
+# Il rilancio manuale non e mai capped: a un umano che premo "Relaunch" non si
+# risponde no.
+MAX_AUTO_ATTEMPTS = 3
+
+# Errori tool recuperabili che un subagent puo commettere prima di arrendersi.
+#
+# NON zero, che era il comportamento precedente: un subagent gira con
+# ``fail_on_tool_error=True`` e qualunque risultato che inizi per "Error" lo
+# uccideva, ``stop_reason="tool_error"``. Osservato sul device: un researcher con
+# due ``web_search`` e tre ``web_fetch`` andati a segno ha letto un file di output
+# spillato con ``read_file(offset=40)`` su un file di meno di 40 righe, ha preso
+# "Error: offset 40 is beyond end of file" e ha buttato via un lavoro finito.
+# L'agente principale, nella stessa situazione, riceve il retry hint e prosegue.
+#
+# Tre e il numero concordato: abbastanza per assorbire gli errori di mira che un
+# LLM fa su parametri che deve indovinare, troppo pochi per lasciar girare a
+# vuoto un subagent che non ha capito il proprio compito. La contabilita
+# (consecutivi vs totali vs boundary) sta in ``ToolErrorBudget``.
+DEFAULT_TOOL_ERROR_BUDGET = 3
+
+# Quanti lineage terminati restano tracciati in RAM. Oltre questo tetto il
+# rilancio si appoggia ai record su disco, che sono la fonte durevole.
+_MAX_TRACKED_LINEAGES = 64
+
+# Quanti subagent terminati entrano in ``status_snapshot()["recent"]``. Il
+# pannello mostra la coda recente, non lo storico: quello sta nei record.
+_SNAPSHOT_RECENT_LIMIT = 10
+
+# Quanto testo del task entra nello snapshot. La card del pannello mostra solo
+# l'etichetta, ma la modale di dettaglio mostra il task per intero: senza questo
+# campo l'unico modo di sapere *cosa* si e chiesto al subagent e leggere i log.
+# Il tetto e generoso e comunque un tetto: lo snapshot viaggia su WebSocket a
+# ogni transizione e con cinque subagent in parallelo un task da 50 KB lo
+# renderebbe un frame da spedire cinque volte.
+_SNAPSHOT_TASK_CHARS = 2000
+
+# Quanti tool event recenti accompagnano un subagent vivo. ``last_tool`` da solo
+# dice cosa sta facendo adesso, non come ci e arrivato: la modale mostra la coda,
+# ma corta, perche la lista intera cresce per tutta la vita del subagent.
+_SNAPSHOT_TOOL_EVENTS_LIMIT = 6
+
+# Profondita della casella di posta di un subagent vivo. Bounded per scelta: se
+# l'orchestratore accumula messaggi piu in fretta di quanto il subagent iteri,
+# il problema e il flusso, non la coda — meglio un rifiuto leggibile che una
+# coda che cresce senza limite su un telefono.
+_MAX_PENDING_INJECTIONS = 8
+
+# Riga di progress per *transizione di stato*, non per tool call: con cinque
+# subagent in parallelo una riga per tool call rende la chat illeggibile, e il
+# dettaglio vivo e proprio cio che il pannello mostra meglio della chat.
+_TRANSITION_HINTS = {
+    "started": "subagent started",
+    "stalled": "subagent stalled (no progress)",
+    "done": "subagent done",
+    "failed": "subagent failed",
+}
+
+# Fase interna -> riga leggibile nel pannello. La fase e un identificatore del
+# runner ("awaiting_tools"), il pannello e testo per una persona; la mappa sta qui
+# perche e anche cio che rende **stabile** il summary, e il digest tiene solo le
+# transizioni confrontando proprio quello (vedi ``build_digest``).
+_PHASE_LABELS = {
+    "initializing": "starting up",
+    "awaiting_tools": "running tools",
+    "tools_completed": "tools finished",
+    "final_response": "writing the answer",
+    "done": "finished",
+    "error": "failed",
+}
+
+# Finestra di coalescing del segnale di pensiero. 400 ms e scelto, non ereditato:
+# sotto i ~250 ms gli aggiornamenti sono piu veloci di quanto un occhio segua e
+# consumano il ring per niente; sopra il secondo l'attesa torna a sembrare un
+# blocco, che e esattamente cio che il segnale esiste per smentire.
+_THINKING_THROTTLE_S = 0.4
+
+# Estratto mostrato e finestra minima perche resti una frase e non un mozzicone.
+# 140 sta sotto ``MAX_SUMMARY_CHARS`` (160): il taglio a frase e nostro, e non
+# deve essere ritagliato una seconda volta dal cap del log — con l'aggiunta
+# dell'etichetta ("thinking: ") il totale resta comunque dentro.
+_THINKING_EXCERPT_CHARS = 140
+_THINKING_EXCERPT_MIN_CHARS = 40
+
+# Quanto testo di ragionamento resta in RAM per task. Solo la coda serve
+# all'estratto: tenere tutto il ragionamento di un run sarebbe megabyte su un
+# telefono per mostrarne 140 caratteri.
+_THINKING_BUFFER_CHARS = 512
+
+_THINKING_WS_RE = re.compile(r"\s+")
+# Fine di frase seguita da spazio. Include ``;`` e ``:`` perche il ragionamento di
+# un modello e fatto di elenchi e di clausole, non di prosa.
+_THINKING_SENTENCE_RE = re.compile(r"[.!?;:]\s+")
 
 
 @dataclass(slots=True)
@@ -43,26 +179,284 @@ class SubagentStatus:
     usage: dict = field(default_factory=dict)          # token usage
     stop_reason: str | None = None
     error: str | None = None
+    # Identita del lavoro: ``lineage_id`` e stabile tra i rilanci, ``attempt``
+    # cresce di uno per rilancio. ``task_id`` resta l'id del singolo tentativo.
+    lineage_id: str = ""
+    attempt: int = 1
+    agent_type: str = DEFAULT_AGENT_TYPE
+    # Stato coarse-grained: running | done | failed | cancelled | stalled.
+    # Non sostituisce ``phase``, che risponde a un'altra domanda (cosa sta
+    # facendo il subagent adesso) e ha gia consumatori.
+    state: str = "running"
+    # Provenienza della cancellazione (``SUBAGENT_CANCEL_REASONS``), valorizzata
+    # solo quando ``state == "cancelled"``. Viaggia nel record Tier-1, quindi
+    # sopravvive al riavvio del gateway: e la sola differenza fra "l'utente ha
+    # premuto Stop" e "lo shutdown ha interrotto il lavoro".
+    cancel_reason: str | None = None
+    # Ultimo segno di vita (monotonic). Senza questo non si distingue "bloccato
+    # da 4 minuti" da "al lavoro da 4 minuti": ``started_at`` da solo non basta.
+    last_progress_at: float = 0.0
+    started_at_wall: float = field(default_factory=time.time)
+    result_summary: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.last_progress_at:
+            self.last_progress_at = self.started_at
+
+    def touch(self, *, now: float | None = None) -> None:
+        """Registra un segno di vita del subagent.
+
+        Un subagent marcato ``stalled`` che riprende a produrre progresso torna
+        ``running``: il watchdog marca, non condanna, quindi la marcatura deve
+        essere reversibile.
+        """
+        self.last_progress_at = time.monotonic() if now is None else now
+        if self.state == "stalled":
+            self.state = "running"
 
 
 class SubagentConcurrencyLimitError(RuntimeError):
     """Sollevata da ``SubagentManager.spawn`` quando lo spawn supererebbe
     ``max_concurrent_subagents``. Porta i contatori per formattare l'errore
-    user-facing al layer chiamante."""
+    user-facing al layer chiamante.
 
-    def __init__(self, running: int, limit: int) -> None:
+    ``reserved`` distingue il rifiuto dovuto allo slot tenuto libero per i job
+    quick da quello dovuto al pool davvero pieno."""
+
+    def __init__(self, running: int, limit: int, *, reserved: bool = False) -> None:
         self.running = running
         self.limit = limit
-        super().__init__(f"concurrency limit reached ({running}/{limit} running)")
+        self.reserved = reserved
+        if reserved:
+            super().__init__(
+                f"concurrency limit reached ({running}/{limit} running, "
+                "one slot is reserved for quick tasks)"
+            )
+        else:
+            super().__init__(f"concurrency limit reached ({running}/{limit} running)")
+
+
+class SubagentRestartError(RuntimeError):
+    """Sollevata da ``SubagentManager.restart`` quando il rilancio non e
+    possibile (target sconosciuto, o tetto dei tentativi automatici raggiunto).
+    Il messaggio e pensato per essere mostrato al chiamante."""
+
+
+class SubagentSendError(RuntimeError):
+    """Sollevata da ``SubagentManager.send`` quando il messaggio non e
+    consegnabile ne convertibile in un resume/rilancio (target sconosciuto,
+    messaggio vuoto, casella piena). Il testo e user-facing."""
+
+
+@dataclass(slots=True)
+class SubagentSendResult:
+    """Esito di ``SubagentManager.send``.
+
+    ``mode`` e la sola informazione che cambia la mossa successiva
+    dell'orchestratore — "iniettato in un subagent vivo" non e "ripartito da
+    zero" — per questo viaggia strutturato e non solo dentro ``text``.
+    """
+
+    mode: str  # injected | resumed | restarted
+    text: str
+
+
+def _append_activity(
+    log: SubagentActivityLog | None,
+    task_id: str,
+    kind: str,
+    **fields: Any,
+) -> None:
+    """Registra un evento di attivita. **Non solleva mai, per contratto.**
+
+    INVARIANTE applicata qui e nient'altrove: un difetto della telemetria non
+    puo uccidere un subagent ne fargli perdere una tool call. ``append`` e gia
+    scritta per non sollevare per ragioni ordinarie (vedi
+    ``SubagentActivityLog.append``), quindi questa guardia copre solo l'imprevisto
+    — ed e la stessa linea che il manager tiene sul bus con
+    ``try_publish_outbound``: la telemetria e best-effort, il lavoro no.
+    """
+    if log is None:
+        return
+    try:
+        log.append(task_id, kind, **fields)
+    except Exception:  # noqa: BLE001 — vedi docstring
+        logger.exception("Subagent activity event dropped for [{}] ({})", task_id, kind)
+
+
+class _ThinkingSignal:
+    """Estratto rotolante del ragionamento, coalescato in una finestra di tempo.
+
+    Perche non uno stream: un provider emette il ragionamento a token, e un
+    evento per token riempirebbe il ring (:data:`RING_CAPACITY` = 200) in pochi
+    secondi buttando fuori tutto il resto — il pannello mostrerebbe *solo*
+    ragionamento, cioe l'unica cosa che il digest poi collassa. Perche non un
+    flag "sta pensando": non dice nulla che l'assenza di eventi non dica gia.
+
+    Perche l'estratto e la **coda** del testo e non la testa: la coda e cio a cui
+    il modello sta pensando adesso; la testa e cio a cui pensava dieci secondi
+    fa, e resta identica per tutta la durata del segmento.
+
+    Un evento viene emesso anche quando l'estratto non e cambiato: cio che cambia
+    e ``duration_ms``, ed e quello che permette alla UI di scrivere
+    "thinking - 12s" senza tenere un orologio proprio.
+    """
+
+    __slots__ = ("_label", "_last_emit", "_pending", "_started", "_text")
+
+    def __init__(self, label: str) -> None:
+        self._label = label
+        self._text = ""
+        self._started = 0.0
+        self._last_emit = 0.0
+        self._pending = False
+
+    def feed(self, chunk: Any, *, now: float) -> tuple[str, int] | None:
+        """Aggiunge testo e ritorna ``(summary, elapsed_ms)`` se e ora di emettere."""
+        if not isinstance(chunk, str) or not chunk:
+            return None
+        self._text = (self._text + chunk)[-_THINKING_BUFFER_CHARS:]
+        self._pending = True
+        if not self._started:
+            self._started = now
+        if self._last_emit and now - self._last_emit < _THINKING_THROTTLE_S:
+            return None
+        return self._take(now)
+
+    def flush(self, *, now: float) -> tuple[str, int] | None:
+        """Emette l'aggiornamento coalescato non ancora uscito, se c'e.
+
+        Chiamata alla fine di un segmento: senza di lei la coda del ragionamento
+        — la parte piu vicina a cio che il modello ha deciso — sarebbe proprio
+        quella che la finestra di throttle fa sparire.
+        """
+        return self._take(now) if self._pending else None
+
+    def reset(self) -> None:
+        """Chiude il segmento: il prossimo riparte con elapsed da zero."""
+        self._text = ""
+        self._started = 0.0
+        self._last_emit = 0.0
+        self._pending = False
+
+    def _take(self, now: float) -> tuple[str, int]:
+        self._pending = False
+        self._last_emit = now
+        elapsed_ms = int(max(0.0, now - self._started) * 1000)
+        return f"{self._label}: {_thinking_excerpt(self._text)}", elapsed_ms
+
+
+def _thinking_excerpt(text: str) -> str:
+    """Coda del ragionamento tagliata perche si legga come una frase.
+
+    Un troncamento secco a N caratteri produce "...ttribuire il calo di traffi",
+    che chiede al lettore di indovinare. Quindi il taglio non e alla lunghezza ma
+    a un **confine**: dentro la finestra si riparte dalla *prima* fine di frase —
+    quindi dall'estratto piu lungo che inizi comunque all'inizio di un pensiero —
+    e in mancanza di una fine di frase dal primo spazio. La soglia
+    :data:`_THINKING_EXCERPT_MIN_CHARS` scarta i confini troppo a destra, che
+    lascerebbero due parole al posto di una frase. Il risultato inizia dove inizia
+    un pensiero e finisce dove il modello e arrivato adesso.
+    """
+    flat = _THINKING_WS_RE.sub(" ", text).strip()
+    if len(flat) <= _THINKING_EXCERPT_CHARS:
+        return flat
+    window = flat[-_THINKING_EXCERPT_CHARS:]
+    for match in _THINKING_SENTENCE_RE.finditer(window):
+        if len(window) - match.end() >= _THINKING_EXCERPT_MIN_CHARS:
+            return window[match.end():]
+    _, _, rest = window.partition(" ")
+    return rest or window
 
 
 class _SubagentHook(AgentHook):
-    """Hook for subagent execution — logs tool calls and updates status."""
+    """Hook di un subagent: aggiorna lo status e produce la sua attivita viva.
 
-    def __init__(self, task_id: str, status: SubagentStatus | None = None) -> None:
+    I produttori stanno qui e non nel manager perche l'hook e l'unico oggetto che
+    il runner chiama nei momenti giusti — inizio di una tool call, **fine di una
+    singola** tool call, fine iterazione, chunk di ragionamento. Prima esisteva
+    solo ``after_iteration``, che copia gli eventi una volta per iterazione: un
+    ``web_fetch`` da 8 secondi non produceva un aggiornamento finche non finiva
+    tutto il batch.
+
+    Le note che il runner non conosce (fase, messaggio dall'orchestratore, esito
+    terminale) arrivano dal manager attraverso i metodi ``note_*``: cosi l'intera
+    attivita di un task ha un solo produttore, con un solo punto di guardia.
+    """
+
+    def __init__(
+        self,
+        task_id: str,
+        status: SubagentStatus | None = None,
+        *,
+        activity: SubagentActivityLog | None = None,
+    ) -> None:
         super().__init__()
         self._task_id = task_id
         self._status = status
+        self._activity = activity
+        self._reasoning = _ThinkingSignal("thinking")
+        # Il testo della risposta e un secondo segnale vivo, distinto dal
+        # ragionamento: e il risultato che si sta formando. Stesso ``kind``
+        # (l'enum non ne ha uno per "sta scrivendo", e il digest li collassa
+        # entrambi), etichetta diversa nel summary.
+        self._writing = _ThinkingSignal("writing")
+
+    # -- produzione ----------------------------------------------------------
+
+    def _emit(self, kind: str, **fields: Any) -> None:
+        _append_activity(self._activity, self._task_id, kind, **fields)
+
+    def _emit_thinking(self, signal: _ThinkingSignal, update: tuple[str, int] | None) -> None:
+        if update is None:
+            return
+        summary, elapsed_ms = update
+        self._emit(KIND_THINKING, summary=summary, duration_ms=elapsed_ms)
+        # Un ragionamento lungo E progresso: senza questo il watchdog vedrebbe
+        # fermo un subagent che sta pensando da tre minuti.
+        if self._status is not None:
+            self._status.touch()
+
+    # -- hook del runner -----------------------------------------------------
+
+    def wants_streaming(self) -> bool:
+        """Chiede al runner la risposta in streaming. Serve a rendere l'attivita
+        *viva*, non solo dettagliata.
+
+        Senza questo il subagent riceve un segnale per iterazione: mentre l'LLM
+        ragiona per venti secondi la modale resta immobile, che era esattamente la
+        lamentela. L'altro path (``progress_callback`` +
+        ``supports_progress_deltas``) non e utilizzabile: nessun provider dichiara
+        quel flag.
+
+        Costo dichiarato: con lo streaming il runner **non** applica il wall
+        timeout esterno (``request_execution``, ~riga 192). Non e una protezione
+        persa ma spostata — lo streaming ha il proprio idle timeout
+        (``JENNY_STREAM_IDLE_TIMEOUT_S``, default 90s), che e la forma giusta del
+        vincolo: si mette un tetto al *silenzio*, non alla durata di un
+        ragionamento sano. Un provider che smette di produrre delta viene comunque
+        interrotto, e il watchdog di stallo resta la seconda rete.
+        """
+        return True
+
+    async def on_stream(self, context: AgentHookContext, delta: str) -> None:
+        """Delta del testo di risposta: alimenta il segnale ``writing``.
+
+        Throttlato e ridotto a un estratto dal segnale stesso — qui non arriva
+        mai testo grezzo alla UI.
+        """
+        self._emit_thinking(self._writing, self._writing.feed(delta, now=time.monotonic()))
+
+    async def on_stream_end(self, context: AgentHookContext, *, resuming: bool) -> None:
+        """Chiude il segmento: la coda va emessa, non scartata dalla finestra.
+
+        Su ``resuming`` il testo continua nella stessa risposta, quindi il segnale
+        non viene resettato: azzerarlo farebbe ripartire l'elapsed a zero in mezzo
+        a una singola generazione.
+        """
+        self._emit_thinking(self._writing, self._writing.flush(now=time.monotonic()))
+        if not resuming:
+            self._writing.reset()
 
     async def before_execute_tools(self, context: AgentHookContext) -> None:
         for tool_call in context.tool_calls:
@@ -71,8 +465,50 @@ class _SubagentHook(AgentHook):
                 "Subagent [{}] executing: {} with arguments: {}",
                 self._task_id, tool_call.name, args_str,
             )
+            self._emit(
+                KIND_TOOL_START,
+                summary=format_tool_start(tool_call.name, tool_call.arguments),
+                name=tool_call.name,
+                # Id di chiamata del provider: e cio che fa accoppiare questo
+                # start con il proprio end anche quando tre chiamate dello stesso
+                # tool sono in volo insieme.
+                call_id=tool_call.id,
+            )
+
+    async def after_execute_tool(self, context: ToolResultHookContext) -> None:
+        self._emit(
+            KIND_TOOL_END,
+            summary=format_tool_end(
+                context.name,
+                context.arguments,
+                context.result,
+                error=context.error,
+            ),
+            name=context.name,
+            call_id=context.call_id,
+            status=classify_tool_result(context.name, context.result, context.error),
+            duration_ms=context.duration_ms,
+        )
+        # Una tool call finita e un segno di vita: con un solo tool lentissimo per
+        # iterazione era l'unico che esistesse, e non veniva registrato.
+        if self._status is not None:
+            self._status.touch()
+
+    async def emit_reasoning(self, reasoning_content: str | None) -> None:
+        self._emit_thinking(
+            self._reasoning, self._reasoning.feed(reasoning_content, now=time.monotonic())
+        )
+
+    async def emit_reasoning_end(self) -> None:
+        self._emit_thinking(self._reasoning, self._reasoning.flush(now=time.monotonic()))
+        self._reasoning.reset()
 
     async def after_iteration(self, context: AgentHookContext) -> None:
+        # La coda del testo di risposta prima dell'evento di iterazione: e l'ultima
+        # cosa accaduta dentro l'iterazione, quindi e dove va letta.
+        self._emit_thinking(self._writing, self._writing.flush(now=time.monotonic()))
+        self._writing.reset()
+        self._emit(KIND_ITERATION, summary=f"iteration {context.iteration}")
         if self._status is None:
             return
         self._status.iteration = context.iteration
@@ -80,6 +516,58 @@ class _SubagentHook(AgentHook):
         self._status.usage = dict(context.usage)
         if context.error:
             self._status.error = str(context.error)
+        # Fine iterazione = progresso osservabile: e uno dei due punti in cui il
+        # watchdog di stallo viene disarmato (l'altro e il checkpoint).
+        self._status.touch()
+
+    # -- note dal manager ----------------------------------------------------
+
+    def note_output(self, content: Any) -> None:
+        """Delta di testo della risposta (dal ``progress_callback`` del run)."""
+        self._emit_thinking(self._writing, self._writing.feed(content, now=time.monotonic()))
+
+    def note_phase(self, phase: Any) -> None:
+        """Transizione di fase (dal ``checkpoint_callback`` del run)."""
+        if not isinstance(phase, str) or not phase:
+            return
+        self._emit(KIND_PHASE, summary=_PHASE_LABELS.get(phase, phase.replace("_", " ")))
+
+    def note_message_in(self, count: int) -> None:
+        """Messaggi dell'orchestratore appena consumati da questo subagent.
+
+        Solo il conteggio, non il testo: il messaggio arriva dall'agente
+        principale, che a sua volta cita risultati di subagent — cioe contenuto
+        non fidato — e da qui finirebbe in una UI.
+        """
+        if count <= 0:
+            return
+        plural = "message" if count == 1 else "messages"
+        self._emit(
+            KIND_MESSAGE_IN,
+            summary=f"received {count} {plural} from the orchestrator",
+        )
+
+    def note_result(self, chars: int) -> None:
+        """Esito terminale buono: la misura del risultato, non il risultato."""
+        self._emit(
+            KIND_RESULT,
+            summary=f"task completed, {chars} characters of result",
+            status=STATUS_OK,
+        )
+
+    def note_error(self, summary: str) -> None:
+        """Esito terminale cattivo. ``summary`` deve essere testo **nostro**."""
+        self._emit(KIND_ERROR, summary=summary, status=STATUS_ERROR)
+
+
+@dataclass(slots=True)
+class _Lineage:
+    """Stato in RAM di un lineage: la spec da rigiocare e l'ultimo tentativo."""
+
+    lineage_id: str
+    spec: SubagentSpec
+    attempt: int
+    task_id: str
 
 
 class SubagentManager:
@@ -97,6 +585,13 @@ class SubagentManager:
         max_iterations: int | None = None,
         max_concurrent_subagents: int | None = None,
         llm_wall_timeout_for_session: Callable[[str | None], float | None] | None = None,
+        stall_threshold_s: float | None = None,
+        stall_check_interval_s: float = 15.0,
+        tool_error_budget: int | None = None,
+        record_store: SubagentRecordStore | None = None,
+        *,
+        session_manager: "SessionManager | None" = None,
+        history_store: SubagentHistoryStore | None = None,
     ):
         defaults = AgentDefaults()
         self.provider = provider
@@ -116,15 +611,103 @@ class SubagentManager:
             if max_concurrent_subagents is not None
             else defaults.max_concurrent_subagents
         )
+        self.stall_threshold_s = (
+            float(stall_threshold_s)
+            if stall_threshold_s is not None
+            else float(defaults.subagent_stall_threshold_seconds)
+        )
+        # Knob al pari di ``stall_threshold_s``/``max_iterations``: iniettato dal
+        # chiamante, con il default del modulo quando non lo specifica. Zero e
+        # legittimo e significa "il primo errore chiude il subagent" (il vecchio
+        # comportamento), negativo viene normalizzato a zero dal budget.
+        self.tool_error_budget = (
+            int(tool_error_budget)
+            if tool_error_budget is not None
+            else DEFAULT_TOOL_ERROR_BUDGET
+        )
         self.runner = AgentRunner(provider)
         self._llm_wall_timeout_for_session = llm_wall_timeout_for_session
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._task_statuses: dict[str, SubagentStatus] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
         # Subagent abbandonati da cancel_by_session (task che non muore entro
-        # il grace): il loro announce tardivo va soppresso, non deve iniettare
-        # un turno stale nella sessione.
+        # il grace) o superati da un rilancio: il loro announce tardivo va
+        # soppresso, non deve iniettare un turno stale nella sessione.
         self._repudiated_task_ids: set[str] = set()
+        self._lineages: dict[str, _Lineage] = {}
+        # Casella di posta per subagent vivo, consumata dal runner via
+        # ``injection_callback``. Creata allo spawn, rimossa alla terminazione.
+        self._pending_injections: dict[str, asyncio.Queue[str]] = {}
+        # Telemetria viva (RAM, a perdere) e sua condensa durevole (un file per
+        # task). Nomi PUBBLICI di proposito: sono il contratto verso il transport,
+        # che legge ``manager.activity`` e ``manager.digests`` e non deve conoscere
+        # nient'altro del manager.
+        self.activity = SubagentActivityLog()
+        self.digests = SubagentDigestStore(workspace)
+        # Lo store dei record riceve i digest: cosi la potatura di un record porta
+        # via il proprio digest invece di lasciarlo su disco per sempre.
+        self._records = record_store or SubagentRecordStore(
+            workspace, digest_store=self.digests
+        )
+        # SessionManager INIETTATO, mai costruito qui: il suo ``_cache`` e
+        # per-istanza, quindi due manager sulla stessa directory sarebbero due
+        # cache divergenti sugli stessi file. Senza sessioni la storia Tier-2 e
+        # semplicemente disabilitata e ``send`` degrada al rilancio.
+        self._history = history_store or SubagentHistoryStore(session_manager)
+        self._stall_check_interval_s = max(0.01, stall_check_interval_s)
+        self._watchdog_task: asyncio.Task[None] | None = None
+        self.sweep_orphan_digests()
+
+    def sweep_orphan_digests(self) -> int:
+        """Cancella i digest di attivita senza record. Chiamata una volta all'avvio.
+
+        Copre l'unica finestra che la retention non puo coprire: il digest viene
+        scritto **prima** del record (vedi :meth:`_retain`), quindi un processo
+        ucciso tra le due lascia un file di cui nessun record parla — e la
+        potatura cancella i digest guardando i record che escono, quindi di
+        quell'orfano non si accorgerebbe mai. Su un telefono e una perdita lenta.
+
+        Best-effort: un boot non fallisce per una pulizia.
+        """
+        try:
+            removed = self.digests.keep_only({r.task_id for r in self._records.load_all()})
+        except Exception as e:  # noqa: BLE001 — vedi docstring
+            logger.warning("Subagent activity digest sweep failed: {}", e)
+            return 0
+        if removed:
+            logger.info("Swept {} orphan subagent activity digest(s)", removed)
+        return removed
+
+    def _mark_cancelled(self, task_id: str, reason: str) -> SubagentStatus | None:
+        """Marca il tentativo vivo ``task_id`` come cancellato, con provenienza.
+
+        UNICO punto in cui uno status passa a ``cancelled``: la provenienza deve
+        essere scritta insieme allo stato, non dopo, perche il record Tier-1 la
+        legge dallo status appena la done-callback lo estrae dal dict — e quel
+        momento non e sotto il controllo di chi cancella.
+
+        Oltre al campo strutturato scrive ``stop_reason`` e ``result_summary``:
+        sono i due campi che ``subagent_status`` mostra all'orchestratore, e una
+        regola che i dati portano vale piu di una scritta nel prompt.
+        """
+        status = self._task_statuses.get(task_id)
+        if status is None:
+            return None
+        status.state = "cancelled"
+        status.cancel_reason = reason
+        if (stop_reason := cancellation_stop_reason(reason)) is not None:
+            status.stop_reason = stop_reason
+        status.result_summary = truncate_text(
+            cancellation_summary(reason), MAX_RESULT_SUMMARY_CHARS
+        )
+        # Registrato qui e non nei rami di ``_run_subagent``: una cancellazione non
+        # ne attraversa nessuno (il task muore su ``CancelledError``), quindi senza
+        # questo evento il digest finirebbe senza dire *come* il lavoro e finito.
+        _append_activity(
+            self.activity, task_id, KIND_ERROR,
+            summary=f"cancelled ({reason})", status=STATUS_ERROR,
+        )
+        return status
 
     def _subagent_tools_config(self) -> ToolsConfig:
         """Build a ToolsConfig scoped for subagent use."""
@@ -139,8 +722,15 @@ class SubagentManager:
         self,
         workspace: Path | None = None,
         tools_config: ToolsConfig | None = None,
+        agent_type: AgentType | None = None,
     ) -> ToolRegistry:
-        """Build an isolated subagent tool registry via ToolLoader."""
+        """Build an isolated subagent tool registry via ToolLoader.
+
+        L'allowlist del tipo e il *secondo* filtro dopo lo scope: ``_scopes`` e
+        per-classe e globale, quindi non sa distinguere un researcher da un
+        coder (vedi ``agent_types.py``). ``agent_type=None`` o un tipo con
+        ``tools=None`` lascia l'intero scope subagent, come prima dei tipi.
+        """
         root = self.workspace if workspace is None else workspace
         registry = ToolRegistry()
         cfg = tools_config if tools_config is not None else self._subagent_tools_config()
@@ -154,13 +744,18 @@ class SubagentManager:
             ),
             android_context=get_android_context(),
         )
-        ToolLoader().load(ctx, registry, scope="subagent")
+        allow = agent_type.tools if agent_type is not None else None
+        ToolLoader().load(ctx, registry, scope="subagent", allow=allow)
         return registry
 
     def set_provider(self, provider: LLMProvider, model: str) -> None:
         self.provider = provider
         self.model = model
         self.runner.provider = provider
+
+    # ------------------------------------------------------------------
+    # spawn / capacity
+    # ------------------------------------------------------------------
 
     async def spawn(
         self,
@@ -172,75 +767,190 @@ class SubagentManager:
         origin_message_id: str | None = None,
         temperature: float | None = None,
         workspace_scope: WorkspaceScope | None = None,
+        *,
+        agent_type: str = DEFAULT_AGENT_TYPE,
+        quick: bool = False,
     ) -> str:
         """Spawn a subagent to execute a task in the background.
 
-        Solleva ``SubagentConcurrencyLimitError`` se il numero di subagent
-        attivi ha gia raggiunto ``max_concurrent_subagents``: l'invariante di
-        concorrenza e applicata qui, dove il manager possiede lo stato, cosi
-        ogni chiamante (tool, cron, path interni) ne e vincolato."""
-        running = len(self._running_tasks)
-        if running >= self.max_concurrent_subagents:
-            raise SubagentConcurrencyLimitError(running, self.max_concurrent_subagents)
-        task_id = str(uuid.uuid4())[:8]
-        display_label = label or task[:30] + ("..." if len(task) > 30 else "")
-        origin = {"channel": origin_channel, "chat_id": origin_chat_id, "session_key": session_key}
+        Solleva ``SubagentConcurrencyLimitError`` se lo spawn violerebbe
+        l'invariante di concorrenza: e applicata qui, dove il manager possiede
+        lo stato, cosi ogni chiamante (tool, cron, path interni) ne e vincolato.
+        """
+        spec = SubagentSpec(
+            task=task,
+            label=label or task[:30] + ("..." if len(task) > 30 else ""),
+            agent_type=agent_type,
+            temperature=temperature,
+            workspace_scope=workspace_scope,
+            origin_channel=origin_channel,
+            origin_chat_id=origin_chat_id,
+            session_key=session_key,
+            origin_message_id=origin_message_id,
+            quick=quick,
+        )
+        return await self._spawn_spec(spec)
 
+    def _check_capacity(self, *, quick: bool) -> None:
+        """Invariante di concorrenza, con uno slot sempre libero.
+
+        Uno spawn normale puo occupare al massimo ``max_concurrent - 1`` slot:
+        senza riserva cinque ricercatori lunghi saturano il pool e
+        l'orchestratore non ha piu modo di far partire un job breve per
+        rispondere all'utente. Con limite 1 la riserva si annulla, altrimenti
+        una configurazione a slot singolo non spawnerebbe piu nulla.
+        """
+        # Conta solo i task ancora vivi: un rilancio arriva subito dopo aver
+        # cancellato il tentativo precedente, che puo essere ancora nel dict in
+        # attesa della propria done-callback.
+        running = sum(1 for t in self._running_tasks.values() if not t.done())
+        limit = self.max_concurrent_subagents
+        if running >= limit:
+            raise SubagentConcurrencyLimitError(running, limit)
+        if not quick:
+            normal_limit = max(1, limit - 1)
+            if running >= normal_limit:
+                raise SubagentConcurrencyLimitError(running, limit, reserved=True)
+
+    async def _spawn_spec(
+        self,
+        spec: SubagentSpec,
+        *,
+        lineage_id: str | None = None,
+        attempt: int = 1,
+    ) -> str:
+        """Avvia un tentativo per ``spec`` e ritorna il testo per il chiamante."""
+        task_id, _ = await self._launch(spec, lineage_id=lineage_id, attempt=attempt)
+        suffix = "" if attempt <= 1 else f" (attempt {attempt})"
+        return (
+            f"Subagent [{spec.label}] started{suffix} (id: {task_id}). "
+            "I'll notify you when it completes."
+        )
+
+    async def _launch(
+        self,
+        spec: SubagentSpec,
+        *,
+        lineage_id: str | None = None,
+        attempt: int = 1,
+        resume_messages: list[dict[str, Any]] | None = None,
+    ) -> tuple[str, str]:
+        """Avvia un tentativo per ``spec`` su un lineage nuovo o esistente.
+
+        Ritorna ``(task_id, lineage_id)``. Con ``resume_messages`` il subagent
+        riparte dalla conversazione salvata invece che dal solo task: e un loop
+        LLM completo come uno spawn, quindi passa dallo stesso
+        :meth:`_check_capacity` (slot riservato incluso).
+        """
+        self._check_capacity(quick=spec.quick)
+
+        task_id = str(uuid.uuid4())[:8]
+        lineage = lineage_id or str(uuid.uuid4())[:8]
         status = SubagentStatus(
             task_id=task_id,
-            label=display_label,
-            task_description=task,
+            label=spec.label,
+            task_description=spec.task,
             started_at=time.monotonic(),
+            lineage_id=lineage,
+            attempt=attempt,
+            agent_type=spec.agent_type,
+            state="running",
         )
         self._task_statuses[task_id] = status
+        self._track_lineage(_Lineage(lineage, spec, attempt, task_id))
+        self._pending_injections[task_id] = asyncio.Queue(maxsize=_MAX_PENDING_INJECTIONS)
 
         bg_task = asyncio.create_task(
-            self._run_subagent(
-                task_id,
-                task,
-                display_label,
-                origin,
-                status,
-                origin_message_id,
-                temperature,
-                workspace_scope,
-            )
+            self._run_subagent(task_id, spec, status, resume_messages=resume_messages)
         )
         self._running_tasks[task_id] = bg_task
+        session_key = spec.session_key
         if session_key:
             self._session_tasks.setdefault(session_key, set()).add(task_id)
 
-        def _cleanup(_: asyncio.Task) -> None:
+        def _cleanup(finished: asyncio.Task) -> None:
             self._running_tasks.pop(task_id, None)
-            self._task_statuses.pop(task_id, None)
+            # Lo status non viene piu buttato via: la terminazione e una
+            # *transizione* verso un record Tier-1 su disco. Col pop distruttivo
+            # tutto cio che serve a ispezionare o rilanciare il subagent
+            # svaniva nell'istante in cui finiva.
+            final = self._task_statuses.pop(task_id, None)
             self._repudiated_task_ids.discard(task_id)
+            self._discard_injections(task_id)
             if session_key and (ids := self._session_tasks.get(session_key)):
                 ids.discard(task_id)
                 if not ids:
                     del self._session_tasks[session_key]
+            state = self._terminal_state(finished, final)
+            self._retain(finished, final, spec, lineage, attempt)
+            if state != "done":
+                # Invariante: la storia Tier-2 riflette solo un lineage il cui
+                # ultimo tentativo e andato a buon fine. Un fallimento, uno stop
+                # o un tentativo superato la eliminano — riprendere da un
+                # transcript che il lineage ha poi abbandonato darebbe una
+                # continuazione incoerente. Il drop invalida anche il cache del
+                # SessionManager, quindi la RAM non cresce.
+                self._history.drop(lineage)
+            # Snapshot pubblicato DOPO il retain e dopo il pop dello status: solo
+            # qui il subagent e uscito da ``running`` ed e entrato in ``recent``,
+            # quindi lo snapshot non mostra lo stesso task in entrambe le liste.
+            self._publish_transition(spec, state, spec.label)
 
         bg_task.add_done_callback(_cleanup)
+        self._ensure_stall_watchdog()
+        self._publish_transition(spec, "started", spec.label)
 
-        logger.info("Spawned subagent [{}]: {}", task_id, display_label)
-        return f"Subagent [{display_label}] started (id: {task_id}). I'll notify you when it completes."
+        logger.info(
+            "Spawned subagent [{}] lineage={} attempt={} resumed={}: {}",
+            task_id, lineage, attempt, bool(resume_messages), spec.label,
+        )
+        return task_id, lineage
+
+    def _track_lineage(self, lineage: _Lineage) -> None:
+        """Registra il lineage in RAM, potando i piu vecchi non attivi."""
+        self._lineages[lineage.lineage_id] = lineage
+        if len(self._lineages) <= _MAX_TRACKED_LINEAGES:
+            return
+        for key, lin in list(self._lineages.items()):
+            if len(self._lineages) <= _MAX_TRACKED_LINEAGES:
+                break
+            task = self._running_tasks.get(lin.task_id)
+            if task is None or task.done():
+                del self._lineages[key]
+
+    # ------------------------------------------------------------------
+    # execution
+    # ------------------------------------------------------------------
 
     async def _run_subagent(
         self,
         task_id: str,
-        task: str,
-        label: str,
-        origin: dict[str, str],
+        spec: SubagentSpec,
         status: SubagentStatus,
-        origin_message_id: str | None = None,
-        temperature: float | None = None,
-        workspace_scope: WorkspaceScope | None = None,
+        *,
+        resume_messages: list[dict[str, Any]] | None = None,
     ) -> None:
         """Execute the subagent task and announce the result."""
+        label = spec.label
+        task = spec.task
+        origin = spec.origin
+        origin_message_id = spec.origin_message_id
+        workspace_scope = spec.workspace_scope
         logger.info("Subagent [{}] starting task: {}", task_id, label)
+        hook = _SubagentHook(task_id, status, activity=self.activity)
+        # Primo evento del task, prima di qualunque I/O: la modale che si apre su
+        # un subagent appena nato deve mostrare qualcosa, non una lista vuota.
+        hook.note_phase(status.phase)
 
         async def _on_checkpoint(payload: dict) -> None:
-            status.phase = payload.get("phase", status.phase)
+            phase = payload.get("phase", status.phase)
+            if phase != status.phase:
+                hook.note_phase(phase)
+            status.phase = phase
             status.iteration = payload.get("iteration", status.iteration)
+            # Secondo punto di stamp del progresso: un subagent che fa un solo
+            # tool call lunghissimo passa dai checkpoint, non dalle iterazioni.
+            status.touch()
 
         try:
             root = workspace_scope.project_path if workspace_scope is not None else self.workspace
@@ -248,12 +958,22 @@ class SubagentManager:
             if workspace_scope is not None:
                 cfg = self._subagent_tools_config()
                 cfg.restrict_to_workspace = workspace_scope.restrict_to_workspace
-            tools = self._build_tools(workspace=root, tools_config=cfg)
-            system_prompt = self._build_subagent_prompt(workspace=root)
-            messages: list[dict[str, Any]] = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": task},
-            ]
+            atype = get_agent_type(spec.agent_type)
+            tools = self._build_tools(workspace=root, tools_config=cfg, agent_type=atype)
+            system_prompt = self._build_subagent_prompt(workspace=root, agent_type=atype)
+            messages: list[dict[str, Any]]
+            if resume_messages:
+                messages = list(resume_messages)
+                if messages[0].get("role") != "system":
+                    # Una storia potata dalla testa (``enforce_file_cap``) puo
+                    # aver perso il proprio system prompt: rimetterne uno fresco
+                    # e sempre meglio che far girare un subagent senza ruolo.
+                    messages.insert(0, {"role": "system", "content": system_prompt})
+            else:
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": task},
+                ]
 
             sess_key = origin.get("session_key")
             llm_timeout = (
@@ -265,16 +985,40 @@ class SubagentManager:
                 result = await self.runner.run(AgentRunSpec(
                     initial_messages=messages,
                     tools=tools,
-                    model=self.model,
-                    temperature=temperature,
-                    max_iterations=self.max_iterations,
+                    model=atype.model or self.model,
+                    # Una temperatura passata allo spawn e una scelta esplicita
+                    # del chiamante e vince sul default del tipo.
+                    temperature=(
+                        spec.temperature if spec.temperature is not None
+                        else atype.temperature
+                    ),
+                    max_iterations=self._type_max_iterations(atype),
                     max_tool_result_chars=self.max_tool_result_chars,
-                    hook=_SubagentHook(task_id, status),
+                    hook=hook,
                     max_iterations_message="Task completed but no final response was generated.",
                     finalize_on_max_iterations=False,
                     error_message=None,
+                    # Un errore tool resta fatale, ma non il primo: il budget
+                    # lascia sbagliare qualche colpo (col retry hint, come
+                    # l'agente principale) e chiude solo quando l'agente non sta
+                    # piu recuperando. Vedi ``DEFAULT_TOOL_ERROR_BUDGET``.
                     fail_on_tool_error=True,
+                    tool_error_budget=self.tool_error_budget,
                     checkpoint_callback=_on_checkpoint,
+                    # Il ``progress_callback`` del subagent non scrive in chat: e
+                    # cio che apre lo streaming incrementale del runner (vedi
+                    # ``wants_progress_streaming`` in ``request_execution.py``),
+                    # quindi e la differenza fra "ragionamento consegnato in blocco
+                    # a fine iterazione" e "ragionamento visibile mentre accade".
+                    # La firma e deliberatamente stretta: senza ``file_edit_events``
+                    # ne ``tool_events`` il runner non attiva i tracker di
+                    # file-edit, che sono UI della chat principale e non di qui.
+                    progress_callback=self._make_progress_callback(hook),
+                    # Iniezione mid-run: la stessa macchina che ``AgentLoop`` usa
+                    # per i messaggi di follow-up dell'utente. Un ``subagent_send``
+                    # su un subagent vivo NON lo ferma, entra alla sua prossima
+                    # iterazione.
+                    injection_callback=self._make_injection_callback(task_id, hook),
                     session_key=sess_key,
                     workspace=root,
                     llm_timeout_s=llm_timeout,
@@ -283,28 +1027,156 @@ class SubagentManager:
             status.stop_reason = result.stop_reason
 
             if result.stop_reason == "tool_error":
+                hook.note_error("stopped: too many failed tool calls")
+                status.state = "failed"
                 status.tool_events = list(result.tool_events)
+                partial = self._format_partial_progress(result)
+                status.result_summary = truncate_text(partial, MAX_RESULT_SUMMARY_CHARS)
                 await self._announce_result(
                     task_id, label, task,
-                    self._format_partial_progress(result),
+                    partial,
                     origin, "error", origin_message_id,
                 )
             elif result.stop_reason == "error":
+                # Frase nostra, non ``result.error``: quel testo puo portare un
+                # messaggio di provider, una URL o un frammento di pagina, e da
+                # qui finirebbe in una UI e nel digest su disco.
+                hook.note_error("stopped: the run failed")
+                status.state = "failed"
+                error_text = result.error or "Error: subagent execution failed."
+                status.result_summary = truncate_text(error_text, MAX_RESULT_SUMMARY_CHARS)
                 await self._announce_result(
                     task_id, label, task,
-                    result.error or "Error: subagent execution failed.",
+                    error_text,
                     origin, "error", origin_message_id,
                 )
             else:
                 final_result = result.final_content or "Task completed but no final response was generated."
+                hook.note_result(len(final_result))
+                status.state = "done"
+                status.result_summary = truncate_text(final_result, MAX_RESULT_SUMMARY_CHARS)
                 logger.info("Subagent [{}] completed successfully", task_id)
+                # Storia Tier-2 salvata solo sull'esito buono, e PRIMA
+                # dell'announce: l'orchestratore puo rispondere al risultato con
+                # un ``subagent_send`` nello stesso turno, e a quel punto la
+                # storia deve essere gia su disco.
+                self._history.save(
+                    status.lineage_id,
+                    spec.records_key,
+                    getattr(result, "messages", None),
+                )
                 await self._announce_result(task_id, label, task, final_result, origin, "ok", origin_message_id)
 
         except Exception as e:
+            # Solo il nome di classe dell'eccezione, per la stessa ragione del
+            # ramo ``error``: il messaggio e testo di provenienza ignota.
+            hook.note_error(f"crashed ({type(e).__name__})")
             status.phase = "error"
+            status.state = "failed"
             status.error = str(e)
+            status.result_summary = truncate_text(f"Error: {e}", MAX_RESULT_SUMMARY_CHARS)
             logger.exception("Subagent [{}] failed", task_id)
             await self._announce_result(task_id, label, task, f"Error: {e}", origin, "error", origin_message_id)
+
+    # ------------------------------------------------------------------
+    # iniezione mid-run
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _make_progress_callback(hook: _SubagentHook) -> Callable[..., Any]:
+        """Callback di progress di un subagent: telemetria, non output in chat.
+
+        L'agente principale ne costruisce uno che pubblica sul bus
+        (``build_bus_progress_callback``); un subagent non ha una bolla in chat da
+        aggiornare, quindi il suo va nel log di attivita — che e proprio cio che la
+        modale mostra.
+
+        La firma e stretta di proposito, e il runner la ispeziona: dichiarare
+        ``file_edit_events`` o ``tool_events`` accenderebbe i tracker di file-edit
+        streaming del runner, che alimentano la UI della chat principale e qui
+        sarebbero lavoro e allocazioni per nessun consumatore.
+        """
+
+        async def _on_progress(
+            content: str,
+            *,
+            tool_hint: bool = False,
+            reasoning: bool = False,
+            reasoning_end: bool = False,
+        ) -> None:
+            if reasoning_end:
+                await hook.emit_reasoning_end()
+                return
+            if reasoning:
+                await hook.emit_reasoning(content)
+                return
+            # ``tool_hint`` e la riga "sto per chiamare X": qui e ridondante, gli
+            # eventi ``tool_start`` la portano gia con gli argomenti.
+            if not tool_hint:
+                hook.note_output(content)
+
+        return _on_progress
+
+    def _make_injection_callback(
+        self,
+        task_id: str,
+        hook: _SubagentHook | None = None,
+    ) -> Callable[..., Any]:
+        """Callback nella forma attesa da ``AgentRunSpec.injection_callback``.
+
+        Non blocca mai: se la casella e vuota ritorna una lista vuota e il
+        subagent continua per la sua strada. Il ``limit`` lo passa il runner
+        (``_MAX_INJECTIONS_PER_TURN``); la firma keyword-only e cio che gli fa
+        capire, per introspezione, che il parametro e supportato.
+        """
+
+        async def _drain(*, limit: int = 3) -> list[dict[str, Any]]:
+            queue = self._pending_injections.get(task_id)
+            if queue is None:
+                return []
+            items: list[dict[str, Any]] = []
+            while len(items) < max(1, limit):
+                try:
+                    items.append({"role": "user", "content": queue.get_nowait()})
+                except asyncio.QueueEmpty:
+                    break
+            if items:
+                logger.info(
+                    "Delivered {} orchestrator message(s) to live subagent [{}]",
+                    len(items), task_id,
+                )
+                # Un messaggio consumato spiega perche il subagent cambia
+                # comportamento a metà lavoro: senza l'evento, nel post-mortem
+                # quella svolta sembrerebbe arbitraria.
+                if hook is not None:
+                    hook.note_message_in(len(items))
+            return items
+
+        return _drain
+
+    def _enqueue_injection(self, task_id: str, message: str) -> None:
+        """Accoda un messaggio per un subagent vivo. Solleva se non consegnabile."""
+        queue = self._pending_injections.get(task_id)
+        if queue is None:
+            raise SubagentSendError(
+                f"subagent [{task_id}] is not accepting messages (it just terminated)"
+            )
+        try:
+            queue.put_nowait(message)
+        except asyncio.QueueFull:
+            raise SubagentSendError(
+                f"subagent [{task_id}] already has {_MAX_PENDING_INJECTIONS} undelivered "
+                "messages: let it work through them before sending more"
+            ) from None
+
+    def _discard_injections(self, task_id: str) -> None:
+        """Butta la casella di un subagent terminato, segnalando cio che resta."""
+        queue = self._pending_injections.pop(task_id, None)
+        if queue is not None and not queue.empty():
+            logger.warning(
+                "Subagent [{}] terminated with {} undelivered message(s)",
+                task_id, queue.qsize(),
+            )
 
     async def _announce_result(
         self,
@@ -315,15 +1187,28 @@ class SubagentManager:
         origin: dict[str, str],
         status: str,
         origin_message_id: str | None = None,
+        *,
+        lineage_id: str | None = None,
+        attempt: int | None = None,
+        force: bool = False,
     ) -> None:
-        """Announce the subagent result to the main agent via the message bus."""
-        if task_id in self._repudiated_task_ids:
-            # Subagent abbandonato da /stop che è riuscito a finire più tardi:
-            # il risultato è stale, non deve iniettare un turno nella sessione.
+        """Announce the subagent result to the main agent via the message bus.
+
+        ``force`` scavalca il ripudio: serve all'annuncio *esplicito* di
+        cancellazione, che deve arrivare proprio perché quello naturale è stato
+        soppresso. Vedi :meth:`cancel_task`.
+        """
+        if not force and task_id in self._repudiated_task_ids:
+            # Subagent abbandonato da /stop, o superato da un rilancio, che è
+            # riuscito a finire più tardi: il risultato è stale, non deve
+            # iniettare un turno nella sessione.
             self._repudiated_task_ids.discard(task_id)
             logger.info("Suppressed stale announce from repudiated subagent [{}]", task_id)
             return
-        status_text = "completed successfully" if status == "ok" else "failed"
+        status_text = {
+            "ok": "completed successfully",
+            "cancelled": "was stopped by the user",
+        }.get(status, "failed")
 
         announce_content = render_template(
             "agent/subagent_announce.md",
@@ -339,9 +1224,20 @@ class SubagentManager:
         # routed to the correct pending queue (mid-turn injection) instead of
         # being dispatched as a competing independent task.
         override = origin.get("session_key") or f"{origin['channel']}:{origin['chat_id']}"
+        live = self._task_statuses.get(task_id)
         metadata: dict[str, Any] = {
             "injected_event": "subagent_result",
             "subagent_task_id": task_id,
+            "subagent_lineage_id": (
+                lineage_id
+                if lineage_id is not None
+                else (live.lineage_id if live is not None else task_id)
+            ),
+            "subagent_attempt": (
+                attempt
+                if attempt is not None
+                else (live.attempt if live is not None else 1)
+            ),
         }
         if origin_message_id:
             metadata["origin_message_id"] = origin_message_id
@@ -378,8 +1274,28 @@ class SubagentManager:
             lines.append(f"- {result.error}")
         return "\n".join(lines) or (result.error or "Error: subagent execution failed.")
 
-    def _build_subagent_prompt(self, workspace: Path | None = None) -> str:
-        """Build a focused system prompt for the subagent."""
+    def _type_max_iterations(self, agent_type: AgentType) -> int:
+        """Tetto di iterazioni effettivo per un tipo.
+
+        Il valore del tipo puo solo STRINGERE quello configurato, mai allargarlo:
+        ``max_tool_iterations`` e una decisione dell'utente sul proprio device, e
+        un default di tipo piu generoso la scavalcherebbe in silenzio.
+        """
+        if agent_type.max_iterations is None:
+            return self.max_iterations
+        return min(agent_type.max_iterations, self.max_iterations)
+
+    def _build_subagent_prompt(
+        self,
+        workspace: Path | None = None,
+        agent_type: AgentType | None = None,
+    ) -> str:
+        """Build a focused system prompt for the subagent.
+
+        Il prompt di ruolo del tipo viene *composto* dentro il template base, non
+        duplicato: la parte condivisa (contenuto non fidato, workspace, skills)
+        resta in un solo file.
+        """
         from jenny.agent.context import ContextBuilder
         from jenny.agent.skills import SkillsLoader
 
@@ -394,7 +1310,555 @@ class SubagentManager:
             time_ctx=time_ctx,
             workspace=str(root),
             skills_summary=skills_summary or "",
+            role_section=self._render_role_section(agent_type),
         )
+
+    @staticmethod
+    def _render_role_section(agent_type: AgentType | None) -> str:
+        """Rende il prompt di ruolo del tipo, o stringa vuota se non c'e.
+
+        Un template mancante non deve uccidere il subagent: un workspace
+        sincronizzato da una versione precedente puo non avere ancora il file, e
+        girare senza la sezione di ruolo e infinitamente meglio che non girare.
+        """
+        if agent_type is None:
+            return ""
+        try:
+            return render_template(agent_type.prompt_template, strip=True)
+        except Exception as e:  # noqa: BLE001 — vedi docstring
+            logger.warning(
+                "Agent type prompt {} unavailable ({}); running without role section",
+                agent_type.prompt_template, e,
+            )
+            return ""
+
+    # ------------------------------------------------------------------
+    # retention Tier-1
+    # ------------------------------------------------------------------
+
+    def _retain(
+        self,
+        finished: asyncio.Task,
+        status: SubagentStatus | None,
+        spec: SubagentSpec,
+        lineage_id: str,
+        attempt: int,
+    ) -> None:
+        """Persiste il record terminale del tentativo appena concluso.
+
+        Sequenza, in quest'ordine per una ragione: **digest -> record -> drop**.
+        Il digest va su disco prima del record perche il record e cio che lo
+        rende raggiungibile (porta ``activity_events``/``activity_bytes``): con
+        l'ordine inverso un kill in mezzo lascerebbe un record che promette un
+        digest inesistente, cioe un blocco "cosa ha fatto davvero" che si apre
+        vuoto. Con questo ordine il rischio simmetrico e un digest senza record —
+        invisibile, e raccolto da :meth:`sweep_orphan_digests` al boot. Il ring in
+        RAM si butta per ultimo: e la sorgente del digest, e va liberato solo
+        quando la copia durevole e stata tentata.
+        """
+        task_id = status.task_id if status is not None else lineage_id
+        digest = self._write_activity_digest(task_id)
+        record = SubagentRecord(
+            task_id=task_id,
+            lineage_id=lineage_id,
+            attempt=attempt,
+            spec=spec,
+            state=self._terminal_state(finished, status),
+            phase=status.phase if status is not None else "done",
+            stop_reason=status.stop_reason if status is not None else None,
+            error=status.error if status is not None else None,
+            result_summary=status.result_summary if status is not None else "",
+            iteration=status.iteration if status is not None else 0,
+            cancel_reason=status.cancel_reason if status is not None else None,
+            started_at=status.started_at_wall if status is not None else time.time(),
+            ended_at=time.time(),
+            activity_events=digest.events,
+            activity_bytes=digest.bytes,
+        )
+        try:
+            self._records.append(record)
+        except Exception as e:  # noqa: BLE001 — la retention non puo uccidere il subagent
+            logger.warning(
+                "Subagent record persistence failed for [{}]: {}", record.task_id, e
+            )
+        self.activity.drop(task_id)
+
+    def _write_activity_digest(self, task_id: str) -> DigestMeta:
+        """Condensa il ring del task e la scrive su disco. Non solleva."""
+        try:
+            return self.digests.write(task_id, self.activity.digest(task_id))
+        except Exception as e:  # noqa: BLE001 — la telemetria non uccide la retention
+            logger.warning("Subagent activity digest failed for [{}]: {}", task_id, e)
+            return DigestMeta()
+
+    @staticmethod
+    def _terminal_state(finished: asyncio.Task, status: SubagentStatus | None) -> str:
+        """Stato finale osservato dal task, non solo quello dichiarato.
+
+        Una cancellazione (``/stop``, rilancio, drain) non passa dai rami di
+        ``_run_subagent``: va letta dal task, altrimenti il record resterebbe
+        ``running`` per sempre.
+        """
+        if finished.cancelled():
+            return "cancelled"
+        if finished.exception() is not None:
+            return "failed"
+        if status is None:
+            return "done"
+        return status.state if status.state != "running" else "done"
+
+    # ------------------------------------------------------------------
+    # snapshot + pubblicazione sul bus
+    # ------------------------------------------------------------------
+
+    def status_snapshot(self, session_key: str | None = None) -> dict:
+        """Snapshot JSON-serializzabile di subagent vivi e terminati di recente.
+
+        Contratto stabile: lo consuma il pannello della WebUI (che non importa
+        nulla da ``jenny/agent``) e il tool ``subagent_status``. Solo tipi JSON:
+        i timestamp monotonic non escono da qui, ``elapsed_s``/``idle_s`` sono
+        derivate e ``ended_at`` e orologio di parete.
+
+        ``recent`` e ordinato dal piu recente al meno recente e limitato a
+        ``_SNAPSHOT_RECENT_LIMIT``.
+
+        Ogni voce porta ``task`` troncato a ``_SNAPSHOT_TASK_CHARS``, e le voci
+        vive anche la coda dei ``tool_events``: sono i due campi che la modale di
+        dettaglio del pannello mostra e che la card, larga una riga, non puo.
+        """
+        now = time.monotonic()
+        # Default a ``set()``, non a ``None``: una chiave di sessione sconosciuta
+        # deve filtrare tutto, non disattivare il filtro. Con ``.get(key)`` un
+        # caller con una chiave stale otteneva i subagent di *tutte* le sessioni
+        # in ``running`` e solo i propri in ``recent``.
+        ids = self._session_tasks.get(session_key, set()) if session_key else None
+        running: list[dict[str, Any]] = []
+        for task_id, st in list(self._task_statuses.items()):
+            if ids is not None and task_id not in ids:
+                continue
+            running.append({
+                "task_id": st.task_id,
+                "lineage_id": st.lineage_id,
+                "attempt": st.attempt,
+                "label": st.label,
+                "task": truncate_text(st.task_description, _SNAPSHOT_TASK_CHARS),
+                "agent_type": st.agent_type,
+                "state": st.state,
+                "phase": st.phase,
+                "iteration": st.iteration,
+                "elapsed_s": round(max(0.0, now - st.started_at), 1),
+                "idle_s": round(max(0.0, now - st.last_progress_at), 1),
+                "last_tool": self._last_tool_name(st.tool_events),
+                "tool_events": self._snapshot_tool_events(st.tool_events),
+            })
+
+        recent: list[dict[str, Any]] = []
+        for record in reversed(self.list_records(session_key)):
+            recent.append({
+                "task_id": record.task_id,
+                "lineage_id": record.lineage_id,
+                "attempt": record.attempt,
+                "label": record.spec.label,
+                "task": truncate_text(record.spec.task, _SNAPSHOT_TASK_CHARS),
+                "agent_type": record.spec.agent_type,
+                "state": record.state,
+                "stop_reason": record.stop_reason,
+                # Provenienza della cancellazione: ``state="cancelled"`` da solo e
+                # ambiguo, e dopo un riavvio l'ambiguita si risolveva sempre nel
+                # modo peggiore (rilanciare cio che l'utente aveva fermato).
+                # ``None`` per tutti gli altri stati.
+                "cancel_reason": record.cancel_reason,
+                "result_summary": record.result_summary,
+                "ended_at": record.ended_at,
+                # Riflette il tetto dei rilanci *automatici*: un rilancio
+                # manuale resta sempre possibile (vedi ``restart``).
+                "can_restart": record.attempt < MAX_AUTO_ATTEMPTS,
+            })
+            if len(recent) >= _SNAPSHOT_RECENT_LIMIT:
+                break
+        return {"running": running, "recent": recent}
+
+    @staticmethod
+    def _last_tool_name(tool_events: list) -> str | None:
+        for event in reversed(tool_events or []):
+            if isinstance(event, dict) and isinstance(event.get("name"), str):
+                return event["name"]
+        return None
+
+    @staticmethod
+    def _snapshot_tool_events(tool_events: list) -> list[dict[str, str]]:
+        """Coda corta e JSON-only dei tool event, dal piu vecchio al piu nuovo.
+
+        Ricostruisce i dizionari invece di passarli: ``tool_events`` arriva dal
+        runner e lo snapshot e un contratto verso la WebUI, quindi qui non deve
+        poter transitare una chiave nuova ne un valore non serializzabile.
+        """
+        recent = [e for e in (tool_events or []) if isinstance(e, dict)]
+        return [
+            {
+                "name": str(e.get("name") or ""),
+                "status": str(e.get("status") or ""),
+                "detail": str(e.get("detail") or ""),
+            }
+            for e in recent[-_SNAPSHOT_TOOL_EVENTS_LIMIT:]
+        ]
+
+    def _publish_status_snapshot(self, spec: SubagentSpec) -> None:
+        """Pubblica lo snapshot sul canale d'origine a ogni transizione.
+
+        Best-effort (``try_publish_outbound``): e uno stato ricalcolabile, e
+        bloccare una transizione di stato su una coda outbound piena sarebbe un
+        prezzo peggiore di uno snapshot perso — il successivo lo rimpiazza.
+        """
+        try:
+            payload = self.status_snapshot(spec.session_key)
+            self.bus.try_publish_outbound(OutboundMessage(
+                channel=spec.origin_channel,
+                chat_id=spec.origin_chat_id,
+                content="",
+                metadata={OUTBOUND_META_SUBAGENT_STATUS: payload},
+            ))
+        except Exception:  # noqa: BLE001 — la telemetria non uccide il subagent
+            logger.exception("Failed to publish subagent status snapshot")
+
+    def _publish_transition(self, spec: SubagentSpec, state: str, label: str) -> None:
+        """Riga di progress + snapshot per una transizione di stato."""
+        hint = _TRANSITION_HINTS.get(state)
+        if hint:
+            try:
+                self.bus.try_publish_outbound(OutboundMessage(
+                    channel=spec.origin_channel,
+                    chat_id=spec.origin_chat_id,
+                    content=f"{hint}: {label}",
+                    metadata={"_progress": True, "_tool_hint": True},
+                ))
+            except Exception:  # noqa: BLE001 — vedi _publish_status_snapshot
+                logger.exception("Failed to publish subagent transition hint")
+        self._publish_status_snapshot(spec)
+
+    def list_statuses(self) -> dict[str, SubagentStatus]:
+        """Status dei subagent attualmente vivi (copia difensiva)."""
+        return dict(self._task_statuses)
+
+    def list_records(self, session_key: str | None = None) -> list[SubagentRecord]:
+        """Record Tier-1 dei subagent terminati, dal piu vecchio al piu nuovo."""
+        if session_key is None:
+            return self._records.load_all()
+        return self._records.load(session_key)
+
+    # ------------------------------------------------------------------
+    # restart
+    # ------------------------------------------------------------------
+
+    async def restart(
+        self,
+        target_id: str,
+        *,
+        extra_instructions: str | None = None,
+        manual: bool = False,
+        quick: bool | None = None,
+        grace_s: float = 2.0,
+    ) -> str:
+        """Rilancia il lavoro identificato da ``target_id`` come attempt N+1.
+
+        ``target_id`` puo essere un ``task_id`` (di un tentativo vivo o
+        terminato) o un ``lineage_id``. Il tentativo precedente, se ancora vivo,
+        viene cancellato e ripudiato prima di far partire il successivo.
+
+        ``manual=True`` e il bottone premuto da un umano e non ha tetto;
+        ``manual=False`` (orchestratore/codice) si fermano a
+        ``MAX_AUTO_ATTEMPTS`` tentativi per lineage.
+        """
+        resolved = self._resolve_target(target_id)
+        if resolved is None:
+            raise SubagentRestartError(f"unknown subagent or lineage: {target_id}")
+        lineage_id, spec, attempt = resolved
+        next_attempt = attempt + 1
+        if not manual and next_attempt > MAX_AUTO_ATTEMPTS:
+            raise SubagentRestartError(
+                f"automatic restart refused for lineage {lineage_id}: "
+                f"{attempt}/{MAX_AUTO_ATTEMPTS} attempts already used "
+                "(a manual relaunch is still possible)"
+            )
+
+        await self._supersede(lineage_id, grace_s=grace_s)
+
+        new_spec = spec.with_extra_instructions(extra_instructions)
+        if quick is not None and quick != new_spec.quick:
+            new_spec = replace(new_spec, quick=quick)
+        logger.info(
+            "Restarting lineage {} as attempt {} (manual={})",
+            lineage_id, next_attempt, manual,
+        )
+        return await self._spawn_spec(new_spec, lineage_id=lineage_id, attempt=next_attempt)
+
+    # ------------------------------------------------------------------
+    # send: iniezione / resume / rilancio
+    # ------------------------------------------------------------------
+
+    async def send(
+        self,
+        target_id: str,
+        message: str,
+        *,
+        quick: bool | None = None,
+        grace_s: float = 2.0,
+    ) -> SubagentSendResult:
+        """Parla a un subagent, qualunque sia il suo stato.
+
+        Il chiamante NON deve sapere se il subagent e vivo: dice "parla con
+        questo subagent" e la scelta la fa il manager, in quest'ordine:
+
+        1. tentativo **vivo e in corso** -> iniezione mid-run, senza fermarlo;
+        2. **terminato bene** con storia entro la finestra di retention ->
+           *resume*: un run nuovo seminato con i messaggi salvati piu il
+           follow-up;
+        3. tutto il resto (stallato, fallito, storia scaduta) -> *rilancio*
+           dalla spec, col messaggio come nota correttiva.
+
+        Un resume occupa uno slot di concorrenza come uno spawn, ma **non**
+        consuma il budget dei rilanci automatici: ``attempt`` non avanza, perche
+        una continuazione diretta non e il ritentativo di un fallimento e
+        ``MAX_AUTO_ATTEMPTS`` esiste per quello.
+        """
+        text = (message or "").strip()
+        if not text:
+            raise SubagentSendError("the message is empty: there is nothing to send")
+
+        live_id = self._live_task_for(target_id)
+        if live_id is not None:
+            live = self._task_statuses.get(live_id)
+            # La casella deve esistere: un tentativo che ha appena perso la
+            # propria (terminazione in corso) non e piu iniettabile e deve
+            # cadere sui rami resume/rilancio, non fallire.
+            if (
+                live is not None
+                and live.state == "running"
+                and live_id in self._pending_injections
+            ):
+                self._enqueue_injection(live_id, text)
+                return SubagentSendResult(
+                    "injected",
+                    f"Delivered to running subagent [{live_id}] ({live.label}); it will "
+                    "pick the message up at its next step and keep working. Its result "
+                    "will be announced to you as usual — do not poll for it.",
+                )
+
+        resolved = self._resolve_target(target_id)
+        if resolved is None:
+            raise SubagentSendError(f"unknown subagent or lineage: {target_id}")
+        lineage_id, spec, attempt = resolved
+
+        # La storia si consulta solo se non c'e un tentativo vivo: un lineage
+        # stallato puo avere il transcript di un tentativo precedente, e
+        # riprenderlo mentre un altro tentativo e in volo sarebbe incoerente.
+        history = self._history.load(lineage_id) if live_id is None else None
+        if history:
+            return await self._resume_lineage(
+                lineage_id, spec, attempt, history, text, quick=quick,
+            )
+
+        detail = await self.restart(
+            target_id,
+            extra_instructions=text,
+            manual=False,
+            quick=quick,
+            grace_s=grace_s,
+        )
+        return SubagentSendResult(
+            "restarted",
+            "No resumable conversation for this subagent (it failed, stalled, or its "
+            f"history aged out), so the job was relaunched from scratch with your "
+            f"message as a corrective note. {detail}",
+        )
+
+    async def _resume_lineage(
+        self,
+        lineage_id: str,
+        spec: SubagentSpec,
+        attempt: int,
+        history: list[dict[str, Any]],
+        message: str,
+        *,
+        quick: bool | None,
+    ) -> SubagentSendResult:
+        """Rilancia un lineage terminato seminandolo con la storia salvata."""
+        resume_spec = spec if quick is None or quick == spec.quick else replace(spec, quick=quick)
+        messages = list(history) + [{"role": "user", "content": message}]
+        # ``attempt`` invariato: vedi il contratto in ``send``. Il record del run
+        # ripreso resta sullo stesso attempt, cosi ``can_restart`` nello snapshot
+        # continua a significare "quanti rilanci automatici sono stati spesi".
+        task_id, _ = await self._launch(
+            resume_spec,
+            lineage_id=lineage_id,
+            attempt=attempt,
+            resume_messages=messages,
+        )
+        logger.info(
+            "Resumed lineage {} as [{}] from {} stored message(s)",
+            lineage_id, task_id, len(history),
+        )
+        return SubagentSendResult(
+            "resumed",
+            f"Resumed subagent [{spec.label}] from its saved conversation "
+            f"(new id: {task_id}, lineage {lineage_id}, {len(history)} messages of "
+            "context): it already knows what it did, you only sent the change. "
+            "Its result will be announced to you as usual.",
+        )
+
+    def _live_task_for(self, target_id: str) -> str | None:
+        """Task id del tentativo VIVO che corrisponde a un task id o lineage id."""
+        if not target_id:
+            return None
+        candidates: list[str] = []
+        if target_id in self._task_statuses:
+            candidates.append(target_id)
+        candidates.extend(
+            tid for tid, st in self._task_statuses.items()
+            if tid != target_id and st.lineage_id == target_id
+        )
+        for tid in candidates:
+            task = self._running_tasks.get(tid)
+            if task is not None and not task.done():
+                return tid
+        return None
+
+    def _resolve_target(self, target_id: str) -> tuple[str, SubagentSpec, int] | None:
+        """Risolve un task id o lineage id in (lineage_id, spec, attempt corrente).
+
+        L'attempt restituito e sempre il piu alto noto per il lineage: rilanciare
+        partendo dall'id di un tentativo vecchio non deve far regredire la
+        numerazione (ne rimettere in gioco il tetto automatico).
+        """
+        if not target_id:
+            return None
+        lineage_id: str | None = None
+        spec: SubagentSpec | None = None
+        attempt = 0
+
+        if (live := self._task_statuses.get(target_id)) is not None:
+            lineage_id = live.lineage_id
+        elif target_id in self._lineages:
+            lineage_id = target_id
+        else:
+            for lin in self._lineages.values():
+                if lin.task_id == target_id:
+                    lineage_id = lin.lineage_id
+                    break
+        if lineage_id is None:
+            # Fallback durevole: dopo un riavvio del processo la memoria e vuota
+            # ma i record Tier-1 su disco portano ancora spec, lineage e attempt.
+            record = self._records.find(target_id)
+            if record is None:
+                return None
+            lineage_id, spec, attempt = record.lineage_id, record.spec, record.attempt
+
+        tracked = self._lineages.get(lineage_id)
+        if tracked is not None and tracked.attempt >= attempt:
+            spec, attempt = tracked.spec, tracked.attempt
+        if spec is None:
+            return None
+        return lineage_id, spec, attempt
+
+    async def _supersede(self, lineage_id: str, *, grace_s: float) -> None:
+        """Cancella e ripudia il tentativo vivo di un lineage.
+
+        Riusa ``_repudiated_task_ids``, lo stesso meccanismo di ``/stop``: un
+        tentativo superato che riesce a finire piu tardi non deve iniettare il
+        proprio risultato stale nella sessione.
+        """
+        lin = self._lineages.get(lineage_id)
+        if lin is None:
+            return
+        task = self._running_tasks.get(lin.task_id)
+        if task is None or task.done():
+            return
+        self._mark_cancelled(lin.task_id, CANCEL_REASON_SUPERSEDED)
+        self._repudiated_task_ids.add(lin.task_id)
+        task.cancel()
+        await asyncio.wait([task], timeout=grace_s)
+
+    # ------------------------------------------------------------------
+    # stall watchdog
+    # ------------------------------------------------------------------
+
+    def _ensure_stall_watchdog(self) -> None:
+        """Crea lazy l'unico task di vigilanza per tutti i subagent.
+
+        Uno solo, non uno per subagent: su Android ogni task in piu e memoria e
+        wakeup. Il loop esce da solo quando non resta nulla da vigilare, e uno
+        spawn successivo lo ricrea.
+        """
+        if self.stall_threshold_s <= 0:
+            return
+        if self._watchdog_task is not None and not self._watchdog_task.done():
+            return
+        self._watchdog_task = asyncio.create_task(self._stall_watchdog_loop())
+
+    async def _stall_watchdog_loop(self) -> None:
+        while self._running_tasks:
+            await asyncio.sleep(self._stall_check_interval_s)
+            try:
+                for task_id in self.check_stalls():
+                    if (spec := self._spec_for_task(task_id)) is not None:
+                        status = self._task_statuses.get(task_id)
+                        self._publish_transition(
+                            spec, "stalled", status.label if status else spec.label
+                        )
+            except Exception:  # noqa: BLE001 — il watchdog non deve mai morire
+                logger.exception("Subagent stall check failed")
+
+    def _spec_for_task(self, task_id: str) -> SubagentSpec | None:
+        """Spec del tentativo vivo ``task_id``, se ancora tracciato in RAM."""
+        status = self._task_statuses.get(task_id)
+        if status is not None and (lin := self._lineages.get(status.lineage_id)) is not None:
+            return lin.spec
+        for lin in self._lineages.values():
+            if lin.task_id == task_id:
+                return lin.spec
+        return None
+
+    def check_stalls(self, *, now: float | None = None) -> list[str]:
+        """Marca ``stalled`` i subagent senza progresso da oltre la soglia.
+
+        MARCA E BASTA: non cancella nulla. La decisione di rilanciare e
+        dell'utente o dell'orchestratore, e un subagent lento non e un subagent
+        rotto. Simmetricamente, uno ``stalled`` che riprende a progredire torna
+        ``running``.
+
+        Ritorna i task id marcati in questo giro.
+        """
+        moment = time.monotonic() if now is None else now
+        marked: list[str] = []
+        for task_id, status in list(self._task_statuses.items()):
+            if status.state not in ("running", "stalled"):
+                continue
+            idle = moment - status.last_progress_at
+            if idle >= self.stall_threshold_s:
+                if status.state != "stalled":
+                    status.state = "stalled"
+                    marked.append(task_id)
+                    logger.warning(
+                        "Subagent [{}] marked stalled after {:.0f}s without progress",
+                        task_id, idle,
+                    )
+            elif status.state == "stalled":
+                status.state = "running"
+        return marked
+
+    async def _cancel_stall_watchdog(self) -> None:
+        """Ferma il watchdog senza lasciare task orfani allo shutdown."""
+        task = self._watchdog_task
+        self._watchdog_task = None
+        if task is None or task.done():
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    # ------------------------------------------------------------------
+    # cancellation / shutdown
+    # ------------------------------------------------------------------
 
     async def cancel_by_session(self, session_key: str, *, grace_s: float = 2.0) -> int:
         """Cancel all subagents for the given session. Returns count cancelled.
@@ -410,6 +1874,11 @@ class SubagentManager:
         }
         tasks = list(by_task)
         for t in tasks:
+            # Provenienza scritta PRIMA della cancellazione: dopo il cancel la
+            # done-callback puo girare in qualunque momento e il record verrebbe
+            # persistito senza. Questo path e /stop, quindi la provenienza e
+            # l'utente (vedi ``AgentLoop`` in loop_tasks.py).
+            self._mark_cancelled(by_task[t], CANCEL_REASON_USER)
             t.cancel()
         if tasks:
             _, pending = await asyncio.wait(tasks, timeout=grace_s)
@@ -422,16 +1891,83 @@ class SubagentManager:
                 )
         return len(tasks)
 
+    async def cancel_task(self, task_id: str, *, grace_s: float = 2.0) -> bool:
+        """Cancella un singolo tentativo vivo. Ritorna ``True`` se c'era da fermare.
+
+        Pensata per lo stop puntuale (bottone in UI, orchestratore): a differenza
+        di ``cancel_by_session`` non tocca gli altri subagent della sessione.
+
+        Il tentativo viene ripudiato (l'announce naturale, se riesce a partire,
+        è stale) **ma al suo posto ne viene iniettato uno esplicito di
+        cancellazione**. Non è rumore: l'orchestratore è tipicamente fermo
+        mid-turn in attesa proprio di quell'injection, e senza nulla il turno
+        resta appeso fino al timeout della pending queue (300s) — l'utente
+        preme Stop e vede "Agent running" per cinque minuti.
+        """
+        task = self._running_tasks.get(task_id)
+        if task is None or task.done():
+            return False
+        lineage_id: str | None = None
+        attempt: int | None = None
+        if (status := self._mark_cancelled(task_id, CANCEL_REASON_USER)) is not None:
+            lineage_id = status.lineage_id or None
+            attempt = status.attempt
+        self._repudiated_task_ids.add(task_id)
+        # Snapshot pubblicato subito, non solo dalla done-callback: un task che
+        # non muore entro il grace verrebbe abbandonato e il pannello lo
+        # mostrerebbe "running" per sempre.
+        spec = self._spec_for_task(task_id)
+        if spec is not None:
+            self._publish_status_snapshot(spec)
+        task.cancel()
+        _, pending = await asyncio.wait([task], timeout=grace_s)
+        if pending:
+            logger.warning(
+                "Abandoned stuck subagent [{}] after {}s grace", task_id, grace_s
+            )
+        if spec is not None:
+            await self._announce_result(
+                task_id,
+                spec.label,
+                spec.task,
+                # Stesso testo che finisce nel record e in ``subagent_status``:
+                # l'orchestratore deve leggere la stessa regola sia sull'annuncio
+                # immediato sia rileggendo lo storico dopo un riavvio.
+                cancellation_summary(CANCEL_REASON_USER),
+                {
+                    "channel": spec.origin_channel,
+                    "chat_id": spec.origin_chat_id,
+                    "session_key": spec.session_key,
+                },
+                "cancelled",
+                spec.origin_message_id,
+                lineage_id=lineage_id,
+                attempt=attempt,
+                force=True,
+            )
+        return True
+
     async def drain(self, *, timeout_s: float = 10.0) -> int:
         """Attende la fine di TUTTI i subagent in volo; cancella quelli che
         sforano ``timeout_s``. Usato dallo shutdown ordinato del gateway.
 
         Ritorna il numero di subagent che erano ancora attivi all'inizio."""
-        tasks = [t for t in self._running_tasks.values() if not t.done()]
+        # Il watchdog va fermato per primo: e un task periodico del manager,
+        # non un subagent, e nessuno lo aspetterebbe.
+        await self._cancel_stall_watchdog()
+        by_task: dict[asyncio.Task[None], str] = {
+            task: task_id
+            for task_id, task in self._running_tasks.items()
+            if not task.done()
+        }
+        tasks = list(by_task)
         if not tasks:
             return 0
         _, pending = await asyncio.wait(tasks, timeout=timeout_s)
         for t in pending:
+            # Solo i pending: chi ha finito da se ha gia il proprio esito, e
+            # sovrascriverlo con "cancellato allo shutdown" sarebbe una bugia.
+            self._mark_cancelled(by_task[t], CANCEL_REASON_SHUTDOWN)
             t.cancel()
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)

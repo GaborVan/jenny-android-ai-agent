@@ -205,3 +205,69 @@ async def test_runner_keeps_going_when_tool_result_persistence_fails():
     assert result.final_content == "done"
     tool_message = next(msg for msg in captured_second_call if msg.get("role") == "tool")
     assert tool_message["content"] == "tool result"
+
+
+# ---------------------------------------------------------------------------
+# Riferimento all'output spillato: righe, non solo caratteri
+# ---------------------------------------------------------------------------
+
+
+def test_persisted_reference_states_the_line_count_and_where_to_resume(tmp_path):
+    """Il riferimento non deve costringere il modello a inventarsi un ``offset``.
+
+    ``read_file`` pagina per riga e rifiuta un offset oltre la fine con un errore
+    tool; un riferimento che parla solo di caratteri rende quell'errore
+    inevitabile per chiunque voglia "il resto". Il conteggio delle righe e la riga
+    da cui riprendere sono esattamente cio che serve a non tirare a indovinare.
+    """
+    from jenny.utils.helpers import maybe_persist_tool_result
+
+    payload = "\n".join(f"line {i}" for i in range(1, 501))
+    persisted = maybe_persist_tool_result(
+        tmp_path, "current:session", "call_big", payload, max_chars=64,
+    )
+
+    assert "[tool output persisted]" in persisted
+    assert "500 lines" in persisted
+    # La preview e tagliata a 1200 caratteri, quindi l'offset di ripresa cade
+    # dentro il file e non oltre la fine.
+    stored = (tmp_path / ".jenny" / "tool-results" / "current_session" / "call_big.txt")
+    total = len(stored.read_text(encoding="utf-8").splitlines())
+    assert total == 500
+    offset = int(persisted.split("offset=")[1].split(")")[0])
+    assert 1 <= offset <= total
+    # La riga indicata e la prima non mostrata per intero: rileggerla da lì non
+    # salta niente.
+    assert f"line {offset}" in payload.splitlines()[offset - 1]
+
+
+def test_persisted_reference_line_count_describes_the_written_file(tmp_path):
+    """Per i blocchi testuali su disco finisce il JSON indentato, non la preview.
+
+    Il conteggio deve descrivere il file che il modello aprirebbe; e per lo stesso
+    motivo l'offset di ripresa, che si riferisce alla preview, qui non viene dato.
+    """
+    from jenny.utils.helpers import maybe_persist_tool_result
+
+    blocks = [{"type": "text", "text": "x" * 4000}]
+    persisted = maybe_persist_tool_result(
+        tmp_path, "current:session", "call_blocks", blocks, max_chars=64,
+    )
+
+    stored = tmp_path / ".jenny" / "tool-results" / "current_session" / "call_blocks.json"
+    expected = len(stored.read_text(encoding="utf-8").splitlines())
+    assert f"{expected} lines" in persisted
+    assert "offset=" not in persisted
+
+
+def test_persisted_reference_without_a_cut_preview_still_reports_lines(tmp_path):
+    """Anche senza taglio il conteggio c'e: e il campo, non l'avviso, a informare."""
+    from jenny.utils.helpers import maybe_persist_tool_result
+
+    payload = "\n".join(["short"] * 20)
+    persisted = maybe_persist_tool_result(
+        tmp_path, "current:session", "call_small", payload, max_chars=32,
+    )
+
+    assert "20 lines" in persisted
+    assert "Preview cut" not in persisted

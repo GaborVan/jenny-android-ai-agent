@@ -29,6 +29,14 @@ class ToolRegistry:
         # l'annotazione di un attributo viene valutata a runtime e l'import è
         # solo TYPE_CHECKING.
         self.file_states: "FileStates | None" = None
+        # Contatore monotono delle tool call passate da questo registry.
+        # Serve a un tool per sapere se *altri* tool hanno girato dopo la sua
+        # ultima chiamata: e per-registry, non globale, perche l'informazione
+        # utile riguarda l'agente che chiede (vedi la guardia anti-polling in
+        # ``subagent_control.py``) e i subagent hanno registry propri.
+        # Avanza in :meth:`prepare_call` e non in :meth:`execute`: il perche e
+        # documentato la, ed e meta del motivo per cui quella guardia era morta.
+        self.exec_seq: int = 0
 
     def register(self, tool: Tool) -> None:
         """Register a tool."""
@@ -96,7 +104,18 @@ class ToolRegistry:
         name: str,
         params: Any,
     ) -> tuple[Tool | None, Any, str | None]:
-        """Resolve, cast, and validate one tool call."""
+        """Resolve, cast, and validate one tool call.
+
+        Qui avanza ``exec_seq``, e non in :meth:`execute`: il runner
+        (``agent/tool_execution.py``) risolve il tool con ``prepare_call`` e poi
+        invoca ``tool.execute(...)`` diretto, saltando ``execute()``. Contare la
+        lasciava ``exec_seq`` a zero per sempre in produzione — meta della
+        ragione per cui la guardia anti-polling di ``subagent_status`` viveva
+        solo nei test. ``prepare_call`` e invece l'unico passaggio comune ai due
+        path, esattamente una volta per tool call (anche quando la risoluzione
+        fallisce: il tentativo conta comunque come "qualcosa e girato in mezzo").
+        """
+        self.exec_seq += 1
         tool = self._tools.get(name)
         if not tool:
             suggestion = self._suggest_name(str(name))
@@ -158,6 +177,9 @@ class ToolRegistry:
 
     async def execute(self, name: str, params: Any) -> Any:
         """Execute a tool by name with given parameters."""
+        # ``exec_seq`` avanza dentro ``prepare_call`` (chiamata qui sotto): un
+        # incremento anche qui conterebbe due volte la stessa tool call e
+        # sfaserebbe chi misura "e girato qualcos'altro in mezzo?".
         hint = TOOL_ERROR_RETRY_HINT
         tool, params, error = self.prepare_call(name, params)
         if error:

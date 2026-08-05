@@ -10,7 +10,9 @@ There is no fixed tool count. What Jenny actually has available in a given conve
 - **The runtime platform** — `web_search`, `web_fetch`, `get_location`, and `ui_view` only register when an Android context is available (they are backed by Android-only bridges: a hidden WebView, the location bridge, and the WebUI query channel). On any other platform they simply do not exist.
 - **Installed Jenny Apps** — every app under `workspace/apps/` contributes one tool per declared action, re-synced every turn.
 
-The built-in count is **23**: 22 tools registered through the standard loader (`jenny/agent/tools/loader.py:12-29`) plus `my`, which is registered by hand because it needs a live reference to the running agent loop (`jenny/agent/loop.py`). Add to that N dynamic app tools. If you ask Jenny to list its tools, expect the number to vary between installs.
+- **The agent's scope** — the main agent loads either the `orchestrator` scope (default, see `agents.defaults.orchestratorMode`) or the historical `core` scope; a subagent loads the `subagent` scope, narrowed further by its agent type. The same install therefore exposes different tools to the orchestrator and to its subagents.
+
+The built-in count is **26**: 25 tools registered through the standard loader (`jenny/agent/tools/loader.py`) plus `my`, which is registered by hand because it needs a live reference to the running agent loop (`jenny/agent/loop.py`). No single agent sees all of them at once — see the scope note above. Add to that N dynamic app tools. If you ask Jenny to list its tools, expect the number to vary between installs.
 
 Below, tools are grouped into seven categories. Each entry gives the exact tool name the model calls, what it does for you in practice, the parameters worth knowing, hard numeric limits, the config toggle that controls it, and any gotcha worth knowing before you rely on it.
 
@@ -272,11 +274,35 @@ Gotcha: seeing a `dream` job in the list is expected, not a sign of something wr
 
 Starts a subagent to work a task in the background and reports the result back into the chat when it finishes.
 
-- Parameters: `task` (required), `label` (display name), `temperature` (0.0–2.0, optional override).
-- **Concurrency defaults to 1** (`agents.defaults.maxConcurrentSubagents`). A second `spawn` while one is already running is rejected outright with "concurrency limit reached" — there is no queue.
+- Parameters: `task` (required), `label` (display name), `agent_type` (which kind of subagent — see below), `quick` (mark a short job), `temperature` (0.0–2.0, optional override).
+- **Concurrency defaults to 3** (`agents.defaults.maxConcurrentSubagents`), and **one slot is always kept free for short jobs**: an ordinary `spawn` may occupy at most `maxConcurrentSubagents - 1` slots. Past that the call is rejected outright with "concurrency limit reached" — there is no queue. A `quick=true` spawn may use the reserved slot.
 - A subagent only gets tools scoped `subagent`: file tools (including `apply_patch`), search, `python_exec` (plus its session tools `write_stdin`/`list_exec_sessions`), the web tools, `download_file`, `get_location`, introspection, and logs. It explicitly does **not** get `spawn` (no subagents spawning subagents), `cron`, `message`, `my`, `long_task`, or `ui_view`.
+- The **agent type** narrows that scope further, and comes with its own role prompt plus sampling defaults:
 
-Config: `agents.defaults.maxConcurrentSubagents` (default 1).
+| `agent_type` | Tools | Notes |
+|---|---|---|
+| `researcher` | `web_search`, `web_fetch`, `read_file`, `list_dir`, `write_file` | Gathers material online. **No code execution** — it is the type most exposed to untrusted pages. |
+| `writer` | `read_file`, `list_dir`, `write_file`, `apply_patch` | Docs, wiki pages, synthesis. **No network at all.** |
+| `coder` | filesystem, `find_files`, `grep`, `apply_patch`, `python_exec`, `write_stdin`, `list_exec_sessions`, `get_recent_logs` | Writes and changes code. No network. |
+| `analyst` | `python_exec`, `read_file`, `list_dir`, `write_file` | Computation, data, charts. No network. |
+| `operator` | the whole `subagent` scope | Default, and the fallback for what fits none of the above. |
+
+The researcher/writer and researcher/coder splits are a security boundary, not a preference: whoever read untrusted web content is not the one who then runs code. An unknown `agent_type` is rejected with the list of valid ones; a persisted record carrying a type that no longer exists degrades to `operator` so its work stays relaunchable.
+
+Config: `agents.defaults.maxConcurrentSubagents` (default 3), `agents.defaults.subagentStallThresholdSeconds` (default 180), `agents.defaults.subagentToolErrorBudget` (default 3).
+
+### subagent_status / subagent_cancel / subagent_restart / subagent_send
+
+Available to the main agent only in orchestrator mode (`agents.defaults.orchestratorMode`, default `true`), and never to a subagent — a subagent cannot drive its siblings.
+
+- `subagent_status(task_id?)` lists running and recently finished subagents (id, type, state, phase, elapsed and idle time, last tool, result summary, whether an automatic relaunch is still allowed).
+- `subagent_cancel(task_id)` stops one running subagent; the others keep going, and a cancelled subagent reports nothing back.
+- `subagent_restart(task_id, extra_instructions?)` relaunches a failed or stalled job as the next attempt of the same lineage, optionally with a corrective note. Automatic relaunches stop after 3 attempts per job; a manual relaunch is never capped.
+- `subagent_send(task_id, message, quick?)` talks to a subagent that already exists, so a follow-up ("no, change the title") does not mean re-specifying the whole job. One tool, three behaviours picked by the manager: the subagent is **still running** → the message is injected mid-run and reaches it at its next step without stopping it; it **finished** and its conversation is still within the retention window → it **resumes** from that conversation plus your message; anything else (failed, stalled, history aged out) → the job is **relaunched** with the message as a corrective note. The result text says which one happened.
+
+Subagent conversations are kept as sessions under the key `subagent:<lineage_id>` — internal keys, never listed as user conversations. Retention is deliberately short: the **3 most recent finished jobs per conversation, for 6 hours**. Resuming re-sends the subagent's whole conversation to the model, so a long window would make every follow-up expensive; past the window the loss is small, because the real output is the artifact on disk, not the transcript. A resume occupies a concurrency slot like a spawn (`quick=true` may use the reserved one) but does **not** consume the 3-attempt automatic-relaunch budget — a directed continuation is not a retry of a failure.
+
+Gotcha: `subagent_status` **refuses a second consecutive call in the same turn** when no other tool ran in between, and `subagent_send` **refuses the same message to the same subagent twice in one turn**. Subagent results are announced to the agent on their own when they finish, so polling can only burn tokens — it cannot make a result arrive sooner, and a subagent never acknowledges a message, it just acts on it.
 
 ### long_task / complete_goal
 
@@ -376,6 +402,8 @@ Settings → Tools in the WebUI governs exactly two things. Everything else in t
 | Log access (`get_recent_logs`) | No | `tools.diagnostics.enable` |
 | Jenny Apps / app tools | No | `apps.enabled` (+ `httpTimeoutS`, `maxCollectionBytes`) |
 | Subagent concurrency | No | `agents.defaults.maxConcurrentSubagents` |
+| Subagent stall threshold | No | `agents.defaults.subagentStallThresholdSeconds` |
+| Orchestrator mode (main agent's toolset) | No | `agents.defaults.orchestratorMode` |
 
 `cron`, `spawn`, `long_task`/`complete_goal`, `message`, `download_file`, `get_source`, `ui_view`, and app tools have no on/off switch tied to a UI element at all — they're either always registered when their prerequisites exist, or controlled only from config.json.
 

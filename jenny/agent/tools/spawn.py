@@ -5,9 +5,19 @@ from __future__ import annotations
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
+from jenny.agent.agent_types import (
+    AGENT_TYPE_NAMES,
+    DEFAULT_AGENT_TYPE,
+    UnknownAgentTypeError,
+)
 from jenny.agent.tools.base import Tool, tool_parameters
 from jenny.agent.tools.context import ContextAware, RequestContext
-from jenny.agent.tools.schema import NumberSchema, StringSchema, tool_parameters_schema
+from jenny.agent.tools.schema import (
+    BooleanSchema,
+    NumberSchema,
+    StringSchema,
+    tool_parameters_schema,
+)
 from jenny.security.workspace_access import current_workspace_scope
 
 if TYPE_CHECKING:
@@ -18,11 +28,34 @@ if TYPE_CHECKING:
     tool_parameters_schema(
         task=StringSchema("The task for the subagent to complete"),
         label=StringSchema("Optional short label for the task (for display)"),
+        agent_type=StringSchema(
+            "Which kind of subagent to run. Pick deliberately — it decides which "
+            "tools the subagent gets. "
+            "'researcher': web search and fetch, read/list/write files, NO code "
+            "execution — use it for gathering material online. "
+            "'writer': read/list/write files and apply_patch, NO network — use it "
+            "for docs, wiki pages and synthesis of material already gathered. "
+            "'coder': filesystem, search, apply_patch, python_exec, exec sessions "
+            "and logs, NO network — use it to write or change code. "
+            "'analyst': python_exec plus read/list/write, NO network — use it for "
+            "computation, data and charts. "
+            "'operator': everything (fallback for tasks that fit none of the above).",
+            enum=AGENT_TYPE_NAMES,
+        ),
+        quick=BooleanSchema(
+            description=(
+                "Mark this as a short job (a single lookup, a quick check). One "
+                "concurrency slot is reserved for quick jobs, so a fan-out of "
+                "long subagents can never leave you unable to serve the user. "
+                "Set it only when the task really is short — a long job in the "
+                "reserved slot defeats the purpose."
+            ),
+        ),
         temperature=NumberSchema(
             description=(
                 "Optional sampling temperature for the subagent "
                 "(0.0 = deterministic, higher = more creative). "
-                "Defaults to the provider's configured temperature."
+                "Defaults to the agent type's temperature."
             ),
             minimum=0.0,
             maximum=2.0,
@@ -32,6 +65,8 @@ if TYPE_CHECKING:
 )
 class SpawnTool(Tool, ContextAware):
     """Tool to spawn a subagent for background task execution."""
+
+    _scopes = {"core", "orchestrator"}
 
     def __init__(self, manager: "SubagentManager"):
         self._manager = manager
@@ -62,8 +97,11 @@ class SpawnTool(Tool, ContextAware):
     def description(self) -> str:
         return (
             "Spawn a subagent to handle a task in the background. "
-            "Use this for complex or time-consuming tasks that can run independently. "
-            "The subagent will complete the task and report back when done. "
+            "Use this for anything multi-step: the subagent's tool output stays "
+            "out of this conversation, which is the point. "
+            "The subagent will complete the task and report back when done — the "
+            "result arrives on its own, do not poll for it. "
+            "Choose 'agent_type' deliberately and set 'quick' for short jobs. "
             "For deliverables or existing projects, inspect the workspace first "
             "and use a dedicated subdirectory when helpful."
         )
@@ -73,27 +111,44 @@ class SpawnTool(Tool, ContextAware):
         task: str,
         label: str | None = None,
         temperature: float | None = None,
+        agent_type: str | None = None,
+        quick: bool = False,
         **kwargs: Any,
     ) -> str:
         """Spawn a subagent to execute the given task."""
-        running = self._manager.get_running_count()
-        limit = self._manager.max_concurrent_subagents
-        if running >= limit:
+        # Import locale: ``jenny.agent.subagent`` importa il ToolLoader, che
+        # importa questo modulo. A livello di modulo l'import sarebbe circolare.
+        from jenny.agent.subagent import SubagentConcurrencyLimitError
+
+        # L'invariante di concorrenza vive nel manager (dove sta lo stato); qui
+        # si formatta soltanto il messaggio per il modello.
+        try:
+            return await self._manager.spawn(
+                task=task,
+                label=label,
+                origin_channel=self._origin_channel.get(),
+                origin_chat_id=self._origin_chat_id.get(),
+                session_key=self._session_key.get(),
+                origin_message_id=self._origin_message_id.get(),
+                temperature=temperature,
+                workspace_scope=current_workspace_scope(),
+                agent_type=agent_type or DEFAULT_AGENT_TYPE,
+                quick=bool(quick),
+            )
+        except UnknownAgentTypeError as e:
+            # Il modello inventa un tipo: l'errore torna come testo con l'elenco
+            # dei validi, non come traceback.
+            return f"Cannot spawn subagent: {e}"
+        except SubagentConcurrencyLimitError as e:
+            hint = (
+                "One slot is kept free for short tasks."
+                if e.reserved
+                else "Wait for a running subagent to complete before spawning a new one."
+            )
             return (
                 f"Cannot spawn subagent: concurrency limit reached "
-                f"({running}/{limit} running). Wait for a running subagent "
-                f"to complete before spawning a new one."
+                f"({e.running}/{e.limit} running). {hint}"
             )
-        return await self._manager.spawn(
-            task=task,
-            label=label,
-            origin_channel=self._origin_channel.get(),
-            origin_chat_id=self._origin_chat_id.get(),
-            session_key=self._session_key.get(),
-            origin_message_id=self._origin_message_id.get(),
-            temperature=temperature,
-            workspace_scope=current_workspace_scope(),
-        )
 
 
 # Registrazione esplicita dei tool di questo modulo (Fase 5.3): il

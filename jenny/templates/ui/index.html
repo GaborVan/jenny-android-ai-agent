@@ -122,6 +122,17 @@
           <i class="ti ti-chevron-down"></i>
           <span class="chat-scroll-fab-badge" style="display:none"></span>
         </button>
+        <!-- Subagent panel: fuori da .chat-area così non scorre via mentre
+             cinque job girano. Nascosto quando non c'è nulla da mostrare. -->
+        <div class="subagents" id="subagents" hidden>
+          <button class="subagents-head" id="subagents-head" type="button" aria-expanded="false" aria-controls="subagents-body">
+            <i class="ti ti-users subagents-head-icon"></i>
+            <span class="subagents-head-title" data-i18n="subagents.title">Subagents</span>
+            <span class="subagents-head-count" id="subagents-count"></span>
+            <i class="ti ti-chevron-up subagents-head-chevron"></i>
+          </button>
+          <div class="subagents-body" id="subagents-body" hidden></div>
+        </div>
         <div class="attach-preview" id="attach-preview" style="display:none"></div>
         <div id="input-bar">
           <div id="input-row" class="compose-row">
@@ -215,6 +226,19 @@
       <button class="oc-btn oc-btn-cancel" id="oc-prompt-cancel" data-i18n="dialog.cancel">Cancel</button>
       <button class="oc-btn oc-btn-confirm" id="oc-prompt-ok" data-i18n="dialog.confirm">Confirm</button>
     </div>
+  </div>
+</dialog>
+
+<!-- Modale di dettaglio (dialog.js::detailDialog): la card del pannello subagent
+     sta su una riga, il quadro completo — task, tool, esito — sta qui. -->
+<dialog class="oc-sheet oc-detail" id="oc-detail-dialog">
+  <div class="oc-sheet-inner oc-detail-inner">
+    <div class="oc-detail-head">
+      <h2 class="oc-detail-title" id="oc-detail-title"></h2>
+      <button class="oc-detail-close" id="oc-detail-close" type="button" aria-label="Close" data-i18n-aria="common.close"><i class="ti ti-x"></i></button>
+    </div>
+    <div class="oc-detail-body" id="oc-detail-body"></div>
+    <div class="oc-dialog-buttons oc-detail-actions" id="oc-detail-actions"></div>
   </div>
 </dialog>
 

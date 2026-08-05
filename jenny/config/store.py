@@ -21,8 +21,10 @@ import asyncio
 from collections.abc import Callable
 from pathlib import Path
 
+from loguru import logger
+
 from jenny.config.loader import load_config_with_raw, save_config
-from jenny.config.schema import Config
+from jenny.config.schema import CURRENT_CONFIG_VERSION, Config
 
 # Un lock di processo: tutte le scritture della config passano dall'event loop
 # del gateway. Le due eccezioni documentate (bootstrap pre-loop e ripristino da
@@ -53,6 +55,35 @@ async def mutate(
             return config
         save_config(config, config_path, preserve_unknown_from=raw)
         return config
+
+
+async def persist_schema_migrations(*, config_path: Path | None = None) -> bool:
+    """Persiste lo stamp di ``configVersion`` se il file è indietro. ``True`` se ha scritto.
+
+    Le migrazioni di :meth:`Config._migrate_by_version` sono in-memory: valgono
+    subito, ma finché il file non viene riscritto ripartono a ogni parse — e il
+    config viene letto più volte per boot, quindi il warning si moltiplica e lo
+    stamp potrebbe non arrivare mai se l'utente non cambia mai un'impostazione.
+    Una scrittura sola all'avvio chiude il ciclo.
+
+    Va chiamata a gateway avviato, non dal bootstrap: passa da :func:`mutate`,
+    che vuole l'event loop.
+    """
+    raw_version = 0
+    try:
+        _, raw = load_config_with_raw(config_path)
+        candidate = raw.get("configVersion", raw.get("config_version", 0))
+        raw_version = int(candidate)
+    except Exception:
+        # File assente, illeggibile o versione non numerica: in tutti i casi
+        # "indietro". Il rewrite lo sistema; se non si può leggere, mutate
+        # fallirà con il suo errore, non con uno nostro.
+        raw_version = -1
+    if raw_version >= CURRENT_CONFIG_VERSION:
+        return False
+    await mutate(lambda _cfg: None, config_path=config_path)
+    logger.info("Config schema stamped at version {}", CURRENT_CONFIG_VERSION)
+    return True
 
 
 def locked() -> bool:

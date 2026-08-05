@@ -28,9 +28,20 @@ class ContextBuilder:
     _MAX_HISTORY_TOKENS = 8_000  # hard cap on recent history section size (tokens)
     _RUNTIME_CONTEXT_END = "[/Runtime Context]"
 
-    def __init__(self, workspace: Path, timezone: str | None = None, disabled_skills: list[str] | None = None):
+    def __init__(
+        self,
+        workspace: Path,
+        timezone: str | None = None,
+        disabled_skills: list[str] | None = None,
+        orchestrator: bool = False,
+    ):
         self.workspace = workspace
         self.timezone = timezone
+        # Modalita orchestratore: i template ricevono il flag e omettono le
+        # istruzioni sui tool che in quello scope non esistono. Un prompt che
+        # descrive tool assenti non e solo contesto sprecato: invita il modello a
+        # chiamarli.
+        self.orchestrator = orchestrator
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace, disabled_skills=set(disabled_skills) if disabled_skills else None)
 
@@ -50,7 +61,9 @@ class ContextBuilder:
         if bootstrap:
             parts.append(bootstrap)
 
-        parts.append(render_template("agent/tool_contract.md"))
+        parts.append(render_template("agent/tool_contract.md", orchestrator=self.orchestrator))
+        if self.orchestrator:
+            parts.append(render_template("agent/orchestrator.md"))
 
         memory = self.memory.get_memory_context()
         if memory and not self._is_template_content(self.memory.read_memory(), "memory/MEMORY.md"):
@@ -106,6 +119,7 @@ class ContextBuilder:
             runtime=runtime,
             platform_policy=render_template("agent/platform_policy.md"),
             channel=channel or "",
+            orchestrator=self.orchestrator,
         )
 
     @staticmethod

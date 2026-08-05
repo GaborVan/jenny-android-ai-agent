@@ -50,6 +50,8 @@ _NO_TURN_FLAGS: dict[str, bool] = {}
 class MessageTool(Tool, ContextAware):
     """Tool to send messages to users on chat channels."""
 
+    _scopes = {"core", "orchestrator"}
+
     def __init__(
         self,
         send_callback: Callable[[OutboundMessage], Awaitable[None]] | None = None,

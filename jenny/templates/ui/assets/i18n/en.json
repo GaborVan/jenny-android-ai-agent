@@ -33,6 +33,70 @@
     "message": "Message",
     "scrollToBottom": "Jump to bottom"
   },
+  "subagents": {
+    "title": "Subagents",
+    "headCount": "{running} running",
+    "headCountFinished": "{running} running · {finished} just finished",
+    "untitled": "untitled",
+    "openDetail": "Open subagent details",
+    "idle": "idle {duration}",
+    "attempt": "attempt {n}",
+    "stalledHint": "No progress for a while — relaunch?",
+    "autoCapReached": "Auto attempts used up ({attempt}/3) — relaunching by hand does not refill them.",
+    "stop": "Stop",
+    "relaunch": "Relaunch",
+    "detail": {
+      "type": "Type",
+      "attempt": "Attempt",
+      "phase": "Phase",
+      "iteration": "Iteration",
+      "stopReason": "Stop reason",
+      "task": "Task",
+      "diagnostics": "Technical details",
+      "outcome": "Outcome"
+    },
+    "activity": {
+      "title": "Activity",
+      "live": "live",
+      "paused": "paused",
+      "frozen": "frozen",
+      "offline": "offline",
+      "frozenNote": "This view stopped receiving updates.",
+      "offlineNote": "Reconnecting — the stream resumes on its own.",
+      "resume": "Resume",
+      "waiting": "Waiting for the first activity…",
+      "count": "{count} events",
+      "jump": "New activity",
+      "earlier": "{count} earlier events not shown",
+      "hole": "{count} events lost here"
+    },
+    "digest": {
+      "toggle": "What it actually did",
+      "count": "{count} steps",
+      "loading": "Loading…",
+      "failed": "Could not load the activity.",
+      "live": "Still running: this is a preview and will change.",
+      "empty": "No activity was recorded for this subagent"
+    },
+    "stopped": "Subagent stopped",
+    "relaunched": "Subagent relaunched",
+    "actionFailed": "Action failed",
+    "state": {
+      "running": "running",
+      "stalled": "stalled",
+      "done": "done",
+      "failed": "failed",
+      "cancelled": "cancelled"
+    },
+    "phase": {
+      "initializing": "starting",
+      "awaiting_tools": "awaiting tools",
+      "tools_completed": "tools done",
+      "final_response": "final response",
+      "done": "done",
+      "error": "error"
+    }
+  },
   "session": {
     "info": "Session Info",
     "session": "Session",

@@ -87,12 +87,13 @@ When Jenny decides a task is complex or slow enough to run independently, she ca
 
 - You'll see this happen as a short confirmation in chat, something like *"Subagent [research] started (id: xxxxxxxx). I'll notify you when it completes."* — after that the chat is free for you to keep talking about anything else.
 - When the subagent finishes, its result is fed back in as a fresh turn of the main conversation: Jenny reads the outcome and summarizes it for you naturally (the announcement is explicitly told not to mention "subagent" or task IDs in the final reply, so it may just read like an ordinary answer).
-- By default only **1** subagent can run at a time (`agents.defaults.maxConcurrentSubagents`, default `1`). Asking for a second one while the first is still running gets a plain "concurrency limit reached" reply instead of being queued.
+- By default up to **3** subagents can run at a time (`agents.defaults.maxConcurrentSubagents`, default `3`), and one slot is always kept free for a short job — so an ordinary delegation is refused once two are already running. Asking for one past the limit gets a plain "concurrency limit reached" reply instead of being queued.
 - A subagent is **blind to your conversation** — it only knows what task text it was handed. If a delegated task comes back disappointing, the usual cause is that the task description didn't carry enough context, not that the subagent "misunderstood."
 - Subagents use the same model/provider as your main agent and consume tokens like a full turn — delegating is not free.
 - `/goal` refuses to start while a subagent is still active on the session.
 - `/stop` disowns any subagents running for that chat: their in-flight work is abandoned, and if one finishes anyway after being disowned, its stale result is silently discarded rather than injected into the chat.
-- If the app process dies while a subagent is working, that work is gone — subagent state lives only in memory, not on disk.
+- A subagent that goes quiet for longer than `agents.defaults.subagentStallThresholdSeconds` (default 180s) is flagged as stalled. It is never cancelled for you: relaunching is a decision, and a subagent that starts making progress again is un-flagged on its own.
+- If the app process dies while a subagent is working, its in-flight work is gone. What survives is a small record of each finished attempt (task, outcome, result summary) under `workspace/subagents/records/`, kept for the last 20 attempts per chat and 7 days — enough to see what happened and replay the work.
 
 ## Android notifications
 

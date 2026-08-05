@@ -213,8 +213,13 @@ class MyTool(Tool, ContextAware):
         tool_summary = ", ".join(
             f"{e.get('name', '?')}({e.get('status', '?')})" for e in st.tool_events[-5:]
         ) or "none"
+        idle = time.monotonic() - st.last_progress_at
         lines = [
             f"{indent}phase: {st.phase}, iteration: {st.iteration}, elapsed: {elapsed:.1f}s",
+            # ``state`` e ``idle`` distinguono "bloccato da N secondi" da
+            # "al lavoro da N secondi": senza questi l'introspezione non
+            # permette di decidere se rilanciare.
+            f"{indent}state: {st.state}, attempt: {st.attempt}, idle: {idle:.1f}s",
             f"{indent}tools: {tool_summary}",
             f"{indent}usage: {st.usage or 'n/a'}",
         ]

@@ -33,6 +33,70 @@
     "message": "Messaggio",
     "scrollToBottom": "Vai in fondo"
   },
+  "subagents": {
+    "title": "Subagent",
+    "headCount": "{running} attivi",
+    "headCountFinished": "{running} attivi · {finished} appena conclusi",
+    "untitled": "senza titolo",
+    "openDetail": "Apri il dettaglio del subagent",
+    "idle": "fermo {duration}",
+    "attempt": "tentativo {n}",
+    "stalledHint": "Nessun progresso da un po' — rilanciare?",
+    "autoCapReached": "Tentativi automatici esauriti ({attempt}/3) — rilanciare a mano non li ricarica.",
+    "stop": "Ferma",
+    "relaunch": "Rilancia",
+    "detail": {
+      "type": "Tipo",
+      "attempt": "Tentativo",
+      "phase": "Fase",
+      "iteration": "Iterazione",
+      "stopReason": "Motivo di uscita",
+      "task": "Incarico",
+      "diagnostics": "Dettagli tecnici",
+      "outcome": "Esito"
+    },
+    "activity": {
+      "title": "Attività",
+      "live": "in diretta",
+      "paused": "in pausa",
+      "frozen": "ferma",
+      "offline": "non connesso",
+      "frozenNote": "Questa vista ha smesso di ricevere aggiornamenti.",
+      "offlineNote": "Riconnessione in corso — lo stream riparte da sé.",
+      "resume": "Riprendi",
+      "waiting": "In attesa della prima attività…",
+      "count": "{count} eventi",
+      "jump": "Nuova attività",
+      "earlier": "{count} eventi precedenti non mostrati",
+      "hole": "{count} eventi persi qui"
+    },
+    "digest": {
+      "toggle": "Cosa ha fatto davvero",
+      "count": "{count} passi",
+      "loading": "Caricamento…",
+      "failed": "Attività non caricata.",
+      "live": "Ancora al lavoro: questa è un'anteprima e cambierà.",
+      "empty": "Nessuna attività registrata per questo subagent"
+    },
+    "stopped": "Subagent fermato",
+    "relaunched": "Subagent rilanciato",
+    "actionFailed": "Azione non riuscita",
+    "state": {
+      "running": "in corso",
+      "stalled": "fermo",
+      "done": "concluso",
+      "failed": "fallito",
+      "cancelled": "annullato"
+    },
+    "phase": {
+      "initializing": "avvio",
+      "awaiting_tools": "attende i tool",
+      "tools_completed": "tool eseguiti",
+      "final_response": "risposta finale",
+      "done": "concluso",
+      "error": "errore"
+    }
+  },
   "session": {
     "info": "Info sessione",
     "session": "Sessione",

@@ -215,6 +215,9 @@ class GatewayContainer:
             webui_runtime_model_name=self._webui_runtime_model_name,
             onboarding_event=self.onboarding_event,
             on_settings_changed=self._on_settings_changed,
+            # Late-binding come ``get_agent`` per il cron: l'agente può essere
+            # creato dopo il gateway (onboarding) e riassegnato da set_agent.
+            get_subagent_manager=lambda: getattr(self._agent, "subagents", None),
         )
 
         if self.channels.enabled:
@@ -334,6 +337,18 @@ class GatewayContainer:
 
     async def run(self) -> None:
         try:
+            # Prima cosa a event loop vivo: fissa su disco lo stamp di
+            # ``configVersion``. Le migrazioni di schema valgono già in memoria,
+            # ma senza questa scrittura ripartirebbero a ogni parse — e il
+            # config viene letto più volte per boot.
+            from jenny.config.store import persist_schema_migrations
+            try:
+                await persist_schema_migrations()
+            except Exception:
+                # Un config non scrivibile non deve impedire l'avvio: la
+                # migrazione in memoria è già applicata, si riproverà al
+                # prossimo boot.
+                logger.opt(exception=True).warning("Could not persist config schema version")
             await self.cron.start()
             await self.snapshot.start()
             tasks = [self.channels.start()]

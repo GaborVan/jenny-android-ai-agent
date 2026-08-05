@@ -15,6 +15,15 @@ from jenny.session.keys import UNIFIED_SESSION_KEY
 _MAX_TOOL_RESULT_CHARS = AgentDefaults().max_tool_result_chars
 
 
+def _sub_spec(task: str = "do task", label: str = "label", **kw):
+    """Spec minimale per invocare ``_run_subagent`` direttamente."""
+    from jenny.agent.subagent import SubagentSpec
+
+    defaults = dict(origin_channel="test", origin_chat_id="c1")
+    defaults.update(kw)
+    return SubagentSpec(task=task, label=label, **defaults)
+
+
 def _make_loop(*, tools_config=None):
     """Create a minimal AgentLoop with mocked dependencies."""
     from jenny.agent.loop import AgentLoop
@@ -365,7 +374,14 @@ class TestSubagentCancellation:
                 )
             captured_second_call[:] = messages
             return LLMResponse(content="done", tool_calls=[])
-        provider.chat_with_retry = scripted_chat_with_retry
+
+        async def _scripted(**kwargs):
+            return await scripted_chat_with_retry(**kwargs)
+
+        # Entrambi i path: un subagent chiede lo streaming, quindi il runner passa
+        # da ``chat_stream_with_retry``.
+        from tests.agent.subagent_provider_fakes import script_provider
+        script_provider(provider, _scripted)
         mgr = SubagentManager(
             provider=provider,
             workspace=tmp_path,
@@ -380,7 +396,7 @@ class TestSubagentCancellation:
 
         from jenny.agent.subagent import SubagentStatus
         status = SubagentStatus(task_id="sub-1", label="label", task_description="do task", started_at=time.monotonic())
-        await mgr._run_subagent("sub-1", "do task", "label", {"channel": "test", "chat_id": "c1"}, status)
+        await mgr._run_subagent("sub-1", _sub_spec(), status)
 
         assistant_messages = [
             msg for msg in captured_second_call
@@ -422,7 +438,7 @@ class TestSubagentCancellation:
 
         from jenny.agent.subagent import SubagentStatus
         status = SubagentStatus(task_id="sub-1", label="label", task_description="do task", started_at=time.monotonic())
-        await mgr._run_subagent("sub-1", "do task", "label", {"channel": "test", "chat_id": "c1"}, status)
+        await mgr._run_subagent("sub-1", _sub_spec(), status)
 
         mgr.runner.run.assert_awaited_once()
         mgr._announce_result.assert_awaited_once()
@@ -436,10 +452,12 @@ class TestSubagentCancellation:
         bus = MessageBus()
         provider = MagicMock()
         provider.get_default_model.return_value = "test-model"
-        provider.chat_with_retry = AsyncMock(return_value=LLMResponse(
+        # Entrambi i path: un subagent chiede lo streaming.
+        from tests.agent.subagent_provider_fakes import script_provider
+        script_provider(provider, [LLMResponse(
             content="thinking",
             tool_calls=[ToolCallRequest(id="call_1", name="list_dir", arguments={"path": "."})],
-        ))
+        )])
         mgr = SubagentManager(
             provider=provider,
             workspace=tmp_path,
@@ -460,7 +478,7 @@ class TestSubagentCancellation:
 
         from jenny.agent.subagent import SubagentStatus
         status = SubagentStatus(task_id="sub-1", label="label", task_description="do task", started_at=time.monotonic())
-        await mgr._run_subagent("sub-1", "do task", "label", {"channel": "test", "chat_id": "c1"}, status)
+        await mgr._run_subagent("sub-1", _sub_spec(), status)
 
         mgr._announce_result.assert_awaited_once()
         args = mgr._announce_result.await_args.args
@@ -479,10 +497,12 @@ class TestSubagentCancellation:
         bus = MessageBus()
         provider = MagicMock()
         provider.get_default_model.return_value = "test-model"
-        provider.chat_with_retry = AsyncMock(return_value=LLMResponse(
+        # Entrambi i path: un subagent chiede lo streaming.
+        from tests.agent.subagent_provider_fakes import script_provider
+        script_provider(provider, [LLMResponse(
             content="thinking",
             tool_calls=[ToolCallRequest(id="call_1", name="list_dir", arguments={"path": "."})],
-        ))
+        )])
         mgr = SubagentManager(
             provider=provider,
             workspace=tmp_path,
@@ -506,7 +526,7 @@ class TestSubagentCancellation:
 
         task = asyncio.create_task(
             mgr._run_subagent(
-                "sub-1", "do task", "label", {"channel": "test", "chat_id": "c1"},
+                "sub-1", _sub_spec(),
                 SubagentStatus(task_id="sub-1", label="label", task_description="do task", started_at=time.monotonic()),
             )
         )
@@ -602,8 +622,13 @@ class TestSubagentAnnounceSessionKey:
             started_at=time.monotonic(),
         )
         await mgr._run_subagent(
-            "sub-4", "task", "label",
-            {"channel": "websocket", "chat_id": "444", "session_key": UNIFIED_SESSION_KEY},
+            "sub-4",
+            _sub_spec(
+                task="task",
+                origin_channel="websocket",
+                origin_chat_id="444",
+                session_key=UNIFIED_SESSION_KEY,
+            ),
             status,
         )
 

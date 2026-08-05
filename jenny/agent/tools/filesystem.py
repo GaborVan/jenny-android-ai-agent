@@ -233,7 +233,7 @@ def _parse_page_range(pages: str, total: int) -> tuple[int, int]:
 )
 class ReadFileTool(_FsTool):
     """Read file contents with optional line-based pagination."""
-    _scopes = {"core", "subagent"}
+    _scopes = {"core", "orchestrator", "subagent"}
 
     _MAX_CHARS = 128_000
     _DEFAULT_LIMIT = 2000
@@ -732,7 +732,7 @@ class EditFileTool(_FsTool):
 )
 class ListDirTool(_FsTool):
     """List directory contents with optional recursion."""
-    _scopes = {"core", "subagent"}
+    _scopes = {"core", "orchestrator", "subagent"}
 
     _DEFAULT_MAX = 200
     _IGNORE_DIRS = {

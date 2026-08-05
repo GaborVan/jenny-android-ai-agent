@@ -12,6 +12,14 @@ from jenny.config.schema import AgentDefaults
 _MAX_TOOL_RESULT_CHARS = AgentDefaults().max_tool_result_chars
 
 
+def _spec(task: str = "do task", label: str = "label", **kw):
+    from jenny.agent.subagent import SubagentSpec
+
+    defaults = dict(origin_channel="test", origin_chat_id="c1")
+    defaults.update(kw)
+    return SubagentSpec(task=task, label=label, **defaults)
+
+
 @pytest.mark.asyncio
 async def test_subagent_exec_tool_receives_allowed_env_keys(tmp_path):
     """allowed_modules from PythonExecConfig must be forwarded to the subagent's PythonExecTool."""
@@ -48,9 +56,7 @@ async def test_subagent_exec_tool_receives_allowed_env_keys(tmp_path):
     status = SubagentStatus(
         task_id="sub-1", label="label", task_description="do task", started_at=time.monotonic()
     )
-    await mgr._run_subagent(
-        "sub-1", "do task", "label", {"channel": "test", "chat_id": "c1"}, status
-    )
+    await mgr._run_subagent("sub-1", _spec(), status)
 
     mgr.runner.run.assert_awaited_once()
 
@@ -87,9 +93,7 @@ async def test_subagent_uses_configured_max_iterations(tmp_path):
     status = SubagentStatus(
         task_id="sub-1", label="label", task_description="do task", started_at=time.monotonic()
     )
-    await mgr._run_subagent(
-        "sub-1", "do task", "label", {"channel": "test", "chat_id": "c1"}, status
-    )
+    await mgr._run_subagent("sub-1", _spec(), status)
 
     mgr.runner.run.assert_awaited_once()
 
@@ -142,6 +146,9 @@ async def test_spawn_tool_rejects_when_at_concurrency_limit(tmp_path):
         workspace=tmp_path,
         bus=bus,
         max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+        # Il limite di default è 5: qui serve un pool a slot singolo per
+        # esercitare il rifiuto formattato dal tool layer.
+        max_concurrent_subagents=1,
     )
     mgr._announce_result = AsyncMock()
 
@@ -168,7 +175,7 @@ async def test_spawn_tool_rejects_when_at_concurrency_limit(tmp_path):
     result = await tool.execute(task="first task")
     assert "started" in result
 
-    # Second spawn should be rejected (default limit is 1)
+    # Second spawn should be rejected (limit is 1 for this manager)
     result = await tool.execute(task="second task")
     assert "Cannot spawn subagent" in result
     assert "concurrency limit reached" in result

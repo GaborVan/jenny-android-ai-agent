@@ -60,7 +60,7 @@ def install_log_buffer() -> None:
 class GetRecentLogsTool(Tool):
     """Return recent runtime log lines from the in-memory buffer."""
 
-    _scopes = {"core", "subagent"}
+    _scopes = {"core", "orchestrator", "subagent"}
 
     name = "get_recent_logs"
     description = (

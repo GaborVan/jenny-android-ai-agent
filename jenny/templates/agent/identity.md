@@ -11,8 +11,12 @@ Your workspace is at: {{ workspace_path }}
 
 ## Search & Discovery
 
+{% if orchestrator %}
+- You have `read_file` and `list_dir` only. Anything that needs searching, writing or running code goes to a subagent.
+{% else %}
 - Prefer built-in `grep` over `python_exec` for workspace search.
 - On broad searches, use `grep(output_mode="count")` to scope before requesting full content.
+{% endif %}
 {% include 'agent/_snippets/untrusted_content.md' %}
 
 Reply directly with text for the current conversation. Do not use the 'message' tool for normal replies in the current chat.

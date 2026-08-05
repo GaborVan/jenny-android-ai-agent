@@ -474,6 +474,56 @@ class ApiClient {
     if (!res.ok) throw new Error(`File preview failed: ${res.status}`);
     return res.json();
   }
+
+  // ── Subagent APIs ──
+  // Stessa forma servita dal frame WS `subagent_status`: {running, recent}.
+  // Serve al pannello per ripartire dopo un reload di pagina (su Android il
+  // processo della WebView muore spesso), non solo alla prossima transizione.
+
+  async getSubagents() {
+    const res = await this._fetch('/api/subagents');
+    if (!res.ok) throw new Error(`Subagents failed: ${res.status}`);
+    return res.json();
+  }
+
+  // Il corpo di errore di queste route è testo semplice, non JSON: il messaggio
+  // del manager è già scritto per essere mostrato all'utente, quindi lo si
+  // propaga così com'è (409 = rilancio impossibile, 429 = niente slot liberi).
+  async restartSubagent(taskId) {
+    const res = await this._fetch(`/api/subagents/${encodeURIComponent(taskId)}/restart`);
+    if (!res.ok) throw new Error((await res.text().catch(() => '')) || `Restart failed: ${res.status}`);
+    return res.json();
+  }
+
+  async cancelSubagent(taskId) {
+    const res = await this._fetch(`/api/subagents/${encodeURIComponent(taskId)}/cancel`);
+    if (!res.ok) throw new Error((await res.text().catch(() => '')) || `Cancel failed: ${res.status}`);
+    return res.json();
+  }
+
+  // Finestra di attività da un cursore. NON è un poll: la modale riceve i frame
+  // `subagent_activity` dalla WebSocket, e questa lettura serve solo quando il
+  // server ha dichiarato un buco (`gap`) — stessa forma del frame, quindi il
+  // client ha un solo parser. Il tetto lato server è più alto di quello del
+  // frame (200 contro 40), che è ciò che rende la risync capace di tappare
+  // davvero il buco invece di aprirne un altro.
+  async getSubagentActivity(taskId, since = 0) {
+    const qs = new URLSearchParams({ since: String(Number(since) || 0) });
+    const res = await this._fetch(
+      `/api/subagents/${encodeURIComponent(taskId)}/activity?${qs}`
+    );
+    if (!res.ok) throw new Error(`Subagent activity failed: ${res.status}`);
+    return res.json();
+  }
+
+  // Condensa "cosa ha fatto davvero" di un subagent. Chiamata SOLO all'espansione
+  // del blocco in chat: la maggior parte dei messaggi non viene mai espansa, e
+  // farla in anticipo sarebbe una lettura da disco per riga di trace.
+  async getSubagentDigest(taskId) {
+    const res = await this._fetch(`/api/subagents/${encodeURIComponent(taskId)}/digest`);
+    if (!res.ok) throw new Error(`Subagent digest failed: ${res.status}`);
+    return res.json();
+  }
 }
 
 export const api = new ApiClient();

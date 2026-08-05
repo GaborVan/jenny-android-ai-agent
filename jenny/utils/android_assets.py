@@ -14,8 +14,10 @@ _TEMPLATES_MANIFEST = [
     "agent/subagent_announce.md", "agent/skills_section.md", "agent/apps_section.md",
     "agent/platform_policy.md", "agent/cron_reminder.md",
     "agent/max_iterations_message.md", "agent/consolidator_archive.md",
-    "agent/dream.md", "agent/evaluator.md",
+    "agent/dream.md", "agent/evaluator.md", "agent/orchestrator.md",
     "agent/_snippets/untrusted_content.md",
+    "agent/types/researcher.md", "agent/types/writer.md", "agent/types/coder.md",
+    "agent/types/analyst.md", "agent/types/operator.md",
     "memory/MEMORY.md",
 ]
 
@@ -119,6 +121,7 @@ _UI_MANIFEST = [
     "assets/shared/provider-brand.js",
     "assets/shared/session-manager.js",
     "assets/shared/state.js",
+    "assets/shared/subagent-policy.js",
     "assets/shared/telegram-pairing.js",
     "assets/shared/theme.js",
     "assets/shared/tree-renderer.js",
