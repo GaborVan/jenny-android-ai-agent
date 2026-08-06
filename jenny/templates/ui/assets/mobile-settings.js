@@ -571,10 +571,9 @@ export class SettingsController {
         </div>
         <div class="settings-field" id="dlg-ssh-password-field" style="${passwordFieldStyle}">
           <label class="settings-label">${i18n.t('settings.ssh.password')}</label>
-          <input type="text" class="settings-input input-secret" id="dlg-ssh-password"
+          <input type="password" class="settings-input" id="dlg-ssh-password"
             placeholder="${i18n.t('settings.ssh.passwordPlaceholder')}"
-            autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
-            data-lpignore="true" value="" />
+            autocomplete="off" data-lpignore="true" value="" />
           <span class="settings-field-hint">${existing?.has_password
             ? i18n.t('settings.ssh.passwordKeepBlank')
             : i18n.t('settings.ssh.passwordHint')}</span>
@@ -1282,10 +1281,9 @@ export class SettingsController {
         </div>
         <div class="settings-field">
           <label class="settings-label">${i18n.t('settings.apiKey')}</label>
-          <input type="text" class="settings-input input-secret" id="dlg-api-key"
+          <input type="password" class="settings-input" id="dlg-api-key"
             placeholder="${escapeHtml(keyPlaceholder)}"
-            autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
-            data-lpignore="true" value="" />
+            autocomplete="off" data-lpignore="true" value="" />
           ${hasStoredKey ? `<span class="settings-field-hint">${i18n.t('settings.apiKeyKeepBlank')}</span>` : ''}
         </div>
         <div class="settings-field">

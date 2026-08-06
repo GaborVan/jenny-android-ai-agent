@@ -62,14 +62,12 @@ export function promptPassphrase({ confirm = false } = {}) {
         ${confirm ? `<p style="margin:0 0 12px;font-size:12px;color:var(--text-faint)">${i18n.t('backup.passphraseHint')}</p>` : ''}
         <div class="settings-field">
           <label class="settings-label">${i18n.t('backup.passphrase')}</label>
-          <input type="text" class="settings-input input-secret" id="bk-pass"
-                 autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+          <input type="password" class="settings-input" id="bk-pass" autocomplete="off" />
         </div>
         ${confirm ? `
         <div class="settings-field">
           <label class="settings-label">${i18n.t('backup.passphraseConfirm')}</label>
-          <input type="text" class="settings-input input-secret" id="bk-pass2"
-                 autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+          <input type="password" class="settings-input" id="bk-pass2" autocomplete="off" />
         </div>` : ''}
         <div class="oc-dialog-buttons" style="margin-top:16px">
           <button class="oc-btn oc-btn-cancel" id="bk-cancel">${i18n.t('common.cancel')}</button>

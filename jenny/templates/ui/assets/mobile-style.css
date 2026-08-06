@@ -3958,35 +3958,6 @@ body {
   box-shadow: inset 0 1px 2px rgba(0,0,0,0.06);
 }
 
-/* Campo segreto (chiave API, token, passphrase, password SSH) mascherato senza
-   `type="password"`.
-
-   Un solo `type="password"` nel DOM basta a far classificare l'intera pagina
-   come modulo di login dal gestore password di sistema: si offriva di salvare
-   la chiave API, e da li in poi riproponeva quella credenziale su ogni altro
-   campo della WebUI — cioe portava fuori dall'app, dentro un account cloud, un
-   segreto che l'utente aveva scelto di tenere sul telefono.
-
-   `autocomplete="new-password"` non lo ferma: e un suggerimento che il
-   framework di autofill puo ignorare, e lo ignora. Nemmeno
-   `importantForAutofill` sulla WebView basta, perche i campi di una pagina web
-   sono viste *virtuali* e passano da `notifyVirtualViewEntered`, che quel flag
-   non consulta.
-
-   Mascherare via CSS toglie l'aggancio invece di chiedere per favore: senza un
-   campo password non c'e un modulo di login da riconoscere. Il valore resta
-   illeggibile a schermo. `-webkit-text-security` non e standard, ma la WebUI
-   gira solo dentro la WebView di Android, che e Blink.
-
-   Il prezzo: un `type="text"` non gode del trattamento speciale che la
-   tastiera riserva ai campi password, quindi ogni campo che usa questa classe
-   deve portarsi anche `autocomplete="off" autocorrect="off" spellcheck="false"`
-   — e la combinazione con cui Chromium alza `TYPE_TEXT_FLAG_NO_SUGGESTIONS`,
-   che e cio che impedisce a Gboard di imparare quel che ci si scrive. */
-.input-secret {
-  -webkit-text-security: disc;
-}
-
 .settings-input:focus,
 .settings-select:focus {
   border-color: var(--accent);
