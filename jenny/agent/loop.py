@@ -84,6 +84,17 @@ if TYPE_CHECKING:
     from jenny.cron.service import CronService
 
 
+def _load_current_tools_config() -> "ToolsConfig":
+    """Rilegge ``config.tools`` dal disco, per chi deve sapere com'e *ora*.
+
+    Import ritardato: ``config.loader`` non e importabile a livello di modulo
+    da qui senza chiudere un ciclo con lo startup.
+    """
+    from jenny.config.loader import load_config
+
+    return load_config().tools
+
+
 def _new_turn_id(session_key: str) -> str:
     """Identita di un turno: session key + istante d'avvio in nanosecondi.
 
@@ -229,6 +240,7 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             timezone=timezone,
             disabled_skills=disabled_skills,
             orchestrator=self.orchestrator_mode,
+            available_tools=lambda: self.tools.tool_names,
         )
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
@@ -242,6 +254,12 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             bus=bus,
             model=self.model,
             tools_config=_tc,
+            # ``_tc`` e la copia presa all'avvio: basta a far partire il
+            # manager, non a decidere quali tool esistono *adesso*. Un host SSH
+            # aggiunto dalle impostazioni ad app accesa vive solo su disco —
+            # ``store.mutate`` scrive il file, non questo oggetto — quindi il
+            # prossimo subagent deve rileggerlo.
+            tools_config_provider=_load_current_tools_config,
             max_tool_result_chars=self.max_tool_result_chars,
             disabled_skills=disabled_skills,
             max_iterations=self.max_iterations,
@@ -396,6 +414,7 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             runtime_events=self.runtime_events,
             android_context=get_android_context(),
             ui_query_service=self._ui_query,
+            orchestrator=self.orchestrator_mode,
         )
         loader = ToolLoader()
         registered = loader.load(ctx, self.tools, scope=self.tool_scope)

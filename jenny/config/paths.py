@@ -18,8 +18,15 @@ def set_workspace_dir(path: str | Path) -> None:
     nel ``RuntimeContext`` (unica fonte di verità).
     """
     from jenny.runtime.context import get_runtime_context
+    from jenny.utils.prompt_templates import forget_templates_root
 
     get_runtime_context().workspace_dir = Path(path) if path else None
+    # L'ambiente Jinja e memoizzato sulla radice dei template, che *e* il
+    # workspace: senza questo, cambiare workspace lascia in piedi un loader che
+    # legge ancora dal precedente. In produzione succede una volta all'avvio,
+    # nei test a ogni caso — ed e li che un prompt costruito dai file di un
+    # altro test non fallisce, mente.
+    forget_templates_root()
 
 
 def get_config_path() -> Path:

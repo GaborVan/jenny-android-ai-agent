@@ -103,3 +103,32 @@ Use the helpers in `jenny/templates/ui/assets/shared/dialog.js` — `confirmDial
 grep -rn --include="*.js" -E "(^|[^.[:alnum:]_])(confirm|alert|prompt)\(" \
   jenny/templates/ui/assets/ | grep -vE "confirmDialog|promptDialog"
 ```
+
+## La config che l'agente vede non è quella su disco
+
+`store.mutate()` scrive `config.json`; **non** aggiorna l'oggetto `Config` che il
+gateway ha caricato all'avvio. Sono due cose diverse, e chi legge la prima
+credendo di leggere la seconda ottiene un bug che nessun test coglie perché in
+un test l'oggetto e il file coincidono.
+
+Chi legge la config *fresca* a ogni chiamata:
+
+- il corpo dei tool SSH (`ssh_transport.resolve_target` fa `load_config()`);
+- `SubagentManager._live_tools_config()`, tramite il `tools_config_provider`
+  iniettato da `AgentLoop` — è ciò che decide **quali tool esistono** per il
+  prossimo subagent.
+
+Chi legge ancora la copia dell'avvio, e per cui serve un riavvio:
+
+- **il registry dell'agente principale**, costruito una volta in
+  `AgentLoop._register_default_tools()` (loop.py). Accendere `cron` o la ricerca
+  web dalle impostazioni non li fa comparire finché il gateway non riparte.
+
+Il sintomo è muto per costruzione: il tool semplicemente non c'è, il modello dice
+"non era disponibile", e sembra una scusa. Se stai indagando un tool che "non
+esiste" ma in `config.json` risulta acceso, guarda **quando** è stato acceso
+rispetto all'avvio del processo prima di guardare altro.
+
+Storia: un host SSH aggiunto alle 13:18 su un'app avviata alle 13:12 non è
+arrivato al subagent `sysadmin` lanciato alle 13:32. Vedi
+`tests/agent/test_subagent_config_freshness.py`.

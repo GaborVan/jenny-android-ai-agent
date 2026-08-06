@@ -583,8 +583,11 @@ def test_subagent_tools_config_carries_ssh_through():
 
     from jenny.agent.subagent import SubagentManager
 
+    # ``_live_tools_config`` stubbata sulla stessa sorgente: qui interessa solo
+    # che la sezione ``ssh`` sopravviva alla riduzione, non da dove arrivi (la
+    # freschezza ha i suoi test in ``test_subagent_config_freshness.py``).
     scoped = SubagentManager._subagent_tools_config(
-        SimpleNamespace(tools_config=source)  # type: ignore[arg-type]
+        SimpleNamespace(tools_config=source, _live_tools_config=lambda: source)  # type: ignore[arg-type]
     )
     assert scoped.ssh.enable is True
     assert [h.alias for h in scoped.ssh.hosts] == ["x"]

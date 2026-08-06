@@ -6,13 +6,14 @@ import json
 import re
 import time
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from loguru import logger
 
-from jenny.agent.agent_types import AgentType, get_agent_type
+from jenny.agent.agent_types import AgentType, UnknownAgentTypeError, get_agent_type
 from jenny.agent.hook import AgentHook, AgentHookContext, ToolResultHookContext
 from jenny.agent.runner import AgentRunner, AgentRunSpec
 from jenny.agent.subagent_activity import (
@@ -234,6 +235,32 @@ class SubagentConcurrencyLimitError(RuntimeError):
             )
         else:
             super().__init__(f"concurrency limit reached ({running}/{limit} running)")
+
+
+class SubagentCapabilityError(RuntimeError):
+    """Il tipo richiesto ha perso tutti i tool dichiarati in ``requires``.
+
+    ``sysadmin`` senza SSH non e un sysadmin con qualche tool in meno: e un
+    agente che sa solo leggere file a cui e stato chiesto di amministrare una
+    macchina remota, e improvvisera. Meglio rifiutare e dire quale interruttore
+    e giu — la frase arriva nello stesso turno, mentre un subagent monco costa
+    un giro completo per produrre un non-risultato.
+
+    Sollevata **solo** quando esiste una ``reason``, cioe quando la causa e
+    qualcosa che l'utente puo cambiare. Se i tool mancano perche il runtime non
+    li ha (i tool web fuori da Android), rifiutare darebbe un consiglio
+    impossibile da seguire: in quel caso restano i log e il subagent parte.
+
+    Perdita *parziale* non passa di qui: e un log, non un rifiuto.
+    """
+
+    def __init__(self, agent_type: str, tools: tuple[str, ...], reason: str) -> None:
+        self.agent_type = agent_type
+        self.tools = tools
+        self.reason = reason
+        super().__init__(
+            f"agent type '{agent_type}' cannot run without {', '.join(tools)}: {reason}"
+        )
 
 
 class SubagentRestartError(RuntimeError):
@@ -607,6 +634,80 @@ def split_allow_by_scope(
     return by_scope
 
 
+def _tool_classes(loader: ToolLoader) -> dict[str, type]:
+    return {name: cls for cls in loader.discover() if (name := declared_tool_name(cls))}
+
+
+def unavailable_tools(
+    loader: ToolLoader, names: Iterable[str], ctx: Any
+) -> tuple[str, ...]:
+    """Quali fra ``names`` esistono come classe ma ``enabled()`` nega adesso.
+
+    Non istanzia niente: ``enabled()`` e un classmethod che legge la sola
+    config, quindi il controllo costa una lettura di attributi e si puo fare
+    *prima* di avviare qualcosa.
+    """
+    by_name = _tool_classes(loader)
+    missing: list[str] = []
+    for name in sorted(names):
+        cls = by_name.get(name)
+        if cls is None:
+            continue
+        try:
+            available = cls.enabled(ctx)
+        except Exception:
+            # Un ``enabled()`` che solleva e gia trattato come "spento" dal
+            # loader (con log ERROR): qui si concorda, senza duplicare.
+            available = False
+        if not available:
+            missing.append(name)
+    return tuple(missing)
+
+
+def first_disabled_reason(loader: ToolLoader, names: Iterable[str], ctx: Any) -> str | None:
+    """La prima spiegazione *azionabile* fra i tool indicati, se ce n'e una.
+
+    ``None`` non significa "non so perche": significa che nessuno di quei tool
+    sa indicare qualcosa che l'utente possa cambiare. E la distinzione che
+    separa "l'hai spento tu" da "questo runtime non ce l'ha", e su cui si regge
+    la decisione di rifiutare o no uno spawn.
+    """
+    by_name = _tool_classes(loader)
+    for name in sorted(names):
+        cls = by_name.get(name)
+        if cls is None:
+            continue
+        with contextlib.suppress(Exception):
+            if reason := cls.disabled_reason(ctx):
+                return reason
+    return None
+
+
+def unavailable_by_scope(
+    loader: ToolLoader, agent_type: AgentType, ctx: Any
+) -> dict[str, tuple[str, ...]]:
+    """Per ogni scope del tipo, i tool che l'allowlist chiede e ``enabled()`` nega.
+
+    ``split_allow_by_scope`` valida l'allowlist contro i tool che esistono *come
+    classe*; ``ToolLoader.load`` poi salta quelli spenti dalla config. Fra i due
+    c'e un buco per cui un tipo puo perdere la propria ragione d'essere senza
+    che nessuno lo dica: ``sysadmin`` partiva con i soli tool sul filesystem e
+    rispondeva "il tool SSH non era disponibile", che si legge come una scusa
+    inventata dal modello e invece era la verita.
+
+    Qui non si istanzia niente: ``enabled()`` e un classmethod e legge solo la
+    config, quindi il controllo costa quanto una lettura di attributi e si puo
+    fare *prima* di avviare il subagent.
+
+    ``tools=None`` (``operator``) significa "tutto lo scope": non c'e nessuna
+    promessa esplicita da tradire, quindi lo scope risulta sempre vuoto qui.
+    """
+    return {
+        scope: () if allow is None else unavailable_tools(loader, allow, ctx)
+        for scope, allow in split_allow_by_scope(loader, agent_type).items()
+    }
+
+
 @dataclass(slots=True)
 class _Lineage:
     """Stato in RAM di un lineage: la spec da rigiocare e l'ultimo tentativo."""
@@ -628,6 +729,7 @@ class SubagentManager:
         max_tool_result_chars: int,
         model: str | None = None,
         tools_config: ToolsConfig | None = None,
+        tools_config_provider: Callable[[], ToolsConfig] | None = None,
         disabled_skills: list[str] | None = None,
         max_iterations: int | None = None,
         max_concurrent_subagents: int | None = None,
@@ -646,6 +748,10 @@ class SubagentManager:
         self.bus = bus
         self.model = model or provider.get_default_model()
         self.tools_config = tools_config or ToolsConfig()
+        # Sorgente della config *corrente*, consultata a ogni costruzione di
+        # registry. Senza, resta la copia presa all'avvio: vedi
+        # :meth:`_live_tools_config`.
+        self._tools_config_provider = tools_config_provider
         self.max_tool_result_chars = max_tool_result_chars
         self.disabled_skills = set(disabled_skills or [])
         self.max_iterations = (
@@ -756,17 +862,49 @@ class SubagentManager:
         )
         return status
 
+    def _live_tools_config(self) -> ToolsConfig:
+        """La ``ToolsConfig`` corrente, non quella catturata all'avvio.
+
+        Quale tool *esiste* lo decide ``enabled()``, che legge da qui; cosa fa
+        una volta chiamato lo decide il suo corpo, che rilegge la config a ogni
+        chiamata (``ssh_transport.resolve_target`` carica da disco). Leggere una
+        copia vecchia solo nel primo dei due punti produceva un'asimmetria
+        assurda: togliere un host aveva effetto subito, aggiungerne uno no —
+        finche non si riavviava l'app.
+
+        Il provider e iniettato invece che letto qui dentro perche questo modulo
+        non deve sapere che esiste un file: i test passano una config e basta, e
+        il percorso vero resta uno solo.
+        """
+        if self._tools_config_provider is None:
+            return self.tools_config
+        try:
+            return self._tools_config_provider()
+        except Exception as exc:
+            # Config illeggibile o corrotta: si degrada alla copia nota. Perdere
+            # il subagent sarebbe peggio, ma in silenzio sarebbe peggio ancora.
+            logger.warning(
+                "Could not read the current tools config, using the startup copy: {}", exc
+            )
+            return self.tools_config
+
     def _subagent_tools_config(self) -> ToolsConfig:
         """Build a ToolsConfig scoped for subagent use."""
+        live = self._live_tools_config()
         return ToolsConfig(
-            python_exec=self.tools_config.python_exec,
-            android_web=self.tools_config.android_web,
-            file=self.tools_config.file,
+            python_exec=live.python_exec,
+            android_web=live.android_web,
+            file=live.file,
             # Senza questo il tipo ``sysadmin`` non vedrebbe MAI i tool SSH:
             # ``enabled()`` legge il toggle e gli host da qui, e una ToolsConfig
             # ricostruita senza ``ssh`` porta i default (spento, zero host). Il
             # gate vero resta l'allowlist del tipo, non l'assenza della config.
-            ssh=self.tools_config.ssh,
+            ssh=live.ssh,
+            # ATTENZIONE: questo NON viene da ``live``. Sull'oggetto vivo
+            # ``restrict_to_workspace`` e il valore *risolto* da ``AgentLoop``
+            # all'avvio, non quello scritto nel file; ripescarlo dal disco
+            # insieme al resto cancellerebbe la risoluzione, e con essa il
+            # confine dello workspace.
             restrict_to_workspace=self.tools_config.restrict_to_workspace,
         )
 
@@ -792,7 +930,19 @@ class SubagentManager:
         root = self.workspace if workspace is None else workspace
         registry = ToolRegistry()
         cfg = tools_config if tools_config is not None else self._subagent_tools_config()
-        ctx = ToolContext(
+        ctx = self._tool_context(root, cfg)
+        loader = ToolLoader()
+        if agent_type is None:
+            loader.load(ctx, registry, scope="subagent", allow=None)
+            return registry
+        for scope, allow in split_allow_by_scope(loader, agent_type).items():
+            loader.load(ctx, registry, scope=scope, allow=allow)
+        self._log_unavailable(loader, agent_type, ctx)
+        return registry
+
+    def _tool_context(self, root: Path, cfg: ToolsConfig) -> ToolContext:
+        """Il ctx che i tool ricevono. Estratto perche lo usa anche il pre-volo."""
+        return ToolContext(
             config=cfg,
             workspace=str(root.resolve()),
             file_state_store=FileStates(),
@@ -802,13 +952,23 @@ class SubagentManager:
             ),
             android_context=get_android_context(),
         )
-        loader = ToolLoader()
-        if agent_type is None:
-            loader.load(ctx, registry, scope="subagent", allow=None)
-            return registry
-        for scope, allow in split_allow_by_scope(loader, agent_type).items():
-            loader.load(ctx, registry, scope=scope, allow=allow)
-        return registry
+
+    @staticmethod
+    def _log_unavailable(loader: ToolLoader, agent_type: AgentType, ctx: ToolContext) -> None:
+        """Traccia i tool *chiesti per nome* e non caricati.
+
+        Solo quelli: l'insieme dei tool spenti in generale e grande e noioso,
+        quello dei tool che un tipo aveva dichiarato di volere e piccolo ed e
+        sempre interessante. Era la riga di log che mancava quando ``sysadmin``
+        e partito senza SSH.
+        """
+        for scope, missing in unavailable_by_scope(loader, agent_type, ctx).items():
+            if missing:
+                logger.info(
+                    "Agent type '{}' declared {} tool(s) in scope '{}' that are "
+                    "switched off and were not loaded: {}",
+                    agent_type.name, len(missing), scope, ", ".join(missing),
+                )
 
     def set_provider(self, provider: LLMProvider, model: str) -> None:
         self.provider = provider
@@ -874,6 +1034,43 @@ class SubagentManager:
             if running >= normal_limit:
                 raise SubagentConcurrencyLimitError(running, limit, reserved=True)
 
+    def _check_capabilities(self, spec: SubagentSpec) -> None:
+        """Rifiuta un tipo rimasto senza *nessuno* dei tool che lo definiscono.
+
+        Due condizioni, entrambe necessarie. Che manchi l'intero ``requires``:
+        finche ne resta uno il tipo puo ancora fare qualcosa di sensato, e il
+        resto e materia da log. E che qualcuno sappia dire **perche** in termini
+        che l'utente possa agire — senza quella frase il rifiuto sarebbe solo un
+        secondo modo di non fare il lavoro.
+        """
+        try:
+            agent_type = get_agent_type(spec.agent_type)
+        except UnknownAgentTypeError:
+            return  # Gestito da SubagentSpec, non e affare di questo controllo.
+        if not agent_type.requires:
+            return
+
+        scope = spec.workspace_scope
+        root = scope.project_path if scope is not None else self.workspace
+        cfg = self._subagent_tools_config()
+        if scope is not None:
+            cfg.restrict_to_workspace = scope.restrict_to_workspace
+        loader = ToolLoader()
+        ctx = self._tool_context(root, cfg)
+
+        missing = unavailable_tools(loader, agent_type.requires, ctx)
+        if set(missing) != set(agent_type.requires):
+            return
+        reason = first_disabled_reason(loader, missing, ctx)
+        if reason is None:
+            logger.warning(
+                "Agent type '{}' has none of its required tools ({}), but nothing "
+                "can explain why in user terms — spawning anyway",
+                agent_type.name, ", ".join(missing),
+            )
+            return
+        raise SubagentCapabilityError(agent_type.name, missing, reason)
+
     async def _spawn_spec(
         self,
         spec: SubagentSpec,
@@ -905,6 +1102,7 @@ class SubagentManager:
         :meth:`_check_capacity` (slot riservato incluso).
         """
         self._check_capacity(quick=spec.quick)
+        self._check_capabilities(spec)
 
         task_id = str(uuid.uuid4())[:8]
         lineage = lineage_id or str(uuid.uuid4())[:8]
