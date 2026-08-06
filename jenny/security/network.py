@@ -142,6 +142,50 @@ def validate_app_server_target(url: str) -> tuple[bool, str]:
     return _validate_target(url, _APP_SERVER_BLOCKED_NETWORKS)
 
 
+def validate_ssh_target(host: str) -> tuple[bool, str]:
+    """Validate an SSH target host (declared by the user, never model-supplied).
+
+    Shares the policy of :func:`validate_app_server_target` and for the same
+    reason: RFC1918 and IPv6 ULA are allowed because a home server on the LAN is
+    the main use case, while loopback stays blocked — the agent must not be able
+    to SSH into the phone itself, nor use the SSH tool as a bridge back to the
+    gateway's own API. Link-local/metadata, 0.0.0.0/8 and CGNAT stay blocked,
+    with the usual ``ssrf_whitelist`` escape hatch for Tailscale.
+
+    Unlike the URL validators this takes a bare hostname: SSH has no scheme to
+    parse, so ``_validate_target`` (which requires http/https) does not apply.
+
+    Called twice on purpose: once when the host is saved in Settings, and again
+    at connection time so a name that later starts resolving to a blocked
+    address (DNS rebinding) is caught.
+
+    Returns (ok, error_message).  When ok is True, error_message is empty.
+    """
+    hostname = (host or "").strip().rstrip(".")
+    if not hostname:
+        return False, "Missing host"
+
+    try:
+        infos = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+    except socket.gaierror:
+        return False, f"Cannot resolve hostname: {hostname}"
+
+    addrs: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
+    for info in infos:
+        try:
+            addrs.append(ipaddress.ip_address(info[4][0]))
+        except ValueError:
+            continue
+    if not addrs:
+        return False, f"Cannot resolve hostname: {hostname}"
+
+    for addr in addrs:
+        if _is_blocked(addr, _APP_SERVER_BLOCKED_NETWORKS):
+            return False, f"Blocked: {hostname} resolves to {addr}"
+
+    return True, ""
+
+
 def _is_allowed_loopback_target(
     hostname: str,
     addrs: list[ipaddress.IPv4Address | ipaddress.IPv6Address],

@@ -31,6 +31,8 @@ That phrasing is intentional — it's written to stop the model from treating a 
 
 One deliberate exception: Jenny's own Python source (`jenny/`) is exposed **read-only** to the agent when `tools.file.exposePackageSource` is `true` (default), so it can inspect the framework it runs on. It is never writable through this path.
 
+The boundary also works in the other direction, to keep things *out*. The SSH private keys and `known_hosts` live in `<filesDir>/ssh`, **beside** the workspace rather than inside it, precisely so that no file tool can reach them — unlike `config.json`, which sits in the workspace and which the agent can therefore already read. The cost is paid by the user, not by the model: snapshots and encrypted backups only walk the workspace root, so a restore brings back the host list without the keys (see [SSH access](../using/ssh.md)).
+
 Note the framing: this is an **application-level guard**, not a sandbox. If `restrict_to_workspace` is turned off, the agent is *not* granted access to the rest of the phone — Android's own sandbox (Level 1) still applies — but it loses the extra safety net that keeps it inside `workspace/` even when it shouldn't need to leave it.
 
 ### Level 3 — Network / SSRF filter
@@ -52,6 +54,8 @@ Outbound network tools (`web_fetch`, `download_file`, and the `http_get`/`http_p
 
 Jenny Apps get a separate, slightly looser blocklist for their own outbound `http` actions (private/RFC1918 ranges are allowed there, since app servers are expected to be LAN devices the user pointed the app at — loopback, link-local, and CGNAT stay blocked so an app manifest can't use the proxy as a back door into the gateway's own API).
 
+**SSH targets share that looser policy, for the same reason and with the same exclusions**: a home server on the LAN is the main use case, but loopback stays blocked so the agent cannot SSH into the phone itself or use an SSH session as a bridge back to the gateway's own API. The check runs twice — once when the host is saved in Settings, and again at connection time, so a hostname that only later starts resolving to a blocked address (DNS rebinding) is still caught.
+
 ### Level 4 — `python_exec` guardrails (explicitly not a sandbox)
 
 `python_exec` runs arbitrary Python **in-process**, on the same Chaquopy interpreter as the rest of the gateway. The source file itself states this bluntly, and this documentation states it just as bluntly: **it is not a security sandbox.**
@@ -70,6 +74,20 @@ Defaults: `tools.pythonExec.enable` = `true`, `timeout` = 60 seconds (`0` = no l
 
 **If you don't trust the model to run arbitrary code responsibly, the only real mitigation is to turn the tool off:** set `tools.pythonExec.enable` to `false` in `workspace/config.json`. There is no "sandboxed mode" to fall back to.
 
+## Remote machines: a fifth boundary that isn't a level
+
+SSH is the only capability that acts outside the phone, so the four-level stack above doesn't describe it — nothing Android enforces protects a server on the other side of the network. What contains it instead is four independent gates, none of which the model can open:
+
+**1. Targeting is by alias.** Every SSH tool takes a `host` argument that must be the alias of a machine a person registered in Settings → SSH. There is no parameter for an address, a port, a username or a credential anywhere in the four tool schemas, so no prompt injection can redirect the agent at a machine the user never declared. Aliases are resolved against live config on every call, and the address behind one is re-validated against the network policy each time.
+
+**2. Host keys are pinned, with no trust-on-first-use.** A connection to a host whose key has not been accepted by a human is refused outright, and the error tells the model to ask the user rather than retry. The enforcement is the `known_hosts` file next to the private key — the fingerprint stored in `config.json` is for display only. A registered host presenting a *different* key raises rather than overwriting: it is a possible man-in-the-middle, and the only acceptable response is a person looking at both fingerprints and deciding, which is a second explicit confirmation in the UI.
+
+**3. The private key is unreachable from the agent.** It is generated on-device (ed25519, one pair per alias), the private half is never returned by any API — the settings payload carries a boolean, not the key — and it lives outside the workspace, so no file tool and no `python_exec` file helper can read it. Nothing in the tool layer needs the key material; the backend opens the file by a path derived from the alias, never from a configurable field.
+
+**4. The capability is compartmentalized.** The four SSH tools live in a tool scope of their own (`remote`) that no agent loads by default. The main agent — the one you talk to — has no SSH at all: it delegates to a **`sysadmin` subagent**, the only type that requests that scope, and that type has neither the web tools nor `download_file` nor `python_exec`. This is the same rule the researcher/coder split follows, applied to a shorter and worse chain: whoever reads untrusted pages must not be whoever holds a shell on a production machine. Keeping the SSH tools out of the `subagent` scope is what stops the catch-all `operator` type — defined as "everything in that scope" — from inheriting a remote shell by accident.
+
+Two things this does **not** protect against, stated plainly: a command the agent runs on the server has whatever rights the account you gave it has, and Jenny's snapshots do not cover a remote machine. There is no undo on the other end.
+
 ## What the agent can and cannot do on the phone
 
 **Can:**
@@ -81,6 +99,7 @@ Defaults: `tools.pythonExec.enable` = `true`, `timeout` = 60 seconds (`0` = no l
 - Send and receive messages over Telegram, if you've paired a bot.
 - Run Python code in-process (unless you disable `python_exec`).
 - Spawn subagents and run long-running background tasks.
+- Run commands on a remote machine over SSH — but only on an alias you registered, only once you have accepted its host key, only through a `sysadmin` subagent, and only if you enabled `tools.ssh` (off by default).
 
 **Cannot:**
 - Read or write any other app's data — the Android sandbox stops this regardless of any Jenny-level toggle.
@@ -88,6 +107,7 @@ Defaults: `tools.pythonExec.enable` = `true`, `timeout` = 60 seconds (`0` = no l
 - Reach private/loopback/link-local network addresses with its web tools, unless you've added them to `security.ssrfWhitelist`.
 - Meaningfully resist a compromised or adversarial model once inside `python_exec` — that boundary is the Android sandbox, not Jenny's own guardrails.
 - Escape the workspace boundary through file tools when `security.restrictToWorkspace` is `true` — the fail-closed policy rejects paths outside it rather than silently widening scope.
+- SSH to a machine you didn't register, accept a host key on your behalf, or read its own SSH private key — the alias is the only target it can name, and the key lives outside every path its tools can resolve.
 
 ## Signed media URLs
 
@@ -109,6 +129,7 @@ The gateway listens on `127.0.0.1:18790` by default (WebSocket and HTTP share th
 ## Related pages
 
 - [Privacy](./privacy.md) — what leaves the device and when.
+- [SSH access](../using/ssh.md) — setting up a remote host, and why a restore does not restore access.
 - [Configuration reference](../reference/configuration.md) — the `security.*` and `tools.*` keys in full.
 - [Tool reference](../reference/tools.md) — per-tool limits and behavior.
 - [Local models](../reference/local-models.md) — the HTTPS-outside-localhost constraint for self-hosted providers.

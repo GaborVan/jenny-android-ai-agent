@@ -123,3 +123,58 @@ class DiagnosticsToolConfig(Base):
     """Diagnostics tool configuration."""
 
     enable: bool = True
+
+
+class SshHostConfig(Base):
+    """Un host SSH registrato a mano dall'utente in Settings.
+
+    ``alias`` è **l'unica cosa che il modello passa** ai tool SSH, e da lì viene
+    la garanzia che conta: l'agente non può raggiungere un indirizzo arbitrario
+    della rete, può solo nominare un alias che un umano ha già dichiarato qui.
+    Nessuna credenziale entra mai negli argomenti o nei risultati dei tool.
+
+    Host e username invece il modello li *vede*, elencati da ``ssh_hosts``:
+    senza non potrebbe scegliere fra due alias né dire all'utente su quale
+    macchina ha agito. Non sono segreti — il segreto è la chiave privata, che
+    vive fuori dal workspace e che nessun tool legge.
+
+    ``host_key_fingerprint`` è **solo per display** nella UI. L'enforcement vero
+    è il file ``known_hosts`` accanto alla chiave (vedi
+    ``jenny.config.paths.get_ssh_dir``): è quello che il backend legge, e senza
+    una riga corrispondente la connessione viene rifiutata.
+    """
+
+    alias: str
+    host: str
+    port: int = Field(default=22, ge=1, le=65535)
+    username: str
+    # Mostrata al modello da ``ssh_hosts``: serve a fargli scegliere l'alias
+    # giusto quando ce n'è più di uno ("il NAS di casa", "il VPS del sito").
+    description: str = ""
+    host_key_fingerprint: str | None = None
+    # Dove vivono i log dei job lunghi lato server (vedi il tool ``ssh_job``).
+    job_log_dir: str = "/tmp/jenny-jobs"
+
+
+class SshConfig(Base):
+    """Accesso SSH a macchine remote.
+
+    Spento di default e senza host: sono due gate distinti e volutamente
+    entrambi necessari, perché questa è la sola capacità di Jenny che agisce su
+    una macchina che non è il telefono.
+
+    ``command_timeout_s`` è basso di proposito. Il gateway è un foreground
+    service **senza WakeLock**, quindi a schermo spento la CPU può sospendersi e
+    un comando lungo resterebbe appeso: i comandi lunghi vanno passati a
+    ``ssh_job``, che li stacca dalla connessione e li segue a delta.
+    """
+
+    enable: bool = False
+    hosts: list[SshHostConfig] = Field(default_factory=list)
+    connect_timeout_s: float = Field(default=15.0, ge=1.0, le=60.0)
+    command_timeout_s: int = Field(default=60, ge=1, le=300)
+    max_output_chars: int = Field(default=10_000, ge=1_000, le=50_000)
+    # 0 = keepalive disattivato.
+    keepalive_interval_s: int = Field(default=30, ge=0, le=300)
+    idle_close_s: int = Field(default=300, ge=30)
+    max_transfer_bytes: int = Field(default=50 * 1024 * 1024, ge=1024)

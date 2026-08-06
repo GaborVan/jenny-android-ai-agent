@@ -39,6 +39,10 @@ if TYPE_CHECKING:
             "and logs, NO network — use it to write or change code. "
             "'analyst': python_exec plus read/list/write, NO network — use it for "
             "computation, data and charts. "
+            "'sysadmin': SSH to the machines the user registered (run commands, "
+            "start and follow long jobs, transfer files) plus read/list/write, NO "
+            "network and NO local code execution — the only type that reaches a "
+            "remote machine, and the only way to do so. "
             "'operator': everything (fallback for tasks that fit none of the above).",
             enum=AGENT_TYPE_NAMES,
         ),

@@ -374,6 +374,17 @@ class GatewayContainer:
             from jenny.agent.tools.exec_session import DEFAULT_EXEC_SESSION_MANAGER
 
             DEFAULT_EXEC_SESSION_MANAGER.shutdown()
+            # Pool SSH: le sessioni sono socket verso una macchina di qualcun
+            # altro, e lasciarle cadere senza disconnettere significa lasciare
+            # processi ssh appesi *sul server* fino al suo timeout. Costa nulla
+            # quando SSH non è mai stato usato (il pool è vuoto), e non deve mai
+            # impedire il resto dello shutdown.
+            try:
+                from jenny.agent.tools.ssh_transport import get_ssh_backend
+
+                await get_ssh_backend().close_all()
+            except Exception:
+                logger.opt(exception=True).debug("Could not close ssh connections")
             if self._agent:
                 flushed = self._agent.sessions.flush_all()
                 if flushed:

@@ -75,6 +75,7 @@ _HARDCODED_TOOL_MODULES = [
     "introspect",
     "diagnostics",
     "ui_view",
+    "ssh",
 ]
 
 

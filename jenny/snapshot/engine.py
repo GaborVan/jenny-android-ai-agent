@@ -33,6 +33,13 @@ DEFAULT_EXCLUDE_GLOBS: tuple[str, ...] = (
     ".jenny/logs/**",
     ".jenny/snapshots/**",
     ".jenny/backup_staging/**",
+    # Registro dei job SSH remoti. Escluso per due ragioni distinte. La prima è
+    # che è stato operativo effimero: id, cursori e pid di processi su una
+    # macchina che non è questa, privi di senso dopo un restore. La seconda
+    # conta di più — contiene i comandi INTERI e i path dei log lato server,
+    # cioè l'unica traccia SSH che altrimenti lascerebbe il dispositivo dentro
+    # un ``.jbk`` esportato, mentre la chiave privata (fuori dal workspace) no.
+    ".jenny/ssh_jobs/**",
     "**/__pycache__/**",
     "*.tmp",
     "*.tmp.*",

@@ -66,6 +66,23 @@ class GatewayService : Service() {
         // stalls for that entire window (same effect as an ANR).
         thread(name = "jenny-gateway") {
             try {
+                // Provider crittografico: UNA SOLA registrazione per processo, e
+                // qui. Questo servizio e l'unico ingresso del runtime — ci si
+                // arriva sia da MainActivity sia da BootReceiver (avvio headless
+                // al boot, senza activity) — e onCreate gira una volta sola.
+                // Prima di Python.start: da quel momento in poi qualunque codice
+                // Python puo chiedere un Cipher, e il provider deve essere gia
+                // quello definitivo.
+                //
+                // ATTENZIONE: BouncyCastle finisce in posizione 1, quindi cambia
+                // quale provider serve AES/GCM a TUTTA l'app, non solo all'SSH.
+                // Il container di backup cifrato passa di li
+                // (jenny/snapshot/crypto_backends/android.py): chi sposta o
+                // rimuove questa chiamata deve riverificare sul device un giro
+                // completo di export + import di un backup, non solo l'SSH. Il
+                // JSON loggato riporta apposta il provider di AES/GCM prima e
+                // dopo l'inserimento.
+                Log.i(TAG, "SSH crypto provider: ${SshBridge.installProvider()}")
                 if (!Python.isStarted()) {
                     Python.start(AndroidPlatform(applicationContext))
                 }

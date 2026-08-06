@@ -27,11 +27,18 @@ Choose `agent_type` on purpose, because it decides which tools the subagent gets
 - `writer` — docs, wiki pages, synthesis from material already gathered. No network.
 - `coder` — writes and changes code, runs tests. No network.
 - `analyst` — computation, data, charts. No network.
+- `sysadmin` — administers the user's remote machines over SSH: run commands, follow
+  long jobs, move files. It is the only type that reaches a machine other than this
+  phone, and for that reason it has neither network access here nor local code
+  execution.
 - `operator` — fallback when the job fits none of the above.
 
 The researcher/writer and researcher/coder splits are a security boundary: whoever
-read untrusted web pages is not the one who then runs code. Do not route a job to
-`operator` just to sidestep a missing tool — say what is missing instead.
+read untrusted web pages is not the one who then runs code. `sysadmin` is the same
+boundary at its sharpest — a shell on a production server is one step from a hostile
+page, so that agent never gets one. Do not route a job to `operator` just to sidestep
+a missing tool — say what is missing instead. `operator` has no SSH either: remote
+work goes to `sysadmin` or nowhere.
 
 Set `quick=true` for genuinely short jobs (one lookup, one check). One concurrency
 slot is reserved for them, so a fan-out of long jobs can never leave you unable to

@@ -14,6 +14,7 @@ from jenny.config.tool_schemas import (
     LocationConfig,
     MyToolConfig,
     PythonExecConfig,
+    SshConfig,
 )
 from jenny.config_base import Base
 from jenny.cron.types import CronSchedule
@@ -187,6 +188,7 @@ class ToolsConfig(Base):
     my: MyToolConfig = Field(default_factory=MyToolConfig)
     introspect: IntrospectToolConfig = Field(default_factory=IntrospectToolConfig)
     diagnostics: DiagnosticsToolConfig = Field(default_factory=DiagnosticsToolConfig)
+    ssh: SshConfig = Field(default_factory=SshConfig)
     # NB: canonical home = ``Config.security`` (SecurityConfig). Questo campo
     # resta su ToolsConfig come **mirror** sincronizzato (il tool-layer lo legge
     # via ``ctx.config.restrict_to_workspace``); il validator di ``Config`` lo

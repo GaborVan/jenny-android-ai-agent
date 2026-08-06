@@ -17,7 +17,7 @@ _TEMPLATES_MANIFEST = [
     "agent/dream.md", "agent/evaluator.md", "agent/orchestrator.md",
     "agent/_snippets/untrusted_content.md",
     "agent/types/researcher.md", "agent/types/writer.md", "agent/types/coder.md",
-    "agent/types/analyst.md", "agent/types/operator.md",
+    "agent/types/analyst.md", "agent/types/sysadmin.md", "agent/types/operator.md",
     "memory/MEMORY.md",
 ]
 
@@ -53,6 +53,8 @@ _SKILLS_MANIFEST = [
     "memory/SKILL.md",
     # data-processing
     "data-processing/SKILL.md",
+    # ssh
+    "ssh/SKILL.md",
 ]
 
 _UI_MANIFEST = [

@@ -397,21 +397,110 @@ class TestFormatterPerTool:
         assert format_tool_start("get_location", {}) == "getting device location"
         assert format_tool_end("get_location", {}, "45.4642, 9.1900 (Milan)") == "location resolved"
 
-    def test_every_subagent_scope_tool_has_a_formatter(self):
-        # Il test che tiene vera la copertura quando un tool nuovo entra nello
-        # scope: senza questo, un tool aggiunto domani degrada in silenzio al
-        # fallback e nessuno lo nota.
+    def test_ssh_hosts(self):
+        assert format_tool_start("ssh_hosts", {}) == "listing ssh hosts"
+        listing = "3 SSH host(s) registered:\n- prod: root@example.com — the VPS"
+        assert format_tool_end("ssh_hosts", {}, listing) == "3 hosts"
+        assert format_tool_end("ssh_hosts", {}, "No SSH hosts are configured.") == (
+            "no hosts configured"
+        )
+
+    def test_ssh_exec_reports_exit_code_and_size_not_output(self):
+        args = {"host": "prod", "command": "systemctl restart api"}
+        assert format_tool_start("ssh_exec", args) == "running on prod: systemctl restart api"
+        result = "exit code: 0\nstdout:\n" + "\n".join(f"line {i}" for i in range(12))
+        summary = format_tool_end("ssh_exec", args, result)
+        assert summary == "exit 0, 12 lines"
+        assert "line 3" not in summary
+        assert format_tool_end("ssh_exec", args, "exit code: 1\n(no output)") == "exit 1, no output"
+
+    def test_ssh_job_start_poll_stop_list(self):
+        start_args = {"host": "prod", "action": "start", "command": "apt upgrade"}
+        assert format_tool_start("ssh_job", start_args) == "started job on prod: apt upgrade"
+        assert format_tool_end("ssh_job", start_args, "Started job 3f2a on prod (remote pid 91)") == (
+            "job started"
+        )
+
+        poll_args = {"host": "prod", "action": "poll", "job_id": "3f2a"}
+        assert format_tool_start("ssh_job", poll_args) == "polling job 3f2a on prod"
+        poll = (
+            "job 3f2a on prod: running\nnew output:\n"
+            + "\n".join(f"Unpacking pkg{i}" for i in range(240))
+            + "\nStill running. Do not poll in a tight loop: answer the user."
+        )
+        summary = format_tool_end("ssh_job", poll_args, poll)
+        assert summary == "job 3f2a: 240 new lines, still running"
+        assert "Unpacking" not in summary
+        done = "job 3f2a on prod: finished (exit code 0)\nno new output since the last poll."
+        assert format_tool_end("ssh_job", poll_args, done) == (
+            "job 3f2a: no new output, finished, exit 0"
+        )
+
+        stop_args = {"host": "prod", "action": "stop", "job_id": "3f2a"}
+        assert format_tool_start("ssh_job", stop_args) == "stopping job 3f2a on prod"
+        assert format_tool_end("ssh_job", stop_args, "Sent SIGTERM to job 3f2a") == (
+            "job 3f2a: stop signalled"
+        )
+
+        # Un job id vero e "<alias>-<8 hex>": deve restare intero (``_ident``
+        # lo taglierebbe al trattino e due job sullo stesso host diventerebbero
+        # indistinguibili).
+        real_args = {"host": "prod", "action": "poll", "job_id": "prod-3f2a9b1c"}
+        assert format_tool_start("ssh_job", real_args) == "polling job prod-3f2a9b1c on prod"
+
+        list_args = {"host": "prod", "action": "list"}
+        assert format_tool_start("ssh_job", list_args) == "listing jobs on prod"
+        assert format_tool_end("ssh_job", list_args, "2 job(s) on prod:\n- a\n- b") == "2 jobs"
+
+    def test_ssh_transfer_measures_the_file(self):
+        up = {"host": "prod", "direction": "up", "local_path": "out/site.tar.gz"}
+        assert format_tool_start("ssh_transfer", up) == "uploading site.tar.gz to prod"
+        assert format_tool_end(
+            "ssh_transfer", up, "Uploaded out/site.tar.gz to prod:/srv/site.tar.gz (2516582 bytes)."
+        ) == "uploaded 2.4 MB"
+        down = {"host": "prod", "direction": "down", "remote_path": "/var/log/api.log"}
+        assert format_tool_start("ssh_transfer", down) == "downloading api.log from prod"
+        assert format_tool_end(
+            "ssh_transfer", down, "Downloaded prod:/var/log/api.log to logs/api.log (4096 bytes)."
+        ) == "downloaded 4.0 KB"
+
+    def test_ssh_errors_do_not_echo_the_remote_message(self):
+        # Un errore SSH porta con se testo del server (banner, motd, stderr):
+        # come ogni altro errore deve uscire come frase nostra, non riecheggiato.
+        summary = format_tool_end(
+            "ssh_exec",
+            {"host": "prod", "command": "id"},
+            "Error: the SSH connection failed (banner: SECRET-HOSTNAME-42).",
+        )
+        assert "SECRET-HOSTNAME-42" not in summary
+
+    @pytest.mark.parametrize("scope", ["subagent", "remote"])
+    def test_every_agent_reachable_scope_tool_has_a_formatter(self, scope):
+        # Il test che tiene vera la copertura quando un tool nuovo entra in uno
+        # scope raggiungibile da un subagent: senza questo, un tool aggiunto
+        # domani degrada in silenzio al fallback e nessuno lo nota. ``remote``
+        # (i tool SSH del tipo ``sysadmin``) e nell'elenco per lo stesso motivo:
+        # e uno scope in piu, non un'eccezione.
         from jenny.agent.tools.loader import ToolLoader, declared_tool_name
 
         scope_tools = {
             name
             for cls in ToolLoader().discover()
-            if "subagent" in getattr(cls, "_scopes", {"core"})
+            if scope in getattr(cls, "_scopes", {"core"})
             and (name := declared_tool_name(cls))
         }
-        assert scope_tools, "lo scope subagent non puo essere vuoto"
+        assert scope_tools, f"lo scope {scope} non puo essere vuoto"
         missing = sorted(scope_tools - known_tools())
-        assert not missing, f"tool dello scope subagent senza formatter: {missing}"
+        assert not missing, f"tool dello scope {scope} senza formatter: {missing}"
+
+    def test_the_formatter_scopes_are_exactly_the_agent_type_scopes(self):
+        # L'invariante sopra vale solo se l'elenco degli scope parametrizzati e
+        # quello vero: un tipo nuovo con uno scope nuovo deve rompere qui, non
+        # passare inosservato con i suoi tool sul fallback.
+        from jenny.agent.agent_types import AGENT_TYPES
+
+        scopes = {scope for t in AGENT_TYPES.values() for scope in t.scopes}
+        assert scopes == {"subagent", "remote"}
 
     def test_all_agent_type_allowlists_are_covered(self):
         from jenny.agent.agent_types import AGENT_TYPES

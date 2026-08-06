@@ -33,33 +33,79 @@ EXPECTED_TOOLS = {
         "find_files", "grep",
     },
     "analyst": {"python_exec", "read_file", "list_dir", "write_file"},
+    "sysadmin": {
+        "ssh_hosts", "ssh_exec", "ssh_job", "ssh_transfer",
+        "read_file", "list_dir", "write_file",
+    },
     "operator": None,  # tutto lo scope subagent
 }
 
 _CODE_EXECUTION = {"python_exec", "write_stdin", "list_exec_sessions"}
 _NETWORK = {"web_search", "web_fetch", "download_file"}
+_SSH = {"ssh_hosts", "ssh_exec", "ssh_job", "ssh_transfer"}
 
 
-def _load(allow, tmp_path: Path) -> set[str]:
-    """Carica lo scope subagent con l'allowlist data e ritorna i nomi."""
-    registry = ToolRegistry()
-    ctx = ToolContext(
-        config=ToolsConfig(),
+def _tools_config(*, ssh: bool = False) -> ToolsConfig:
+    """``ToolsConfig`` per il ctx dei tool, con SSH acceso su richiesta.
+
+    ``enabled()`` dei tool SSH vuole il toggle *e* almeno un host: sono due gate
+    d'ambiente, indipendenti dal cablaggio scope/allowlist verificato qui, e
+    senza soddisfarli i quattro tool non entrerebbero in nessun registry.
+    """
+    from jenny.config.tool_schemas import SshHostConfig
+
+    cfg = ToolsConfig()
+    if ssh:
+        cfg.ssh.enable = True
+        cfg.ssh.hosts = [SshHostConfig(alias="prod", host="example.com", username="u")]
+        # Il gate dei tool SSH cerca la config sotto ``ctx.config.tools.ssh``,
+        # mentre il ctx del runtime porta una ToolsConfig (quindi ``.ssh``).
+        # Il ctx di questo test soddisfa entrambe le forme: il test verifica il
+        # cablaggio, e non deve dipendere da quale delle due sia quella giusta.
+        cfg.tools = cfg
+    return cfg
+
+
+def _ctx(tmp_path: Path, *, ssh: bool = False) -> ToolContext:
+    return ToolContext(
+        config=_tools_config(ssh=ssh),
         workspace=str(tmp_path),
         file_state_store=FileStates(),
         # Contesto Android finto: senza, i tool web sono disabilitati
         # dall'ambiente e il set del researcher non sarebbe verificabile.
         android_context=object(),
     )
-    return set(ToolLoader().load(ctx, registry, scope="subagent", allow=allow))
 
 
-def test_five_types_exist() -> None:
-    assert AGENT_TYPE_NAMES == ("researcher", "writer", "coder", "analyst", "operator")
+def _load(allow, tmp_path: Path) -> set[str]:
+    """Carica lo scope subagent con l'allowlist data e ritorna i nomi."""
+    return set(ToolLoader().load(_ctx(tmp_path), ToolRegistry(), scope="subagent", allow=allow))
+
+
+def _load_type(name: str, tmp_path: Path) -> set[str]:
+    """Carica un tipo su TUTTI i suoi scope, come fa ``_build_tools``."""
+    from jenny.agent.subagent import split_allow_by_scope
+
+    agent_type = AGENT_TYPES[name]
+    loader = ToolLoader()
+    registry = ToolRegistry()
+    ctx = _ctx(tmp_path, ssh="remote" in agent_type.scopes)
+    loaded: set[str] = set()
+    for scope, allow in split_allow_by_scope(loader, agent_type).items():
+        loaded |= set(loader.load(ctx, registry, scope=scope, allow=allow))
+    return loaded
+
+
+def test_six_types_exist() -> None:
+    assert AGENT_TYPE_NAMES == (
+        "researcher", "writer", "coder", "analyst", "sysadmin", "operator",
+    )
     assert DEFAULT_AGENT_TYPE == "operator"
 
 
-@pytest.mark.parametrize("name", ["researcher", "writer", "coder", "analyst", "operator"])
+@pytest.mark.parametrize(
+    "name", ["researcher", "writer", "coder", "analyst", "sysadmin", "operator"]
+)
 def test_declared_allowlist_matches_contract(name: str) -> None:
     expected = EXPECTED_TOOLS[name]
     declared = AGENT_TYPES[name].tools
@@ -69,10 +115,9 @@ def test_declared_allowlist_matches_contract(name: str) -> None:
         assert declared == frozenset(expected)
 
 
-@pytest.mark.parametrize("name", ["researcher", "writer", "coder", "analyst"])
+@pytest.mark.parametrize("name", ["researcher", "writer", "coder", "analyst", "sysadmin"])
 def test_type_registry_contains_exactly_its_tools(name: str, tmp_path: Path) -> None:
-    loaded = _load(AGENT_TYPES[name].tools, tmp_path)
-    assert loaded == EXPECTED_TOOLS[name]
+    assert _load_type(name, tmp_path) == EXPECTED_TOOLS[name]
 
 
 def test_operator_gets_the_whole_subagent_scope(tmp_path: Path) -> None:
@@ -99,10 +144,67 @@ def test_researcher_cannot_execute_code(tmp_path: Path) -> None:
     assert "edit_file" not in loaded
 
 
-@pytest.mark.parametrize("name", ["writer", "analyst", "coder"])
+@pytest.mark.parametrize("name", ["writer", "analyst", "coder", "sysadmin"])
 def test_non_researcher_types_have_no_network(name: str, tmp_path: Path) -> None:
     """Confine simmetrico: chi esegue/scrive non va a prendersi la fonte."""
-    assert not (_load(AGENT_TYPES[name].tools, tmp_path) & _NETWORK)
+    assert not (_load_type(name, tmp_path) & _NETWORK)
+
+
+# -- SSH: il confine del tipo ``sysadmin`` -------------------------------------
+
+
+def test_sysadmin_has_the_four_ssh_tools_and_nothing_that_executes_or_browses(
+    tmp_path: Path,
+) -> None:
+    """La catena corta: da "pagina ostile" a "shell su un server" non c'e ponte."""
+    loaded = _load_type("sysadmin", tmp_path)
+    assert _SSH <= loaded
+    assert not (loaded & _NETWORK)
+    assert not (loaded & _CODE_EXECUTION)
+    assert "apply_patch" not in loaded
+    assert "edit_file" not in loaded
+
+
+def test_operator_does_not_inherit_the_ssh_tools(tmp_path: Path) -> None:
+    """``operator`` e ``tools=None``: tutto cio che entra nello scope subagent
+    lo eredita in automatico. I tool SSH devono restarne fuori."""
+    assert AGENT_TYPES["operator"].tools is None
+    assert AGENT_TYPES["operator"].scopes == ("subagent",)
+    assert not (_load_type("operator", tmp_path) & _SSH)
+
+
+@pytest.mark.parametrize("scope", ["core", "orchestrator", "subagent"])
+def test_ssh_tools_are_in_no_pre_existing_scope(scope: str, tmp_path: Path) -> None:
+    loaded = set(ToolLoader().load(
+        _ctx(tmp_path, ssh=True), ToolRegistry(), scope=scope, allow=None
+    ))
+    assert not (loaded & _SSH), scope
+
+
+def test_only_sysadmin_reaches_the_remote_scope() -> None:
+    for name, agent_type in AGENT_TYPES.items():
+        expected = ("subagent", "remote") if name == "sysadmin" else ("subagent",)
+        assert agent_type.scopes == expected, name
+
+
+def test_multi_scope_allowlist_is_split_per_scope() -> None:
+    """L'allowlist di un tipo multi-scope si valida sull'unione, si passa a fette.
+
+    ``ToolLoader.load`` valida l'``allow`` contro il solo scope che carica:
+    passargli l'allowlist intera di ``sysadmin`` farebbe abortire lo startup
+    perche ``ssh_exec`` nello scope ``subagent`` non esiste.
+    """
+    from jenny.agent.subagent import split_allow_by_scope
+
+    by_scope = split_allow_by_scope(ToolLoader(), AGENT_TYPES["sysadmin"])
+    assert by_scope["remote"] == frozenset(_SSH)
+    assert by_scope["subagent"] == frozenset({"read_file", "list_dir", "write_file"})
+
+
+def test_operator_keeps_allow_none_on_every_scope() -> None:
+    from jenny.agent.subagent import split_allow_by_scope
+
+    assert split_allow_by_scope(ToolLoader(), AGENT_TYPES["operator"]) == {"subagent": None}
 
 
 def test_unknown_allow_entry_raises_at_load(tmp_path: Path) -> None:
@@ -111,6 +213,38 @@ def test_unknown_allow_entry_raises_at_load(tmp_path: Path) -> None:
     assert "reed_file" in str(exc.value)
     # L'errore deve elencare i tool noti, altrimenti il typo va indovinato.
     assert "read_file" in str(exc.value)
+
+
+def test_a_name_missing_from_every_scope_is_still_fatal() -> None:
+    """La guardia sui typo non si perde nello split: un nome che non esiste in
+    NESSUNO degli scope del tipo resta un ``ToolLoadError`` che aborta il boot."""
+    from dataclasses import replace
+
+    from jenny.agent.subagent import split_allow_by_scope
+
+    broken = replace(
+        AGENT_TYPES["sysadmin"],
+        tools=frozenset({"ssh_exec", "read_file", "ssh_exce"}),
+    )
+    with pytest.raises(ToolLoadError) as exc:
+        split_allow_by_scope(ToolLoader(), broken)
+    assert "ssh_exce" in str(exc.value)
+    # I nomi noti dei DUE scope, altrimenti il typo va indovinato.
+    assert "ssh_exec" in str(exc.value)
+    assert "read_file" in str(exc.value)
+
+
+def test_a_name_from_another_scope_is_not_a_typo(tmp_path: Path) -> None:
+    """Il contrario della guardia: ``ssh_exec`` esiste, solo non in ``subagent``.
+    Senza lo split questo sarebbe un boot abortito."""
+    registry = ToolRegistry()
+    loader = ToolLoader()
+    ctx = _ctx(tmp_path, ssh=True)
+    from jenny.agent.subagent import split_allow_by_scope
+
+    for scope, allow in split_allow_by_scope(loader, AGENT_TYPES["sysadmin"]).items():
+        loader.load(ctx, registry, scope=scope, allow=allow)  # non deve sollevare
+    assert registry.has("ssh_exec")
 
 
 def test_config_disabled_tool_is_not_a_typo(tmp_path: Path) -> None:

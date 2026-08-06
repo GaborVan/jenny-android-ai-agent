@@ -87,6 +87,28 @@ def get_uploads_dir() -> Path:
     return ensure_dir(get_workspace_path() / "uploads")
 
 
+def get_ssh_dir() -> Path:
+    """Chiave privata SSH e ``known_hosts``, **fuori dal workspace**.
+
+    Sta accanto al workspace, non dentro (su Android: ``filesDir/ssh`` mentre il
+    workspace è ``filesDir/workspace``). Le tre conseguenze sono tutte volute:
+
+    * i tool filesystem dell'agente non possono leggerla —
+      ``resolve_allowed_path`` rifiuta un path fuori dalla radice workspace, e a
+      differenza di ``config.json`` (che sta *dentro* il workspace e che
+      l'agente può quindi già leggere) una chiave SSH privata dà accesso a una
+      macchina terza;
+    * non entra negli snapshot né nel backup cifrato esportabile, perché
+      ``snapshot/engine.py`` cammina solo la radice del workspace;
+    * resta comunque nello storage privato dell'app.
+
+    Il prezzo, da documentare per l'utente: un restore del workspace **non**
+    ripristina l'accesso SSH. Si rigenera la chiave e si reinstalla la pubblica
+    sul server.
+    """
+    return ensure_dir(get_workspace_path().parent / "ssh")
+
+
 def get_webui_dir() -> Path:
     """Return the directory for WebUI-only persisted display threads (JSON)."""
     return get_runtime_subdir("webui")

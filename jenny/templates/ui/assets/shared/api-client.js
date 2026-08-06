@@ -376,6 +376,58 @@ class ApiClient {
     return res.json();
   }
 
+  // ── SSH APIs ──
+  // Helper dedicato invece di _postWithQuery: quello scarta i valori vuoti, e
+  // qui un campo svuotato (es. la descrizione di un host) deve poter arrivare
+  // al server come stringa vuota, altrimenti cancellarlo diventa impossibile.
+  // Lo `status` viene rimesso sull'errore perché la UI distingue il 409
+  // "host key cambiata" dagli altri per decidere se offrire la sostituzione.
+  async _sshCall(path, params = {}) {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) qs.set(k, v == null ? '' : String(v));
+    const res = await this._fetch(qs.toString() ? `${path}?${qs}` : path);
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      const err = new Error(text || `SSH request failed: ${res.status}`);
+      err.status = res.status;
+      throw err;
+    }
+    return res.json();
+  }
+
+  async getSsh() {
+    return this._sshCall('/api/settings/ssh');
+  }
+
+  async updateSsh(params) {
+    return this._sshCall('/api/settings/ssh/update', params);
+  }
+
+  async saveSshHost(params) {
+    return this._sshCall('/api/settings/ssh/host/save', params);
+  }
+
+  async deleteSshHost(alias) {
+    return this._sshCall('/api/settings/ssh/host/delete', { alias });
+  }
+
+  async generateSshKey(alias, { replace = false } = {}) {
+    return this._sshCall(
+      '/api/settings/ssh/key/generate',
+      replace ? { alias, replace: '1' } : { alias },
+    );
+  }
+
+  async probeSshHostKey(alias) {
+    return this._sshCall('/api/settings/ssh/host-key/probe', { alias });
+  }
+
+  async acceptSshHostKey(alias, fingerprint, { replace = false } = {}) {
+    const params = { alias, fingerprint };
+    if (replace) params.replace = '1';
+    return this._sshCall('/api/settings/ssh/host-key/accept', params);
+  }
+
   async saveOnboarding(params) {
     const qs = new URLSearchParams({
       provider_name: params.provider_name || params.provider || '',

@@ -891,9 +891,158 @@ def _end_get_location(args: Mapping[str, Any], outcome: _Outcome) -> str:
     return "location resolved"
 
 
+# -- ssh_hosts / ssh_exec / ssh_job / ssh_transfer ---------------------------
+#
+# I quattro tool dello scope ``remote`` (tipo ``sysadmin``). Qui la regola 1 —
+# mai il contenuto — vale piu che altrove: il risultato di ``ssh_exec`` e di un
+# ``poll`` e output di una macchina di produzione, e l'activity stream finisce in
+# una UI e su disco. Quindi da questi esiti escono solo misure (exit code,
+# righe, byte) e frasi nostre; l'unica cosa che resta leggibile e cio che
+# **abbiamo chiesto noi**: alias dell'host, comando, job_id, tutti letti dagli
+# *argomenti*, mai dal risultato.
+
+_RE_SSH_HOST_COUNT = re.compile(r"^(\d+) SSH host\(s\) registered")
+_RE_SSH_EXIT_CODE = re.compile(r"^exit code: (\d+)", re.MULTILINE)
+_RE_SSH_JOB_EXIT = re.compile(r"\(exit code (\d+)\)")
+_RE_SSH_JOB_COUNT = re.compile(r"^(\d+) job\(s\) on ")
+_RE_SSH_BYTES = re.compile(r"\((\d+) bytes\)")
+
+
+def _ssh_host(args: Mapping[str, Any]) -> str:
+    """Alias dell'host, o ``"a remote host"``. Mai un indirizzo: e un alias."""
+    return _arg_text(args, "host", limit=32) or "a remote host"
+
+
+# Un job id vero e ``<alias>-<8 hex>`` (vedi ``ssh_jobs._new_job_id``): comincia
+# spesso per cifra e contiene un trattino, quindi ``_ident`` lo decapiterebbe.
+# Il charset e chiuso ed e lo stesso che ``ssh_jobs`` gia impone.
+_JOB_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+_MAX_JOB_ID_CHARS = 24
+
+
+def _ssh_job_id(args: Mapping[str, Any]) -> str:
+    """Job id letto dagli *argomenti*, su charset chiuso. Mai dal risultato."""
+    value = args.get("job_id")
+    if not isinstance(value, str):
+        return ""
+    match = _JOB_ID_RE.search(value)
+    return match.group(0)[:_MAX_JOB_ID_CHARS] if match else ""
+
+
+def _start_ssh_hosts(args: Mapping[str, Any]) -> str:
+    return "listing ssh hosts"
+
+
+def _end_ssh_hosts(args: Mapping[str, Any], outcome: _Outcome) -> str:
+    count = _probe_int(outcome.head, _RE_SSH_HOST_COUNT)
+    if count is not None:
+        return _plural(count, "host")
+    if "switched off" in outcome.head.lower():
+        return "ssh is switched off"
+    return "no hosts configured"
+
+
+def _start_ssh_exec(args: Mapping[str, Any]) -> str:
+    command = _arg_text(args, "command", limit=60)
+    host = _ssh_host(args)
+    return f"running on {host}: {command}" if command else f"running a command on {host}"
+
+
+def _end_ssh_exec(args: Mapping[str, Any], outcome: _Outcome) -> str:
+    code = _probe_int(outcome.head, _RE_SSH_EXIT_CODE)
+    head = f"exit {code}" if code is not None else "finished"
+    if "(no output)" in outcome.head:
+        return f"{head}, no output"
+    # Le righe di intestazione che ``_render_exec`` aggiunge sempre ("exit
+    # code: N" e le etichette) non sono output del comando: si scontano quelle
+    # che si vedono, cosi il numero riferito e quello che l'utente conta a
+    # schermo e non tre di piu.
+    overhead = (
+        1
+        + ("stdout:" in outcome.head)
+        + ("stderr:" in outcome.head or "stderr:" in outcome.tail)
+    )
+    text = f"{head}, {_plural(max(outcome.lines - overhead, 0), 'line')}"
+    if "characters were dropped" in outcome.tail:
+        text += ", truncated"
+    return text
+
+
+def _start_ssh_job(args: Mapping[str, Any]) -> str:
+    action = _arg_text(args, "action", limit=8).lower()
+    host = _ssh_host(args)
+    if action == "start":
+        command = _arg_text(args, "command", limit=60)
+        return f"started job on {host}: {command}" if command else f"starting a job on {host}"
+    job = _ssh_job_id(args)
+    label = f"job {job}" if job else "job"
+    if action == "poll":
+        return f"polling {label} on {host}"
+    if action == "stop":
+        return f"stopping {label} on {host}"
+    if action == "list":
+        return f"listing jobs on {host}"
+    return f"ssh job on {host}"
+
+
+# Code di riga che ``_render_poll`` aggiunge dopo l'output (una riga ciascuna):
+# non sono output del job e non vanno contate come tale.
+_SSH_POLL_NOTES = (
+    "poll again right away",
+    "Do not poll in a tight loop",
+    "The process disappeared",
+)
+
+
+def _ssh_job_state(outcome: _Outcome) -> str:
+    """Stato di un job letto dai marker del render, non dal suo output."""
+    code = _probe_int(outcome.head, _RE_SSH_JOB_EXIT)
+    if code is not None:
+        return f"finished, exit {code}"
+    if "The process disappeared" in outcome.tail:
+        return "process gone"
+    return "still running"
+
+
+def _end_ssh_job(args: Mapping[str, Any], outcome: _Outcome) -> str:
+    action = _arg_text(args, "action", limit=8).lower()
+    if action == "start":
+        # Il job_id lo genera il risultato, non gli argomenti: non lo si estrae
+        # (regola 3) e non serve — il pannello dice che il job e partito, l'id
+        # ce l'ha il modello.
+        return "job started"
+    if action == "list":
+        count = _probe_int(outcome.head, _RE_SSH_JOB_COUNT)
+        return _plural(count, "job") if count is not None else "no jobs"
+    job = _ssh_job_id(args)
+    label = f"job {job}: " if job else ""
+    if action == "stop":
+        return f"{label}stop signalled"
+    if "no new output since the last poll" in outcome.head:
+        return f"{label}no new output, {_ssh_job_state(outcome)}"
+    # Come sopra: intestazione, etichetta "new output:" e le note finali non
+    # sono output del job.
+    overhead = 2 + sum(note in outcome.tail for note in _SSH_POLL_NOTES)
+    new_lines = max(outcome.lines - overhead, 0)
+    return f"{label}{_plural(new_lines, 'new line')}, {_ssh_job_state(outcome)}"
+
+
+def _start_ssh_transfer(args: Mapping[str, Any]) -> str:
+    host = _ssh_host(args)
+    if _arg_text(args, "direction", limit=8).lower() == "down":
+        return f"downloading {_basename(args.get('remote_path'), limit=32)} from {host}"
+    return f"uploading {_basename(args.get('local_path'), limit=32)} to {host}"
+
+
+def _end_ssh_transfer(args: Mapping[str, Any], outcome: _Outcome) -> str:
+    verb = "downloaded" if _arg_text(args, "direction", limit=8).lower() == "down" else "uploaded"
+    size = _probe_int(outcome.head, _RE_SSH_BYTES)
+    return f"{verb} {_fmt_bytes(size)}" if size is not None else verb
+
+
 # Registro: un tool coperto ha una riga qui. Copre tutto lo scope ``subagent``
-# di ``agent/tools/loader.py`` (e quindi ogni allowlist di
-# ``agent/agent_types.py``, che ne e un sottoinsieme).
+# e tutto lo scope ``remote`` di ``agent/tools/loader.py`` (e quindi ogni
+# allowlist di ``agent/agent_types.py``, che ne e un sottoinsieme).
 _FORMATTERS: dict[str, tuple[_StartFn, _EndFn]] = {
     "read_file": (_start_read_file, _end_read_file),
     "write_file": (_start_write_file, _end_write_file),
@@ -911,6 +1060,10 @@ _FORMATTERS: dict[str, tuple[_StartFn, _EndFn]] = {
     "get_recent_logs": (_start_get_recent_logs, _end_get_recent_logs),
     "get_source": (_start_get_source, _end_get_source),
     "get_location": (_start_get_location, _end_get_location),
+    "ssh_hosts": (_start_ssh_hosts, _end_ssh_hosts),
+    "ssh_exec": (_start_ssh_exec, _end_ssh_exec),
+    "ssh_job": (_start_ssh_job, _end_ssh_job),
+    "ssh_transfer": (_start_ssh_transfer, _end_ssh_transfer),
 }
 
 

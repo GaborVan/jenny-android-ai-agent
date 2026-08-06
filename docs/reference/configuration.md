@@ -214,6 +214,55 @@ Defaults — allowed: `os`, `sys`, `pathlib`, `json`, `re`, `math`, `datetime`, 
 
 See [Location](../using/location.md).
 
+### tools.ssh
+
+Access to remote machines. Both gates are closed by default and **both are necessary**: this is the only capability that acts on a computer other than the phone.
+
+```json
+{
+  "tools": {
+    "ssh": {
+      "enable": true,
+      "hosts": [
+        {
+          "alias": "nas",
+          "host": "nas.home.lan",
+          "port": 22,
+          "username": "jenny",
+          "description": "The home NAS",
+          "jobLogDir": "/tmp/jenny-jobs"
+        }
+      ]
+    }
+  }
+}
+```
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `tools.ssh.enable` | bool | **`false`** | Master switch. **Asymmetric**: turning it off is checked on every single call, so it applies instantly (it is the emergency stop); turning it on only registers the tools at the next gateway start. |
+| `tools.ssh.hosts[]` | array | `[]` | The registered machines. An empty list means no SSH tools even with `enable: true` — the agent can only name an alias from here, never an address. |
+| `tools.ssh.connectTimeoutS` | float 1–60 | `15.0` | Connection timeout. |
+| `tools.ssh.commandTimeoutS` | int 1–300 | `60` | Ceiling for a single `ssh_exec`, and for the short launch/poll/stop commands `ssh_job` issues. Low on purpose: the gateway is a foreground service **without a wake lock**, so with the screen off the CPU can suspend and a waited-for command hangs. Long work belongs to `ssh_job`, which detaches it. A `timeout_s` passed by the model can only lower this, never raise it. |
+| `tools.ssh.maxOutputChars` | int 1000–50000 | `10000` | Truncation threshold for command output and for each `ssh_job` poll. The result reports how many characters were dropped. |
+| `tools.ssh.keepaliveIntervalS` | int 0–300 | `30` | Server-alive interval on the SSH session; `0` disables it. |
+| `tools.ssh.idleCloseS` | int ≥ 30 | `300` | **Declared but not consulted by the current wiring** — nothing in the connection pool reads it today. Setting it changes nothing. |
+| `tools.ssh.maxTransferBytes` | int ≥ 1024 | `52428800` | Cap for `ssh_transfer` (50 MB), in both directions. On a download it is checked with a remote `stat` before the local file is opened, so an oversize transfer leaves nothing behind. |
+
+Per host:
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `alias` | string | required | The identity of the host and the **only** thing the model ever passes. Also the name of the key file on disk, so the Settings UI restricts it to 1–32 chars of `A–Za–z0–9_-` starting alphanumeric. Not renameable. |
+| `host` | string | required | Hostname or IP. Validated against the network policy when saved **and** again at connection time, so a name that later starts resolving to a blocked address is caught. RFC1918 and IPv6 ULA are allowed (a home server is the point); loopback, link-local/metadata, `0.0.0.0/8` and CGNAT are not — CGNAT is exemptable through `security.ssrfWhitelist` for Tailscale. |
+| `port` | int 1–65535 | `22` | |
+| `username` | string | required | Login account. |
+| `description` | string | `""` | Shown **to the model** by `ssh_hosts`, so it can pick between machines and tell you which one it acted on. |
+| `hostKeyFingerprint` | string \| null | `null` | **Display only.** The enforcement is the `known_hosts` file next to the private key; without a matching line there, the connection is refused no matter what this says. |
+| `jobLogDir` | string | `"/tmp/jenny-jobs"` | Where `ssh_job` writes its per-job log and exit-code files **on the server**. No field in Settings — config-only. Nothing cleans these up, and `/tmp` is wiped on reboot on most systems, so point it somewhere durable if you want old job output to survive. |
+
+The private key (`<alias>_ed25519`, one per host) and `known_hosts` live in `<filesDir>/ssh` — **outside** the workspace, alongside it. That is why the agent's file tools cannot read them, and also why they are absent from snapshots and from an exported `.jbk`: a restore brings back this host list but no keys. See [SSH access](../using/ssh.md).
+
 ### tools.my, introspect, diagnostics
 
 | Key | Type | Default | Effect |
@@ -237,7 +286,7 @@ The canonical home for the two policy switches.
 Two things people get wrong here:
 
 - **The old location still loads, but is not where you edit.** A legacy config carrying `tools.restrictToWorkspace` / `tools.ssrfWhitelist` and no `security` block is migrated into `security` automatically by a validator, and `tools.restrictToWorkspace` is then kept in sync as a mirror the tool layer reads. Write to `security`.
-- **The SSRF whitelist covers agent tools, not provider calls.** It gates `web_fetch`, `download_file`, the `python_exec` HTTP helpers, and media ingestion. Requests to your LLM endpoint do not go through it — a self-hosted model on a private address works without whitelisting anything (see [Local models](./local-models.md)).
+- **The SSRF whitelist covers agent tools, not provider calls.** It gates `web_fetch`, `download_file`, the `python_exec` HTTP helpers, media ingestion, and — through a looser blocklist that permits private LAN ranges — Jenny App servers and `tools.ssh` targets. Requests to your LLM endpoint do not go through it — a self-hosted model on a private address works without whitelisting anything (see [Local models](./local-models.md)).
 
 Full threat model: [Security model](../internals/security-model.md).
 
@@ -342,5 +391,5 @@ How switching behaves:
 - [Providers and models](./providers.md) — choosing formats, base URLs, and models
 - [Tool reference](./tools.md) — what each tool actually does with these toggles
 - [Security model](../internals/security-model.md) — workspace policy, SSRF, and where the real boundaries are
-- [Memory and Dream](../using/memory.md), [Scheduling and proactivity](../using/scheduling.md), [Telegram bridge](../using/telegram.md), [Backup and restore](../using/backup.md)
+- [Memory and Dream](../using/memory.md), [Scheduling and proactivity](../using/scheduling.md), [SSH access](../using/ssh.md), [Telegram bridge](../using/telegram.md), [Backup and restore](../using/backup.md)
 - [Troubleshooting](../using/troubleshooting.md) — what to do when a config change breaks the boot

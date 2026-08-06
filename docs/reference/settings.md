@@ -2,7 +2,7 @@
 
 Every control in the Settings screen, what it does, and its default value.
 
-Settings is a single accordion of 6 sections — Personalization, Model, Tools, Telegram, Backup & restore, System — all collapsed the first time you open the screen. There is no global Save button: almost every field saves itself, with a "Saved!" toast confirming the write. A few controls (theme, mascot, Home button, language, Developer mode) live entirely on the device and never touch `config.json` at all — those are called out explicitly below.
+Settings is a single accordion of 7 sections — Personalization, Model, Tools, SSH, Telegram, Backup & restore, System — all collapsed the first time you open the screen. There is no global Save button: almost every field saves itself, with a "Saved!" toast confirming the write. A few controls (theme, mascot, Home button, language, Developer mode) live entirely on the device and never touch `config.json` at all — those are called out explicitly below.
 
 ## How saving works
 
@@ -97,6 +97,31 @@ This toggle is a software gate only — it does **not** request or manage the An
 
 Two related values exist only in `config.json`, with no UI control: `tools.location.telegram_ttl_s` (default 3600 — how long a location shared from Telegram stays valid) and `tools.location.fresh_timeout_s` (default 15 — how long Jenny waits for a fresh GPS fix). See [Location](../using/location.md).
 
+## SSH
+
+Its own section between Tools and Telegram, holding the two decisions that cannot be delegated to the agent: **which machines exist**, and **which host key is the right one**.
+
+| Control | Effect | Default |
+|---|---|---|
+| **Enable SSH access** | Master switch (`tools.ssh.enable`). Off means the agent has no SSH tools at all; the host list stays visible and editable so you can fix things with the switch down. | **Off** |
+| **Add host** → Alias | The only name the agent ever uses for this machine, and also the name of its key file. 1–32 chars, `A–Z a–z 0–9 - _`, must start alphanumeric. **Cannot be changed later** — there is no rename. | — |
+| **Add host** → Host / Port / User | Address, port and login account. | port 22 |
+| **Add host** → Description | Free text, shown **to the model** so it can pick between machines ("the home NAS"). Not decoration. | empty |
+| **Generate key** / **Regenerate key** | Creates an ed25519 pair *for that alias* on the device and shows the public line to paste into `~/.ssh/authorized_keys`. Regenerating asks for confirmation, because it revokes the access already installed on the server. | no key |
+| **Verify fingerprint** → **Accept** | Reads the key the host presents (without authenticating), shows its SHA256 fingerprint, and pins it on acceptance. | not verified |
+| **Delete host** | Removes the host **and** its private key, its public key and its accepted fingerprint. | — |
+
+Every host card shows two status badges — key present or missing, fingerprint verified or not — and both have to be green before the agent can connect.
+
+Four behaviors worth knowing before you use this screen:
+
+- **Enabling is not symmetric with disabling.** Switching SSH *off* applies immediately, even to a subagent already working on a server — that is the emergency stop. Switching it *on*, or adding your first host, needs an **app restart** before the agent actually has the tools, because they are built at startup. Adding a second host to an install that already worked is live, no restart.
+- **There is no trust-on-first-use.** Until you have accepted a fingerprint, every SSH call for that alias fails and tells the agent to ask you. A fingerprint reading older than 10 minutes is refused and has to be taken again.
+- **A changed host key is treated as an attack, not an update.** If a host presents a key different from the one you accepted, Jenny shows both fingerprints side by side and requires a second explicit confirmation to replace it.
+- **Editing the address or port of an existing host clears its verified fingerprint** (and forgets the `known_hosts` line), because a verification of the old address says nothing about the new one. You have to verify again.
+
+The private key and the `known_hosts` file live **outside** the workspace, so they are not in snapshots and not in an encrypted backup: after a restore you have to generate new keys and reinstall them on each server. One field has no UI at all — the per-host `jobLogDir` (default `/tmp/jenny-jobs`), which is `config.json`-only. Full walkthrough: [SSH access](../using/ssh.md).
+
 ## Telegram
 
 Bot pairing lives in its own section, sharing the same widget used during onboarding: paste a BotFather token, get a 6-digit pairing code, send it to the bot from Telegram. All changes here (connecting, changing token, unpairing, disabling) apply immediately with no app restart. Full walkthrough: [Telegram bridge](../using/telegram.md).
@@ -149,12 +174,14 @@ Settings intentionally does not expose everything the backend supports. The foll
 - `websocket.show_reasoning` — whether the "reasoning" pill is shown/recorded at all for the WebUI channel (default true); no toggle in Settings
 - `tools.*.enable` toggles for individual tools (file tools, `python_exec`, `my`, introspection, diagnostics, etc.) — only Web Search and Location get a Tools-section UI; everything else is config-only
 - `tools.location.telegram_ttl_s`, `tools.location.fresh_timeout_s` — see Location above
+- `tools.ssh.*` beyond the on/off switch and the host list — timeouts, output and transfer caps, keepalive, and the per-host `job_log_dir`; the SSH section covers hosts, keys and fingerprints and nothing else
 - `security.restrict_to_workspace`, `security.ssrf_whitelist` — sandboxing and network policy
 
 ## Cross-references
 
 - [Configuration (config.json)](configuration.md) — full key-by-key reference for everything above and beyond the UI
 - [Themes and mascot](../using/themes-mascot.md)
+- [SSH access](../using/ssh.md)
 - [Telegram bridge](../using/telegram.md)
 - [Backup and restore](../using/backup.md)
 - [Location](../using/location.md)

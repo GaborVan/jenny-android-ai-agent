@@ -50,6 +50,23 @@ open source since 12.0.1, with no remaining license restrictions — and CPython
 is under the Python Software Foundation License. Both are compatible with this
 project's AGPL-3.0 grant.
 
+## Bundled Android libraries — SSH
+
+The SSH client is native rather than Python. Both libraries below are plain
+Java, resolve from Maven Central and are shipped inside the APK.
+
+| Component | Version | License |
+|---|---|---|
+| [JSch (mwiede fork)](https://github.com/mwiede/jsch) | 2.28.6 | BSD-3-Clause, plus the bundled JZlib (BSD) and jBCrypt (ISC) notices carried in the jar |
+| [Bouncy Castle](https://www.bouncycastle.org/) (`bcprov-jdk18on`) | 1.85 | Bouncy Castle Licence (MIT-style) |
+
+Bouncy Castle is not optional. Android's own `BC` provider is a reduced build
+without Ed25519, and X25519 only reached Conscrypt in Android 14 while this app
+supports API 26 — so without it neither the modern key exchange every current
+server negotiates nor ed25519 keys would work at all.
+
+Both licenses are permissive and compatible with this project's AGPL-3.0 grant.
+
 ## Mascot artwork
 
 The Jenny mascot artwork (`android/image_source/`, and the WebP poses derived

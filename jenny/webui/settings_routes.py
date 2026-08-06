@@ -8,7 +8,7 @@ request mapping and response shaping.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from websockets.http11 import Request as WsRequest
@@ -25,6 +25,15 @@ from jenny.webui.settings_api import (
     update_location_settings,
     update_provider,
     update_web_search_settings,
+)
+from jenny.webui.ssh_api import (
+    accept_ssh_host_key,
+    delete_ssh_host,
+    generate_ssh_key,
+    probe_ssh_host_key,
+    save_ssh_host,
+    ssh_settings_payload,
+    update_ssh_settings,
 )
 
 QueryParams = dict[str, list[str]]
@@ -73,6 +82,20 @@ class WebUISettingsRouter:
             return await self._handle_settings_web_search_update(request)
         if path == "/api/settings/location/update":
             return await self._handle_settings_location_update(request)
+        if path == "/api/settings/ssh":
+            return self._handle_ssh_settings(request)
+        if path == "/api/settings/ssh/update":
+            return await self._handle_ssh(request, update_ssh_settings, "ssh settings update")
+        if path == "/api/settings/ssh/host/save":
+            return await self._handle_ssh(request, save_ssh_host, "ssh host save")
+        if path == "/api/settings/ssh/host/delete":
+            return await self._handle_ssh(request, delete_ssh_host, "ssh host delete")
+        if path == "/api/settings/ssh/key/generate":
+            return await self._handle_ssh(request, generate_ssh_key, "ssh key generation")
+        if path == "/api/settings/ssh/host-key/probe":
+            return await self._handle_ssh(request, probe_ssh_host_key, "ssh host key probe")
+        if path == "/api/settings/ssh/host-key/accept":
+            return await self._handle_ssh(request, accept_ssh_host_key, "ssh host key accept")
         if path == "/api/onboarding/save":
             return await self._handle_onboarding_save(request)
         if path == "/api/telegram/status":
@@ -206,6 +229,41 @@ class WebUISettingsRouter:
         except Exception:
             self.logger.exception("location settings update failed")
             return self._error_response(500, "failed to update location settings")
+        return self._json_response(payload)
+
+    # -- SSH ---------------------------------------------------------------- #
+
+    def _handle_ssh_settings(self, request: WsRequest) -> Response:
+        if not self._authorized(request):
+            return self._unauthorized()
+        try:
+            return self._json_response(ssh_settings_payload())
+        except Exception:
+            self.logger.exception("failed to load ssh settings")
+            return self._error_response(500, "failed to load ssh settings")
+
+    async def _handle_ssh(
+        self,
+        request: WsRequest,
+        handler: Callable[[QueryParams], Awaitable[dict[str, Any]]],
+        what: str,
+    ) -> Response:
+        """Tronco comune delle route SSH: auth, errori applicativi, 500 muto.
+
+        Una sola funzione perché le sette route differiscono *solo* per il
+        gestore: duplicare il blocco try/except sette volte è il modo più
+        facile per lasciarne una che fa trapelare il messaggio di un'eccezione
+        inattesa nel corpo della risposta.
+        """
+        if not self._authorized(request):
+            return self._unauthorized()
+        try:
+            payload = await handler(self._query(request))
+        except WebUISettingsError as e:
+            return self._error_response(e.status, e.message)
+        except Exception:
+            self.logger.exception("{} failed", what)
+            return self._error_response(500, f"{what} failed")
         return self._json_response(payload)
 
     async def _handle_onboarding_save(self, request: WsRequest) -> Response:

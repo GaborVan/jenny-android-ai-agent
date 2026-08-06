@@ -87,10 +87,11 @@ def run_gateway(
 
     # Reset Android-only bridge state so a fresh gateway start cannot inherit
     # a stale bridge or locked asyncio state from a previous crashed loop.
-    # Tutti i bridge (web-search + installed-apps + notifier + location)
+    # Tutti i bridge (web-search + installed-apps + notifier + location + ssh)
     # vengono resettati qui, simmetricamente.
     try:
         from jenny.agent.tools.android_web import reset_android_web_state
+        from jenny.agent.tools.ssh_transport import reset_ssh_backend
         from jenny.runtime.location import reset_location_state
         from jenny.runtime.notifier import reset_notifier_state
         from jenny.webui.android_apps_api import reset_installed_apps_state
@@ -99,6 +100,9 @@ def run_gateway(
         reset_installed_apps_state()
         reset_notifier_state()
         reset_location_state()
+        # Il backend SSH tiene il pool di sessioni: ereditarlo da un loop morto
+        # lascerebbe connessioni legate a un event loop che non esiste più.
+        reset_ssh_backend()
     except Exception:
         # Non-fatale: al peggio si eredita un bridge stale (verrà ricreato).
         logger.opt(exception=True).debug("Could not reset Android bridge state")

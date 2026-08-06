@@ -48,7 +48,7 @@ from jenny.agent.subagent_records import (
 )
 from jenny.agent.tools.context import ToolContext
 from jenny.agent.tools.file_state import FileStates
-from jenny.agent.tools.loader import ToolLoader
+from jenny.agent.tools.loader import ToolLoader, ToolLoadError, declared_tool_name
 from jenny.agent.tools.registry import ToolRegistry
 from jenny.bus.events import (
     OUTBOUND_META_SUBAGENT_STATUS,
@@ -560,6 +560,53 @@ class _SubagentHook(AgentHook):
         self._emit(KIND_ERROR, summary=summary, status=STATUS_ERROR)
 
 
+def split_allow_by_scope(
+    loader: ToolLoader, agent_type: AgentType
+) -> dict[str, frozenset[str] | None]:
+    """Ripartisce l'allowlist di un tipo fra i suoi ``scopes``, validandola una volta.
+
+    ``ToolLoader.load`` valida l'``allow`` che riceve contro i soli tool dello
+    scope che sta caricando, e una voce che li non trova nessuno e un
+    ``ToolLoadError`` **fatale** che aborta lo startup del gateway. La guardia e
+    giusta — un typo in un agent type deve esplodere, non far girare un subagent
+    con meno tool del previsto — ma e per-scope, e un tipo multi-scope come
+    ``sysadmin`` la farebbe scattare a vuoto: ``ssh_exec`` non esiste nello scope
+    ``subagent``, e passargli l'allowlist intera impedirebbe il boot.
+
+    Quindi l'allowlist si valida qui **una volta contro l'unione** degli scope
+    del tipo, e a ogni ``load`` si passa solo la fetta di sua competenza. Il
+    risultato e quello voluto in entrambi i versi: un nome che non esiste in
+    NESSUNO degli scope resta un errore fatale, un nome che esiste in uno solo
+    non lo e piu.
+
+    ``tools=None`` (``operator``) non e un'allowlist vuota: significa "tutto lo
+    scope", e resta ``None`` per ogni scope.
+    """
+    if agent_type.tools is None:
+        return {scope: None for scope in agent_type.scopes}
+
+    discovered = loader.discover()
+    by_scope: dict[str, frozenset[str] | None] = {}
+    known: set[str] = set()
+    for scope in agent_type.scopes:
+        names = {
+            name
+            for cls in discovered
+            if scope in getattr(cls, "_scopes", {"core"}) and (name := declared_tool_name(cls))
+        }
+        known |= names
+        by_scope[scope] = frozenset(agent_type.tools & names)
+
+    unknown = sorted(set(agent_type.tools) - known)
+    if unknown:
+        raise ToolLoadError(
+            f"Unknown tool name(s) in allow list for agent type '{agent_type.name}': "
+            f"{', '.join(unknown)}. Known tools in scope(s) "
+            f"{', '.join(agent_type.scopes)}: {', '.join(sorted(known))}."
+        )
+    return by_scope
+
+
 @dataclass(slots=True)
 class _Lineage:
     """Stato in RAM di un lineage: la spec da rigiocare e l'ultimo tentativo."""
@@ -715,6 +762,11 @@ class SubagentManager:
             python_exec=self.tools_config.python_exec,
             android_web=self.tools_config.android_web,
             file=self.tools_config.file,
+            # Senza questo il tipo ``sysadmin`` non vedrebbe MAI i tool SSH:
+            # ``enabled()`` legge il toggle e gli host da qui, e una ToolsConfig
+            # ricostruita senza ``ssh`` porta i default (spento, zero host). Il
+            # gate vero resta l'allowlist del tipo, non l'assenza della config.
+            ssh=self.tools_config.ssh,
             restrict_to_workspace=self.tools_config.restrict_to_workspace,
         )
 
@@ -730,6 +782,12 @@ class SubagentManager:
         per-classe e globale, quindi non sa distinguere un researcher da un
         coder (vedi ``agent_types.py``). ``agent_type=None`` o un tipo con
         ``tools=None`` lascia l'intero scope subagent, come prima dei tipi.
+
+        Gli scope del tipo si caricano uno alla volta sullo *stesso* registry:
+        un tipo come ``sysadmin`` prende ``subagent`` + ``remote``. La
+        ripartizione dell'allowlist fra gli scope, e la sua validazione,
+        stanno in :func:`split_allow_by_scope` — che va letta prima di
+        toccare questo metodo.
         """
         root = self.workspace if workspace is None else workspace
         registry = ToolRegistry()
@@ -744,8 +802,12 @@ class SubagentManager:
             ),
             android_context=get_android_context(),
         )
-        allow = agent_type.tools if agent_type is not None else None
-        ToolLoader().load(ctx, registry, scope="subagent", allow=allow)
+        loader = ToolLoader()
+        if agent_type is None:
+            loader.load(ctx, registry, scope="subagent", allow=None)
+            return registry
+        for scope, allow in split_allow_by_scope(loader, agent_type).items():
+            loader.load(ctx, registry, scope=scope, allow=allow)
         return registry
 
     def set_provider(self, provider: LLMProvider, model: str) -> None:

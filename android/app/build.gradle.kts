@@ -50,8 +50,8 @@ android {
         // versionCode must increase monotonically on every published build.
         // versionName tracks the Python package version in pyproject.toml —
         // keep the two in sync when releasing.
-        versionCode = 5
-        versionName = "0.5.0"
+        versionCode = 6
+        versionName = "0.6.0"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
@@ -94,6 +94,20 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
+    }
+
+    packaging {
+        resources {
+            // jsch e bcprov sono entrambi multi-release jar e spediscono lo
+            // stesso metadata OSGi sotto piu cartelle di versione (9, 15, …):
+            // due input con lo stesso path fanno FALLIRE
+            // mergeReleaseJavaResource. Serve il glob e non il path esatto,
+            // altrimenti il build fallisce di nuovo alla cartella successiva.
+            // Sono metadata per l'OSGi runtime, che su Android non esiste:
+            // escluderli non toglie nulla (le classi dei multi-release jar non
+            // passano da qui, le dexa D8).
+            excludes += "/META-INF/versions/**/OSGI-INF/**"
+        }
     }
 
     kotlinOptions {
@@ -189,4 +203,12 @@ dependencies {
     // Chrome Custom Tabs: apre i link esterni della chat in un browser
     // in-app (con pulsante di chiusura) invece di dirottare la WebView SPA.
     implementation("androidx.browser:browser:1.7.0")
+
+    // SPIKE SSH — client SSH nativo. jsch e puro Java e client-only.
+    // BouncyCastle NON e opzionale su Android: X25519 e entrato in Conscrypt
+    // solo con Android 14 e qui il minSdk e 26, quindi senza BC lo scambio di
+    // chiavi curve25519-sha256 (quello che ogni server moderno negozia) e
+    // Ed25519 non sono disponibili. Vedi SshBridge.kt e proguard-rules.pro.
+    implementation("com.github.mwiede:jsch:2.28.6")
+    implementation("org.bouncycastle:bcprov-jdk18on:1.85")
 }

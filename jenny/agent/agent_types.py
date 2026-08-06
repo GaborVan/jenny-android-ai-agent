@@ -49,6 +49,13 @@ class AgentType:
     set vuoto. ``temperature``/``max_iterations``/``model`` sono default: se
     ``None`` vale quello del manager, e un valore esplicito passato allo spawn
     vince sempre su quello del tipo.
+
+    ``scopes`` sono gli scope di ``Tool._scopes`` da cui il tipo puo pescare.
+    Quasi tutti si accontentano del solo ``subagent``; un tipo che ne elenca di
+    piu li carica tutti (vedi ``SubagentManager._build_tools``). Serve perche
+    ``tools=None`` significa "tutto lo scope subagent": un tool tenuto fuori da
+    quello scope non puo essere ereditato per distrazione da ``operator``, va
+    concesso nominando il suo scope qui.
     """
 
     name: str
@@ -56,6 +63,7 @@ class AgentType:
     temperature: float | None = None
     max_iterations: int | None = None
     model: str | None = None
+    scopes: tuple[str, ...] = ("subagent",)
 
     @property
     def prompt_template(self) -> str:
@@ -113,8 +121,40 @@ _AGENT_TYPES: tuple[AgentType, ...] = (
         temperature=0.1,
         max_iterations=60,
     ),
+    # Amministra macchine remote via SSH. E l'unico tipo che esce dal telefono
+    # verso una macchina terza, e per questo e anche il piu stretto:
+    #
+    # * niente ``web_search``/``web_fetch``/``download_file``. Vale la regola
+    #   enunciata in cima a questo modulo — chi ha letto pagine non fidate non e
+    #   chi poi esegue — ma qui la catena e piu corta e peggiore: da "pagina
+    #   ostile" a "shell su un server di produzione" ci sarebbe un passo solo.
+    # * niente ``python_exec``: l'esecuzione che questo tipo puo fare e gia
+    #   quella remota, e sommarci quella locale rifarebbe l'operator.
+    # * ``write_file`` c'e perche serve al lavoro: preparare i file da caricare
+    #   con ``ssh_transfer`` e salvare i log scaricati.
+    #
+    # Gli ``ssh_*`` vivono nello scope ``remote``, non in ``subagent``: e cio che
+    # impedisce a ``operator`` (``tools=None``, cioe tutto lo scope subagent) di
+    # ereditarli e ritrovarsi web, esecuzione locale e shell remota insieme.
+    AgentType(
+        name="sysadmin",
+        tools=frozenset((
+            "ssh_hosts",
+            "ssh_exec",
+            "ssh_job",
+            "ssh_transfer",
+            *_FS_READ,
+            "write_file",
+        )),
+        temperature=0.0,
+        max_iterations=60,
+        scopes=("subagent", "remote"),
+    ),
     # Fallback per cio che non rientra negli altri: l'intero scope ``subagent``,
-    # cioe esattamente il subagent generico che esisteva prima dei tipi.
+    # cioe esattamente il subagent generico che esisteva prima dei tipi. Resta
+    # ``tools=None`` di proposito, ed e il motivo per cui i tool SSH stanno in
+    # uno scope a parte: qualunque cosa entri nello scope ``subagent`` finisce
+    # qui dentro automaticamente, senza che nessuno debba deciderlo.
     AgentType(name="operator", tools=None),
 )
 

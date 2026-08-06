@@ -4,7 +4,7 @@ import { api } from './shared/api-client.js';
 import { escapeHtml, showToast } from './shared/utils.js';
 import { i18n } from './shared/i18n.js';
 import { AppState } from './shared/state.js';
-import { confirmDialog } from './shared/dialog.js';
+import { confirmDialog, detailDialog } from './shared/dialog.js';
 import { THEMES, DEFAULT_THEME, setTheme } from './shared/theme.js';
 import { advancedMode, setAdvancedMode } from './shared/advanced-mode.js';
 import { mascotVisible, setMascotVisible, mascotSide, setMascotSide,
@@ -75,6 +75,7 @@ export class SettingsController {
       this._section('personalization', 'ti-palette', i18n.t('settings.personalization'), this._renderPersonalization(d)),
       this._section('models', 'ti-cpu', i18n.t('settings.model'), this._renderModelSettings(d)),
       this._section('tools', 'ti-tool', i18n.t('settings.tools'), this._renderTools(d)),
+      this._section('ssh', 'ti-terminal-2', i18n.t('settings.ssh.title'), this._renderSsh()),
       this._section('telegram', 'ti-brand-telegram', i18n.t('settings.telegram.title'), this._renderTelegram()),
       this._section('backup', 'ti-database-export', i18n.t('backup.sectionTitle'), this._renderBackup()),
       this._section('system', 'ti-info-circle', i18n.t('settings.system'), this._renderSystem(d)),
@@ -244,6 +245,313 @@ export class SettingsController {
         </label>
       </div>
       <p class="settings-hint" style="margin:6px 0 0;font-size:12px;color:var(--text-faint)">${i18n.t('settings.location.hint')}</p>`;
+  }
+
+  // ── SSH ────────────────────────────────────────────────────────────
+
+  /* Il blocco SSH arriva da /api/settings/ssh, non dal payload di /api/settings:
+     è l'unica sezione con stato che vive fuori dal config (chiave sul disco,
+     riga in known_hosts), e tenerla su una chiamata sua evita di far pagare
+     quelle letture a ogni apertura delle impostazioni. */
+  _renderSsh() {
+    return `<div id="ssh-block"><div class="settings-empty-state">${i18n.t('settings.loading')}</div></div>`;
+  }
+
+  async _loadSsh() {
+    const blockEl = this.contentEl.querySelector('#ssh-block');
+    if (!blockEl) return;
+    try {
+      this._ssh = await api.getSsh();
+    } catch {
+      blockEl.innerHTML = `<div class="settings-empty-state">${i18n.t('settings.ssh.loadFailed')}</div>`;
+      return;
+    }
+    blockEl.innerHTML = this._renderSshBlock(this._ssh);
+    this._wireSshBlock();
+  }
+
+  _renderSshBlock(d) {
+    const hosts = d.hosts || [];
+    const list = hosts.length
+      ? hosts.map(h => this._renderSshHost(h)).join('')
+      : `<div class="settings-empty-state">${i18n.t('settings.ssh.empty')}</div>`;
+    return `
+      <div class="settings-field settings-toggle-row">
+        <label class="settings-label">${i18n.t('settings.ssh.enable')}</label>
+        <label class="toggle-switch">
+          <input type="checkbox" id="ssh-enabled-toggle" ${d.enabled ? 'checked' : ''}>
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+      <p class="settings-hint" style="margin:6px 0 10px;font-size:12px;color:var(--text-faint)">${i18n.t('settings.ssh.hint')}</p>
+      ${list}
+      <button class="settings-btn-add" id="btn-ssh-add"><i class="ti ti-plus"></i> ${i18n.t('settings.ssh.addHost')}</button>`;
+  }
+
+  /* Una card per host. I due stati che decidono se l'host è usabile — chiave
+     generata e impronta accettata — stanno in chiaro sulla card: sono i due
+     passi che l'utente deve fare, e nasconderli dietro un tap lascerebbe host
+     mezzi configurati che falliscono solo al primo comando. */
+  _renderSshHost(h) {
+    const alias = escapeHtml(h.alias);
+    const pinned = h.pinned
+      ? `<span class="provider-badge format-badge">${i18n.t('settings.ssh.statusPinned')}</span>`
+      : `<span class="provider-badge format-badge">${i18n.t('settings.ssh.statusUnpinned')}</span>`;
+    const keyState = h.has_key
+      ? i18n.t('settings.ssh.statusKeyReady')
+      : i18n.t('settings.ssh.statusKeyMissing');
+    const desc = h.description
+      ? `<div style="font-size:12px;color:var(--text-faint)">${escapeHtml(h.description)}</div>`
+      : '';
+    return `<div class="provider-card" data-ssh-alias="${alias}">
+      <div class="provider-card-header">
+        <span class="provider-name">${alias}</span>
+        ${pinned}
+      </div>
+      <div class="provider-card-body">
+        <span class="provider-url">${escapeHtml(`${h.username}@${h.host}:${h.port}`)}</span>
+        <span class="provider-key">${escapeHtml(keyState)}</span>
+      </div>
+      ${desc}
+      ${this._renderSshPublicKey(h)}
+      <div class="provider-card-actions">
+        <button class="settings-btn-add ssh-generate" data-ssh-alias="${alias}" data-has-key="${h.has_key ? '1' : ''}">
+          ${h.has_key ? i18n.t('settings.ssh.regenerateKey') : i18n.t('settings.ssh.generateKey')}
+        </button>
+        <button class="settings-btn-add ssh-verify" data-ssh-alias="${alias}">${i18n.t('settings.ssh.verify')}</button>
+        <button class="btn-icon ssh-edit" data-ssh-alias="${alias}" title="${i18n.t('settings.edit')}">
+          <i class="ti ti-edit"></i>
+        </button>
+        <button class="btn-icon btn-danger ssh-delete" data-ssh-alias="${alias}" title="${i18n.t('settings.delete')}">
+          <i class="ti ti-trash"></i>
+        </button>
+      </div>
+    </div>`;
+  }
+
+  /* La pubblica resta a schermo finché l'host esiste: il passo "incollala in
+     authorized_keys" avviene su un'altra macchina, e mostrarla una volta sola
+     costringerebbe a rigenerare la coppia — cioè a invalidare la chiave che si
+     stava installando. */
+  _renderSshPublicKey(h) {
+    if (!h.public_key) {
+      return `<div class="settings-field-hint">${i18n.t('settings.ssh.noKeyYet')}</div>`;
+    }
+    return `<div style="margin-top:8px">
+      <div class="settings-field-hint">${i18n.t('settings.ssh.publicKeyHint')}</div>
+      <code style="display:block;margin:4px 0;padding:6px 8px;font-size:11px;word-break:break-all;
+        background:var(--bg-elevated,rgba(128,128,128,.12));border-radius:6px">${escapeHtml(h.public_key)}</code>
+      <button class="settings-btn-add ssh-copy" data-ssh-alias="${escapeHtml(h.alias)}">
+        <i class="ti ti-copy"></i> ${i18n.t('settings.ssh.copy')}
+      </button>
+    </div>`;
+  }
+
+  _wireSshBlock() {
+    const toggle = this.contentEl.querySelector('#ssh-enabled-toggle');
+    if (toggle) {
+      toggle.addEventListener('change', () => {
+        const enabled = toggle.checked;
+        api.updateSsh({ enabled: enabled ? '1' : '0' })
+          .then(() => showToast(i18n.t(enabled ? 'settings.ssh.on' : 'settings.ssh.off')))
+          .catch(e => {
+            toggle.checked = !enabled;  // rollback sull'errore
+            showToast(e.message || i18n.t('settings.saveError'), 'error');
+          });
+      });
+    }
+    this._wireBtn('btn-ssh-add', () => this._showSshHostDialog());
+    const each = (selector, fn) =>
+      this.contentEl.querySelectorAll(selector).forEach(btn =>
+        btn.addEventListener('click', () => fn(btn.dataset.sshAlias, btn)));
+    each('.ssh-generate', (alias, btn) => this._sshGenerateKey(alias, !!btn.dataset.hasKey));
+    each('.ssh-verify', alias => this._sshVerify(alias));
+    each('.ssh-edit', alias => this._showSshHostDialog(
+      (this._ssh?.hosts || []).find(h => h.alias === alias)));
+    each('.ssh-delete', alias => this._sshDelete(alias));
+    each('.ssh-copy', alias => this._sshCopyPublicKey(alias));
+  }
+
+  /* Le route SSH rispondono con un corpo di errore in testo semplice, e quel
+     testo è già scritto per l'utente ("host refused by the network policy: …"):
+     va mostrato com'è, non sostituito da un codice di stato. */
+  async _sshGenerateKey(alias, hasKey) {
+    if (hasKey && !await confirmDialog(i18n.t('settings.ssh.regenerateConfirm', { alias }))) return;
+    try {
+      await api.generateSshKey(alias, { replace: hasKey });
+      showToast(i18n.t('settings.ssh.keyGenerated'));
+      this._loadSsh();
+    } catch (e) { showToast(e.message, 'error'); }
+  }
+
+  async _sshCopyPublicKey(alias) {
+    const host = (this._ssh?.hosts || []).find(h => h.alias === alias);
+    if (!host?.public_key) return;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(host.public_key);
+      } else {
+        // WebView senza Clipboard API: il vecchio execCommand su una textarea
+        // fuori schermo funziona ancora, ed è l'unica via che resta.
+        const area = document.createElement('textarea');
+        area.value = host.public_key;
+        area.style.position = 'fixed';
+        area.style.left = '-9999px';
+        document.body.appendChild(area);
+        area.select();
+        document.execCommand('copy');
+        area.remove();
+      }
+      showToast(i18n.t('settings.ssh.copied'));
+    } catch {
+      showToast(i18n.t('settings.ssh.copyFailed'), 'error');
+    }
+  }
+
+  /* Legge l'impronta e la mette davanti all'utente. Il probe non accetta
+     niente: fin qui known_hosts non è stato toccato. */
+  async _sshVerify(alias) {
+    showToast(i18n.t('settings.ssh.verifying'));
+    let probe;
+    try {
+      probe = (await api.probeSshHostKey(alias)).probe;
+    } catch (e) { showToast(e.message, 'error'); return; }
+
+    if (probe.already_accepted) {
+      showToast(i18n.t('settings.ssh.alreadyAccepted'));
+      this._loadSsh();
+      return;
+    }
+    const accepted = probe.changed
+      ? await this._confirmChangedHostKey(alias, probe)
+      : await this._confirmNewHostKey(alias, probe);
+    if (!accepted) return;
+
+    try {
+      await api.acceptSshHostKey(alias, probe.fingerprint, { replace: probe.changed });
+      showToast(i18n.t('settings.ssh.accepted'));
+      this._loadSsh();
+    } catch (e) { showToast(e.message, 'error'); }
+  }
+
+  _confirmNewHostKey(alias, probe) {
+    return detailDialog({
+      title: i18n.t('settings.ssh.fingerprintTitle'),
+      bodyHtml: `
+        <p style="font-size:13px">${escapeHtml(i18n.t('settings.ssh.fingerprintIntro', { alias }))}</p>
+        <code style="display:block;margin:8px 0;padding:8px;font-size:12px;word-break:break-all;
+          background:var(--bg-elevated,rgba(128,128,128,.12));border-radius:6px">${escapeHtml(probe.fingerprint)}</code>
+        <p style="font-size:12px;color:var(--text-faint)">${escapeHtml(i18n.t('settings.ssh.fingerprintServerHint'))}</p>`,
+      actions: [
+        { id: 'cancel', label: i18n.t('common.cancel') },
+        { id: 'accept', label: i18n.t('settings.ssh.accept'), variant: 'primary' },
+      ],
+    }).then(choice => choice === 'accept');
+  }
+
+  /* Host key diversa da quella accettata: potenziale MITM, non un
+     aggiornamento. Le due impronte vanno affiancate — senza la vecchia accanto
+     alla nuova, "accetta" e "annulla" sono una scelta alla cieca — e la
+     sostituzione chiede una seconda conferma, perché è quella che butta via la
+     verifica fatta la prima volta. */
+  async _confirmChangedHostKey(alias, probe) {
+    const choice = await detailDialog({
+      title: i18n.t('settings.ssh.changedTitle'),
+      bodyHtml: `
+        <p style="font-size:13px">${escapeHtml(i18n.t('settings.ssh.changedWarning', { alias }))}</p>
+        <div style="font-size:12px;color:var(--text-faint);margin-top:8px">${escapeHtml(i18n.t('settings.ssh.changedOld'))}</div>
+        <code style="display:block;padding:6px 8px;font-size:12px;word-break:break-all;
+          background:var(--bg-elevated,rgba(128,128,128,.12));border-radius:6px">${escapeHtml(probe.pinned_fingerprint || '—')}</code>
+        <div style="font-size:12px;color:var(--text-faint);margin-top:8px">${escapeHtml(i18n.t('settings.ssh.changedNew'))}</div>
+        <code style="display:block;padding:6px 8px;font-size:12px;word-break:break-all;
+          background:var(--bg-elevated,rgba(128,128,128,.12));border-radius:6px">${escapeHtml(probe.fingerprint)}</code>`,
+      actions: [
+        { id: 'cancel', label: i18n.t('common.cancel') },
+        { id: 'accept', label: i18n.t('settings.ssh.replace'), variant: 'primary' },
+      ],
+    });
+    if (choice !== 'accept') return false;
+    return confirmDialog(i18n.t('settings.ssh.replaceConfirm', { alias }));
+  }
+
+  async _sshDelete(alias) {
+    if (!await confirmDialog(i18n.t('settings.ssh.deleteConfirm', { alias }))) return;
+    try {
+      await api.deleteSshHost(alias);
+      showToast(i18n.t('settings.ssh.deleted'));
+      this._loadSsh();
+    } catch (e) { showToast(e.message, 'error'); }
+  }
+
+  /* L'alias non è modificabile: è l'identità dell'host, il nome del file di
+     chiave e l'unica cosa che il modello passa ai tool SSH. Rinominarlo
+     scollegherebbe chiave e impronta dall'host senza dirlo a nessuno. */
+  _showSshHostDialog(existing) {
+    const isEdit = !!existing;
+    const dialog = document.createElement('dialog');
+    dialog.className = 'oc-dialog';
+    dialog.id = 'ssh-host-dialog';
+    const value = (field, fallback = '') => escapeHtml(String(existing?.[field] ?? fallback));
+    dialog.innerHTML = `
+      <div class="oc-dialog-inner">
+        <h3 style="margin:0 0 16px;font-size:15px;font-weight:600">
+          ${isEdit ? i18n.t('settings.ssh.editHost') : i18n.t('settings.ssh.addHost')}
+        </h3>
+        <div class="settings-field">
+          <label class="settings-label">${i18n.t('settings.ssh.alias')}</label>
+          <input type="text" class="settings-input" id="dlg-ssh-alias" placeholder="${i18n.t('settings.ssh.aliasPlaceholder')}"
+            value="${isEdit ? value('alias') : ''}" ${isEdit ? 'readonly' : ''} autocomplete="off" />
+          <span class="settings-field-hint">${i18n.t('settings.ssh.aliasHint')}</span>
+        </div>
+        <div class="settings-field">
+          <label class="settings-label">${i18n.t('settings.ssh.host')}</label>
+          <input type="text" class="settings-input" id="dlg-ssh-host" placeholder="${i18n.t('settings.ssh.hostPlaceholder')}"
+            value="${value('host')}" autocomplete="off" />
+        </div>
+        <div class="settings-field">
+          <label class="settings-label">${i18n.t('settings.ssh.port')}</label>
+          <input type="number" class="settings-input" id="dlg-ssh-port" value="${value('port', '22')}" />
+        </div>
+        <div class="settings-field">
+          <label class="settings-label">${i18n.t('settings.ssh.username')}</label>
+          <input type="text" class="settings-input" id="dlg-ssh-username" placeholder="${i18n.t('settings.ssh.usernamePlaceholder')}"
+            value="${value('username')}" autocomplete="off" />
+        </div>
+        <div class="settings-field">
+          <label class="settings-label">${i18n.t('settings.ssh.description')}</label>
+          <input type="text" class="settings-input" id="dlg-ssh-description" placeholder="${i18n.t('settings.ssh.descriptionPlaceholder')}"
+            value="${value('description')}" autocomplete="off" />
+        </div>
+        <div class="oc-dialog-buttons" style="margin-top:16px">
+          <button class="oc-btn oc-btn-cancel" id="dlg-ssh-cancel">${i18n.t('common.cancel')}</button>
+          <button class="oc-btn oc-btn-confirm" id="dlg-ssh-save">${i18n.t('settings.save')}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(dialog);
+    dialog.showModal();
+
+    const close = () => { dialog.close(); dialog.remove(); };
+    dialog.querySelector('#dlg-ssh-cancel').addEventListener('click', close);
+    dialog.querySelector('#dlg-ssh-save').addEventListener('click', async () => {
+      const params = {
+        alias: dialog.querySelector('#dlg-ssh-alias').value.trim(),
+        host: dialog.querySelector('#dlg-ssh-host').value.trim(),
+        port: dialog.querySelector('#dlg-ssh-port').value.trim() || '22',
+        username: dialog.querySelector('#dlg-ssh-username').value.trim(),
+        description: dialog.querySelector('#dlg-ssh-description').value.trim(),
+      };
+      if (!params.alias || !params.host || !params.username) {
+        showToast(i18n.t('settings.ssh.fieldsRequired'), 'error');
+        return;
+      }
+      try {
+        await api.saveSshHost(params);
+        close();
+        showToast(i18n.t('settings.saved'));
+        this._loadSsh();
+      } catch (e) { showToast(e.message, 'error'); }
+    });
+    dialog.addEventListener('close', () => dialog.remove());
   }
 
   // ── Theme ──────────────────────────────────────────────────────────
@@ -641,6 +949,9 @@ export class SettingsController {
 
     // Add provider
     this._wireBtn('btn-add-provider', () => this._showAddProviderDialog());
+
+    // SSH: il blocco si popola da solo (chiamata a parte, v. _renderSsh)
+    this._loadSsh();
 
     // Backup e ripristino
     this._wireBackup();

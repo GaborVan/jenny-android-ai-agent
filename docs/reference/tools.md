@@ -10,11 +10,11 @@ There is no fixed tool count. What Jenny actually has available in a given conve
 - **The runtime platform** — `web_search`, `web_fetch`, `get_location`, and `ui_view` only register when an Android context is available (they are backed by Android-only bridges: a hidden WebView, the location bridge, and the WebUI query channel). On any other platform they simply do not exist.
 - **Installed Jenny Apps** — every app under `workspace/apps/` contributes one tool per declared action, re-synced every turn.
 
-- **The agent's scope** — the main agent loads either the `orchestrator` scope (default, see `agents.defaults.orchestratorMode`) or the historical `core` scope; a subagent loads the `subagent` scope, narrowed further by its agent type. The same install therefore exposes different tools to the orchestrator and to its subagents.
+- **The agent's scope** — the main agent loads either the `orchestrator` scope (default, see `agents.defaults.orchestratorMode`) or the historical `core` scope; a subagent loads the `subagent` scope, narrowed further by its agent type. The four SSH tools sit in a scope of their own, `remote`, which **no** agent loads by default — only the `sysadmin` subagent type asks for it. The same install therefore exposes different tools to the orchestrator, to a `sysadmin` subagent, and to every other subagent.
 
-The built-in count is **26**: 25 tools registered through the standard loader (`jenny/agent/tools/loader.py`) plus `my`, which is registered by hand because it needs a live reference to the running agent loop (`jenny/agent/loop.py`). No single agent sees all of them at once — see the scope note above. Add to that N dynamic app tools. If you ask Jenny to list its tools, expect the number to vary between installs.
+The built-in count is **31**: 30 tools registered through the standard loader (`jenny/agent/tools/loader.py`) plus `my`, which is registered by hand because it needs a live reference to the running agent loop (`jenny/agent/loop.py`). No single agent sees all of them at once — see the scope note above. Add to that N dynamic app tools. If you ask Jenny to list its tools, expect the number to vary between installs.
 
-Below, tools are grouped into seven categories. Each entry gives the exact tool name the model calls, what it does for you in practice, the parameters worth knowing, hard numeric limits, the config toggle that controls it, and any gotcha worth knowing before you rely on it.
+Below, tools are grouped into eight categories. Each entry gives the exact tool name the model calls, what it does for you in practice, the parameters worth knowing, hard numeric limits, the config toggle that controls it, and any gotcha worth knowing before you rely on it.
 
 ---
 
@@ -251,7 +251,75 @@ Config: no dedicated toggle — it registers whenever the underlying query servi
 
 ---
 
-## 5. Autonomy and scheduling
+## 5. Remote machines (SSH)
+
+These four tools act on a computer that isn't the phone, and they are gated three ways: `tools.ssh.enable` must be `true`, at least one host must be registered, and the agent asking for them must be a **`sysadmin` subagent** — they live in the `remote` scope, which neither the orchestrator nor any other agent type loads. See [SSH access](../using/ssh.md) for the setup walkthrough.
+
+Two properties are shared by all four and are the actual security story:
+
+- **Targeting is by alias only.** Every tool takes `host`, and `host` must be the alias of a machine a person registered in Settings → SSH. There is no parameter anywhere for an address, a port, a username or a credential, so the agent cannot reach a machine you didn't declare.
+- **Host keys are pinned, with no trust-on-first-use.** Until a person has read a fingerprint in Settings and accepted it, every call for that alias fails. A registered host that starts presenting a *different* key needs a second, explicit confirmation — it is treated as a possible man-in-the-middle, not as an update.
+
+The private key lives outside the workspace (`<filesDir>/ssh`, next to it, never inside), so the file tools cannot read it and it is not captured by snapshots or by an encrypted backup. Consequence worth repeating: **restoring a backup does not restore SSH access** — the keys have to be regenerated and reinstalled on each server.
+
+### ssh_hosts
+
+Lists the registered machines: alias, `user@host`, non-default port, and the description the user wrote. No connection is made and no host key is needed.
+
+The list is read from **live config on every call**, so a host added in Settings a moment ago is visible without restarting anything — unlike the tools themselves, which are only *built* at startup.
+
+Config: `tools.ssh.enable`, `tools.ssh.hosts`. Gotcha: the tool distinguishes "no hosts configured" from "SSH switched off" in its answer, because the remedy is different.
+
+### ssh_exec
+
+Runs **one short command** and waits for it: exit code, stdout, stderr in the result.
+
+- `timeout_s` is optional and can only **lower** the configured cap (`tools.ssh.commandTimeoutS`, default 60s, hard maximum 300) — a tool cannot raise its own ceiling.
+- Output above `tools.ssh.maxOutputChars` (default 10,000) is truncated, and the result reports how many characters were **dropped** so the model can decide to re-run narrowed rather than guess.
+- A non-zero exit code is a normal result, not an error.
+
+| Limit | Value |
+|---|---|
+| Default timeout | 60s (`commandTimeoutS`, 1–300) |
+| Connect timeout | 15s (`connectTimeoutS`, 1–60) |
+| Output cap | 10,000 chars (`maxOutputChars`, 1,000–50,000) |
+
+Gotcha: **there is no TTY and no stdin.** An interactive command doesn't prompt, it stalls until the timeout — so `sudo` asking for a password simply cannot work, and package managers need their non-interactive flags. And do not use this for anything slow: the phone's CPU can suspend with the screen off and its network switches between wifi and mobile data, which kills a waiting connection mid-command. That's what `ssh_job` is for.
+
+### ssh_job
+
+Long remote commands, detached from the connection. Actions: `start`, `poll`, `stop`, `list`.
+
+- `start` launches the command with `nohup` writing to a log file on the server (`<jobLogDir>/<job_id>.log`, default `jobLogDir` is `/tmp/jenny-jobs`), records the remote pid, and returns a `job_id` immediately. The exit code is written to a sibling `.rc` file, because by the time anyone polls, the process no longer exists to be asked.
+- `poll` returns **only the output produced since the previous poll**, plus liveness and the exit code once there is one. The byte cursor is kept by Jenny — never by the model — and it is persisted, so it survives context compaction, a gateway restart, and days of elapsed time. If the log was rotated or truncated under it, the cursor resets to 0 rather than reading garbage.
+- `stop` sends SIGTERM to the process's children and then to the process itself. Best-effort by construction: a deep process tree or a program that ignores SIGTERM survives, and only a subsequent `poll` says what really happened.
+- `list` is answered from the local registry with **no connection at all**, so pending jobs stay readable when the host is unreachable or its key has changed.
+
+Statuses are four, and the fourth matters: `running`, `finished` (with an exit code), `stopped` (signalled by us), and **`lost`** — the process is gone but never recorded an exit code, i.e. it was killed (OOM, server reboot). `lost` is deliberately not reported as `finished`, because that would hide a failure.
+
+| Limit | Value |
+|---|---|
+| Bytes returned per poll | `maxOutputChars` (default 10,000) |
+| Jobs kept in the registry | 100, pruning finished ones only — running jobs are never pruned |
+| Registry location | `<workspace>/.jenny/ssh_jobs/jobs.json` |
+
+Config: `tools.ssh.commandTimeoutS` (applies to the short launch/poll/stop commands, not to the job itself — the job has no timeout), `tools.ssh.maxOutputChars`, per-host `jobLogDir`.
+
+Gotcha: nothing cleans up the server-side logs, and `/tmp` is wiped on reboot on most systems — an old job's output can therefore disappear. Point `jobLogDir` somewhere durable if that matters; it is config-only, with no field in Settings.
+
+### ssh_transfer
+
+Copies **one file** over SFTP on the same connection: `direction="up"` sends from the workspace, `direction="down"` fetches to it.
+
+- The local side is always resolved inside the workspace — the workspace is the only allowed root, so a path outside it (including the SSH key directory) is refused.
+- `tools.ssh.maxTransferBytes` (default 50 MB) caps both directions. On a download the size is checked with a remote `stat` **before** the local file is opened, so a too-large transfer leaves nothing behind rather than a truncated file that looks complete.
+- No recursion, no globs, no directory sync: one path in, one path out.
+
+Config: `tools.ssh.maxTransferBytes`, `security.restrictToWorkspace` (the local root).
+
+---
+
+## 6. Autonomy and scheduling
 
 ### cron
 
@@ -285,7 +353,10 @@ Starts a subagent to work a task in the background and reports the result back i
 | `writer` | `read_file`, `list_dir`, `write_file`, `apply_patch` | Docs, wiki pages, synthesis. **No network at all.** |
 | `coder` | filesystem, `find_files`, `grep`, `apply_patch`, `python_exec`, `write_stdin`, `list_exec_sessions`, `get_recent_logs` | Writes and changes code. No network. |
 | `analyst` | `python_exec`, `read_file`, `list_dir`, `write_file` | Computation, data, charts. No network. |
+| `sysadmin` | `ssh_hosts`, `ssh_exec`, `ssh_job`, `ssh_transfer`, `read_file`, `list_dir`, `write_file` | The only type that can touch a remote machine — and in exchange the only one with **neither web access nor `python_exec`**. Temperature 0. |
 | `operator` | the whole `subagent` scope | Default, and the fallback for what fits none of the above. |
+
+`sysadmin` is also the only type that loads a second scope (`subagent` + `remote`). The SSH tools are kept out of the `subagent` scope precisely so that `operator` — which means "everything in that scope" — cannot inherit a remote shell by accident; granting them takes naming their scope explicitly.
 
 The researcher/writer and researcher/coder splits are a security boundary, not a preference: whoever read untrusted web content is not the one who then runs code. An unknown `agent_type` is rejected with the list of valid ones; a persisted record carrying a type that no longer exists degrades to `operator` so its work stays relaunchable.
 
@@ -331,7 +402,7 @@ Gotcha: if the model uses `message` instead of a normal reply for the current co
 
 ---
 
-## 6. Self-diagnosis
+## 7. Self-diagnosis
 
 ### my
 
@@ -372,7 +443,7 @@ Config: `tools.diagnostics.enable` (default `true`). Gotcha: the buffer **emptie
 
 ---
 
-## 7. App tools
+## 8. App tools
 
 Every action declared in an installed Jenny App's `<workspace>/apps/<slug>/app.json` becomes a native tool named `<slug>_<action>` (the slug's hyphens are kept as-is, never normalized, so `my-app` and `my_app` can't collide with each other).
 
@@ -389,12 +460,13 @@ Gotcha: because the tool count depends on what's installed, don't expect a stabl
 
 ## Toggle → where it lives
 
-Settings → Tools in the WebUI governs exactly two things. Everything else in this page is `config.json`-only.
+Settings → Tools in the WebUI governs exactly two things, and SSH gets a section of its own. Everything else in this page is `config.json`-only.
 
 | Setting | In Settings UI? | Config key |
 |---|---|---|
 | Web search (engine, max results, timeout, fetch max chars) | Yes — Settings → Tools → Web Search | `tools.androidWeb.*` |
 | Location sharing | Yes — Settings → Tools → Location | `tools.location.enable` |
+| SSH access (on/off, hosts, keys, fingerprints) | Yes — Settings → SSH (its own section) | `tools.ssh.enable`, `tools.ssh.hosts` |
 | File tools (read/write/edit/patch/list/find/grep) | No | `tools.file.enable` |
 | Python execution | No | `tools.pythonExec.enable` (+ timeout, output cap, module lists) |
 | Self-inspection (`my`) | No | `tools.my.enable`, `tools.my.allowSet` |
@@ -405,11 +477,13 @@ Settings → Tools in the WebUI governs exactly two things. Everything else in t
 | Subagent stall threshold | No | `agents.defaults.subagentStallThresholdSeconds` |
 | Orchestrator mode (main agent's toolset) | No | `agents.defaults.orchestratorMode` |
 
+The SSH switch is **asymmetric**, which is worth knowing before you file a bug: turning it *off* takes effect immediately, mid-turn, because it is meant to work as an emergency stop; turning it back *on* (or adding the very first host) only takes effect after a gateway restart, because the tools are built at startup.
+
 `cron`, `spawn`, `long_task`/`complete_goal`, `message`, `download_file`, `get_source`, `ui_view`, and app tools have no on/off switch tied to a UI element at all — they're either always registered when their prerequisites exist, or controlled only from config.json.
 
 ## Shared boundaries
 
 Two settings apply across almost every tool in this page, not just one:
 
-- **`security.restrictToWorkspace`** (default `true`) confines file reads/writes (`read_file`, `write_file`, `edit_file`, `apply_patch`, `list_dir`, `find_files`, `grep`), `python_exec`'s file I/O (`open`, `os.open`, pathlib), and `message`'s attachment paths to the workspace, plus `skills/`, the media directory, and (if enabled) Jenny's own read-only source tree. Turning it off is an application-level policy change, not an OS sandbox — see the Security model page.
-- **`security.ssrfWhitelist`** (default empty list of CIDRs) is checked by every tool that makes outbound network requests on the model's behalf: `web_fetch`, `download_file`, and the `http_get`/`http_post` helpers inside `python_exec`. It exists to let you deliberately open specific private-network ranges (a Tailscale CIDR, for example) without disabling the SSRF protection everywhere else. It does **not** apply to LLM provider calls themselves — those are a separate, explicit configuration (see Providers and models).
+- **`security.restrictToWorkspace`** (default `true`) confines file reads/writes (`read_file`, `write_file`, `edit_file`, `apply_patch`, `list_dir`, `find_files`, `grep`), `python_exec`'s file I/O (`open`, `os.open`, pathlib), `ssh_transfer`'s local side, and `message`'s attachment paths to the workspace, plus `skills/`, the media directory, and (if enabled) Jenny's own read-only source tree. Turning it off is an application-level policy change, not an OS sandbox — see the Security model page.
+- **`security.ssrfWhitelist`** (default empty list of CIDRs) is checked by every tool that makes outbound network requests on the model's behalf: `web_fetch`, `download_file`, and the `http_get`/`http_post` helpers inside `python_exec`. The SSH tools share the same whitelist through a slightly looser policy — private LAN ranges are allowed for them, since a home server is the point, while loopback, link-local/metadata and CGNAT stay blocked (a Tailscale target therefore still needs its CIDR listed here). It exists to let you deliberately open specific private-network ranges (a Tailscale CIDR, for example) without disabling the SSRF protection everywhere else. It does **not** apply to LLM provider calls themselves — those are a separate, explicit configuration (see Providers and models).

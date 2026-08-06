@@ -28,6 +28,7 @@ Start here if you just want to install and use the app.
 | [Mini-apps (Jenny Apps)](using/mini-apps.md) | Chat-authored mini web apps backed by native tools, how they differ from skills, and their sandboxing limits. |
 | [Skills](using/skills.md) | Markdown-based skill folders that extend agent behavior in chat, and why built-in skill edits don't survive a restart. |
 | [Themes and mascot](using/themes-mascot.md) | The 7 UI themes, the mascot's interactions and preferences, and UI language vs. agent language. |
+| [SSH access](using/ssh.md) | Registering your own remote machines, generating the on-device key, pinning host fingerprints, short commands vs detached jobs — and why a restore doesn't bring SSH access back. |
 | [Telegram bridge](using/telegram.md) | Pairing and using the optional Telegram bridge alongside the WebUI, and what does and doesn't work over it. |
 | [Location](using/location.md) | How device location is shared with the model as context, the two-gate permission model, and the privacy trade-off. |
 | [Backup and restore](using/backup.md) | Encrypted `.jbk` backups (for disaster recovery) vs. local workspace snapshots (a time machine), and how to restore either. |
