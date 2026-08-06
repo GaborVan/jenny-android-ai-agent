@@ -529,6 +529,21 @@ class MainActivity : AppCompatActivity() {
         wv.settings.setSupportZoom(false)
         wv.settings.builtInZoomControls = false
         wv.settings.textZoom = 100
+        // La WebView si dichiara fuori dall'autofill di sistema. Qui dentro non
+        // si fa login da nessuna parte: si scrive configurazione.
+        //
+        // Onestamente: da solo questo non basta, e non risolve il caso che
+        // interessa. I campi di una pagina web non sono viste reali, sono viste
+        // *virtuali*, e passano da `AutofillManager.notifyViewEntered(view,
+        // virtualId, bounds)` — che, a differenza della variante per viste
+        // reali, non consulta `isImportantForAutofill`. Vale per il contenitore,
+        // non per gli `<input>`. La meta di questo problema che il codice puo
+        // davvero chiudere sta nella WebUI, dove non esiste piu un
+        // `type="password"` che faccia scattare il salvataggio (vedi
+        // `.input-secret` in mobile-style.css); un segreto gia salvato dal
+        // gestore password per l'origine `127.0.0.1` continua a essere proposto,
+        // e solo l'utente puo cancellarlo da li.
+        wv.importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
         wv.webChromeClient = object : WebChromeClient() {
             override fun onShowFileChooser(
                 view: WebView?,

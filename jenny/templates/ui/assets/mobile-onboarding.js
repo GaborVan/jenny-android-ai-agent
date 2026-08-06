@@ -156,7 +156,9 @@ export class OnboardingController {
         </div>
         <div class="onboarding-field">
           <label class="onboarding-label" for="api-key">${i18n.t('onboarding.apiKey')}</label>
-          <input type="password" class="onboarding-input" id="api-key" autocomplete="new-password" data-lpignore="true"
+          <input type="text" class="onboarding-input input-secret" id="api-key"
+                 autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+                 data-lpignore="true"
                  placeholder="sk-ant-api03-..." value="${escapeHtml(this.apiKey)}">
         </div>
         <div class="onboarding-field">
