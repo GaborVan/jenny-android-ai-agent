@@ -4,7 +4,7 @@ import base64
 import mimetypes
 import platform
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from jenny.agent.memory import MemoryStore
 from jenny.agent.skills import SkillsLoader
@@ -34,9 +34,15 @@ class ContextBuilder:
         timezone: str | None = None,
         disabled_skills: list[str] | None = None,
         orchestrator: bool = False,
+        available_tools: Callable[[], list[str]] | None = None,
     ):
         self.workspace = workspace
         self.timezone = timezone
+        # Callable e non lista: il registry non esiste ancora quando ``AgentLoop``
+        # costruisce questo oggetto, e comunque i tool delle Jenny App cambiano
+        # a runtime. Chiuderlo su una lista significherebbe pubblicare un
+        # inventario vecchio, cioe rifare il difetto che deve chiudere.
+        self._available_tools = available_tools
         # Modalita orchestratore: i template ricevono il flag e omettono le
         # istruzioni sui tool che in quello scope non esistono. Un prompt che
         # descrive tool assenti non e solo contesto sprecato: invita il modello a
@@ -101,7 +107,45 @@ class ContextBuilder:
         if session_summary:
             parts.append(f"[Archived Context Summary]\n\n{session_summary}")
 
+        if inventory := self._render_tool_inventory():
+            parts.append(inventory)
+
         return "\n\n---\n\n".join(parts)
+
+    def _render_tool_inventory(self) -> str | None:
+        """L'elenco autoritativo dei tool, in coda a tutto il resto.
+
+        Un prompt e cucito da pezzi scritti in momenti diversi — identita,
+        contratto dei tool, skill, documenti dell'utente — e nessuno di quei
+        pezzi sa quali tool esistono davvero in questo processo. Bastano due
+        frasi in disaccordo per farne vincere una a caso: e successo con
+        ``grep``, che il contratto dichiarava assente e una skill mostrava in
+        cinque esempi.
+
+        Sta in fondo perche la prosa piu vicina alla fine e quella che il
+        modello segue quando due istruzioni si contraddicono, e viene dal
+        registry perche una lista scritta a mano invecchierebbe come tutte le
+        altre.
+        """
+        if self._available_tools is None:
+            return None
+        try:
+            names = sorted(self._available_tools())
+        except Exception:
+            return None
+        if not names:
+            return None
+        try:
+            return render_template(
+                "agent/tool_inventory.md",
+                tool_names=names,
+                orchestrator=self.orchestrator,
+                strip=True,
+            )
+        except Exception:
+            # Workspace di una versione precedente, dove questo template non e
+            # ancora stato estratto: si perde l'inventario, non il prompt.
+            return None
 
     def _get_identity(self, channel: str | None = None, workspace: Path | None = None) -> str:
         """Get the core identity section."""

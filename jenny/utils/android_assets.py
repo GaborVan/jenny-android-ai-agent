@@ -15,6 +15,7 @@ _TEMPLATES_MANIFEST = [
     "agent/platform_policy.md", "agent/cron_reminder.md",
     "agent/max_iterations_message.md", "agent/consolidator_archive.md",
     "agent/dream.md", "agent/evaluator.md", "agent/orchestrator.md",
+    "agent/tool_inventory.md",
     "agent/_snippets/untrusted_content.md",
     "agent/types/researcher.md", "agent/types/writer.md", "agent/types/coder.md",
     "agent/types/analyst.md", "agent/types/sysadmin.md", "agent/types/operator.md",

@@ -276,11 +276,35 @@ class FindFilesTool(_SearchTool):
 
 
 class GrepTool(_SearchTool):
-    """Search file contents using a regex-like pattern."""
-    _scopes = {"core", "subagent"}
+    """Search file contents using a regex-like pattern.
+
+    Presente anche nello scope ``orchestrator``, ma li solo come *indice*: vedi
+    :attr:`_index_only`.
+    """
+    _scopes = {"core", "subagent", "orchestrator"}
 
     _MAX_RESULT_CHARS = 128_000
     _MAX_FILE_BYTES = 2_000_000
+    # Tetto sui risultati in modalita indice. Un elenco di percorsi e piccolo,
+    # ma "piccolo per risultato" moltiplicato per un pattern sfortunato non lo e
+    # piu, e nella conversazione dell'orchestratore ci resta per sempre.
+    _INDEX_HEAD_LIMIT = 60
+
+    def __init__(self, *args: Any, index_only: bool = False, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        # Modalita indice: si puo sapere *dove* guardare, non leggere qui il
+        # contenuto trovato. L'orchestratore senza ricerca finiva a sfogliare i
+        # file a fette di duecento righe — venti turni per un grep — ma dargli
+        # anche ``content`` rimetterebbe nella conversazione permanente proprio
+        # l'output grosso che la modalita orchestratore esiste per evitare.
+        # Trovato il file, si legge con ``read_file`` o si delega.
+        self._index_only = index_only
+
+    @classmethod
+    def create(cls, ctx: Any) -> Any:
+        tool = super().create(ctx)
+        tool._index_only = bool(getattr(ctx, "orchestrator", False))
+        return tool
 
     @property
     def name(self) -> str:
@@ -288,6 +312,14 @@ class GrepTool(_SearchTool):
 
     @property
     def description(self) -> str:
+        if self._index_only:
+            return (
+                "Locate files whose contents match a regex pattern. "
+                "Returns matching file paths (or per-file match counts) — never the "
+                "matching lines themselves. Use it to find *where* something is, then "
+                "read_file that path, or delegate the reading to a subagent. "
+                "Skips binary and files >2 MB. Supports glob/type filtering."
+            )
         return (
             "Search file contents with a regex pattern. "
             "Default output_mode is files_with_matches (file paths only); "
@@ -302,6 +334,35 @@ class GrepTool(_SearchTool):
 
     @property
     def parameters(self) -> dict[str, Any]:
+        schema = self._full_parameters()
+        if not self._index_only:
+            return schema
+        # Lo schema stesso dice cosa non c'e: un enum senza ``content`` e un
+        # rifiuto che il modello legge prima di sbatterci, non dopo.
+        properties = schema["properties"]
+        for gone in ("context_before", "context_after", "max_matches"):
+            properties.pop(gone, None)
+        properties["output_mode"] = {
+            "type": "string",
+            "enum": ["files_with_matches", "count"],
+            "description": (
+                "files_with_matches: only matching file paths; "
+                "count: matching line counts per file. Default: files_with_matches. "
+                "Matching lines are not available here — read_file the path instead."
+            ),
+        }
+        properties["head_limit"] = {
+            **properties["head_limit"],
+            "maximum": self._INDEX_HEAD_LIMIT,
+            "description": (
+                f"Maximum number of file entries to return (default and cap "
+                f"{self._INDEX_HEAD_LIMIT}). Narrow the pattern or add a glob "
+                "instead of raising it."
+            ),
+        }
+        return schema
+
+    def _full_parameters(self) -> dict[str, Any]:
         return {
             "type": "object",
             "properties": {
@@ -421,6 +482,27 @@ class GrepTool(_SearchTool):
         offset: int = 0,
         **kwargs: Any,
     ) -> str:
+        clamp_note = ""
+        if self._index_only:
+            # Lo schema gia esclude ``content``, ma un modello puo chiederlo
+            # comunque: una skill glielo insegna, un esempio vecchio glielo
+            # mostra. Restituire i percorsi con una riga di spiegazione costa un
+            # turno in meno di un errore, e gli insegna la mossa giusta invece
+            # di limitarsi a vietargli quella sbagliata.
+            if output_mode == "content":
+                output_mode = "files_with_matches"
+                clamp_note = (
+                    "Note: matching lines are not available here — these are the files "
+                    "that match. Read one with read_file, or delegate to a subagent."
+                )
+            context_before = context_after = 0
+            requested = head_limit if head_limit is not None else max_results
+            head_limit = (
+                self._INDEX_HEAD_LIMIT
+                if requested in (None, 0)
+                else min(requested, self._INDEX_HEAD_LIMIT)
+            )
+
         try:
             target = self._resolve(path or ".")
             if not target.exists():
@@ -552,6 +634,8 @@ class GrepTool(_SearchTool):
                     result = "\n\n".join(blocks)
 
             notes: list[str] = []
+            if clamp_note:
+                notes.append(clamp_note)
             if output_mode == "content" and truncated:
                 notes.append(
                     f"(pagination: limit={limit}, offset={offset})"

@@ -35,10 +35,14 @@ ORCHESTRATOR_KEEPS = {
     "cron", "message", "ui_view", "long_task", "complete_goal",
     "get_source", "get_recent_logs", "read_file", "list_dir",
 }
+# Tutto cio che produce output grosso, o che scrive. ``grep`` non e piu qui:
+# in modalita orchestratore esiste come solo indice — percorsi e conteggi, mai
+# le righe — quindi trova senza gonfiare la conversazione. ``find_files`` resta
+# fuori perche ``grep`` in modalita indice fa gia lo stesso mestiere meglio.
 ORCHESTRATOR_LOSES = {
     "python_exec", "write_file", "edit_file", "apply_patch", "download_file",
     "web_search", "web_fetch", "list_exec_sessions", "write_stdin",
-    "find_files", "grep",
+    "find_files",
 }
 
 
@@ -106,7 +110,12 @@ def test_orchestrator_mode_off_reproduces_the_old_registry(tmp_path: Path) -> No
     assert {
         "subagent_status", "subagent_cancel", "subagent_restart", "subagent_send",
     } <= orchestrated
-    assert not (orchestrated & {"python_exec", "write_file", "apply_patch", "grep"})
+    # ``grep`` e l'unica eccezione, e non e un ripensamento sul principio: in
+    # modalita orchestratore esiste solo come indice (percorsi, mai righe), che
+    # e cio che serve per *trovare* senza pagare l'output grosso. Vedi
+    # ``test_search_tools.py``.
+    assert not (orchestrated & {"python_exec", "write_file", "apply_patch"})
+    assert "grep" in orchestrated
 
 
 def test_loop_tool_scope_follows_the_flag(tmp_path: Path) -> None:

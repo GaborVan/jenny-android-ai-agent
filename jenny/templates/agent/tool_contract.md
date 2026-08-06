@@ -17,7 +17,8 @@ Tool signatures are provided automatically via function calling. This section do
 
 {% if orchestrator %}
 - Use `list_dir` to locate workspace paths before `read_file` when a path is uncertain.
-- You have no content-search tool: for anything beyond reading a known file, delegate to a subagent instead of reading files one by one.
+- Use `grep` to find *which* files contain something, then `read_file` that path. It returns file paths (`files_with_matches`) or per-file counts (`count`) — the matching lines themselves are not available to you, and asking for them returns the paths anyway.
+- Never page through a file in slices to find something. That is what `grep` is for; if the answer needs a lot of reading, delegate it to a subagent instead.
 - Binary or oversized files may be skipped to keep results readable.
 {% else %}
 - Use `find_files` or `list_dir` to locate workspace paths before `read_file` when a path is uncertain.

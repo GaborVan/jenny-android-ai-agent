@@ -101,6 +101,11 @@ class ToolContext:
     runtime_events: Any | None = None
     android_context: Any | None = None
     ui_query_service: Any | None = None
+    # Vero quando il registry e quello dell'agente principale in modalita
+    # orchestratore. Serve ai tool che esistono in entrambi i mondi ma devono
+    # restare economici in questo: tutto cio che l'orchestratore produce resta
+    # nella conversazione per sempre, mentre l'output di un subagent no.
+    orchestrator: bool = False
     # Registry in costruzione, valorizzato da ``ToolLoader.load``. Lo legge solo
     # chi deve osservare l'attivita degli *altri* tool dello stesso agente (la
     # guardia anti-polling di ``subagent_status``), non per chiamarli.
