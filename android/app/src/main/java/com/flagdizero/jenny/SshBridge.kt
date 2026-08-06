@@ -117,22 +117,29 @@ object SshBridge {
         }
 
     /**
-     * Registra BouncyCastle al posto del "BC" ridotto di Android.
+     * Registra BouncyCastle **in fondo** alla lista dei provider.
      *
-     * Android ne spedisce gia uno che si chiama "BC" e che NON ha Ed25519:
-     * `Security.addProvider` non farebbe nulla, in silenzio, perche il nome e
-     * occupato. Serve la sequenza remove + insertProviderAt, e poi chiedere gli
-     * algoritmi con nome MAIUSCOLO e provider esplicito ("ED25519", "BC").
+     * Due vincoli che si scontrano. Il primo: Android spedisce un provider che
+     * si chiama gia "BC" e che NON ha Ed25519, quindi `addProvider` da solo non
+     * farebbe nulla — in silenzio — perche il nome e occupato. Serve rimuovere
+     * quello ridotto prima.
      *
-     * ATTENZIONE — questo e un effetto di PROCESSO, non locale al bridge.
-     * Mettere BouncyCastle in posizione 1 cambia quale provider serve AES/GCM a
-     * TUTTA l'app, compreso il container di backup cifrato
-     * (`jenny/snapshot/crypto_backends/android.py`, che istanzia Cipher /
-     * SecretKeySpec / GCMParameterSpec). Chi tocca questa riga — o il punto in
-     * cui viene chiamata, [GatewayService.startGateway] — deve riverificare sul
-     * device un giro completo di export + import di un backup cifrato, non solo
-     * che l'SSH funzioni. Il JSON di ritorno riporta apposta il provider di
-     * AES/GCM prima e dopo l'inserimento.
+     * Il secondo, ed e il motivo per cui qui si usa `addProvider` e NON
+     * `insertProviderAt(bc, 1)`: la posizione decide chi serve *tutti* gli
+     * algoritmi, non solo quelli che ci servono. Misurato sul dispositivo
+     * (Titan 2, Android 16): con BouncyCastle in posizione 1 il provider di
+     * AES/GCM passava da `AndroidOpenSSL` a `BC` per l'INTERA app, compreso il
+     * container di backup cifrato (`jenny/snapshot/crypto_backends/android.py`).
+     * Due danni in uno: un cambio di implementazione sotto i piedi al backup, e
+     * la perdita dell'accelerazione hardware di BoringSSL a favore del Java puro
+     * di BouncyCastle — su un archivio di tutto il workspace si sente.
+     *
+     * In coda invece BouncyCastle serve solo cio che nessun altro provider
+     * offre: JCA scorre la lista in ordine di priorita e arriva a lui per
+     * Ed25519, mentre AES/GCM resta ad AndroidOpenSSL. Il JSON riporta il
+     * provider di AES/GCM prima e dopo proprio per rendere questa proprieta
+     * verificabile invece che sperata: se `aesGcmProviderAfter` non coincide
+     * con `aesGcmProviderBefore`, qualcuno ha rimesso l'inserimento in testa.
      *
      * Idempotente e sincronizzata: chiamarla due volte non fa nulla la seconda.
      */
@@ -140,7 +147,8 @@ object SshBridge {
     @Synchronized
     fun installProvider(): String {
         val out = JSONObject()
-        out.put("aesGcmProviderBefore", aesGcmProvider())
+        val before = aesGcmProvider()
+        out.put("aesGcmProviderBefore", before)
         try {
             val existing = Security.getProvider("BC")
             out.put("existingBcClass", existing?.javaClass?.name ?: "none")
@@ -150,9 +158,8 @@ object SshBridge {
                 // removeProvider ritorna void: l'esito si legge rileggendo.
                 Security.removeProvider("BC")
                 out.put("removedOk", Security.getProvider("BC") == null)
-                val position = Security.insertProviderAt(BouncyCastleProvider(), 1)
-                // -1 significa "non inserito perche il nome e ancora occupato".
-                out.put("insertedAt", position)
+                // In CODA: -1 significa "non inserito, nome ancora occupato".
+                out.put("insertedAt", Security.addProvider(BouncyCastleProvider()))
             }
             val bc = Security.getProvider("BC")
             out.put("bcClass", bc?.javaClass?.name ?: "none")
@@ -162,7 +169,22 @@ object SshBridge {
             out.put("ok", false)
             out.put("error", "${e.javaClass.simpleName}: ${e.message}")
         }
-        out.put("aesGcmProviderAfter", aesGcmProvider())
+        val after = aesGcmProvider()
+        out.put("aesGcmProviderAfter", after)
+        // Invariante, non decorazione: se cambia, il backup cifrato ha cambiato
+        // implementazione sotto i piedi senza che nessuno lo abbia chiesto.
+        val unchanged = before == after
+        out.put("aesGcmUnchanged", unchanged)
+        if (!unchanged) {
+            // A livello WARN e non INFO: e una regressione silenziosa, e l'unico
+            // modo di accorgersene senza saperla cercare e che si veda da sola.
+            Log.w(
+                TAG,
+                "AES/GCM provider changed ($before -> $after): the encrypted " +
+                    "backup container now uses a different implementation. " +
+                    "Verify a backup export/import round trip.",
+            )
+        }
         return out.toString()
     }
 

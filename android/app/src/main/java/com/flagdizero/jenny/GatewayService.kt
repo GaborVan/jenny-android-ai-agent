@@ -74,14 +74,16 @@ class GatewayService : Service() {
                 // Python puo chiedere un Cipher, e il provider deve essere gia
                 // quello definitivo.
                 //
-                // ATTENZIONE: BouncyCastle finisce in posizione 1, quindi cambia
-                // quale provider serve AES/GCM a TUTTA l'app, non solo all'SSH.
-                // Il container di backup cifrato passa di li
-                // (jenny/snapshot/crypto_backends/android.py): chi sposta o
-                // rimuove questa chiamata deve riverificare sul device un giro
-                // completo di export + import di un backup, non solo l'SSH. Il
-                // JSON loggato riporta apposta il provider di AES/GCM prima e
-                // dopo l'inserimento.
+                // BouncyCastle viene aggiunto in CODA, non in testa, e non e un
+                // dettaglio: misurato su questo dispositivo, in posizione 1
+                // cambiava il provider di AES/GCM per TUTTA l'app — compreso il
+                // container di backup cifrato
+                // (jenny/snapshot/crypto_backends/android.py) — passando dal
+                // BoringSSL accelerato in hardware al Java puro di BouncyCastle.
+                // In coda serve solo Ed25519, che nessun altro provider offre.
+                // Il JSON loggato porta `aesGcmUnchanged`: se diventa false,
+                // qualcuno ha rimesso l'inserimento in testa e il backup ha
+                // cambiato implementazione senza che nessuno lo chiedesse.
                 Log.i(TAG, "SSH crypto provider: ${SshBridge.installProvider()}")
                 if (!Python.isStarted()) {
                     Python.start(AndroidPlatform(applicationContext))
