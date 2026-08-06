@@ -19,11 +19,41 @@ export function getFileExtension(filename) {
   return filename.split('.').pop().toLowerCase();
 }
 
+/* Aggancia il toast dove sara VISIBILE, non semplicemente dove sta comodo.
+
+   Un <dialog> aperto con showModal() vive nel "top layer": uno strato che sta
+   sopra l'intero contesto di impilamento della pagina, indipendentemente dagli
+   z-index. Un toast appeso al <body> quindi finisce SOTTO qualunque modale
+   aperta, e alzargli lo z-index non serve a niente — non e una gara che si
+   possa vincere con un numero piu grande.
+
+   Le uniche due strade sono entrare nel top layer (Popover API) o entrare
+   nella modale stessa. Si prova la prima, che non ha effetti collaterali; dove
+   manca (WebView vecchia) si ripiega sulla seconda, che funziona ovunque ma
+   lega la vita del toast a quella della modale che lo ospita. */
+function _mountToast(toast) {
+  if (typeof toast.showPopover === 'function') {
+    // `manual`: niente chiusura automatica al click fuori o con Esc, che su un
+    // toast sarebbe un modo di farlo sparire mentre lo si sta leggendo.
+    toast.setAttribute('popover', 'manual');
+    document.body.appendChild(toast);
+    try {
+      toast.showPopover();
+      return;
+    } catch (_) {
+      toast.removeAttribute('popover');
+    }
+  }
+  const openDialogs = document.querySelectorAll('dialog[open]');
+  const host = openDialogs.length ? openDialogs[openDialogs.length - 1] : document.body;
+  host.appendChild(toast);
+}
+
 export function showToast(message, type = 'info', duration = 3000) {
   const toast = document.createElement('div');
   toast.className = `mobile-toast ${type}`;
   toast.textContent = message;
-  document.body.appendChild(toast);
+  _mountToast(toast);
 
   setTimeout(() => {
     toast.style.animation = 'toastOut 0.3s ease forwards';

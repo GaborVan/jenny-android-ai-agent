@@ -2845,6 +2845,19 @@ body {
   border-color: var(--ok);
 }
 
+/* Il toast entra nel top layer come popover per finire SOPRA le modali aperte
+   con showModal() (vedi shared/utils.js: nessun z-index puo superarle). Il
+   browser pero applica ai [popover] uno stile suo — `inset: 0`, `margin: auto`,
+   `overflow: auto` — e va disinnescato: `top`/`left` li vince gia .mobile-toast,
+   ma `right`/`bottom` restano a 0 e stirerebbero il toast fino all'angolo in
+   basso a destra. `overflow: visible` serve a non tagliare l'ombra. */
+.mobile-toast[popover] {
+  right: auto;
+  bottom: auto;
+  margin: 0;
+  overflow: visible;
+}
+
 /* ── Loading States ── */
 @keyframes spin {
   to { transform: rotate(360deg); }
