@@ -38,7 +38,7 @@ If `/stop` or `/new` land while a turn is mid-flight, the loop does not just can
 1. **Identity** — name, workspace path, runtime string ("Android, Python 3.11.x"), platform policy.
 2. **Bootstrap files** — `AGENTS.md`, `SOUL.md`, `USER.md` from the workspace root, each read in full and concatenated if present (`ContextBuilder.BOOTSTRAP_FILES`).
 3. **Tool contract** — a fixed template describing how to call tools.
-4. **`# Memory`** — the contents of `workspace/memory/MEMORY.md`, unless it still matches the bundled template, whitespace-trimmed (i.e. Dream has never customized it yet, in which case it is omitted rather than shown as if it were real memory).
+4. **`# Memory`** — up to two subsections under one heading. `## Long-term Memory` is `workspace/memory/MEMORY.md`, omitted while it still matches the bundled template whitespace-trimmed (i.e. Dream has never customized it, and showing it would pass a template off as real memory). `## Wiki Directory` is `workspace/memory/WIKI.md`, written by Atlas and truncated to `agents.defaults.atlas.maxContextTokens`. The two are gated independently — an untouched `MEMORY.md` does not suppress the directory — but share the heading and a fixed order, so the cacheable prefix stays stable.
 5. **Active skills** (loaded in full) and a **skills summary** (names + descriptions only, for skills the model can ask to load).
 6. **Jenny Apps summary**, if any apps are installed.
 7. **`# Recent History`** — up to 50 entries / 8,000 tokens of `history.jsonl` written since the last Dream run, so the model sees what has already happened even before Dream has processed it into long-term memory.
@@ -69,7 +69,8 @@ Users (understandably) conflate three different things that all look like "what 
 |---|---|---|---|
 | **Visible transcript** | Every message, tool pill, reasoning block, and attachment ever shown in the WebUI, reconstructed identically on reopen. Permanent JSONL, one file per session key, rotating into numbered segment files once the active file passes **8 MB** (oldest turns move out first; nothing is deleted, just split across files). | `<workspace>/.jenny/webui/<session-key>.jsonl` (+ `.segments/`) — `transcript_store.py` | Never, by any in-app action. `/new` explicitly does **not** touch it — it only adds a visual separator bubble ("New session started."). |
 | **Model context** | The actual message list sent to the provider on the next call: the live, uncompacted tail of the session plus whatever summary replaced the compacted prefix. This is what the model can "see" right now. | `<workspace>/sessions/<session-key>.jsonl` — `session/manager.py` | `/new` (archives the unconsolidated tail to `history.jsonl` in the background, then clears the session outright). Automatic idle compaction (below). Token-budget consolidation when the session grows past its budget mid-conversation. |
-| **Long-term memory (Dream)** | Durable facts Jenny has decided are worth keeping past any single conversation: `MEMORY.md`, `USER.md`, `SOUL.md`, and skill files, updated by the two-phase Dream pipeline. See [Memory and Dream](../using/memory.md) for the full pipeline. | `workspace/memory/` | Only by Dream itself (which can also *prune*, not just add) — see Memory and Dream. |
+| **Long-term memory (Dream)** | Durable facts Jenny has decided are worth keeping past any single conversation: `MEMORY.md`, `USER.md`, `SOUL.md`, and skill files, updated by the two-phase Dream pipeline. See [Memory, Dream and Atlas](../using/memory.md) for the full pipeline. | `workspace/memory/` | Only by Dream itself (which can also *prune*, not just add). |
+| **Wiki directory (Atlas)** | A derived index of `workspace/wikis/`: the wikis you have, plus the people, projects and systems in the default one that matter operationally. Not a memory of anything said — a map of something you already wrote down elsewhere. | `<workspace>/memory/WIKI.md` | Rebuilt wholesale by Atlas whenever the wiki fingerprint changes; hand edits do not survive a run. |
 
 The gotcha worth stating plainly: **you can scroll up and re-read a conversation the model no longer remembers.** After `/new`, or after the idle auto-compaction kicks in, the transcript on screen is unchanged, but the model's next reply is generated from a summary plus a short tail, not from the full conversation you're looking at.
 
@@ -88,15 +89,16 @@ Internal work uses a small set of explicit override keys (`InboundMessage.sessio
 | Key pattern | Used by |
 |---|---|
 | `dream:<timestamp>` | Each Dream consolidation run (`MemoryStore.dream_session_key()`) — an isolated session, never merged into the user's history. |
+| `atlas:<timestamp>` | Each Atlas wiki-directory run (`AtlasStore.session_key()`) — same shape as Dream: ephemeral, isolated, and filtered out of the history Dream later reads. |
 | `heartbeat` | The periodic `HEARTBEAT.md` check (`runtime/cron_dispatch.py`); its own small session with a bounded tail of recent turns. |
 | the session key stored on the job itself (`job.payload.session_key`) | Scheduled reminders (`cron` tool). A reminder created from the user's conversation is bound to `unified:default` at creation time, so it delivers into the one real conversation rather than a hidden side-session. |
 | *(none — no session at all)* | Subagents (`spawn`). A subagent's run starts from a bare `[system prompt, task]` pair with no session history; it is blind to the ongoing conversation by design. When it finishes, its result is injected back into the *origin* session (typically `unified:default`) as a synthetic system-role turn, so only the outcome — never the subagent's intermediate reasoning — becomes part of what the main agent and the user see. |
 
-See [Scheduling and proactivity](../using/scheduling.md) for the user-facing behavior of cron/heartbeat/subagents, and [Memory and Dream](../using/memory.md) for the Dream pipeline in detail.
+See [Scheduling and proactivity](../using/scheduling.md) for the user-facing behavior of cron/heartbeat/subagents, and [Memory, Dream and Atlas](../using/memory.md) for the Dream pipeline in detail.
 
 ## Related
 
 - [Slash commands](../using/slash-commands.md) — exact `/new`, `/clear`, `/stop`, `/status` behavior and output text.
-- [Memory and Dream](../using/memory.md) — the long-term memory pipeline this page only summarizes.
+- [Memory, Dream and Atlas](../using/memory.md) — the long-term memory pipeline this page only summarizes.
 - [Architecture](architecture.md) — where the agent loop sits among the bus, providers, tools, and channels.
 - [Concepts](concepts.md) — higher-level vocabulary (workspace, session, provider) used throughout these docs.

@@ -14,7 +14,7 @@ _TEMPLATES_MANIFEST = [
     "agent/subagent_announce.md", "agent/skills_section.md", "agent/apps_section.md",
     "agent/platform_policy.md", "agent/cron_reminder.md",
     "agent/max_iterations_message.md", "agent/consolidator_archive.md",
-    "agent/dream.md", "agent/evaluator.md",
+    "agent/dream.md", "agent/atlas.md", "agent/evaluator.md",
     "agent/_snippets/untrusted_content.md",
     "memory/MEMORY.md",
 ]

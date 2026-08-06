@@ -18,6 +18,10 @@ from jenny.utils.helpers import (
 )
 from jenny.utils.prompt_templates import render_template
 
+# Fallback quando ContextBuilder è costruito senza config (test, tool isolati):
+# stesso valore del default di ``AtlasConfig.max_context_tokens``.
+_DEFAULT_WIKI_DIRECTORY_TOKENS = 1200
+
 
 class ContextBuilder:
     """Builds the context (system prompt + messages) for the agent."""
@@ -28,9 +32,18 @@ class ContextBuilder:
     _MAX_HISTORY_TOKENS = 8_000  # hard cap on recent history section size (tokens)
     _RUNTIME_CONTEXT_END = "[/Runtime Context]"
 
-    def __init__(self, workspace: Path, timezone: str | None = None, disabled_skills: list[str] | None = None):
+    def __init__(
+        self,
+        workspace: Path,
+        timezone: str | None = None,
+        disabled_skills: list[str] | None = None,
+        wiki_directory_max_tokens: int | None = None,
+    ):
         self.workspace = workspace
         self.timezone = timezone
+        # Tetto del blocco "Wiki Directory" compilato da Atlas. ``None`` lascia
+        # il default dello schema; il valore reale arriva da AgentLoop.from_config.
+        self.wiki_directory_max_tokens = wiki_directory_max_tokens or _DEFAULT_WIKI_DIRECTORY_TOKENS
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace, disabled_skills=set(disabled_skills) if disabled_skills else None)
 
@@ -52,9 +65,22 @@ class ContextBuilder:
 
         parts.append(render_template("agent/tool_contract.md"))
 
+        # Il blocco memoria ha due sottosezioni con due proprietari distinti:
+        # "Long-term Memory" (MEMORY.md, scritto da Dream) e "Wiki Directory"
+        # (memory/WIKI.md, scritto da Atlas). Vanno composte in modo
+        # indipendente: annidare la seconda dentro la guardia della prima
+        # farebbe sparire la rubrica ogni volta che MEMORY.md è ancora il
+        # template intatto. Heading unico e ordine fisso tengono stabile il
+        # prefisso del prompt per la cache del provider.
+        memory_sections: list[str] = []
         memory = self.memory.get_memory_context()
         if memory and not self._is_template_content(self.memory.read_memory(), "memory/MEMORY.md"):
-            parts.append(f"# Memory\n\n{memory}")
+            memory_sections.append(memory)
+        wiki_directory = self.memory.get_wiki_memory_context(self.wiki_directory_max_tokens)
+        if wiki_directory:
+            memory_sections.append(wiki_directory)
+        if memory_sections:
+            parts.append("# Memory\n\n" + "\n\n".join(memory_sections))
 
         always_skills = self.skills.get_always_skills()
         if always_skills:

@@ -48,7 +48,7 @@ A few smaller things worth knowing:
 
 ### Protected system jobs
 
-When you ask Jenny to list reminders, you'll also see two jobs you didn't create: **`dream`** and **`heartbeat`**. These are system-managed and will show up as protected — visible for inspection, but Jenny will refuse to remove them if asked (a removal attempt gets a reply along the lines of "this is a protected system-managed cron job" and cannot be removed). `dream` runs the memory-consolidation pass described in [Memory and Dream](memory.md); `heartbeat` is described next.
+When you ask Jenny to list reminders, you'll also see three jobs you didn't create: **`dream`**, **`atlas`** and **`heartbeat`**. These are system-managed and will show up as protected — visible for inspection, but Jenny will refuse to remove them if asked (a removal attempt gets a reply along the lines of "this is a protected system-managed cron job" and cannot be removed). `dream` runs the memory-consolidation pass and `atlas` rebuilds the wiki directory, both described in [Memory, Dream and Atlas](memory.md); `heartbeat` is described next.
 
 ## Heartbeat: a periodic checklist
 
@@ -108,7 +108,7 @@ None of the proactive messages above are guaranteed to make a sound — whether 
 
 ## Related pages
 
-- [Memory and Dream](memory.md) — what the `dream` system job (visible in your reminders list) actually does.
+- [Memory, Dream and Atlas](memory.md) — what the `dream` and `atlas` system jobs (visible in your reminders list) actually do.
 - [Telegram bridge](telegram.md) — how proactive deliveries (Heartbeat, reminders) reach a paired Telegram chat.
 - [Slash commands](slash-commands.md) — full reference for `/goal`, `/stop`, and the rest.
 - [Android permissions](../reference/android-permissions.md) — the full permission table, including `POST_NOTIFICATIONS` and battery-optimization exemption.

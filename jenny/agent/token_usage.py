@@ -32,7 +32,7 @@ _USAGE_KEYS = (
     "estimated_tokens",
 )
 _REQUEST_KEYS = ("requests", "provider_requests", "estimated_requests")
-_SOURCE_KEYS = ("user", "api", "cron", "dream", "system")
+_SOURCE_KEYS = ("user", "api", "cron", "dream", "atlas", "system")
 _WRITE_LOCK = threading.Lock()
 
 
@@ -83,6 +83,8 @@ def _source_from_session_key(session_key: str | None) -> str:
     key = session_key or ""
     if key.startswith("dream:"):
         return "dream"
+    if key.startswith("atlas:"):
+        return "atlas"
     if key == "heartbeat" or key.startswith("cron:"):
         return "cron"
     if key.startswith("api:"):

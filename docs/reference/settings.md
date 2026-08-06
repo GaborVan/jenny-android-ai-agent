@@ -146,6 +146,7 @@ Settings intentionally does not expose everything the backend supports. The foll
 - `agents.defaults.reasoning_effort` = `adaptive` — the Advanced Parameters select saves the effort (see above), but `adaptive` is not one of the values the endpoint accepts, so that one value is config-only
 - `gateway.heartbeat.*` — the proactive Heartbeat cadence and behavior
 - `agents.defaults.dream.*` — Dream memory-consolidation schedule
+- `agents.defaults.atlas.*` — Atlas wiki-directory schedule and the token cap on the block it injects
 - `websocket.show_reasoning` — whether the "reasoning" pill is shown/recorded at all for the WebUI channel (default true); no toggle in Settings
 - `tools.*.enable` toggles for individual tools (file tools, `python_exec`, `my`, introspection, diagnostics, etc.) — only Web Search and Location get a Tools-section UI; everything else is config-only
 - `tools.location.telegram_ttl_s`, `tools.location.fresh_timeout_s` — see Location above

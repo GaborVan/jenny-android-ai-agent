@@ -517,6 +517,10 @@ def settings_payload(
             "dream": {
                 "schedule": defaults.dream.describe_schedule(),
             },
+            "atlas": {
+                "enabled": defaults.atlas.enabled,
+                "schedule": defaults.atlas.describe_schedule(),
+            },
         },
         "usage": token_usage_payload(timezone_name=defaults.timezone),
         "advanced": {

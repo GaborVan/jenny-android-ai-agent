@@ -136,6 +136,8 @@ class CronDispatcher:
 
         if job.name == "dream":
             return await self._run_dream(agent)
+        if job.name == "atlas":
+            return await self._run_atlas(agent)
         if job.name == "heartbeat":
             return await self._run_heartbeat(agent)
         if is_bound_cron_job(job):
@@ -146,6 +148,19 @@ class CronDispatcher:
             "Cron: skipped unbound agent job '{}' ({}): {}", job.name, job.id, reason
         )
         raise CronJobSkippedError(reason)
+
+    async def _run_atlas(self, agent: "CronCapableAgent") -> str | None:
+        """Atlas: ricompila memory/WIKI.md dalla wiki. Silenzioso per costruzione.
+
+        Tutta la logica sta in ``jenny.agent.atlas.run_atlas``, condivisa con lo
+        slash command ``/atlas``: qui resta solo l'instradamento e il log.
+        """
+        from jenny.agent.atlas import AtlasStore, run_atlas
+
+        store = AtlasStore.from_config(self._config.workspace_path, self._config)
+        outcome = await run_atlas(agent, store=store)
+        logger.debug("Atlas cron job: {}", outcome.status)
+        return None
 
     async def _run_dream(self, agent: "CronCapableAgent") -> str | None:
         # Dream is an internal job — run directly, not through the agent loop.

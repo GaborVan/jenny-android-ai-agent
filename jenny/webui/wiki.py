@@ -24,6 +24,9 @@ from markdown.extensions import Extension
 from markdown.preprocessors import Preprocessor
 
 from jenny.utils.path import atomic_write
+from jenny.utils.wiki_paths import discover_wikis
+from jenny.utils.wiki_paths import extract_title as _extract_title
+from jenny.utils.wiki_paths import strip_frontmatter as _strip_frontmatter
 from jenny.webui.audit import (
     AuditEntry,
     compute_anchor,
@@ -35,7 +38,6 @@ from jenny.webui.audit import (
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-_FRONTMATTER_RE = re.compile(r"^---\n([\s\S]*?)\n---\n?")
 _WIKILINK_RE = re.compile(r"\[\[(.+?)\]\]")
 
 # Cartelle di primo livello nascoste da grafo e albero file: i summaries sono il
@@ -117,58 +119,6 @@ def _split_wikilink(raw: str) -> tuple[str, str | None]:
     if len(parts) >= 2:
         return (parts[0].strip(), parts[1].strip())
     return (parts[0].strip(), None)
-
-
-def _extract_title(text: str) -> str | None:
-    fm = _FRONTMATTER_RE.match(text)
-    if fm:
-        t = re.search(r"^title:\s*(.+)$", fm.group(1), re.M)
-        if t:
-            return t.group(1).strip().strip('"').strip("'")
-    h1 = re.search(r"^#\s+(.+?)\s*$", text, re.M)
-    return h1.group(1) if h1 else None
-
-
-def _strip_frontmatter(text: str) -> tuple[dict[str, Any] | None, str, str | None]:
-    m = _FRONTMATTER_RE.match(text)
-    frontmatter: dict[str, Any] | None = None
-    body = text
-    if m:
-        import yaml
-
-        try:
-            parsed = yaml.safe_load(m.group(1))
-            frontmatter = parsed if isinstance(parsed, dict) else {}
-        except Exception:
-            frontmatter = {}
-        body = text[m.end() :]
-    title = None
-    if frontmatter and "title" in frontmatter:
-        title = frontmatter["title"]
-    else:
-        h1 = re.search(r"^#\s+(.+?)\s*$", body, re.M)
-        if h1:
-            title = h1.group(1)
-    return frontmatter, body, title
-
-
-# ── Discovery ────────────────────────────────────────────────────────────────
-
-
-def discover_wikis(wikis_dir: Path) -> dict[str, Path]:
-    """Scan wikis_dir for subdirectories containing a wiki/ folder.
-
-    Returns {name: wikis_dir/name/wiki} sorted alphabetically by name.
-    """
-    if not wikis_dir.exists():
-        return {}
-    result: dict[str, Path] = {}
-    for child in sorted(wikis_dir.iterdir()):
-        if child.is_dir():
-            wiki_sub = child / "wiki"
-            if wiki_sub.is_dir():
-                result[child.name] = wiki_sub
-    return result
 
 
 # ── Tree ─────────────────────────────────────────────────────────────────────

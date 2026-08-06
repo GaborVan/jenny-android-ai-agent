@@ -50,9 +50,16 @@ class _FsTool(Tool):
         extra_write_allowed_files: list[Path] | None = None,
         file_states: FileStates | None = None,
         restrict_to_workspace: bool | None = None,
+        write_files_only: bool = False,
     ):
         self._workspace = workspace
         self._allowed_dir = allowed_dir
+        # "Nessuna directory scrivibile, solo questi file esatti". Serve a un
+        # runner isolato che produce un unico artefatto (Atlas → memory/WIKI.md):
+        # senza questo, ``allowed_dir=None`` significa "eredita la radice dello
+        # scope", cioè l'intero workspace scrivibile. Va usato insieme a
+        # ``extra_write_allowed_files``; da solo nega qualunque scrittura.
+        self._write_files_only = write_files_only
         # Legacy alias: extra_allowed_dirs is read-only. Write-capable tools
         # must opt in via extra_write_allowed_dirs.
         self._extra_read_allowed_dirs = [
@@ -146,6 +153,23 @@ class _FsTool(Tool):
         # Dream lo usa per non avanzare il cursore quando ha provato a scrivere
         # ma è stato bloccato.
         self._file_states.record_write_attempt()
+        if self._write_files_only:
+            # Bypassa ``_effective_allowed_root``: passare ``allowed_dir=None``
+            # più un'allowlist di file non vuota fa scattare la modalità
+            # "solo questi file" di ``resolve_allowed_path`` (fail-closed se
+            # l'allowlist è vuota).
+            access = current_tool_workspace(
+                self._workspace,
+                restrict_to_workspace=self._restrict_to_workspace,
+            )
+            return resolve_workspace_path(
+                path,
+                access.project_path,
+                None,
+                None,
+                self._extra_write_allowed_files,
+                include_media_dir=False,
+            )
         return self._resolve_with_extra(
             path,
             self._extra_write_allowed_dirs,
