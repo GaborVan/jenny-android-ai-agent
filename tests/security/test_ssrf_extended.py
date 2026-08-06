@@ -19,6 +19,7 @@ import pytest
 from jenny.security.network import (
     configure_ssrf_whitelist,
     validate_app_server_target,
+    validate_ssh_target,
     validate_url_target,
 )
 
@@ -232,6 +233,47 @@ def test_policy_divergence_table(ip, url_target_ok, app_server_ok, label):
         ok_app, _ = validate_app_server_target("http://host.example/x")
         assert ok_url is url_target_ok, label
         assert ok_app is app_server_ok, label
+
+
+@pytest.mark.parametrize(
+    "ip,ssh_ok,label",
+    [
+        ("100.124.67.77", True, "CGNAT: e l'indirizzo che assegna Tailscale"),
+        ("192.168.1.10", True, "RFC1918: il server di casa sulla LAN"),
+        ("fd00::5", True, "IPv6 ULA: stesso caso della LAN"),
+        ("93.184.216.34", True, "pubblico: un VPS qualunque"),
+        ("127.0.0.1", False, "loopback: sarebbe il telefono stesso"),
+        ("::1", False, "loopback v6: idem"),
+        ("169.254.169.254", False, "metadata: mai un server dell'utente"),
+        ("0.0.0.0", False, "0.0.0.0/8: non e una destinazione"),
+    ],
+)
+def test_ssh_policy_table(ip, ssh_ok, label):
+    """L'SSH ha una policy propria, piu larga delle altre due.
+
+    Un host SSH lo scrive l'utente in Settings e la sua host key va accettata a
+    mano: le due cose insieme reggono quel che altrove regge il blocco delle
+    reti private. Quel che resta bloccato punta al telefono, non a un server.
+    """
+    with patch("jenny.security.network.socket.getaddrinfo", _fake_resolve("host.example", [ip])):
+        ok, err = validate_ssh_target("host.example")
+        assert ok is ssh_ok, f"{label} — {err}"
+
+
+def test_ssh_allows_tailscale_without_opening_cgnat_to_the_model():
+    """Il motivo per cui il CGNAT e permesso *qui* e non nella ssrf_whitelist.
+
+    Il whitelist e globale: usarlo per Tailscale avrebbe aperto il CGNAT anche a
+    `web_fetch`, dove l'indirizzo lo sceglie il modello. Questo permesso invece
+    non esce dall'SSH.
+    """
+    with patch(
+        "jenny.security.network.socket.getaddrinfo",
+        _fake_resolve("ts.example", ["100.124.67.77"]),
+    ):
+        assert validate_ssh_target("ts.example")[0]
+        assert not validate_url_target("http://ts.example/x")[0]
+        assert not validate_app_server_target("http://ts.example/x")[0]
 
 
 def test_ssrf_whitelist_applies_identically_to_both_policies():

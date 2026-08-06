@@ -35,6 +35,26 @@ _APP_SERVER_BLOCKED_NETWORKS = [
     ipaddress.ip_network("fe80::/10"),         # link-local v6
 ]
 
+# Blocklist for SSH targets. Come quella degli app server, ma senza CGNAT:
+# 100.64.0.0/10 è la rete che Tailscale assegna ai propri nodi, ed è il modo
+# normale di raggiungere il proprio server da un telefono in 4G. Bloccarla qui
+# lasciava una sola via d'uscita — mettere 100.64.0.0/10 nella ssrf_whitelist —
+# che però è globale: per aprire l'SSH verso Tailscale si sarebbe aperto il
+# CGNAT anche a `web_fetch` e alle Jenny App, cioè proprio ai target che sceglie
+# il modello. Meglio un permesso stretto qui che uno largo altrove.
+#
+# Quel che il CGNAT proteggeva resta coperto da vincoli più forti: un host SSH
+# lo dichiara l'utente in Settings, e la sua host key va accettata a mano prima
+# che parta una connessione. Loopback e link-local restano bloccati — quelli
+# puntano al telefono stesso, non a un server dell'utente.
+_SSH_BLOCKED_NETWORKS = [
+    ipaddress.ip_network("0.0.0.0/8"),
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("169.254.0.0/16"),   # link-local / cloud metadata
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fe80::/10"),         # link-local v6
+]
+
 _URL_RE = re.compile(r"https?://[^\s\"'`;|<>]+", re.IGNORECASE)
 
 _allowed_networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
@@ -145,12 +165,12 @@ def validate_app_server_target(url: str) -> tuple[bool, str]:
 def validate_ssh_target(host: str) -> tuple[bool, str]:
     """Validate an SSH target host (declared by the user, never model-supplied).
 
-    Shares the policy of :func:`validate_app_server_target` and for the same
-    reason: RFC1918 and IPv6 ULA are allowed because a home server on the LAN is
-    the main use case, while loopback stays blocked — the agent must not be able
-    to SSH into the phone itself, nor use the SSH tool as a bridge back to the
-    gateway's own API. Link-local/metadata, 0.0.0.0/8 and CGNAT stay blocked,
-    with the usual ``ssrf_whitelist`` escape hatch for Tailscale.
+    RFC1918, IPv6 ULA and CGNAT are allowed: a home server reached over the LAN
+    or over Tailscale is the main use case, and both are named by the user in
+    Settings and host-key pinned before a single byte is sent. Loopback stays
+    blocked — the agent must not be able to SSH into the phone itself, nor use
+    the SSH tool as a bridge back to the gateway's own API — and so do
+    link-local/metadata and 0.0.0.0/8 (see ``_SSH_BLOCKED_NETWORKS``).
 
     Unlike the URL validators this takes a bare hostname: SSH has no scheme to
     parse, so ``_validate_target`` (which requires http/https) does not apply.
@@ -180,7 +200,7 @@ def validate_ssh_target(host: str) -> tuple[bool, str]:
         return False, f"Cannot resolve hostname: {hostname}"
 
     for addr in addrs:
-        if _is_blocked(addr, _APP_SERVER_BLOCKED_NETWORKS):
+        if _is_blocked(addr, _SSH_BLOCKED_NETWORKS):
             return False, f"Blocked: {hostname} resolves to {addr}"
 
     return True, ""

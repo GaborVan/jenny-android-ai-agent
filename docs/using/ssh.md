@@ -29,7 +29,9 @@ Flip **Enable SSH access**, then **Add host**:
 | **Description** | Free text, and not decoration: it is shown *to the model* so it can pick the right machine when you have several ("the home NAS", "the website VPS"). |
 | **Authentication** | **ed25519 key** (default) or **Password**. Key is the default and stays the default for hosts you already registered. With Password selected, a password field appears — it's required, and an empty one is refused rather than saved. |
 
-The address is checked against Jenny's network policy when you save it, and again on every connection. Private LAN ranges are allowed — a home server is the main use case — but loopback, link-local, cloud-metadata and carrier-grade-NAT addresses are refused, so the agent can't SSH into the phone itself or use the tool as a way back into Jenny's own API. If your server is on Tailscale, its CGNAT range has to be added to `security.ssrfWhitelist` (see [Configuration](../reference/configuration.md)).
+The address is checked against Jenny's network policy when you save it, and again on every connection. Private LAN ranges are allowed — a home server is the main use case — and so is the carrier-grade-NAT range Tailscale hands out, so a Tailscale hostname works with no extra configuration. Loopback, link-local and cloud-metadata addresses are refused: those point at the phone itself, so refusing them stops the agent from SSHing into its own device or using the tool as a way back into Jenny's own API.
+
+This policy is deliberately wider than the one guarding `web_fetch`, and the difference is who picks the address. There, the model does. Here, you type the host in Settings and accept its fingerprint by hand before a single byte is sent — the same two steps that make key pinning worth anything.
 
 ### 2. Generate the key and install it on the server
 

@@ -255,7 +255,7 @@ Per host:
 | Key | Type | Default | Effect |
 |---|---|---|---|
 | `alias` | string | required | The identity of the host and the **only** thing the model ever passes. Also the name of the key file on disk, so the Settings UI restricts it to 1–32 chars of `A–Za–z0–9_-` starting alphanumeric. Not renameable. |
-| `host` | string | required | Hostname or IP. Validated against the network policy when saved **and** again at connection time, so a name that later starts resolving to a blocked address is caught. RFC1918 and IPv6 ULA are allowed (a home server is the point); loopback, link-local/metadata, `0.0.0.0/8` and CGNAT are not — CGNAT is exemptable through `security.ssrfWhitelist` for Tailscale. |
+| `host` | string | required | Hostname or IP. Validated against the network policy when saved **and** again at connection time, so a name that later starts resolving to a blocked address is caught. RFC1918, IPv6 ULA and CGNAT are allowed (a home server on the LAN or over Tailscale is the point); loopback, link-local/metadata and `0.0.0.0/8` are not — those are the phone itself. |
 | `port` | int 1–65535 | `22` | |
 | `username` | string | required | Login account. |
 | `description` | string | `""` | Shown **to the model** by `ssh_hosts`, so it can pick between machines and tell you which one it acted on. |
