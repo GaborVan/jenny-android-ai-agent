@@ -230,6 +230,7 @@ Access to remote machines. Both gates are closed by default and **both are neces
           "port": 22,
           "username": "jenny",
           "description": "The home NAS",
+          "auth": "key",
           "jobLogDir": "/tmp/jenny-jobs"
         }
       ]
@@ -258,10 +259,14 @@ Per host:
 | `port` | int 1–65535 | `22` | |
 | `username` | string | required | Login account. |
 | `description` | string | `""` | Shown **to the model** by `ssh_hosts`, so it can pick between machines and tell you which one it acted on. |
-| `hostKeyFingerprint` | string \| null | `null` | **Display only.** The enforcement is the `known_hosts` file next to the private key; without a matching line there, the connection is refused no matter what this says. |
+| `hostKeyFingerprint` | string \| null | `null` | **Display only.** The enforcement is the `known_hosts` file next to the private key; without a matching line there, the connection is refused no matter what this says. Required in both `auth` modes. |
+| `auth` | `"key"` \| `"password"` | `"key"` | How Jenny logs in. The default is unchanged, so hosts registered before this option existed keep behaving exactly as they did. |
+| `password` | string \| null | `null` | Only read when `auth` is `"password"`, where it is mandatory — Settings refuses to save a password host without one. **Stored in clear text in `config.json`**, like `telegram.botToken` and `providers[].apiKey`. Never returned by the settings API (the payload carries a `has_password` boolean instead), never in a tool argument, never in a tool result, and kept out of `repr()` so it can't fall into a log line. Switching a host back to `auth: "key"` through Settings clears it. |
 | `jobLogDir` | string | `"/tmp/jenny-jobs"` | Where `ssh_job` writes its per-job log and exit-code files **on the server**. No field in Settings — config-only. Nothing cleans these up, and `/tmp` is wiped on reboot on most systems, so point it somewhere durable if you want old job output to survive. |
 
-The private key (`<alias>_ed25519`, one per host) and `known_hosts` live in `<filesDir>/ssh` — **outside** the workspace, alongside it. That is why the agent's file tools cannot read them, and also why they are absent from snapshots and from an exported `.jbk`: a restore brings back this host list but no keys. See [SSH access](../using/ssh.md).
+The private key (`<alias>_ed25519`, one per host) and `known_hosts` live in `<filesDir>/ssh` — **outside** the workspace, alongside it. That is why the agent's file tools cannot read them, and also why they are absent from snapshots and from an exported `.jbk`: a restore brings back this host list but no keys.
+
+A `password` does **not** get that protection, and the difference is worth stating plainly rather than discovering later: `config.json` is inside the workspace, so the file holding it is readable by the agent's own file tools and is included in snapshots and in an exported `.jbk` (encrypted there with your backup passphrase). The practical consequence is that a restore reactivates a password host immediately while a key host has to be set up again — convenient in one direction, and the reason a dedicated key is still the better default in the other: a key can be revoked from `authorized_keys` without changing the password you use to log in yourself. See [SSH access](../using/ssh.md).
 
 ### tools.my, introspect, diagnostics
 

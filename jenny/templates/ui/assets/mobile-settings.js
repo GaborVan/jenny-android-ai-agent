@@ -288,18 +288,27 @@ export class SettingsController {
       <button class="settings-btn-add" id="btn-ssh-add"><i class="ti ti-plus"></i> ${i18n.t('settings.ssh.addHost')}</button>`;
   }
 
-  /* Una card per host. I due stati che decidono se l'host è usabile — chiave
-     generata e impronta accettata — stanno in chiaro sulla card: sono i due
-     passi che l'utente deve fare, e nasconderli dietro un tap lascerebbe host
-     mezzi configurati che falliscono solo al primo comando. */
+  /* Una card per host. I due stati che decidono se l'host è usabile —
+     credenziale pronta (chiave generata o password impostata) e impronta
+     accettata — stanno in chiaro sulla card: sono i due passi che l'utente deve
+     fare, e nasconderli dietro un tap lascerebbe host mezzi configurati che
+     falliscono solo al primo comando. */
   _renderSshHost(h) {
     const alias = escapeHtml(h.alias);
+    const byPassword = h.auth === 'password';
     const pinned = h.pinned
       ? `<span class="provider-badge format-badge">${i18n.t('settings.ssh.statusPinned')}</span>`
       : `<span class="provider-badge format-badge">${i18n.t('settings.ssh.statusUnpinned')}</span>`;
-    const keyState = h.has_key
-      ? i18n.t('settings.ssh.statusKeyReady')
-      : i18n.t('settings.ssh.statusKeyMissing');
+    /* Lo stato della credenziale segue il modo scelto: su un host a password
+       "Nessuna chiave" sarebbe un allarme per qualcosa che non serve, e
+       nasconderebbe l'unica cosa che conta lì, cioè se la password c'è. */
+    const credentialState = byPassword
+      ? (h.has_password
+        ? i18n.t('settings.ssh.statusPasswordSet')
+        : i18n.t('settings.ssh.statusPasswordMissing'))
+      : (h.has_key
+        ? i18n.t('settings.ssh.statusKeyReady')
+        : i18n.t('settings.ssh.statusKeyMissing'));
     const desc = h.description
       ? `<div style="font-size:12px;color:var(--text-faint)">${escapeHtml(h.description)}</div>`
       : '';
@@ -310,14 +319,14 @@ export class SettingsController {
       </div>
       <div class="provider-card-body">
         <span class="provider-url">${escapeHtml(`${h.username}@${h.host}:${h.port}`)}</span>
-        <span class="provider-key">${escapeHtml(keyState)}</span>
+        <span class="provider-key">${escapeHtml(credentialState)}</span>
       </div>
       ${desc}
       ${this._renderSshPublicKey(h)}
       <div class="provider-card-actions">
-        <button class="settings-btn-add ssh-generate" data-ssh-alias="${alias}" data-has-key="${h.has_key ? '1' : ''}">
+        ${byPassword ? '' : `<button class="settings-btn-add ssh-generate" data-ssh-alias="${alias}" data-has-key="${h.has_key ? '1' : ''}">
           ${h.has_key ? i18n.t('settings.ssh.regenerateKey') : i18n.t('settings.ssh.generateKey')}
-        </button>
+        </button>`}
         <button class="settings-btn-add ssh-verify" data-ssh-alias="${alias}">${i18n.t('settings.ssh.verify')}</button>
         <button class="btn-icon ssh-edit" data-ssh-alias="${alias}" title="${i18n.t('settings.edit')}">
           <i class="ti ti-edit"></i>
@@ -332,8 +341,14 @@ export class SettingsController {
   /* La pubblica resta a schermo finché l'host esiste: il passo "incollala in
      authorized_keys" avviene su un'altra macchina, e mostrarla una volta sola
      costringerebbe a rigenerare la coppia — cioè a invalidare la chiave che si
-     stava installando. */
+     stava installando.
+
+     Su un host a password tutto questo blocco sparisce: "copia questa chiave
+     pubblica sul server" è un passo che lì non esiste, e lasciarlo a schermo
+     farebbe credere che manchi qualcosa da fare. Una chiave eventualmente
+     generata prima resta sul disco e ricompare tornando a `auth = key`. */
   _renderSshPublicKey(h) {
+    if (h.auth === 'password') return '';
     if (!h.public_key) {
       return `<div class="settings-field-hint">${i18n.t('settings.ssh.noKeyYet')}</div>`;
     }
@@ -434,14 +449,26 @@ export class SettingsController {
     } catch (e) { showToast(e.message, 'error'); }
   }
 
+  /* Con la password il pinning conta di più, non di meno: una chiave la si
+     presenta a un impostore senza dargli niente di riutilizzabile, una password
+     invece gliela si consegna intera al primo comando. Per questo l'avviso in
+     più sta proprio qui, nel momento in cui l'utente decide di fidarsi. */
+  _sshPasswordPinningWarning(alias) {
+    const host = (this._ssh?.hosts || []).find(h => h.alias === alias);
+    if (host?.auth !== 'password') return '';
+    return `<p style="font-size:12px;margin-top:8px">${escapeHtml(i18n.t('settings.ssh.fingerprintPasswordWarning'))}</p>`;
+  }
+
   _confirmNewHostKey(alias, probe) {
+    const passwordWarning = this._sshPasswordPinningWarning(alias);
     return detailDialog({
       title: i18n.t('settings.ssh.fingerprintTitle'),
       bodyHtml: `
         <p style="font-size:13px">${escapeHtml(i18n.t('settings.ssh.fingerprintIntro', { alias }))}</p>
         <code style="display:block;margin:8px 0;padding:8px;font-size:12px;word-break:break-all;
           background:var(--bg-elevated,rgba(128,128,128,.12));border-radius:6px">${escapeHtml(probe.fingerprint)}</code>
-        <p style="font-size:12px;color:var(--text-faint)">${escapeHtml(i18n.t('settings.ssh.fingerprintServerHint'))}</p>`,
+        <p style="font-size:12px;color:var(--text-faint)">${escapeHtml(i18n.t('settings.ssh.fingerprintServerHint'))}</p>
+        ${passwordWarning}`,
       actions: [
         { id: 'cancel', label: i18n.t('common.cancel') },
         { id: 'accept', label: i18n.t('settings.ssh.accept'), variant: 'primary' },
@@ -464,7 +491,8 @@ export class SettingsController {
           background:var(--bg-elevated,rgba(128,128,128,.12));border-radius:6px">${escapeHtml(probe.pinned_fingerprint || '—')}</code>
         <div style="font-size:12px;color:var(--text-faint);margin-top:8px">${escapeHtml(i18n.t('settings.ssh.changedNew'))}</div>
         <code style="display:block;padding:6px 8px;font-size:12px;word-break:break-all;
-          background:var(--bg-elevated,rgba(128,128,128,.12));border-radius:6px">${escapeHtml(probe.fingerprint)}</code>`,
+          background:var(--bg-elevated,rgba(128,128,128,.12));border-radius:6px">${escapeHtml(probe.fingerprint)}</code>
+        ${this._sshPasswordPinningWarning(alias)}`,
       actions: [
         { id: 'cancel', label: i18n.t('common.cancel') },
         { id: 'accept', label: i18n.t('settings.ssh.replace'), variant: 'primary' },
@@ -485,9 +513,20 @@ export class SettingsController {
 
   /* L'alias non è modificabile: è l'identità dell'host, il nome del file di
      chiave e l'unica cosa che il modello passa ai tool SSH. Rinominarlo
-     scollegherebbe chiave e impronta dall'host senza dirlo a nessuno. */
+     scollegherebbe chiave e impronta dall'host senza dirlo a nessuno.
+
+     La password non viene mai pre-compilata perché non arriva mai: il payload
+     di lettura porta solo `has_password`. Il campo vuoto in modifica significa
+     quindi "tieni quella salvata", ed è il server a rifiutare il caso in cui
+     non ce ne sia una da tenere. */
   _showSshHostDialog(existing) {
     const isEdit = !!existing;
+    const auth = existing?.auth === 'password' ? 'password' : 'key';
+    /* Il campo password si nasconde con `display` inline, non con l'attributo
+       `hidden`: `.settings-field` porta un `display:flex` d'autore, che batte
+       il `[hidden] { display:none }` dello user-agent. Con `hidden` il campo
+       resterebbe a schermo su un host a chiave. */
+    const passwordFieldStyle = auth === 'password' ? '' : 'display:none';
     const dialog = document.createElement('dialog');
     dialog.className = 'oc-dialog';
     dialog.id = 'ssh-host-dialog';
@@ -522,6 +561,23 @@ export class SettingsController {
           <input type="text" class="settings-input" id="dlg-ssh-description" placeholder="${i18n.t('settings.ssh.descriptionPlaceholder')}"
             value="${value('description')}" autocomplete="off" />
         </div>
+        <div class="settings-field">
+          <label class="settings-label">${i18n.t('settings.ssh.auth')}</label>
+          <select class="settings-select" id="dlg-ssh-auth">
+            <option value="key" ${auth === 'key' ? 'selected' : ''}>${i18n.t('settings.ssh.authKey')}</option>
+            <option value="password" ${auth === 'password' ? 'selected' : ''}>${i18n.t('settings.ssh.authPassword')}</option>
+          </select>
+          <span class="settings-field-hint">${i18n.t('settings.ssh.authHint')}</span>
+        </div>
+        <div class="settings-field" id="dlg-ssh-password-field" style="${passwordFieldStyle}">
+          <label class="settings-label">${i18n.t('settings.ssh.password')}</label>
+          <input type="password" class="settings-input" id="dlg-ssh-password"
+            placeholder="${i18n.t('settings.ssh.passwordPlaceholder')}"
+            autocomplete="new-password" data-lpignore="true" value="" />
+          <span class="settings-field-hint">${existing?.has_password
+            ? i18n.t('settings.ssh.passwordKeepBlank')
+            : i18n.t('settings.ssh.passwordHint')}</span>
+        </div>
         <div class="oc-dialog-buttons" style="margin-top:16px">
           <button class="oc-btn oc-btn-cancel" id="dlg-ssh-cancel">${i18n.t('common.cancel')}</button>
           <button class="oc-btn oc-btn-confirm" id="dlg-ssh-save">${i18n.t('settings.save')}</button>
@@ -531,6 +587,20 @@ export class SettingsController {
     dialog.showModal();
 
     const close = () => { dialog.close(); dialog.remove(); };
+    const authEl = dialog.querySelector('#dlg-ssh-auth');
+    const passwordField = dialog.querySelector('#dlg-ssh-password-field');
+    const passwordEl = dialog.querySelector('#dlg-ssh-password');
+    /* Passando a "chiave" il campo password viene anche svuotato, non solo
+       nascosto: un campo nascosto ma pieno resterebbe nel DOM, e il valore
+       digitato per ripensarci un attimo dopo non ha motivo di sopravvivere al
+       cambio di modo. */
+    authEl.addEventListener('change', () => {
+      const byPassword = authEl.value === 'password';
+      // Stringa vuota, non 'flex': così torna a valere la regola della classe.
+      passwordField.style.display = byPassword ? '' : 'none';
+      if (!byPassword) passwordEl.value = '';
+    });
+
     dialog.querySelector('#dlg-ssh-cancel').addEventListener('click', close);
     dialog.querySelector('#dlg-ssh-save').addEventListener('click', async () => {
       const params = {
@@ -539,10 +609,22 @@ export class SettingsController {
         port: dialog.querySelector('#dlg-ssh-port').value.trim() || '22',
         username: dialog.querySelector('#dlg-ssh-username').value.trim(),
         description: dialog.querySelector('#dlg-ssh-description').value.trim(),
+        auth: authEl.value,
       };
       if (!params.alias || !params.host || !params.username) {
         showToast(i18n.t('settings.ssh.fieldsRequired'), 'error');
         return;
+      }
+      if (params.auth === 'password') {
+        // Niente `.trim()`: gli spazi in una password sono contenuto. Il campo
+        // vuoto vale "tieni quella salvata", e senza niente di salvato il
+        // server rifiuta comunque — questo controllo evita solo il giro.
+        const typed = passwordEl.value;
+        if (!typed && !existing?.has_password) {
+          showToast(i18n.t('settings.ssh.passwordRequired'), 'error');
+          return;
+        }
+        if (typed) params.password = typed;
       }
       try {
         await api.saveSshHost(params);

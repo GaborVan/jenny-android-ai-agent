@@ -10,6 +10,7 @@ import com.jcraft.jsch.HostKeyRepository
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.KeyPair
 import com.jcraft.jsch.Session
+import com.jcraft.jsch.UIKeyboardInteractive
 import com.jcraft.jsch.UserInfo
 import org.bouncycastle.jce.provider.BouncyCastleProvider
 import org.json.JSONObject
@@ -286,10 +287,28 @@ object SshBridge {
         try {
             body().toString()
         } catch (e: Throwable) {
-            // Solo classe e messaggio: gli argomenti (comandi, path) non finiscono
-            // nel log di sistema.
+            // Solo classe e messaggio: gli argomenti (comandi, path, e per gli
+            // host a password la PASSWORD) non finiscono nel log di sistema.
+            // Niente `request` qui dentro, mai: sarebbe una password leggibile
+            // con `adb logcat` da qualunque app con quel permesso.
             Log.w(TAG, "ssh call failed: ${e.javaClass.simpleName}: ${e.message}")
             errorJson(e).toString()
+        }
+
+    /**
+     * Decodifica la richiesta senza rimetterne il testo nell'errore.
+     *
+     * `JSONObject(String)` di org.json cita l'input nel messaggio d'eccezione
+     * ("Unterminated string at character 42 of {...}"), e quel messaggio
+     * risalirebbe a Python dentro `error` — cioe fino al risultato di un tool,
+     * cioe nel contesto del modello. Il payload contiene la password: qui si
+     * scarta il dettaglio e si risponde con una frase fissa.
+     */
+    private fun parseRequest(request: String): JSONObject =
+        try {
+            JSONObject(request)
+        } catch (e: Throwable) {
+            throw BridgeException("io", "the ssh bridge received a malformed request")
         }
 
     // ---- pool di sessioni --------------------------------------------------
@@ -301,26 +320,57 @@ object SshBridge {
         val port = request.getInt("port")
         val keyPath = request.getString("keyPath")
         val knownHosts = request.getString("knownHostsPath")
+        // `isNull` copre sia la chiave assente sia un JSON null: Python omette il
+        // campo quando non serve, e `optString` su un null di org.json
+        // restituirebbe la STRINGA "null", che jsch userebbe come password.
+        val password = if (request.isNull("password")) null else request.getString("password")
 
-        if (!File(keyPath).isFile) {
+        if (password == null && !File(keyPath).isFile) {
+            // Solo per l'auth a chiave: un host a password non ha un file di chiave.
             throw BridgeException("io", "private key $keyPath is missing")
         }
         if (!File(knownHosts).isFile) {
             // Senza il file non c'e nulla di pinnato: e un errore da umano, non
-            // da riprovare, esattamente come una host key sconosciuta.
+            // da riprovare, esattamente come una host key sconosciuta. Il
+            // controllo NON ha un ramo che lo salti per l'auth a password: e
+            // proprio li che conta di piu, perche senza impronta verificata la
+            // password andrebbe in chiaro a chiunque risponda a quell'indirizzo,
+            // mentre una chiave privata non lascia comunque il telefono.
             throw BridgeException("host_key", "no known_hosts file at $knownHosts")
         }
 
         val jsch = JSch()
-        jsch.addIdentity(keyPath)
         jsch.setKnownHosts(knownHosts)
+        if (password == null) {
+            jsch.addIdentity(keyPath)
+        }
         val session = jsch.getSession(request.getString("username"), host, port)
-        // Nessun TOFU: un host assente da known_hosts non si contatta.
+        // Nessun TOFU: un host assente da known_hosts non si contatta. Vale per
+        // entrambi i modi di autenticazione — vedi il commento qui sopra.
         session.setConfig("StrictHostKeyChecking", "yes")
-        // Solo chiave pubblica: senza questo jsch puo tentare password /
-        // keyboard-interactive, che senza UserInfo restano appese al prompt.
-        session.setConfig("PreferredAuthentications", "publickey")
-        session.userInfo = SilentUserInfo
+        // Solo i metodi coerenti col modo dichiarato in Settings. Senza questo
+        // jsch prova anche gli altri: con l'auth a chiave tenterebbe password
+        // e keyboard-interactive, e con l'auth a password tenterebbe publickey
+        // per primo, bruciando tentativi su un server con `MaxAuthTries` basso.
+        //
+        // Nel modo password si dichiara ANCHE keyboard-interactive, e non e un
+        // di piu: il tipico Linux che autentica via PAM ha
+        // `PasswordAuthentication no` + `KbdInteractiveAuthentication yes`, e
+        // con la sola "password" rifiuterebbe la connessione. asyncssh negozia
+        // kbdint da solo, quindi senza questa riga il backend dev e il bridge
+        // NON sarebbero in parita: stesso server, funziona sul Mac e fallisce
+        // sul telefono.
+        session.setConfig(
+            "PreferredAuthentications",
+            if (password != null) "password,keyboard-interactive" else "publickey",
+        )
+        if (password != null) {
+            session.setPassword(password)
+        }
+        // Con la password serve un UserInfo che sappia rispondere ai prompt
+        // kbdint; senza credenziale resta quello muto.
+        session.userInfo =
+            if (password != null) CredentialUserInfo(password) else SilentUserInfo
         val keepalive = request.optInt("keepaliveIntervalS", 0)
         if (keepalive > 0) {
             session.serverAliveInterval = keepalive * 1000
@@ -404,6 +454,12 @@ object SshBridge {
      * UserInfo muto: jsch chiede conferme (nuova host key, passphrase) tramite
      * questa interfaccia e senza un'implementazione userebbe lo standard input,
      * che qui non esiste. Rispondere sempre "no" fa fallire in modo pulito.
+     *
+     * Resta muto anche per gli host a password, e non e una svista: la password
+     * arriva da `session.setPassword`, che jsch usa per il PRIMO tentativo.
+     * Questi metodi servono ai RItentativi — cioe al caso "password sbagliata",
+     * in cui l'unica risposta giusta e fallire subito con un errore di auth
+     * invece di ritentare la stessa credenziale altre due volte.
      */
     private object SilentUserInfo : UserInfo {
         override fun getPassphrase(): String? = null
@@ -412,6 +468,43 @@ object SshBridge {
         override fun promptPassphrase(message: String?): Boolean = false
         override fun promptYesNo(message: String?): Boolean = false
         override fun showMessage(message: String?) {}
+    }
+
+    /**
+     * [UserInfo] che sa rispondere anche a *keyboard-interactive*.
+     *
+     * Serve per parita col backend dev: asyncssh negozia kbdint da solo, jsch
+     * no. Senza questo, un server configurato con `PasswordAuthentication no` e
+     * `KbdInteractiveAuthentication yes` — cioe il tipico Linux che autentica
+     * via PAM — funzionerebbe sul Mac nei test e fallirebbe sul telefono, che e
+     * il modo peggiore di scoprire una differenza.
+     *
+     * Risponde SOLO alla forma inequivocabile: un unico prompt, non in eco (il
+     * classico "Password:"). Due prompt, o uno in eco, significano altro — un
+     * codice 2FA, una domanda di sicurezza — e li rispondere con la password
+     * vorrebbe dire consegnarla a un campo che non e il suo, per giunta a un
+     * server che potrebbe averla chiesta apposta. In quei casi si restituisce
+     * null e l'autenticazione fallisce in modo pulito.
+     */
+    private class CredentialUserInfo(private val secret: String?) : UserInfo, UIKeyboardInteractive {
+        override fun getPassphrase(): String? = null
+        override fun getPassword(): String? = secret
+        override fun promptPassword(message: String?): Boolean = secret != null
+        override fun promptPassphrase(message: String?): Boolean = false
+        override fun promptYesNo(message: String?): Boolean = false
+        override fun showMessage(message: String?) {}
+
+        override fun promptKeyboardInteractive(
+            destination: String?,
+            name: String?,
+            instruction: String?,
+            prompt: Array<out String>?,
+            echo: BooleanArray?,
+        ): Array<String>? {
+            if (secret == null || prompt == null || prompt.size != 1) return null
+            if (echo != null && echo.isNotEmpty() && echo[0]) return null
+            return arrayOf(secret)
+        }
     }
 
     // ---- comandi -----------------------------------------------------------
@@ -425,7 +518,7 @@ object SshBridge {
      */
     @JvmStatic
     fun exec(request: String): String = respond {
-        val req = JSONObject(request)
+        val req = parseRequest(request)
         val timeoutMs = (req.getDouble("timeoutS") * 1000).toLong()
         val maxChars = req.getInt("maxOutputChars")
         val session = sessionFor(req)
@@ -488,7 +581,7 @@ object SshBridge {
     /** Carica un file locale via SFTP. Ritorna i byte trasferiti. */
     @JvmStatic
     fun put(request: String): String = respond {
-        val req = JSONObject(request)
+        val req = parseRequest(request)
         val local = File(req.getString("localPath"))
         if (!local.isFile) {
             throw BridgeException("io", "${local.path} is not a readable file")
@@ -506,7 +599,7 @@ object SshBridge {
      */
     @JvmStatic
     fun get(request: String): String = respond {
-        val req = JSONObject(request)
+        val req = parseRequest(request)
         val remote = req.getString("remotePath")
         val local = req.getString("localPath")
         val maxBytes = req.getLong("maxBytes")
@@ -532,7 +625,7 @@ object SshBridge {
      */
     @JvmStatic
     fun generateKeyPair(request: String): String = respond {
-        val req = JSONObject(request)
+        val req = parseRequest(request)
         val target = File(req.getString("keyPath"))
         target.parentFile?.mkdirs()
         val tmp = File(target.parentFile, "${target.name}.tmp")
@@ -563,7 +656,7 @@ object SshBridge {
      */
     @JvmStatic
     fun probeHostKey(request: String): String = respond {
-        val req = JSONObject(request)
+        val req = parseRequest(request)
         val host = req.getString("host")
         val port = req.getInt("port")
 

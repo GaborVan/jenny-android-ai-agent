@@ -9,7 +9,7 @@ fare — che è la parte che deve restare identica e testabile sul Mac.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
@@ -33,7 +33,12 @@ class SshHostKeyError(SshError):
 
 
 class SshAuthError(SshError):
-    """Il server ha rifiutato la chiave (pubblica non installata, utente errato)."""
+    """Il server ha rifiutato la credenziale.
+
+    Chiave pubblica non installata, password sbagliata, o utente errato. Il
+    messaggio non contiene MAI la credenziale tentata: questo errore risale fino
+    al risultato di un tool, cioè nel contesto del modello.
+    """
 
 
 class SshTimeoutError(SshError):
@@ -72,9 +77,16 @@ class SshTarget:
     port: int
     username: str
     # Chiave privata e known_hosts vivono fuori dal workspace: vedi
-    # ``jenny.config.paths.get_ssh_dir``.
+    # ``jenny.config.paths.get_ssh_dir``. ``key_path`` resta valorizzato anche
+    # per un host a password (è derivato dall'alias, non configurabile): i
+    # backend semplicemente non lo aprono quando c'è una password.
     key_path: Path
     known_hosts_path: Path
+    # ``repr=False`` come per ``SshHostConfig.password``: un target finisce nei
+    # log di debug e nei messaggi d'errore molto più spesso di quanto si creda,
+    # e la password non deve poterci comparire. Vale anche per ``str()``, che
+    # per una dataclass passa dallo stesso ``__repr__``.
+    password: str | None = field(default=None, repr=False)
     connect_timeout_s: float = 15.0
     # 0 = keepalive disattivato.
     keepalive_interval_s: int = 30
@@ -85,14 +97,31 @@ class SshTarget:
     idle_close_s: int = 300
 
     @property
+    def auth_mode(self) -> str:
+        """``"password"`` se c'è una password, altrimenti ``"key"``.
+
+        Non è un campo separato perché i due non possono divergere: chi risolve
+        il target rifiuta un host a password senza password, quindi "c'è una
+        password" e "si autentica a password" sono la stessa cosa.
+        """
+        return "password" if self.password is not None else "key"
+
+    @property
     def pool_key(self) -> str:
         """Impronta dei parametri di connessione.
 
         Il pool va invalidato quando cambiano, non solo quando cambia l'alias:
         se l'utente corregge la porta o l'utente in Settings, riusare la
-        sessione aperta significherebbe parlare ancora col vecchio target.
+        sessione aperta significherebbe parlare ancora col vecchio target. Lo
+        stesso vale per il *modo* di autenticazione: passando da chiave a
+        password la sessione già aperta continuerebbe a parlare con le
+        credenziali vecchie, quindi il modo entra nella chiave.
+
+        Ciò che NON entra è la password: questa stringa finisce in una riga di
+        log del potatore e nel payload JSON verso Kotlin, quindi non deve
+        contenere materiale segreto — nemmeno in forma derivata.
         """
-        return f"{self.username}@{self.host}:{self.port}#{self.key_path}"
+        return f"{self.username}@{self.host}:{self.port}#{self.key_path}#{self.auth_mode}"
 
 
 @dataclass(frozen=True, slots=True)

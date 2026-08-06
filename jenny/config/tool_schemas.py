@@ -16,6 +16,8 @@ import PythonExecConfig``) così gli import storici continuano a funzionare.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from jenny.config_base import Base
 from jenny.pydantic_compat import Field
 
@@ -135,13 +137,16 @@ class SshHostConfig(Base):
 
     Host e username invece il modello li *vede*, elencati da ``ssh_hosts``:
     senza non potrebbe scegliere fra due alias né dire all'utente su quale
-    macchina ha agito. Non sono segreti — il segreto è la chiave privata, che
-    vive fuori dal workspace e che nessun tool legge.
+    macchina ha agito. Non sono segreti — i segreti sono la chiave privata, che
+    vive fuori dal workspace e che nessun tool legge, e la ``password`` qui
+    sotto, che nessun tool legge e nessun risultato di tool contiene.
 
     ``host_key_fingerprint`` è **solo per display** nella UI. L'enforcement vero
     è il file ``known_hosts`` accanto alla chiave (vedi
     ``jenny.config.paths.get_ssh_dir``): è quello che il backend legge, e senza
-    una riga corrispondente la connessione viene rifiutata.
+    una riga corrispondente la connessione viene rifiutata. Vale per entrambi i
+    modi di autenticazione, e con ``auth="password"`` conta di più: senza
+    impronta verificata la password andrebbe a chiunque risponda a quell'indirizzo.
     """
 
     alias: str
@@ -152,6 +157,15 @@ class SshHostConfig(Base):
     # giusto quando ce n'è più di uno ("il NAS di casa", "il VPS del sito").
     description: str = ""
     host_key_fingerprint: str | None = None
+    # Come si autentica questo host. Default ``key``: è il modo che non lascia
+    # un segreto riutilizzabile nella config, quindi resta quello di partenza
+    # anche ora che la password esiste.
+    auth: Literal["key", "password"] = "key"
+    # ``repr=False`` è la convenzione con cui questo repo tiene i segreti fuori
+    # dai log (come ``api_key`` e ``bot_token`` in ``config/schema.py``): un
+    # ``repr`` di questo oggetto finisce facilmente in una riga di log o in un
+    # messaggio d'errore, e la password non deve poterci arrivare.
+    password: str | None = Field(default=None, repr=False)
     # Dove vivono i log dei job lunghi lato server (vedi il tool ``ssh_job``).
     job_log_dir: str = "/tmp/jenny-jobs"
 

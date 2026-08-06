@@ -403,6 +403,15 @@ class ApiClient {
     return this._sshCall('/api/settings/ssh/update', params);
   }
 
+  // `params` accetta anche `auth` ('key' | 'password') e, solo con
+  // `auth: 'password'`, la password in chiaro. Due cose da sapere prima di
+  // toccarla: il parametro si deve chiamare esattamente `password`, perché è
+  // quel nome che `http_utils.redact_query_secrets` riconosce e maschera nel
+  // log del path lato gateway; e va omesso — non passato vuoto — quando
+  // l'utente non l'ha ridigitata, perché assente significa "tieni quella
+  // salvata". Il valore non va mai loggato né tenuto in giro: la risposta non
+  // lo rimanda indietro (porta `has_password`, un booleano) proprio perché non
+  // esista una copia da cui possa ricomparire.
   async saveSshHost(params) {
     return this._sshCall('/api/settings/ssh/host/save', params);
   }

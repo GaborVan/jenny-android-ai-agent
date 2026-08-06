@@ -1,9 +1,10 @@
 """Le impostazioni SSH lato WebUI: CRUD, chiave, accettazione dell'impronta.
 
-Qui si misura la parte che l'utente tocca con le dita, e in particolare le tre
-cose che non devono cedere: la chiave privata non entra mai in un payload, ogni
-scrittura passa dal funnel della config, e una host key **cambiata** non si
-accetta senza una seconda decisione esplicita.
+Qui si misura la parte che l'utente tocca con le dita, e in particolare le
+quattro cose che non devono cedere: la chiave privata non entra mai in un
+payload, **né ci entra la password**, ogni scrittura passa dal funnel della
+config, e una host key **cambiata** non si accetta senza una seconda decisione
+esplicita.
 
 NB sull'infrastruttura: l'ambiente si monta con fixture sincrone e con un
 ``asynccontextmanager`` dove serve attesa. Con pytest 9 + pytest-asyncio 1.4 una
@@ -306,6 +307,181 @@ async def test_generate_for_an_unknown_alias_is_a_404(env, monkeypatch) -> None:
     with pytest.raises(WebUISettingsError) as excinfo:
         await ssh_api.generate_ssh_key(_q(alias="ghost"))
     assert excinfo.value.status == 404
+
+
+# -- password ----------------------------------------------------------------
+
+# Una password riconoscibile a occhio dentro un JSON: se sfugge in un payload,
+# il test che la cerca lo dice senza ambiguità.
+PASSWORD = "correct-horse-battery-staple"
+
+
+async def test_save_host_with_password_auth(env) -> None:
+    payload = await _add_host(auth="password", password=PASSWORD)
+
+    assert payload["hosts"][0]["auth"] == "password"
+    assert payload["hosts"][0]["has_password"] is True
+    saved = load_config().tools.ssh.hosts[0]
+    assert saved.auth == "password"
+    assert saved.password == PASSWORD
+
+
+async def test_default_auth_stays_key_for_hosts_saved_without_it(env) -> None:
+    """Gli host già registrati non cambiano comportamento."""
+    payload = await _add_host()
+
+    assert payload["hosts"][0]["auth"] == "key"
+    assert payload["hosts"][0]["has_password"] is False
+    assert load_config().tools.ssh.hosts[0].password is None
+
+
+async def test_password_never_travels_back_to_the_client(env) -> None:
+    """La regola del file, per la password: al client va solo un booleano.
+
+    Non esiste nemmeno la versione offuscata alla ``_mask_api_key``: quattro
+    caratteri veri sarebbero quattro caratteri regalati.
+    """
+    await _add_host(auth="password", password=PASSWORD)
+
+    dumped = json.dumps(ssh_api.ssh_settings_payload())
+
+    assert PASSWORD not in dumped
+    # Nemmeno un pezzo: un suggerimento parziale è comunque materiale vero.
+    assert "correct-horse" not in dumped
+    assert "battery-staple" not in dumped
+    assert '"has_password": true' in dumped
+
+
+async def test_the_save_response_does_not_echo_the_password_back(env) -> None:
+    """Il payload di ritorno della scrittura è lo stesso di quello di lettura."""
+    payload = await _add_host(auth="password", password=PASSWORD)
+
+    assert PASSWORD not in json.dumps(payload)
+
+
+async def test_a_password_host_without_a_password_is_refused(env) -> None:
+    """Altrimenti l'host risulta configurato e fallisce solo al primo comando.
+
+    Cioè dentro un turno dell'agente, dove l'errore lo legge il modello e non
+    l'utente che potrebbe correggerlo.
+    """
+    with pytest.raises(WebUISettingsError, match="password is required"):
+        await _add_host(auth="password")
+    assert load_config().tools.ssh.hosts == []
+
+    # Una password di soli spazi è un campo non compilato, non una password.
+    with pytest.raises(WebUISettingsError, match="password is required"):
+        await _add_host(auth="password", password="   ")
+    assert load_config().tools.ssh.hosts == []
+
+
+async def test_switching_an_existing_host_to_password_needs_one(env) -> None:
+    await _add_host()
+
+    with pytest.raises(WebUISettingsError, match="password is required"):
+        await _add_host(auth="password")
+
+    # L'host resta quello di prima: il rifiuto avviene dentro ``mutate``, che
+    # non scrive niente se il callback solleva.
+    saved = load_config().tools.ssh.hosts[0]
+    assert saved.auth == "key"
+    assert saved.password is None
+
+
+async def test_editing_a_password_host_without_retyping_keeps_it(env) -> None:
+    """Il campo vuoto vale "tieni quella salvata": la UI non l'ha mai ricevuta."""
+    await _add_host(auth="password", password=PASSWORD)
+
+    payload = await _add_host(auth="password", description="aggiornato")
+
+    assert payload["hosts"][0]["description"] == "aggiornato"
+    assert payload["hosts"][0]["has_password"] is True
+    assert load_config().tools.ssh.hosts[0].password == PASSWORD
+
+
+async def test_a_password_is_stored_exactly_as_typed(env) -> None:
+    """Gli spazi ai bordi sono contenuto, non formattazione."""
+    padded = f" {PASSWORD} "
+    await _add_host(auth="password", password=padded)
+
+    assert load_config().tools.ssh.hosts[0].password == padded
+
+
+async def test_switching_between_password_and_key_leaves_a_coherent_config(env) -> None:
+    """Andata e ritorno su un host esistente, senza residui in mezzo."""
+    await _add_host(auth="password", password=PASSWORD)
+
+    # Password → chiave: la credenziale che nessuno userà più se ne va con il
+    # modo che la usava. Tenerla "per comodità" lascerebbe nel file, in chiaro,
+    # una password che l'utente crede di aver rimosso passando alla chiave.
+    payload = await _add_host(auth="key")
+    assert payload["hosts"][0]["auth"] == "key"
+    assert payload["hosts"][0]["has_password"] is False
+    assert load_config().tools.ssh.hosts[0].password is None
+    assert PASSWORD not in json.dumps(payload)
+
+    # Chiave → password: siccome la vecchia è stata buttata, non basta
+    # riselezionare il modo.
+    with pytest.raises(WebUISettingsError, match="password is required"):
+        await _add_host(auth="password")
+
+    payload = await _add_host(auth="password", password="un'altra")
+    assert payload["hosts"][0]["auth"] == "password"
+    assert load_config().tools.ssh.hosts[0].password == "un'altra"
+
+    # Un solo host per tutto il giro: l'alias è l'identità, non la modalità.
+    assert len(load_config().tools.ssh.hosts) == 1
+
+
+async def test_an_unknown_auth_mode_is_refused(env) -> None:
+    with pytest.raises(WebUISettingsError, match="auth must be"):
+        await _add_host(auth="kerberos")
+    assert load_config().tools.ssh.hosts == []
+
+
+async def test_a_password_host_still_has_to_pin_the_host_key(env, monkeypatch) -> None:
+    """Il pinning non è un passo in meno con la password: è quello che decide
+    a chi la password verrà consegnata."""
+    _backend(monkeypatch)
+    await _add_host(auth="password", password=PASSWORD)
+
+    assert ssh_api.ssh_settings_payload()["hosts"][0]["pinned"] is False
+
+    await ssh_api.probe_ssh_host_key(_q(alias="prod"))
+    payload = await ssh_api.accept_ssh_host_key(_q(alias="prod", fingerprint=FINGERPRINT))
+
+    assert payload["hosts"][0]["pinned"] is True
+    # E l'impronta accettata non ha portato con sé la password.
+    assert PASSWORD not in json.dumps(payload)
+
+
+async def test_deleting_a_password_host_takes_the_password_with_it(env) -> None:
+    """Eliminare deve revocare davvero, come già fa con la chiave."""
+    await _add_host(auth="password", password=PASSWORD)
+    assert PASSWORD in env.read_text("utf-8")
+
+    payload = await ssh_api.delete_ssh_host(_q(alias="prod"))
+
+    assert payload["hosts"] == []
+    assert PASSWORD not in env.read_text("utf-8")
+
+
+async def test_moving_a_password_host_keeps_the_password_but_drops_the_pin(env) -> None:
+    """Cambiare indirizzo non ributta via la password, ma nemmeno la consegna.
+
+    Il bersaglio si è spostato, quindi l'impronta accettata per il vecchio
+    indirizzo se ne va (come per un host a chiave) — ed è quello il gate: finché
+    un umano non verifica la macchina nuova, nessuna connessione parte e la
+    password non arriva da nessuna parte.
+    """
+    await _add_host(auth="password", password=PASSWORD)
+    record_host_key(f"example.com {KEY_LINE}")
+
+    payload = await _add_host(auth="password", host="other.example")
+
+    assert payload["hosts"][0]["has_password"] is True
+    assert payload["hosts"][0]["pinned"] is False
+    assert not is_host_pinned("example.com", 22)
 
 
 # -- probe e accettazione dell'impronta --------------------------------------

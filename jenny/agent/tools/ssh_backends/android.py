@@ -87,8 +87,14 @@ def _target_payload(target: SshTarget) -> dict[str, Any]:
     (``SshTarget.pool_key``): così basta cambiare un parametro in Settings
     perché la sessione aperta venga scartata invece che riusata verso il
     vecchio target.
+
+    La password, quando c'è, viaggia qui dentro. Due conseguenze, entrambe
+    rispettate: la chiave ``password`` si **omette** quando non serve invece di
+    mandare ``null`` (``JSONObject.optString`` su un null di org.json restituisce
+    la stringa ``"null"``, che jsch userebbe come password), e questo payload non
+    va mai loggato — né qui né in Kotlin.
     """
-    return {
+    payload: dict[str, Any] = {
         "poolKey": target.pool_key,
         "host": target.host,
         "port": target.port,
@@ -102,6 +108,9 @@ def _target_payload(target: SshTarget) -> dict[str, Any]:
         # dopo un singolo comando: su un telefono sono batteria e dati.
         "idleCloseS": target.idle_close_s,
     }
+    if target.password is not None:
+        payload["password"] = target.password
+    return payload
 
 
 async def _call(method: str, payload: dict[str, Any], *, timeout_s: float) -> dict[str, Any]:

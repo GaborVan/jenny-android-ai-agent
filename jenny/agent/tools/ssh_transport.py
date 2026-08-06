@@ -53,6 +53,19 @@ class SshKeyMissingError(SshError):
     """Manca la chiave privata per questo alias: va generata da Settings."""
 
 
+class SshPasswordMissingError(SshKeyMissingError):
+    """Host dichiarato ``auth="password"`` ma senza password in config.
+
+    Sottoclasse di :class:`SshKeyMissingError` perché per chi la cattura è
+    esattamente la stessa situazione: manca la credenziale locale, la mette un
+    umano in Settings, e riprovare non serve a nulla. Ereditarne la categoria fa
+    sì che ``ssh.py::_describe`` passi già il messaggio così com'è al modello,
+    invece di prefissarlo con la diagnosi generica "SSH failed" — che manderebbe
+    l'agente a indagare sulla rete. (Il nome giusto della coppia sarebbe
+    ``SshCredentialMissingError``; rinominare tocca ``ssh.py``.)
+    """
+
+
 class SshDisabledError(SshError):
     """SSH è spento in Settings.
 
@@ -242,6 +255,12 @@ def resolve_target(
     if not ok:
         raise SshHostBlockedError(f"ssh to {alias!r} refused: {error}")
 
+    # Il pinning si controlla PRIMA della credenziale e per OGNI modo di
+    # autenticazione, senza rami che lo saltino. Con la password è il controllo
+    # che conta di più, non di meno: una chiave privata non lascia il telefono
+    # nemmeno parlando con l'host sbagliato, mentre la password verrebbe
+    # consegnata in chiaro a chiunque risponda a quell'indirizzo — e da lì è
+    # riusabile su sudo, sulla webmail, ovunque l'utente l'abbia riciclata.
     if not is_host_pinned(host_cfg.host, host_cfg.port):
         raise SshHostKeyError(
             f"the host key for {alias!r} has not been accepted yet — open "
@@ -249,8 +268,22 @@ def resolve_target(
             "something you can work around from here."
         )
 
+    # ``key_path`` è derivato dall'alias e viene valorizzato comunque (entra
+    # nella chiave del pool); per un host a password il backend non lo apre.
     key_path = ssh_key_path(alias)
-    if not key_path.exists():
+    password: str | None = None
+    if host_cfg.auth == "password":
+        # Una stringa vuota è "non impostata", non "password vuota": la seconda
+        # non esiste come credenziale valida e lasciarla passare produrrebbe un
+        # rifiuto del server invece di un'istruzione per l'utente.
+        password = host_cfg.password or None
+        if password is None:
+            raise SshPasswordMissingError(
+                f"no password is set for {alias!r} — open Settings > SSH and set it "
+                "for that host. It cannot be set from here, and nobody will show it "
+                "to you"
+            )
+    elif not key_path.exists():
         raise SshKeyMissingError(
             f"no private key for {alias!r} — generate one in Settings > SSH and "
             "install the public key on the server"
@@ -262,6 +295,7 @@ def resolve_target(
         port=host_cfg.port,
         username=host_cfg.username,
         key_path=key_path,
+        password=password,
         known_hosts_path=known_hosts_path(),
         connect_timeout_s=ssh_cfg.connect_timeout_s,
         keepalive_interval_s=ssh_cfg.keepalive_interval_s,

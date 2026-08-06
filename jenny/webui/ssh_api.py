@@ -6,11 +6,19 @@ solo una persona può prendere — quali host esistono e quale host key è quell
 giusta. Nessuna delle due è delegabile all'agente, ed è il motivo per cui
 vivono in Settings e non in un tool.
 
-Due regole valgono per tutto il file:
+Tre regole valgono per tutto il file:
 
 * **la chiave privata non esce mai di qui.** Il payload di lettura dichiara
   solo se esiste (``has_key``); la pubblica invece sì, perché è fatta apposta
   per essere incollata in ``authorized_keys``;
+* **la password non esce mai di qui**, e nemmeno offuscata. Al posto suo il
+  payload porta ``has_password``, un booleano: una password che torna al client
+  finisce nella cronologia della WebView e in qualunque log che tocchi quel
+  corpo, e a differenza di una chiave non si può revocare senza cambiarla anche
+  per l'umano che entra a mano su quella macchina. Il parametro di scrittura si
+  chiama ``password`` di proposito: è uno dei marcatori di
+  ``http_utils.redact_query_secrets``, quindi il suo valore risulta già mascherato
+  in ogni riga di log che stampi il path della richiesta;
 * **ogni scrittura della config passa da** :func:`jenny.config.store.mutate`, e
   l'I/O lento (DNS, connessione di probe, generazione della chiave) sta
   **prima** di entrarci: il lock resta preso per tutta la durata del callback.
@@ -94,6 +102,40 @@ def _parse_alias(query: QueryParams) -> str:
     return alias
 
 
+_AUTH_MODES = ("key", "password")
+
+
+def _parse_auth_or_keep(query: QueryParams) -> str | None:
+    """Modo di autenticazione richiesto, o ``None`` per "lascia quello che c'è".
+
+    Come per la porta, il default non si risolve qui: dipende dall'host già
+    salvato, e quello si legge solo dentro il lock di ``mutate``.
+    """
+    value = (_query_first(query, "auth") or "").strip().lower()
+    if not value:
+        return None
+    if value not in _AUTH_MODES:
+        raise WebUISettingsError("auth must be either 'key' or 'password'")
+    return value
+
+
+def _parse_password(query: QueryParams) -> str | None:
+    """Password richiesta, o ``None`` per "tieni quella salvata".
+
+    Non viene ripulita ai bordi: in una password gli spazi sono contenuto, non
+    formattazione, e toglierli qui farebbe fallire l'autenticazione con un
+    messaggio che parla di altro. Solo un campo interamente vuoto — o di soli
+    spazi, che nessuno digita volendo — conta come "non compilato", perché è
+    ciò che manda la UI quando l'utente modifica un host senza toccare la
+    password: quella salvata non le è mai stata mostrata, quindi non può
+    rimandarla indietro.
+    """
+    value = _query_first(query, "password")
+    if value is None or not value.strip():
+        return None
+    return value
+
+
 def _parse_port_or_keep(value: str | None) -> int | None:
     """Porta richiesta, o ``None`` per "lascia quella che c'è".
 
@@ -163,7 +205,15 @@ def _fingerprint_from_known_hosts_line(line: str | None) -> str | None:
 
 
 def _host_payload(host: SshHostConfig) -> dict[str, Any]:
-    """Un host come lo vede la UI. Nessun campo deriva dalla chiave privata."""
+    """Un host come lo vede la UI.
+
+    Nessun campo deriva dalla chiave privata **né dalla password**: entrambe
+    sono ridotte a un booleano. Per la password non c'è nemmeno la versione
+    offuscata alla ``_mask_api_key`` di ``settings_api``: quel suggerimento
+    esiste perché una API key la si riconosce dal prefisso, mentre di una
+    password non c'è niente da riconoscere e quattro caratteri veri sarebbero
+    quattro caratteri regalati.
+    """
     return {
         "alias": host.alias,
         "host": host.host,
@@ -172,9 +222,14 @@ def _host_payload(host: SshHostConfig) -> dict[str, Any]:
         "description": host.description,
         "job_log_dir": host.job_log_dir,
         "host_key_fingerprint": host.host_key_fingerprint,
+        "auth": host.auth,
         # La privata resta un booleano: il suo contenuto non ha nessun motivo
         # di attraversare la WebView, e un campo che non c'è non si può perdere.
         "has_key": ssh_key_path(host.alias).exists(),
+        # Stessa regola, stesso motivo: la UI deve solo poter dire "password
+        # impostata" o "manca la password" per far vedere all'utente che l'host
+        # non è ancora usabile.
+        "has_password": bool(host.password),
         "public_key": _read_public_key(host.alias),
         "pinned": is_host_pinned(host.host, host.port),
     }
@@ -238,6 +293,12 @@ async def save_ssh_host(query: QueryParams) -> dict[str, Any]:
     connessione (``resolve_target``): questo controllo dice subito all'utente
     che l'indirizzo non è raggiungibile per policy, quello dopo copre il nome
     che comincia a risolvere a un indirizzo vietato più tardi.
+
+    ``auth`` sceglie fra chiave e password; assente vuol dire "come prima", che
+    per un host nuovo è ``key``. Un host a password senza password non viene
+    salvato: risulterebbe configurato in Settings e fallirebbe solo al primo
+    comando, cioè dentro un turno dell'agente, dove l'errore lo legge il modello
+    e non l'utente che potrebbe correggerlo.
     """
     alias = _parse_alias(query)
     host = _required(query, "host")
@@ -245,6 +306,8 @@ async def save_ssh_host(query: QueryParams) -> dict[str, Any]:
     requested_port = _parse_port_or_keep(_query_first(query, "port"))
     description = (_query_first(query, "description") or "").strip()
     job_log_dir = (_query_first(query, "job_log_dir") or "").strip()
+    requested_auth = _parse_auth_or_keep(query)
+    password = _parse_password(query)
 
     # DNS: I/O lento, quindi fuori dal lock di ``mutate`` per definizione.
     ok, error = await asyncio.to_thread(validate_ssh_target, host)
@@ -259,6 +322,11 @@ async def save_ssh_host(query: QueryParams) -> dict[str, Any]:
     def _apply(config: Config) -> None:
         current = next((h for h in config.tools.ssh.hosts if h.alias == alias), None)
         if current is None:
+            auth = requested_auth or "key"
+            if auth == "password" and password is None:
+                raise WebUISettingsError(
+                    "a password is required to save a host with password authentication"
+                )
             config.tools.ssh.hosts.append(
                 SshHostConfig(
                     alias=alias,
@@ -267,6 +335,11 @@ async def save_ssh_host(query: QueryParams) -> dict[str, Any]:
                     username=username,
                     description=description,
                     job_log_dir=job_log_dir or "/tmp/jenny-jobs",
+                    auth=auth,
+                    # Su un host a chiave la password resta ``None``: una
+                    # credenziale che nessuno legge non ha motivo di stare nel
+                    # file, e nel file ci starebbe in chiaro.
+                    password=password if auth == "password" else None,
                 )
             )
             return
@@ -278,6 +351,24 @@ async def save_ssh_host(query: QueryParams) -> dict[str, Any]:
         if current.host != host or current.port != port:
             moved_from.append((current.host, current.port))
             current.host_key_fingerprint = None
+        auth = requested_auth or current.auth
+        if auth == "password":
+            # Campo vuoto in modifica = "tieni quella salvata": la UI non l'ha
+            # mai ricevuta, quindi non può rimandarla. Vuoto *e* senza niente
+            # salvato è invece l'host mezzo configurato che questo endpoint
+            # rifiuta di creare.
+            if password is None and not current.password:
+                raise WebUISettingsError(
+                    "a password is required to save a host with password authentication"
+                )
+            if password is not None:
+                current.password = password
+        else:
+            # Tornare alla chiave butta via la password. Tenerla "per comodità"
+            # lascerebbe nel file una credenziale che niente usa più e che
+            # l'utente crede di aver rimosso passando alla chiave.
+            current.password = None
+        current.auth = auth
         current.host = host
         current.port = port
         current.username = username

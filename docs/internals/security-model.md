@@ -82,7 +82,11 @@ SSH is the only capability that acts outside the phone, so the four-level stack 
 
 **2. Host keys are pinned, with no trust-on-first-use.** A connection to a host whose key has not been accepted by a human is refused outright, and the error tells the model to ask the user rather than retry. The enforcement is the `known_hosts` file next to the private key — the fingerprint stored in `config.json` is for display only. A registered host presenting a *different* key raises rather than overwriting: it is a possible man-in-the-middle, and the only acceptable response is a person looking at both fingerprints and deciding, which is a second explicit confirmation in the UI.
 
-**3. The private key is unreachable from the agent.** It is generated on-device (ed25519, one pair per alias), the private half is never returned by any API — the settings payload carries a boolean, not the key — and it lives outside the workspace, so no file tool and no `python_exec` file helper can read it. Nothing in the tool layer needs the key material; the backend opens the file by a path derived from the alias, never from a configurable field.
+This gate is unconditional in both authentication modes, and password authentication is the case that needs it most. A key presented to an impostor costs a signature the impostor cannot reuse; a password presented to an impostor *is* the credential. The pinned fingerprint is what decides which machine receives it, so the settings UI states that in the acceptance dialog itself rather than leaving it to the docs.
+
+**3. The credential is unreachable from the agent — completely for a key, partially for a password.** The key is generated on-device (ed25519, one pair per alias), the private half is never returned by any API — the settings payload carries a boolean, not the key — and it lives outside the workspace, so no file tool and no `python_exec` file helper can read it. Nothing in the tool layer needs the key material; the backend opens the file by a path derived from the alias, never from a configurable field.
+
+A password gets the same treatment at every layer the tools touch — never in a tool argument, never in a tool result, never in a settings payload (a `has_password` boolean stands in for it, and there is no masked-hint variant of the kind `_mask_api_key` produces for provider keys, because four real characters of a password are four characters given away), kept out of `repr()` so it can't fall into a log line, and named `password` on the wire so `redact_query_secrets` masks it in the request-path log. What it does **not** get is the fourth layer: it is stored in clear text in `config.json`, which sits *inside* the workspace and which the agent's file tools can already read — the same exposure as `telegram.botToken` and the provider API keys. That is the whole reason the SSH private key was put outside the workspace in the first place, so the honest statement is that password authentication trades this specific protection for convenience. `auth` defaults to `"key"`, and Settings refuses to save a password host with an empty password rather than leaving a half-configured host that only fails mid-turn.
 
 **4. The capability is compartmentalized.** The four SSH tools live in a tool scope of their own (`remote`) that no agent loads by default. The main agent — the one you talk to — has no SSH at all: it delegates to a **`sysadmin` subagent**, the only type that requests that scope, and that type has neither the web tools nor `download_file` nor `python_exec`. This is the same rule the researcher/coder split follows, applied to a shorter and worse chain: whoever reads untrusted pages must not be whoever holds a shell on a production machine. Keeping the SSH tools out of the `subagent` scope is what stops the catch-all `operator` type — defined as "everything in that scope" — from inheriting a remote shell by accident.
 
@@ -99,7 +103,7 @@ Two things this does **not** protect against, stated plainly: a command the agen
 - Send and receive messages over Telegram, if you've paired a bot.
 - Run Python code in-process (unless you disable `python_exec`).
 - Spawn subagents and run long-running background tasks.
-- Run commands on a remote machine over SSH — but only on an alias you registered, only once you have accepted its host key, only through a `sysadmin` subagent, and only if you enabled `tools.ssh` (off by default).
+- Run commands on a remote machine over SSH — but only on an alias you registered, only once you have accepted its host key (in both authentication modes), only through a `sysadmin` subagent, and only if you enabled `tools.ssh` (off by default).
 
 **Cannot:**
 - Read or write any other app's data — the Android sandbox stops this regardless of any Jenny-level toggle.
@@ -107,7 +111,7 @@ Two things this does **not** protect against, stated plainly: a command the agen
 - Reach private/loopback/link-local network addresses with its web tools, unless you've added them to `security.ssrfWhitelist`.
 - Meaningfully resist a compromised or adversarial model once inside `python_exec` — that boundary is the Android sandbox, not Jenny's own guardrails.
 - Escape the workspace boundary through file tools when `security.restrictToWorkspace` is `true` — the fail-closed policy rejects paths outside it rather than silently widening scope.
-- SSH to a machine you didn't register, accept a host key on your behalf, or read its own SSH private key — the alias is the only target it can name, and the key lives outside every path its tools can resolve.
+- SSH to a machine you didn't register, accept a host key on your behalf, or read its own SSH private key — the alias is the only target it can name, and the key lives outside every path its tools can resolve. (A host configured with `auth: "password"` is the one gap: the password is in `config.json`, inside the workspace, so the file tools can read it just as they can read the Telegram token and the API keys.)
 
 ## Signed media URLs
 

@@ -33,6 +33,7 @@ from jenny.agent.tools.ssh_backends.base import (
 from jenny.agent.tools.ssh_backends.dev import DevSshBackend, _known_hosts_entry
 
 TEST_USER = "jenny"
+TEST_PASSWORD = "s3gr3t0-di-prova"
 
 
 async def _handle_process(process: asyncssh.SSHServerProcess) -> None:
@@ -121,6 +122,77 @@ async def ssh_env(tmp_path: Path):
         await server.wait_closed()
 
 
+class _PasswordServer(asyncssh.SSHServer):
+    """Server che accetta SOLO la password, come quelli su cui l'utente entra.
+
+    ``begin_auth`` che ritorna ``True`` significa "l'autenticazione serve":
+    ritornare ``False`` aprirebbe a chiunque e i test sulla password sbagliata
+    passerebbero senza provare nulla.
+    """
+
+    def begin_auth(self, username: str) -> bool:
+        return True
+
+    def password_auth_supported(self) -> bool:
+        return True
+
+    def validate_password(self, username: str, password: str) -> bool:
+        return username == TEST_USER and password == TEST_PASSWORD
+
+
+@asynccontextmanager
+async def password_ssh_env(tmp_path: Path):
+    """Come ``ssh_env``, ma il server vuole la password e nessuna chiave esiste.
+
+    Il ``key_path`` del target punta apposta a un file che NON c'è: è la
+    situazione reale di un host a password, e serve a verificare che il backend
+    non provi comunque ad aprirlo.
+    """
+    host_key = asyncssh.generate_private_key("ssh-ed25519")
+    host_key_path = tmp_path / "pw_host_key"
+    host_key.write_private_key(str(host_key_path))
+
+    server = await asyncssh.listen(
+        "127.0.0.1",
+        0,
+        server_host_keys=[str(host_key_path)],
+        server_factory=_PasswordServer,
+        process_factory=_handle_process,
+        sftp_factory=True,
+    )
+    port = server.sockets[0].getsockname()[1]
+
+    host_key_line = " ".join(host_key.export_public_key("openssh").decode().split()[:2])
+    known_hosts = tmp_path / "pw_known_hosts"
+    known_hosts.write_text(f"[127.0.0.1]:{port} {host_key_line}\n")
+
+    backend = DevSshBackend()
+    target = SshTarget(
+        host="127.0.0.1",
+        port=port,
+        username=TEST_USER,
+        key_path=tmp_path / "there_is_no_key_here",
+        known_hosts_path=known_hosts,
+        password=TEST_PASSWORD,
+        connect_timeout_s=5.0,
+        keepalive_interval_s=0,
+    )
+    try:
+        yield _Env(
+            backend=backend,
+            target=target,
+            port=port,
+            key_path=target.key_path,
+            known_hosts=known_hosts,
+            host_key_line=host_key_line,
+            tmp=tmp_path,
+        )
+    finally:
+        await backend.close_all()
+        server.close()
+        await server.wait_closed()
+
+
 # -- esecuzione comandi ------------------------------------------------------
 
 async def test_exec_returns_stdout_and_zero_exit(tmp_path):
@@ -182,6 +254,75 @@ async def test_unknown_host_key_is_refused(tmp_path):
         )
         with pytest.raises(SshHostKeyError):
             await env.backend.exec(blind, "echo ciao", timeout_s=5, max_output_chars=1000)
+
+
+async def test_password_auth_runs_a_command(tmp_path):
+    """Il caso vero: nessuna chiave da nessuna parte, solo la password."""
+    async with password_ssh_env(tmp_path) as env:
+        result = await env.backend.exec(
+            env.target, "echo ciao", timeout_s=5, max_output_chars=1000
+        )
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "ciao"
+
+
+async def test_password_auth_does_not_open_the_key_file(tmp_path):
+    """``client_keys=[]``: publickey non va nemmeno tentato, e il file non esiste."""
+    async with password_ssh_env(tmp_path) as env:
+        assert not env.key_path.exists()
+        await env.backend.exec(env.target, "echo ok", timeout_s=5, max_output_chars=100)
+
+
+async def test_wrong_password_is_rejected(tmp_path):
+    async with password_ssh_env(tmp_path) as env:
+        bad = SshTarget(
+            host="127.0.0.1",
+            port=env.port,
+            username=TEST_USER,
+            key_path=env.key_path,
+            known_hosts_path=env.known_hosts,
+            password="non e questa",
+            connect_timeout_s=5.0,
+        )
+        with pytest.raises(SshAuthError) as excinfo:
+            await env.backend.exec(bad, "echo ciao", timeout_s=5, max_output_chars=1000)
+    # L'errore risale fino al risultato di un tool, cioe nel contesto del
+    # modello: la credenziale tentata non deve comparirci.
+    assert "non e questa" not in str(excinfo.value)
+
+
+async def test_unknown_host_key_is_refused_with_password_auth_too(tmp_path):
+    """Nessuna scorciatoia al pinning quando c'e una password — anzi, il contrario.
+
+    Senza impronta verificata la password verrebbe consegnata a chiunque
+    risponda a quell'indirizzo, e da li e riusabile ovunque l'utente l'abbia
+    riciclata. Il rifiuto deve arrivare PRIMA dell'autenticazione.
+    """
+    async with password_ssh_env(tmp_path) as env:
+        empty = tmp_path / "empty_known_hosts_pw"
+        empty.write_text("")
+        blind = SshTarget(
+            host="127.0.0.1",
+            port=env.port,
+            username=TEST_USER,
+            key_path=env.key_path,
+            known_hosts_path=empty,
+            password=TEST_PASSWORD,
+            connect_timeout_s=5.0,
+        )
+        with pytest.raises(SshHostKeyError):
+            await env.backend.exec(blind, "echo ciao", timeout_s=5, max_output_chars=1000)
+
+
+async def test_password_auth_transfers_files(tmp_path):
+    """SFTP passa dalla stessa sessione: se l'auth e a password deve valere anche li."""
+    async with password_ssh_env(tmp_path) as env:
+        source = tmp_path / "up_pw.txt"
+        source.write_text("contenuto")
+        remote = str(tmp_path / "remote_pw.txt")
+
+        assert await env.backend.put(env.target, source, remote) == source.stat().st_size
+        assert Path(remote).read_text() == "contenuto"
 
 
 async def test_wrong_client_key_is_rejected(tmp_path):
@@ -311,6 +452,50 @@ def test_pool_key_changes_with_connection_params(tmp_path):
     )
     assert base.pool_key != other_port.pool_key
     assert base.pool_key != other_user.pool_key
+
+
+def test_pool_key_changes_between_key_and_password_auth(tmp_path):
+    """Passare da chiave a password deve invalidare la sessione, non riusarla.
+
+    Riusare quella aperta significherebbe continuare a parlare col server con le
+    credenziali vecchie: l'utente ha cambiato il modo di autenticarsi proprio
+    perche quelle non vanno piu bene.
+    """
+    with_key = SshTarget(
+        host="example.com",
+        port=22,
+        username="jenny",
+        key_path=tmp_path / "id",
+        known_hosts_path=tmp_path / "known_hosts",
+    )
+    with_password = SshTarget(
+        host=with_key.host,
+        port=with_key.port,
+        username=with_key.username,
+        key_path=with_key.key_path,
+        known_hosts_path=with_key.known_hosts_path,
+        password="hunter2",
+    )
+    assert with_key.pool_key != with_password.pool_key
+    assert with_key.auth_mode == "key"
+    assert with_password.auth_mode == "password"
+
+
+def test_password_is_not_in_the_pool_key_nor_in_the_repr(tmp_path):
+    """La chiave del pool viene loggata e spedita a Kotlin; il repr finisce ovunque."""
+    target = SshTarget(
+        host="example.com",
+        port=22,
+        username="jenny",
+        key_path=tmp_path / "id",
+        known_hosts_path=tmp_path / "known_hosts",
+        password="s3gr3t0",
+    )
+    assert "s3gr3t0" not in target.pool_key
+    assert "s3gr3t0" not in repr(target)
+    assert "s3gr3t0" not in str(target)
+    # Il resto del target deve restare leggibile, o il repr non diagnostica piu.
+    assert "example.com" in repr(target)
 
 
 # -- chiusura per inattivita -------------------------------------------------

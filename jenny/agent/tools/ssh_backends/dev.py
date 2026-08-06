@@ -74,12 +74,23 @@ class DevSshBackend:
 
     async def _connect(self, target: SshTarget) -> Any:
         asyncssh = _load_asyncssh()
+        password = target.password
         try:
             return await asyncssh.connect(
                 target.host,
                 port=target.port,
                 username=target.username,
-                client_keys=[str(target.key_path)],
+                # Con una password ``client_keys=[]`` NON è ridondante: la lista
+                # di default fa cercare a asyncssh ``~/.ssh/id_*`` e tentare
+                # publickey per primo, e su un server con ``MaxAuthTries`` basso
+                # quei tentativi possono bruciare i turni prima che si arrivi
+                # alla password. La lista vuota disattiva del tutto publickey.
+                client_keys=[] if password is not None else [str(target.key_path)],
+                password=password,
+                # ``known_hosts`` è passato in ENTRAMBI i modi, e con la password
+                # conta di più: senza impronta verificata la password verrebbe
+                # consegnata a chiunque risponda a quell'indirizzo. Una chiave
+                # rubata da un MITM non è comunque riusabile, una password sì.
                 known_hosts=str(target.known_hosts_path),
                 connect_timeout=target.connect_timeout_s,
                 keepalive_interval=target.keepalive_interval_s,

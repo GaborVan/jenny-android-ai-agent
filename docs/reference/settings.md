@@ -107,20 +107,23 @@ Its own section between Tools and Telegram, holding the two decisions that canno
 | **Add host** → Alias | The only name the agent ever uses for this machine, and also the name of its key file. 1–32 chars, `A–Z a–z 0–9 - _`, must start alphanumeric. **Cannot be changed later** — there is no rename. | — |
 | **Add host** → Host / Port / User | Address, port and login account. | port 22 |
 | **Add host** → Description | Free text, shown **to the model** so it can pick between machines ("the home NAS"). Not decoration. | empty |
-| **Generate key** / **Regenerate key** | Creates an ed25519 pair *for that alias* on the device and shows the public line to paste into `~/.ssh/authorized_keys`. Regenerating asks for confirmation, because it revokes the access already installed on the server. | no key |
+| **Add host** → Authentication | `ed25519 key` or `Password` (`auth`). Existing hosts stay on key — the default did not change under them. | **ed25519 key** |
+| **Add host** → Password | Only shown with `Password` selected. Required: saving a password host with an empty password is refused, not accepted quietly, so you can't end up with a host that looks configured and fails on the first command. Blank when editing (the saved password is never sent back to the screen) and blank means "keep the saved one". Switching the host back to key **deletes** the stored password. | none |
+| **Generate key** / **Regenerate key** | Creates an ed25519 pair *for that alias* on the device and shows the public line to paste into `~/.ssh/authorized_keys`. Regenerating asks for confirmation, because it revokes the access already installed on the server. Hidden on a password host, along with the public-key block — there is nothing to install there. | no key |
 | **Verify fingerprint** → **Accept** | Reads the key the host presents (without authenticating), shows its SHA256 fingerprint, and pins it on acceptance. | not verified |
 | **Delete host** | Removes the host **and** its private key, its public key and its accepted fingerprint. | — |
 
-Every host card shows two status badges — key present or missing, fingerprint verified or not — and both have to be green before the agent can connect.
+Every host card shows two status badges — the credential (key present/missing, or password set/missing) and the fingerprint (verified or not) — and both have to be green before the agent can connect.
 
-Four behaviors worth knowing before you use this screen:
+Five behaviors worth knowing before you use this screen:
 
 - **Enabling is not symmetric with disabling.** Switching SSH *off* applies immediately, even to a subagent already working on a server — that is the emergency stop. Switching it *on*, or adding your first host, needs an **app restart** before the agent actually has the tools, because they are built at startup. Adding a second host to an install that already worked is live, no restart.
 - **There is no trust-on-first-use.** Until you have accepted a fingerprint, every SSH call for that alias fails and tells the agent to ask you. A fingerprint reading older than 10 minutes is refused and has to be taken again.
+- **Pinning is required in both authentication modes, and matters more with a password.** With a key, an unverified host gets a signature it can't reuse; with a password, it gets your password. The fingerprint dialog says so explicitly on a password host. There is no way to skip the step in either mode.
 - **A changed host key is treated as an attack, not an update.** If a host presents a key different from the one you accepted, Jenny shows both fingerprints side by side and requires a second explicit confirmation to replace it.
 - **Editing the address or port of an existing host clears its verified fingerprint** (and forgets the `known_hosts` line), because a verification of the old address says nothing about the new one. You have to verify again.
 
-The private key and the `known_hosts` file live **outside** the workspace, so they are not in snapshots and not in an encrypted backup: after a restore you have to generate new keys and reinstall them on each server. One field has no UI at all — the per-host `jobLogDir` (default `/tmp/jenny-jobs`), which is `config.json`-only. Full walkthrough: [SSH access](../using/ssh.md).
+The private key and the `known_hosts` file live **outside** the workspace, so they are not in snapshots and not in an encrypted backup: after a restore you have to generate new keys and reinstall them on each server. A **password** does not get that treatment — it is stored in `config.json` like the Telegram token and the API keys, unencrypted at rest, inside the workspace and therefore inside backups. That's the trade: more convenient, weaker, and a dedicated key can be revoked without touching the password you log in with yourself. One field has no UI at all — the per-host `jobLogDir` (default `/tmp/jenny-jobs`), which is `config.json`-only. Full walkthrough: [SSH access](../using/ssh.md).
 
 ## Telegram
 

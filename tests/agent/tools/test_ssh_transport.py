@@ -17,6 +17,7 @@ from jenny.agent.tools.ssh_transport import (
     SshHostBlockedError,
     SshHostUnknownError,
     SshKeyMissingError,
+    SshPasswordMissingError,
     configured_hosts,
     forget_host,
     is_host_pinned,
@@ -103,6 +104,75 @@ def test_missing_private_key_is_reported_as_such(ssh_home):
     record_host_key(f"example.com {KEY_LINE}")
     with pytest.raises(SshKeyMissingError, match="generate one"):
         resolve_target("prod", config=config, validate=_allow_everything)
+
+
+def test_password_host_does_not_need_a_key_file(ssh_home):
+    """Con ``auth="password"`` la chiave non c'entra: pretenderla bloccava tutto."""
+    config = _config(_host(auth="password", password="hunter2"))
+    record_host_key(f"example.com {KEY_LINE}")
+
+    _host_cfg, target = resolve_target("prod", config=config, validate=_allow_everything)
+
+    assert not ssh_key_path("prod").exists()
+    assert target.password == "hunter2"
+    assert target.auth_mode == "password"
+
+
+def test_password_host_without_a_password_says_where_to_set_it(ssh_home):
+    config = _config(_host(auth="password"))
+    record_host_key(f"example.com {KEY_LINE}")
+    with pytest.raises(SshPasswordMissingError, match="Settings > SSH"):
+        resolve_target("prod", config=config, validate=_allow_everything)
+
+
+def test_empty_password_counts_as_not_set(ssh_home):
+    """Una password vuota non e una credenziale: va detto all'utente, non al server."""
+    config = _config(_host(auth="password", password=""))
+    record_host_key(f"example.com {KEY_LINE}")
+    with pytest.raises(SshPasswordMissingError):
+        resolve_target("prod", config=config, validate=_allow_everything)
+
+
+def test_missing_password_is_caught_as_a_missing_credential():
+    """``ssh.py::_describe`` distingue per tipo: la categoria deve essere quella."""
+    assert issubclass(SshPasswordMissingError, SshKeyMissingError)
+
+
+def test_unpinned_password_host_is_refused_before_any_connection(ssh_home):
+    """Il pinning non ha scorciatoie per la password: li conta DI PIU.
+
+    Una chiave privata non lascia il telefono nemmeno parlando con l'host
+    sbagliato; una password verrebbe consegnata in chiaro a chi risponde.
+    """
+    config = _config(_host(auth="password", password="hunter2"))
+    with pytest.raises(SshHostKeyError, match="not been accepted"):
+        resolve_target("prod", config=config, validate=_allow_everything)
+
+
+def test_key_host_ignores_a_leftover_password(ssh_home):
+    """Tornare a ``auth="key"`` deve smettere di usare la password, non tenerla."""
+    config = _config(_host(auth="key", password="hunter2"))
+    record_host_key(f"example.com {KEY_LINE}")
+    ssh_key_path("prod").write_text("fake private key")
+
+    _host_cfg, target = resolve_target("prod", config=config, validate=_allow_everything)
+
+    assert target.password is None
+    assert target.auth_mode == "key"
+
+
+def test_password_never_reaches_the_target_repr(ssh_home):
+    """Il target finisce nei log di debug: la password non deve seguirlo."""
+    config = _config(_host(auth="password", password="s3gr3t0"))
+    record_host_key(f"example.com {KEY_LINE}")
+
+    _host_cfg, target = resolve_target("prod", config=config, validate=_allow_everything)
+
+    assert "s3gr3t0" not in repr(target)
+    assert "s3gr3t0" not in str(target)
+    # E nemmeno dalla chiave del pool, che viene loggata dal potatore e spedita
+    # a Kotlin dentro il payload.
+    assert "s3gr3t0" not in target.pool_key
 
 
 def test_resolved_target_carries_config_values(ssh_home):

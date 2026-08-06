@@ -126,6 +126,49 @@ async def test_exec_passes_connection_and_command_params(bridge, tmp_path):
     }
 
 
+async def test_password_travels_only_when_there_is_one(bridge, tmp_path):
+    """Assente = chiave OMESSA, non ``null``.
+
+    ``JSONObject.optString`` di org.json su un null restituisce la stringa
+    ``"null"``: mandare ``{"password": null}`` significherebbe far tentare a jsch
+    l'autenticazione con la password letterale "null".
+    """
+    bridge.responses["exec"] = {"exitCode": 0, "stdout": "", "stderr": ""}
+    backend = AndroidSshBackend()
+
+    await backend.exec(_target(tmp_path), "id", timeout_s=5, max_output_chars=100)
+    assert "password" not in bridge.payload_for("exec")
+
+    await backend.exec(
+        _target(tmp_path, password="hunter2"), "id", timeout_s=5, max_output_chars=100
+    )
+    with_password = [p for name, p in bridge.calls if name == "exec"][-1]
+    assert with_password["password"] == "hunter2"
+
+
+async def test_password_does_not_leak_into_the_pool_key(bridge, tmp_path):
+    """La poolKey attraversa il confine e finisce nei log di Kotlin."""
+    bridge.responses["exec"] = {"exitCode": 0, "stdout": "", "stderr": ""}
+    await AndroidSshBackend().exec(
+        _target(tmp_path, password="hunter2"), "id", timeout_s=5, max_output_chars=100
+    )
+    assert "hunter2" not in bridge.payload_for("exec")["poolKey"]
+
+
+async def test_auth_mode_change_forces_a_new_kotlin_session(bridge, tmp_path):
+    """Il pool vive in Kotlin: se la chiave non cambia, riusa le credenziali vecchie."""
+    bridge.responses["exec"] = {"exitCode": 0, "stdout": "", "stderr": ""}
+    backend = AndroidSshBackend()
+
+    await backend.exec(_target(tmp_path), "id", timeout_s=5, max_output_chars=100)
+    await backend.exec(
+        _target(tmp_path, password="hunter2"), "id", timeout_s=5, max_output_chars=100
+    )
+
+    keys = [payload["poolKey"] for name, payload in bridge.calls if name == "exec"]
+    assert keys[0] != keys[1]
+
+
 async def test_pool_key_travels_so_kotlin_can_reconnect_on_param_change(bridge, tmp_path):
     """Cambiare porta cambia la chiave del pool: il pool vive in Kotlin, la chiave qui."""
     bridge.responses["exec"] = {"exitCode": 0, "stdout": "", "stderr": ""}

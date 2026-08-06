@@ -34,6 +34,55 @@ def test_host_defaults():
     # L'enforcement e known_hosts: qui l'impronta e solo per la UI, e parte vuota.
     assert host.host_key_fingerprint is None
     assert host.job_log_dir == "/tmp/jenny-jobs"
+    # La chiave resta il default: e il modo che non lascia un segreto
+    # riutilizzabile dentro config.json.
+    assert host.auth == "key"
+    assert host.password is None
+
+
+def test_password_host_round_trips():
+    host = SshHostConfig(
+        alias="nas", host="192.168.1.10", username="jenny", auth="password", password="hunter2"
+    )
+    assert host.auth == "password"
+    # La password deve restare in model_dump: e cosi che finisce in config.json.
+    assert host.model_dump()["password"] == "hunter2"
+
+
+@pytest.mark.parametrize("auth", ["", "totp", "keyboard-interactive", "KEY"])
+def test_unknown_auth_mode_is_rejected(auth: str):
+    """Un modo sconosciuto deve fallire subito, non silenziosamente cadere su key."""
+    with pytest.raises(Exception):
+        SshHostConfig(alias="x", host="h", username="u", auth=auth)
+
+
+def test_password_never_appears_in_the_repr():
+    """``repr=False`` non e cosmetico: e come i segreti restano fuori dai log.
+
+    Un ``repr`` di un oggetto di config finisce in una riga di log o in un
+    messaggio d'errore senza che nessuno lo decida esplicitamente. Il resto dei
+    campi deve invece restare visibile, o il repr non serve piu a diagnosticare.
+    """
+    host = SshHostConfig(
+        alias="nas", host="h", username="u", auth="password", password="s3gr3t0"
+    )
+    text = repr(host)
+    assert "s3gr3t0" not in text
+    # Il campo intero sparisce, non solo il valore ("auth='password'" resta,
+    # ed e giusto: e il modo, non il segreto).
+    assert "password=" not in text
+    assert "nas" in text and "auth='password'" in text
+
+
+def test_password_never_appears_in_the_repr_of_the_whole_config():
+    """Anche annidata: si logga ``config``, non ``config.tools.ssh.hosts[0]``."""
+    config = Config()
+    config.tools.ssh.hosts = [
+        SshHostConfig(
+            alias="nas", host="h", username="u", auth="password", password="s3gr3t0"
+        )
+    ]
+    assert "s3gr3t0" not in repr(config)
 
 
 def test_wired_into_tools_config():
@@ -60,6 +109,8 @@ def test_camel_case_aliases_load():
                     "username": "jenny",
                     "hostKeyFingerprint": "SHA256:abc",
                     "jobLogDir": "/var/tmp/jobs",
+                    "auth": "password",
+                    "password": "hunter2",
                 }
             ],
         }
@@ -74,6 +125,8 @@ def test_camel_case_aliases_load():
     assert host.alias == "nas"
     assert host.host_key_fingerprint == "SHA256:abc"
     assert host.job_log_dir == "/var/tmp/jobs"
+    assert host.auth == "password"
+    assert host.password == "hunter2"
 
 
 @pytest.mark.parametrize(
