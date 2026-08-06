@@ -166,6 +166,21 @@ class _SshToolMixin:
         return bool(ssh is not None and ssh.enable and ssh.hosts)
 
     @classmethod
+    def disabled_reason(cls, ctx: Any) -> str | None:
+        """Quale dei due gate e giu — il toggle o l'elenco host.
+
+        I due casi si rimediano in due punti diversi della stessa schermata, e
+        confonderli costa all'utente un giro a vuoto. Il subagent ``sysadmin``
+        rifiutato mostra questa frase al posto di "il tool non era disponibile".
+        """
+        ssh = getattr(getattr(ctx, "config", None), "ssh", None)
+        if ssh is None or not ssh.enable:
+            return "SSH access is off (Settings > SSH)"
+        if not ssh.hosts:
+            return "no SSH host is registered (Settings > SSH > Add host)"
+        return None
+
+    @classmethod
     def create(cls, ctx: Any) -> Any:
         return cls()
 

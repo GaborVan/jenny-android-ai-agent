@@ -117,6 +117,8 @@ Legacy aliases `max_matches` (content mode) and `max_results` (other modes) stil
 
 Gotcha: if you're used to shell `grep`, the file-names-only default is the biggest surprise here — say explicitly that you want matching lines.
 
+**In orchestrator mode the main agent gets a reduced `grep`: an index.** `output_mode` offers only `files_with_matches` and `count`, results are capped at 60 files, and asking for `content` anyway returns the paths with a note pointing at `read_file`. The reason is the same one behind the whole orchestrator split: everything the main agent produces stays in the conversation permanently, while a subagent's tool output does not — so knowing *where* something is stays cheap, and reading it there would not. Subagents and `core` mode keep the full tool.
+
 Config: `tools.file.enable` (default `true`).
 
 ---
@@ -357,6 +359,8 @@ Starts a subagent to work a task in the background and reports the result back i
 | `operator` | the whole `subagent` scope | Default, and the fallback for what fits none of the above. |
 
 `sysadmin` is also the only type that loads a second scope (`subagent` + `remote`). The SSH tools are kept out of the `subagent` scope precisely so that `operator` — which means "everything in that scope" — cannot inherit a remote shell by accident; granting them takes naming their scope explicitly.
+
+**A type can also declare tools it cannot work without.** `sysadmin` requires the four SSH tools, `researcher` requires the two web ones. If *every* required tool is unavailable **and** something can say why in terms you can act on — SSH switched off, no host registered, web access off — the spawn is refused with that sentence instead of starting an agent that would improvise. When the cause is the runtime rather than a setting (the web tools off Android, where no switch would help), the spawn proceeds and the loss is only logged. Partial loss is never a refusal.
 
 The researcher/writer and researcher/coder splits are a security boundary, not a preference: whoever read untrusted web content is not the one who then runs code. An unknown `agent_type` is rejected with the list of valid ones; a persisted record carrying a type that no longer exists degrades to `operator` so its work stays relaunchable.
 

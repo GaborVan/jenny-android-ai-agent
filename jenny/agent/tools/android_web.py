@@ -353,6 +353,21 @@ class AndroidWebSearchTool(Tool):
         )
 
     @classmethod
+    def disabled_reason(cls, ctx: Any) -> str | None:
+        """Solo il caso che un umano puo rimediare: l'interruttore.
+
+        Fuori da Android questi tool sono assenti per mancanza di runtime, non
+        per una scelta: dire "accendili nelle impostazioni" sarebbe un consiglio
+        impossibile da seguire, quindi qui si tace e restano i log.
+        """
+        if not ctx.android_context:
+            return None
+        web = getattr(ctx.config, "android_web", None)
+        if web is not None and not web.enable:
+            return "web access is off (Settings > Tools > Web Search)"
+        return None
+
+    @classmethod
     def create(cls, ctx: Any) -> Tool:
         return cls(
             android_context=ctx.android_context,
@@ -445,6 +460,21 @@ class AndroidWebFetchTool(Tool):
             and getattr(ctx.config, "android_web", None) is not None
             and ctx.config.android_web.enable
         )
+
+    @classmethod
+    def disabled_reason(cls, ctx: Any) -> str | None:
+        """Solo il caso che un umano puo rimediare: l'interruttore.
+
+        Fuori da Android questi tool sono assenti per mancanza di runtime, non
+        per una scelta: dire "accendili nelle impostazioni" sarebbe un consiglio
+        impossibile da seguire, quindi qui si tace e restano i log.
+        """
+        if not ctx.android_context:
+            return None
+        web = getattr(ctx.config, "android_web", None)
+        if web is not None and not web.enable:
+            return "web access is off (Settings > Tools > Web Search)"
+        return None
 
     @classmethod
     def create(cls, ctx: Any) -> Tool:

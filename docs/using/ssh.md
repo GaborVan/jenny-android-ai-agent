@@ -98,6 +98,8 @@ Jenny hands the job to a `sysadmin` subagent, and while that agent works you can
 
 Ask which machine it worked on if you have more than one — the agent is instructed to name the alias in what it reports back, but the habit is worth checking.
 
+If SSH is switched off, or no host is registered yet, Jenny does not start the subagent at all: she tells you which of the two it is and where to fix it. A `sysadmin` without SSH would only improvise, and the useful answer is one sentence, not one round trip. Turning SSH on, or adding a host, takes effect on the next job — no restart.
+
 ## Short commands vs long jobs
 
 This is the distinction that matters most in practice, and Jenny makes it for you — but knowing it explains what you'll see.

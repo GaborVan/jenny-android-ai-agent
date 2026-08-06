@@ -122,7 +122,10 @@ class SpawnTool(Tool, ContextAware):
         """Spawn a subagent to execute the given task."""
         # Import locale: ``jenny.agent.subagent`` importa il ToolLoader, che
         # importa questo modulo. A livello di modulo l'import sarebbe circolare.
-        from jenny.agent.subagent import SubagentConcurrencyLimitError
+        from jenny.agent.subagent import (
+            SubagentCapabilityError,
+            SubagentConcurrencyLimitError,
+        )
 
         # L'invariante di concorrenza vive nel manager (dove sta lo stato); qui
         # si formatta soltanto il messaggio per il modello.
@@ -143,6 +146,15 @@ class SpawnTool(Tool, ContextAware):
             # Il modello inventa un tipo: l'errore torna come testo con l'elenco
             # dei validi, non come traceback.
             return f"Cannot spawn subagent: {e}"
+        except SubagentCapabilityError as e:
+            # Il tipo esiste ma la sua capacita e spenta. Va detto all'utente,
+            # non aggirato: rilanciare su un altro tipo gli darebbe un risultato
+            # inventato al posto di un interruttore da alzare.
+            return (
+                f"Cannot spawn a '{e.agent_type}' subagent: {e.reason}. "
+                f"Without {', '.join(e.tools)} this agent type cannot do the job. "
+                "Tell the user what to turn on — do not retry with another agent type."
+            )
         except SubagentConcurrencyLimitError as e:
             hint = (
                 "One slot is kept free for short tasks."

@@ -50,6 +50,14 @@ class AgentType:
     ``None`` vale quello del manager, e un valore esplicito passato allo spawn
     vince sempre su quello del tipo.
 
+    ``requires`` sono i tool senza i quali il tipo non ha piu senso: se
+    *nessuno* di questi e disponibile, lo spawn viene rifiutato invece di far
+    partire un agente che improvvisera (vedi
+    ``SubagentManager._check_capabilities``). Non e un secondo filtro — quel che
+    il tipo puo vedere resta ``tools`` — ed e volutamente un sottoinsieme di
+    ``tools``: non si puo pretendere cio che non si e nemmeno chiesto.
+    ``None`` significa "nessun tool e indispensabile".
+
     ``scopes`` sono gli scope di ``Tool._scopes`` da cui il tipo puo pescare.
     Quasi tutti si accontentano del solo ``subagent``; un tipo che ne elenca di
     piu li carica tutti (vedi ``SubagentManager._build_tools``). Serve perche
@@ -64,6 +72,7 @@ class AgentType:
     max_iterations: int | None = None
     model: str | None = None
     scopes: tuple[str, ...] = ("subagent",)
+    requires: frozenset[str] | None = None
 
     @property
     def prompt_template(self) -> str:
@@ -84,6 +93,7 @@ _AGENT_TYPES: tuple[AgentType, ...] = (
         tools=frozenset(("web_search", "web_fetch", *_FS_READ, "write_file")),
         temperature=0.2,
         max_iterations=60,
+        requires=frozenset(("web_search", "web_fetch")),
     ),
     # Sintesi/wiki/docs da materiale gia raccolto: nessuna rete, ne diretta
     # (web_*) ne indiretta (download_file, python_exec). Chi scrive il
@@ -149,6 +159,7 @@ _AGENT_TYPES: tuple[AgentType, ...] = (
         temperature=0.0,
         max_iterations=60,
         scopes=("subagent", "remote"),
+        requires=frozenset(("ssh_hosts", "ssh_exec", "ssh_job", "ssh_transfer")),
     ),
     # Fallback per cio che non rientra negli altri: l'intero scope ``subagent``,
     # cioe esattamente il subagent generico che esisteva prima dei tipi. Resta
