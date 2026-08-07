@@ -163,7 +163,7 @@ Atlas has its own block, `agents.defaults.atlas`, with the same shape plus a siz
     "defaults": {
       "atlas": {
         "enabled": true,
-        "intervalH": 12,
+        "intervalH": 6,
         "maxContextTokens": 1200
       }
     }
@@ -174,7 +174,7 @@ Atlas has its own block, `agents.defaults.atlas`, with the same shape plus a siz
 | Field | Meaning | Default |
 |-------|---------|---------|
 | `enabled` | Whether the periodic Atlas job is registered. Leaving it on costs nothing if you have no wikis — the job exits before calling the model. | `true` |
-| `intervalH` | How often Atlas checks whether the wiki changed, in hours. | `12` |
+| `intervalH` | How often Atlas checks whether the wiki changed, in hours. | `6` |
 | `maxContextTokens` | Hard cap on the directory block injected into every prompt. A longer `WIKI.md` is truncated at injection time. | `1200` |
 
 Which wiki supplies the entity list follows `wiki.defaultWiki` (default `main`); the wiki *list* always covers every wiki under `wiki.wikisDir`.
@@ -185,7 +185,7 @@ None of this is exposed in the Settings UI today — Dream's interval and the co
 
 ## Gotchas worth knowing
 
-- **The 2-hour interval restarts from zero on every app restart.** Dream's schedule is an "every N hours" timer, not a wall-clock cron job — it does not remember how much time had already elapsed before the app (or its background service) was killed. On a phone that kills the app process often, Dream can end up running noticeably less often than "every 2 hours" would suggest.
+- **"Every 2 hours" is a floor, not a promise.** Since 0.6.0 the deadline survives an app restart and a run missed while the app was dead is caught up shortly after it comes back — before that, every restart pushed it out by another 2 hours. What restarts can't fix is Android's doze: even on a process that stays alive for hours, the gap between runs stretches. Expect Dream to run somewhat less often than the number suggests.
 - **Dream prunes, not just adds.** Expect Jenny's memory to occasionally lose detail on purpose — that's Dream doing its job, not corruption. The pre-Dream snapshot is there specifically so a bad prune is recoverable.
 - **`/dream` on a short or fresh chat will say there's nothing to process.** That's because Dream reads `memory/history.jsonl`, not the live chat — see above.
 - **Memory files are visible in the file browser by default, no Developer mode needed.** If you go looking for `MEMORY.md` in the Workspace tab and don't see it, the more likely explanation is that it's still an untouched template with no real content yet. Developer mode (Settings → System) only reveals dotfiles and runtime-internal folders like `agent/`, `cron/`, and `sessions/` — it doesn't gate the memory files.

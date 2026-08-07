@@ -86,9 +86,9 @@ Everything about how the agent talks to the model and manages its own context.
 | `agents.defaults.maxMessages` | int ≥ 0 | `120` | Upper bound on live messages kept in the session before consolidation kicks in. |
 | `agents.defaults.consolidationRatio` | float 0.1–0.95 | `0.5` | Fraction of the live context consolidated when a consolidation runs. |
 | `agents.defaults.dream.enabled` | bool | `true` | Registers the periodic Dream memory-consolidation job at startup. |
-| `agents.defaults.dream.intervalH` | int ≥ 1 | `2` | Hours between Dream runs. The interval restarts on every app launch. |
+| `agents.defaults.dream.intervalH` | int ≥ 1 | `2` | Hours between Dream runs. The deadline survives an app restart; a run missed while the app was down happens at the next tick. |
 | `agents.defaults.atlas.enabled` | bool | `true` | Registers the periodic Atlas job, which compiles `memory/WIKI.md` from `workspace/wikis/`. With no wikis present the job exits before reaching the provider. |
-| `agents.defaults.atlas.intervalH` | int ≥ 1 | `12` | Hours between Atlas checks. A tick that finds the wiki unchanged since the last run costs nothing. |
+| `agents.defaults.atlas.intervalH` | int ≥ 1 | `6` | Hours between Atlas checks. A tick that finds the wiki unchanged since the last run costs nothing. |
 | `agents.defaults.atlas.maxContextTokens` | int ≥ 100 | `1200` | Cap on the wiki-directory block injected into every system prompt; a longer `memory/WIKI.md` is truncated at injection time. |
 | `agents.defaults.maxToolIterations` | int | `200` | Hard ceiling on tool calls in a single turn. |
 | `agents.defaults.maxToolResultChars` | int | `16000` | Tool output above this is truncated before it reaches the model. |

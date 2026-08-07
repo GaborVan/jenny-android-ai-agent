@@ -5,17 +5,21 @@ def test_atlas_config_defaults() -> None:
     cfg = AtlasConfig()
 
     assert cfg.enabled is True
-    assert cfg.interval_h == 12
+    # Sei, non dodici: su Android il doze allunga i tick e il processo non
+    # sopravvive sempre mezza giornata, quindi una scadenza a 12h rischiava
+    # di non arrivare mai.
+    assert cfg.interval_h == 6
     assert cfg.max_context_tokens == 1200
 
 
 def test_atlas_config_builds_every_schedule_from_interval() -> None:
-    cfg = AtlasConfig(interval_h=6)
+    # Non il default, altrimenti il test passerebbe anche ignorando il campo.
+    cfg = AtlasConfig(interval_h=9)
 
     schedule = cfg.build_schedule()
 
     assert schedule.kind == "every"
-    assert schedule.every_ms == 6 * 3_600_000
+    assert schedule.every_ms == 9 * 3_600_000
     assert schedule.expr is None
 
 

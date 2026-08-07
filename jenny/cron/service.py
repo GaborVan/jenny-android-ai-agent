@@ -389,8 +389,29 @@ class CronService:
         for job in self._store.jobs:
             if self._enforce_agent_binding(job):
                 continue
-            if job.enabled:
-                job.state.next_run_at_ms = _compute_next_run(job.schedule, now)
+            if not job.enabled:
+                continue
+            computed = _compute_next_run(job.schedule, now)
+            # Solo ``every`` è relativo, quindi solo ``every`` poteva perdersi
+            # qui: ricalcolarlo a ogni avvio significava "N ore di uptime
+            # ininterrotto", non "ogni N ore". Su Android, dove il processo
+            # viene ucciso e rilanciato, una scadenza lunga (Atlas, 12h) non
+            # arrivava mai. Conservare quella salvata fa sì che il conto non
+            # arretri mai e che una scadenza mancata a app spenta venga
+            # recuperata al primo tick.
+            # ``at`` e ``cron`` restano ricalcolati: sono già ancorati
+            # all'orologio, non derivano dal momento dell'avvio.
+            if job.schedule.kind == "every" and job.state.next_run_at_ms is not None:
+                # Il tetto copre un orologio che è saltato in avanti e un
+                # intervallo accorciato a mano: senza, una scadenza assurda
+                # salvata una volta resterebbe tale per sempre.
+                job.state.next_run_at_ms = (
+                    min(job.state.next_run_at_ms, computed)
+                    if computed is not None
+                    else job.state.next_run_at_ms
+                )
+                continue
+            job.state.next_run_at_ms = computed
 
     def _get_next_wake_ms(self) -> int | None:
         """Get the earliest next run time across all jobs."""
@@ -581,8 +602,28 @@ class CronService:
         """Register an internal system job (idempotent on restart)."""
         store = self._load_store()
         now = _now_ms()
-        job.state = CronJobState(next_run_at_ms=_compute_next_run(job.schedule, now))
-        job.created_at_ms = now
+        previous = next((j for j in store.jobs if j.id == job.id), None)
+        # Il conto alla rovescia sopravvive al riavvio. Ricalcolarlo qui a ogni
+        # avvio rendeva "ogni N ore" un sinonimo di "dopo N ore di uptime
+        # ininterrotto": su un telefono, dove il servizio viene ucciso e
+        # rilanciato, un job lungo come Atlas (12h) poteva non scattare mai,
+        # perché ogni ripartenza spostava la scadenza di altre 12 ore.
+        # Conservando lo stato la scadenza non arretra mai, quindi il job
+        # arriva a scattare anche a colpi di sessioni brevi; se è gia passata
+        # mentre l'app era spenta, ci pensa il primo tick — è il recupero che
+        # "ogni N ore" promette.
+        # Si riparte da zero solo se la pianificazione è cambiata: un nuovo
+        # intervallo deve valere subito, non dopo la scadenza del vecchio.
+        if (
+            previous is not None
+            and previous.schedule == job.schedule
+            and previous.state.next_run_at_ms is not None
+        ):
+            job.state = previous.state
+            job.created_at_ms = previous.created_at_ms
+        else:
+            job.state = CronJobState(next_run_at_ms=_compute_next_run(job.schedule, now))
+            job.created_at_ms = now
         job.updated_at_ms = now
         store.jobs = [j for j in store.jobs if j.id != job.id]
         store.jobs.append(job)

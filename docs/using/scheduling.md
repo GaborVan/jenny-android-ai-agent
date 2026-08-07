@@ -7,8 +7,8 @@ Jenny can remind you of things, watch a checklist in the background, work a long
 **Everything in this page lives inside the app's own gateway process.** There is no server in the cloud keeping time for you. If Android kills the app (or you swipe it away, or the battery optimizer freezes it) at the moment a reminder was supposed to fire, here is what actually happens:
 
 - A **one-shot reminder** ("remind me at 6pm") whose time passed while the app was dead is lost **forever, silently**. When the gateway starts back up it recomputes each job's next run; for a one-shot whose time is already in the past, the next run comes back empty and the job is never retried or reported missed — nothing tells you it didn't happen.
-- A **recurring reminder** ("every 30 minutes", "every day") does not catch up on missed runs either. Every time the app restarts, its interval resets to "now + interval" — so a daily reminder that should have fired at 9am, if the app happened to restart at 9:05am, now fires roughly 24 hours from the restart, not from the original schedule.
-- The same applies to all three built-in jobs described below — Heartbeat, Dream and Atlas: their clocks also restart from zero whenever the app restarts. A phone that restarts the app more often than every 12 hours can therefore go indefinitely without Atlas ever running.
+- A **recurring reminder** ("every 30 minutes", "every day") keeps its deadline across restarts, and *does* catch up: a daily reminder that came due at 9am while the app was dead fires shortly after the app comes back, not 24 hours later. Before 0.6.0 this was not the case — every restart reset the interval to "now + interval", so on a phone that restarts the app often, a long interval could go indefinitely without ever firing. The same fix covers the three built-in jobs below.
+- **Catch-up is not the same as punctuality.** The deadline is honoured, but only once the app is running again, and Android's doze can stretch the gap well past the nominal interval even while the app lives: on a test device a 30-minute job was observed firing between 30 and 83 minutes apart. Treat every interval here as a floor, not a promise.
 
 None of this is announced anywhere in the app. If reminders matter to you, the practical fix is to keep the app from being killed:
 
@@ -53,7 +53,7 @@ When you ask Jenny to list reminders, you'll also see three jobs you didn't crea
 | Job | Runs | Config | What it costs you |
 |---|---|---|---|
 | `dream` | every **2 hours** | `agents.defaults.dream.enabled` (default on), `agents.defaults.dream.intervalH` (default `2`) | One agent run — a real turn against your provider, several calls if it uses tools — whenever there is new conversation to consolidate. Takes a snapshot first, so a bad run is undoable. |
-| `atlas` | every **12 hours** | `agents.defaults.atlas.enabled` (default on), `agents.defaults.atlas.intervalH` (default `12`) | Nothing at all when your wikis haven't changed — a fingerprint check runs first and the job exits before touching the provider. One agent run when they have. |
+| `atlas` | every **6 hours** | `agents.defaults.atlas.enabled` (default on), `agents.defaults.atlas.intervalH` (default `6`) | Nothing at all when your wikis haven't changed — a fingerprint check runs first and the job exits before touching the provider. One agent run when they have. |
 | `heartbeat` | every **30 minutes** | `gateway.heartbeat.enabled` (default on), `gateway.heartbeat.intervalS` (default `1800`) | Nothing when `## Active Tasks` is empty; one real turn plus a second silent judgment call when it isn't. See below. |
 
 `dream` runs the memory-consolidation pass and `atlas` rebuilds the wiki directory (`memory/WIKI.md`), both described in [Memory, Dream and Atlas](memory.md); `heartbeat` is described next.

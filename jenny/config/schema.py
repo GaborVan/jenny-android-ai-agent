@@ -57,10 +57,14 @@ class AtlasConfig(Base):
     _HOUR_MS = 3_600_000
 
     enabled: bool = True  # Register the periodic Atlas job on startup
-    # Dodici ore, non due come Dream: una wiki cambia con la cadenza con cui
+    # Sei ore, non due come Dream: una wiki cambia con la cadenza con cui
     # l'utente ci fa ingest, non con quella delle conversazioni. Il fingerprint
     # rende comunque gratuiti i tick a wiki ferma.
-    interval_h: int = Field(default=12, ge=1)
+    # Non dodici, però: su Android il doze allunga i tick (misurato, un job da
+    # 30 minuti scattava fino a 83) e il processo non sopravvive sempre mezza
+    # giornata. Una scadenza a sei ore cade dentro una sessione plausibile
+    # dell'app; una a dodici rischiava di non arrivare mai.
+    interval_h: int = Field(default=6, ge=1)
     # Tetto del blocco iniettato in *ogni* system prompt: la rubrica è utile
     # perché è corta. Oltre questa soglia viene troncata a valle, così un run
     # generoso non si porta dietro il costo su tutti i turni successivi.
