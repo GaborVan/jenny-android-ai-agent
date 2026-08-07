@@ -216,7 +216,18 @@ class AtlasStore:
             render_template(
                 "agent/atlas.md",
                 strip=True,
-                wiki_file=str(self.wiki_file),
+                # Relativo al workspace, come fa Dream con `memory/MEMORY.md`, e
+                # non assoluto. Un assoluto qui era un divieto travestito da
+                # istruzione: la allowlist di scrittura tiene la forma
+                # *risolta* del path (vedi `build_tools`), mentre questa era la
+                # forma logica, e su Android le due divergono — `/data/user/0`
+                # è un symlink a `/data/data`. Il modello riceveva l'unico path
+                # su cui può scrivere in una forma che la guardia rifiuta, e
+                # ogni run finiva senza scrivere niente: nessun errore visibile,
+                # solo un fingerprint che non avanza e una chiamata al provider
+                # bruciata ogni dodici ore. I test non lo vedevano perché
+                # scrivono tutti in relativo.
+                wiki_file=self.wiki_file.relative_to(self.workspace).as_posix(),
                 default_wiki=self.default_wiki,
             )
         ]

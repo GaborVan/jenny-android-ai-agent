@@ -193,3 +193,46 @@ async def test_an_atlas_turn_is_described_as_atlas(workspace):
     listed = _inventory_names(_system_prompt(captured))
     assert {"grep", "find_files", "apply_patch"} <= listed
     assert listed.isdisjoint({"spawn", "cron", "subagent_status"})
+
+
+# -- il gemello: la modalita, non solo l'elenco -----------------------------
+
+
+_ORCHESTRATOR_BLOCK = "# Orchestrator Mode"
+
+
+async def test_a_substituted_registry_is_not_the_orchestrator(workspace):
+    """Il difetto gemello di quello sopra, trovato dall'audit delle giunture.
+
+    ``orchestrator`` era un flag del costruttore, quindi ogni turno riceveva il
+    blocco "non puoi scrivere file, delega con ``spawn``" — anche Dream e Atlas,
+    che di mestiere scrivono file e ``spawn`` non ce l'hanno. Il prompt diceva a
+    due agenti di non fare l'unica cosa per cui esistono.
+    """
+    loop, captured = _loop_with_capture(workspace)
+    assert loop.orchestrator_mode is True
+
+    await loop.process_direct("x", session_key="t:sub", tools=_registry("zzz_only_this"))
+    substituted = _system_prompt(captured)
+
+    await loop.process_direct("x", session_key="t:default")
+    default = _system_prompt(captured)
+
+    assert _ORCHESTRATOR_BLOCK in default
+    assert _ORCHESTRATOR_BLOCK not in substituted
+    assert "goes to a subagent via `spawn`" not in substituted
+
+
+async def test_atlas_is_never_told_it_cannot_write(workspace):
+    """Il caso concreto: scrivere e l'unico mestiere di Atlas."""
+    from jenny.agent.atlas import AtlasStore
+
+    loop, captured = _loop_with_capture(workspace)
+
+    await loop.process_direct(
+        "compila", session_key="atlas:t", tools=AtlasStore(workspace).build_tools(),
+    )
+
+    prompt = _system_prompt(captured)
+    assert "you cannot execute code, write or patch" not in prompt
+    assert _ORCHESTRATOR_BLOCK not in prompt

@@ -67,6 +67,7 @@ class ContextBuilder:
         include_memory_recent_history: bool = True,
         session_key: str | None = None,
         available_tools: list[str] | None = None,
+        orchestrator: bool | None = None,
     ) -> str:
         """Build the system prompt from identity, bootstrap files, memory, and skills.
 
@@ -74,16 +75,23 @@ class ContextBuilder:
         l'unico modo perche l'inventario descriva un registry sostituito (Dream,
         Atlas) invece di quello del loop; la callable del costruttore resta il
         default per chi un registry per-turno non ce l'ha.
+
+        ``orchestrator`` e per-turno per lo stesso motivo, e per un difetto
+        gemello: era un flag del costruttore, quindi Dream e Atlas — che girano
+        con un registry proprio e con la scrittura come unico mestiere — si
+        vedevano recapitare il blocco che dice "non puoi scrivere file, delega
+        con ``spawn``". Nessuno dei due ha ``spawn``.
         """
+        orchestrating = self.orchestrator if orchestrator is None else orchestrator
         root = workspace or self.workspace
-        parts = [self._get_identity(channel=channel, workspace=root)]
+        parts = [self._get_identity(channel=channel, workspace=root, orchestrating=orchestrating)]
 
         bootstrap = self._load_bootstrap_files(root)
         if bootstrap:
             parts.append(bootstrap)
 
-        parts.append(render_template("agent/tool_contract.md", orchestrator=self.orchestrator))
-        if self.orchestrator:
+        parts.append(render_template("agent/tool_contract.md", orchestrator=orchestrating))
+        if orchestrating:
             parts.append(render_template("agent/orchestrator.md"))
 
         # Il blocco memoria ha due sottosezioni con due proprietari distinti:
@@ -135,7 +143,7 @@ class ContextBuilder:
         if session_summary:
             parts.append(f"[Archived Context Summary]\n\n{session_summary}")
 
-        if inventory := self._render_tool_inventory(available_tools):
+        if inventory := self._render_tool_inventory(available_tools, orchestrating):
             parts.append(inventory)
 
         return "\n\n---\n\n".join(parts)
@@ -151,7 +159,9 @@ class ContextBuilder:
         except Exception:
             return None
 
-    def _render_tool_inventory(self, available_tools: list[str] | None = None) -> str | None:
+    def _render_tool_inventory(
+        self, available_tools: list[str] | None = None, orchestrating: bool | None = None,
+    ) -> str | None:
         """L'elenco autoritativo dei tool, in coda a tutto il resto.
 
         Un prompt e cucito da pezzi scritti in momenti diversi — identita,
@@ -173,7 +183,7 @@ class ContextBuilder:
             return render_template(
                 "agent/tool_inventory.md",
                 tool_names=names,
-                orchestrator=self.orchestrator,
+                orchestrator=self.orchestrator if orchestrating is None else orchestrating,
                 strip=True,
             )
         except Exception:
@@ -181,7 +191,12 @@ class ContextBuilder:
             # ancora stato estratto: si perde l'inventario, non il prompt.
             return None
 
-    def _get_identity(self, channel: str | None = None, workspace: Path | None = None) -> str:
+    def _get_identity(
+        self,
+        channel: str | None = None,
+        workspace: Path | None = None,
+        orchestrating: bool | None = None,
+    ) -> str:
         """Get the core identity section."""
         root = workspace or self.workspace
         try:
@@ -197,7 +212,7 @@ class ContextBuilder:
             runtime=runtime,
             platform_policy=render_template("agent/platform_policy.md"),
             channel=channel or "",
-            orchestrator=self.orchestrator,
+            orchestrator=self.orchestrator if orchestrating is None else orchestrating,
         )
 
     @staticmethod
@@ -255,6 +270,7 @@ class ContextBuilder:
         include_memory_recent_history: bool = True,
         session_key: str | None = None,
         available_tools: list[str] | None = None,
+        orchestrator: bool | None = None,
     ) -> list[dict[str, Any]]:
         """Build the complete message list for an LLM call."""
         root = workspace or self.workspace
@@ -290,6 +306,7 @@ class ContextBuilder:
                     include_memory_recent_history=include_memory_recent_history,
                     session_key=session_key,
                     available_tools=available_tools,
+                    orchestrator=orchestrator,
                 ),
             },
             *history,

@@ -557,8 +557,14 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
         """
         scope = self.workspace_scopes.for_message(msg, session.metadata)
         chat_id = self._runtime_chat_id(msg)
+        turn_tools = tools or self.tools
         return self.context.build_messages(
-            available_tools=(tools or self.tools).tool_names,
+            available_tools=turn_tools.tool_names,
+            # Un registry sostituito non e l'orchestratore: e un altro agente
+            # che passa da qui. Dire a Dream o ad Atlas "non puoi scrivere file,
+            # delega con `spawn`" e falso due volte — scrivere e il loro unico
+            # mestiere, e `spawn` non ce l'hanno.
+            orchestrator=self.orchestrator_mode and turn_tools is self.tools,
             history=history,
             current_message=msg.content,
             media=msg.media if msg.media else None,
