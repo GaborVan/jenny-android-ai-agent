@@ -44,6 +44,31 @@ A reply is built incrementally, not delivered all at once:
 - **Final latency.** Once a turn completes, the response time in seconds is shown under the bubble.
 - **"Agent running" banner.** While a long-running goal is active (see [Scheduling and proactivity](scheduling.md)), a banner reading **"Agent running"** appears with a live timer counting seconds.
 
+## The Subagents panel
+
+Most real work is done by subagents rather than by the agent you're typing to (see [Scheduling and proactivity](scheduling.md#subagents-spawn)). Without something on screen, that would mean minutes of silence with no way to tell a working job from a stuck one. The Subagents panel is that something: a strip that appears just above the message box whenever background work exists.
+
+**It shows live work, not history.** When nothing is running the panel isn't collapsed, it's absent — the header alone would cost space above the composer for no information. A card that reaches a terminal state stays for the rest of the current turn so you can see the transition, then disappears when the turn ends. Nothing from a past turn is ever shown, including after a reload.
+
+The header reads **Subagents** with a count ("2 running", or "1 running · 1 just finished") and toggles the body open and closed. It starts closed; a subagent that goes **stalled** opens it by itself, since that is precisely the moment you need to see it. If you close it again, it won't reopen for that same job.
+
+Each running job gets a card showing:
+
+- the label Jenny gave the job, and its state (running / stalled / done / failed / cancelled);
+- the agent type (`researcher`, `coder`, `sysadmin`, …);
+- **elapsed** and **idle** time side by side — these two answer "is it working or is it stuck?", and they never get truncated;
+- the current phase, the iteration number, and the last tool it called.
+
+With more than one job the cards sit on a single horizontally scrolling row rather than stacking, so the panel's height is the same for one job or five.
+
+**Stop** ends a job immediately. On a terminal card the button is **Relaunch** instead, which starts a fresh attempt of the same work. Automatic relaunches stop after 3 attempts; relaunching by hand is never capped, and does not refill the automatic budget — the card says so when you're at the limit.
+
+Tapping a card (or pressing Enter on it with a keyboard) opens a **detail sheet** with what doesn't fit on the card: the full task text, the attempt number, the phase and iteration, the stop reason, technical details, the outcome — and a live **Activity** stream of the steps as they happen. The stream labels its own health: *live*, *paused*, *frozen* ("this view stopped receiving updates"), or *offline* ("reconnecting — the stream resumes on its own"), so a stream that has gone quiet is never mistaken for a job that has gone quiet.
+
+When a subagent finishes, a collapsible **"What it actually did"** block is appended in the chat under the reply. It's collapsed by default and fetches the stored step-by-step digest only when you open it — so the detail is there if you want to audit the work, and costs nothing if you don't.
+
+Updates arrive by push as the job changes state; while something is running the panel additionally polls every 5 seconds, and that polling stops while the app is in the background.
+
 ## "N files modified"
 
 When the agent writes or edits files in your workspace during a turn (using its file-writing tools), the reply bubble gets a collapsible pill under it, closed by default, labeled **"N files modified"** with a badge showing the number of distinct files touched. Expand it to see, for each file:
@@ -92,6 +117,7 @@ Scrolling to the very top of the chat automatically loads older history (infinit
 ## Related pages
 
 - [Tour of the WebUI](webui-tour.md) — the Session Info popover, the dock, and how the chat tab fits into the rest of the app.
+- [Scheduling and proactivity](scheduling.md) — why delegation is the normal path, the six subagent types, and what Jenny can do to a running subagent from her side.
 - [Files and attachments](attachments.md) — sending images/files, attachment limits, and what the agent can actually read from them.
 - [Slash commands](slash-commands.md) — the full command list, including `/stop`, `/new`, and `/clear`.
 - [Memory, Dream and Atlas](memory.md) — the difference between what stays on screen and what the model actually remembers.

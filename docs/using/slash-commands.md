@@ -10,7 +10,7 @@ Two commands — `/stop` and `/status` — are handled on a "priority" fast path
 
 All server-side command responses below are **hardcoded in English**, regardless of whether the WebUI is set to Italian or English. This is true for the confirmation text, the usage/error messages, and the `/status`/`/model` output.
 
-## The 9 server commands
+## The 10 server commands
 
 | Command | Arguments | What it does |
 |---|---|---|
@@ -58,7 +58,7 @@ No active task to stop.
 No arguments. Output is a fixed-format block (rendered as plain text, not markdown), for example:
 
 ```text
-🐈 jenny v0.3.0
+🐈 jenny v0.6.0
 🧠 Model: gpt-4o
 📊 Tokens: 1234 in / 567 out (40% cached)
 📚 Context: 12k/65k (22% of input budget)
@@ -80,7 +80,7 @@ Without an argument, shows the current state:
 - Available presets: `default`, `fast`, `deep`
 ```
 
-`default` is always available and reflects the plain `agents.defaults.*` model fields; named presets come from `modelPresets` in `config.json` — there is no UI for creating presets, they exist only in the config file. See [Configuration reference](../reference/configuration.md#model-presets).
+`default` is always available and reflects the plain `agents.defaults.*` model fields; named presets come from `modelPresets` in `config.json` — there is no UI for creating presets, they exist only in the config file. See [Configuration reference](../reference/configuration.md#modelpresets).
 
 With one argument, it switches presets for future turns and confirms:
 

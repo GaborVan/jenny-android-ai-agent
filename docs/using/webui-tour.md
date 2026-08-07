@@ -97,9 +97,17 @@ If the agent is actively processing a message, Status shows **Running** with a s
 
 The timer starts the moment you send a message and is **backed by the actual turn start time on the gateway**, so it survives reloading the page or reopening the app mid-turn — it doesn't reset to zero just because the WebUI restarted. It only reflects turns from the WebUI/websocket channel: a turn started from Telegram does not turn this indicator on, even though you'll see the resulting messages appear in the same unified chat.
 
+## The Subagents strip
+
+One more piece of chrome lives on the chat screen and isn't part of the dock: a **Subagents** strip pinned just above the message box. It appears on its own when background work starts and vanishes when the turn ends, so most of the time you won't see it at all.
+
+It exists because Jenny delegates by default: the real work usually happens in subagents, and without this the chat would just be silent for minutes. Collapsed, it is a single header line with a running count; expanded, it's one card per job with its type, elapsed and idle time, current step, and a **Stop** button — plus a tap-through detail sheet with the full task and a live activity stream.
+
+It is deliberately not a history view: only work from the current turn is ever shown, and it does not survive the turn that started it. Full behavior in [Chat basics](chat.md#the-subagents-panel).
+
 ## Where to go next
 
-- [Chat basics](chat.md) — sending messages, reading a response, `/stop`.
+- [Chat basics](chat.md) — sending messages, reading a response, the Subagents panel, `/stop`.
 - [Slash commands](slash-commands.md) — the full command list.
 - [Settings](../reference/settings.md) — the reliable place to check which model/provider is active.
 - [Security model](../internals/security-model.md) — what "Restricted" access actually enforces.

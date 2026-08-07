@@ -87,6 +87,8 @@ If a tool refuses a URL with a message like "URL blocked" or "blocked address", 
 
 If you deliberately want the agent to reach something on your own private network (e.g. a self-hosted Ollama box, a home NAS), you can add its address range to `security.ssrfWhitelist` in `config.json` (for example `100.64.0.0/10` for Tailscale). This has to be edited in the config file directly — there is no UI control for it. See [Configuration reference](../reference/configuration.md) and [Security model](../internals/security-model.md).
 
+**Don't do this for an SSH host.** SSH targets are checked against their own, looser policy that already allows private LAN ranges (RFC1918), IPv6 ULA, and the CGNAT range `100.64.0.0/10` that Tailscale uses — no whitelist entry is needed, and adding one would widen `web_fetch`, `download_file` and Jenny Apps to the same range for no benefit. If an SSH host is rejected as blocked, the address is one of the ones blocked in *every* policy: loopback, link-local, or `0.0.0.0/8` — all of which resolve to the phone itself. See [SSH access](./ssh.md).
+
 Note that this whitelist only affects the agent's *tools*. It does not affect calls to your configured LLM provider itself — those never pass through the SSRF filter at all, so a self-hosted provider endpoint on a private network is not blocked by this setting either way.
 
 ## Wiki tab shows an error (503)
@@ -111,5 +113,6 @@ If none of the above resolves it, gather this before reporting the problem:
 - [Scheduling and proactivity](./scheduling.md) for the full reminders/heartbeat model and its limits.
 - [Telegram bridge](./telegram.md) for pairing, throttling, and what does and doesn't work over Telegram.
 - [Files and attachments](./attachments.md) for exact attachment limits.
+- [SSH access](./ssh.md) for the separate network policy SSH hosts are checked against, and why a restore doesn't restore access.
 - [Security model](../internals/security-model.md) for the SSRF whitelist and the workspace policy boundary.
 - [Providers and models](../reference/providers.md) for provider setup and connection errors in more detail.

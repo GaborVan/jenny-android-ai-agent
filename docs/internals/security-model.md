@@ -29,9 +29,13 @@ When a path falls outside the boundary, the tool raises an error whose message s
 
 That phrasing is intentional — it's written to stop the model from treating a workspace-boundary rejection as a fluke worth retrying with a different tool.
 
+That roster of seven is the full set across all agents; no single agent holds it. With `agents.defaults.orchestratorMode` at its default of `true`, the agent you talk to gets only `read_file`, `list_dir` and `grep` — and its `grep` is an **index**: it returns matching file paths or per-file match counts, never the matching lines, capped at 60 files. `find_files` is not in the orchestrator's scope at all. Everything that writes goes to a subagent. This is a context-budget decision rather than a security one — a subagent's tool output doesn't stay in your conversation — but it does mean the write path and the boundary above apply to a different agent than the one you're typing to.
+
 One deliberate exception: Jenny's own Python source (`jenny/`) is exposed **read-only** to the agent when `tools.file.exposePackageSource` is `true` (default), so it can inspect the framework it runs on. It is never writable through this path.
 
 The boundary also works in the other direction, to keep things *out*. The SSH private keys and `known_hosts` live in `<filesDir>/ssh`, **beside** the workspace rather than inside it, precisely so that no file tool can reach them — unlike `config.json`, which sits in the workspace and which the agent can therefore already read. The cost is paid by the user, not by the model: snapshots and encrypted backups only walk the workspace root, so a restore brings back the host list without the keys (see [SSH access](../using/ssh.md)).
+
+**That protection is exactly as conditional as this level is.** Living outside the workspace only helps while `security.restrictToWorkspace` is `true`, which is what makes the path policy reject anything above the workspace root in the first place. Turn it off and `<filesDir>/ssh` becomes an ordinary readable directory: `read_file` can print the private key, and `python_exec`'s file helpers can too. Nothing else in the SSH design compensates for that — the key is protected by a path check, not by encryption or by an OS boundary. If you turn `restrictToWorkspace` off, assume the SSH private key is readable by the model.
 
 Note the framing: this is an **application-level guard**, not a sandbox. If `restrict_to_workspace` is turned off, the agent is *not* granted access to the rest of the phone — Android's own sandbox (Level 1) still applies — but it loses the extra safety net that keeps it inside `workspace/` even when it shouldn't need to leave it.
 
@@ -84,7 +88,7 @@ SSH is the only capability that acts outside the phone, so the four-level stack 
 
 This gate is unconditional in both authentication modes, and password authentication is the case that needs it most. A key presented to an impostor costs a signature the impostor cannot reuse; a password presented to an impostor *is* the credential. The pinned fingerprint is what decides which machine receives it, so the settings UI states that in the acceptance dialog itself rather than leaving it to the docs.
 
-**3. The credential is unreachable from the agent — completely for a key, partially for a password.** The key is generated on-device (ed25519, one pair per alias), the private half is never returned by any API — the settings payload carries a boolean, not the key — and it lives outside the workspace, so no file tool and no `python_exec` file helper can read it. Nothing in the tool layer needs the key material; the backend opens the file by a path derived from the alias, never from a configurable field.
+**3. The credential is unreachable from the agent — completely for a key, partially for a password.** The key is generated on-device (ed25519, one pair per alias), the private half is never returned by any API — the settings payload carries a boolean, not the key — and it lives outside the workspace, so — **while `security.restrictToWorkspace` is `true`, the default** — no file tool and no `python_exec` file helper can read it. Turning that setting off removes this gate and nothing replaces it (see Level 2). Nothing in the tool layer needs the key material; the backend opens the file by a path derived from the alias, never from a configurable field.
 
 A password gets the same treatment at every layer the tools touch — never in a tool argument, never in a tool result, never in a settings payload (a `has_password` boolean stands in for it, and there is no masked-hint variant of the kind `_mask_api_key` produces for provider keys, because four real characters of a password are four characters given away), kept out of `repr()` so it can't fall into a log line, and named `password` on the wire so `redact_query_secrets` masks it in the request-path log. What it does **not** get is the fourth layer: it is stored in clear text in `config.json`, which sits *inside* the workspace and which the agent's file tools can already read — the same exposure as `telegram.botToken` and the provider API keys. That is the whole reason the SSH private key was put outside the workspace in the first place, so the honest statement is that password authentication trades this specific protection for convenience. `auth` defaults to `"key"`, and Settings refuses to save a password host with an empty password rather than leaving a half-configured host that only fails mid-turn.
 
@@ -94,15 +98,17 @@ Two things this does **not** protect against, stated plainly: a command the agen
 
 ## What the agent can and cannot do on the phone
 
-**Can:**
-- Read, write, and edit files inside `workspace/` (and read Jenny's own source, read-only).
-- Download files from the web into `workspace/downloads/`.
-- Search the web and fetch/read pages (through the hidden WebView — see [Tool reference](../reference/tools.md)).
+**Can:** (read this list as "Jenny, as a whole" — the agent you talk to is an **orchestrator** and does several of these only by delegating)
+
+- Read files inside `workspace/` (and read Jenny's own source, read-only), and locate them with an index-only `grep`.
+- Write, edit, and patch files inside `workspace/` — but with `agents.defaults.orchestratorMode` at its default of `true`, only through a subagent; the main agent has no write tool at all.
+- Download files from the web into `workspace/downloads/` — only through a subagent, for the same reason.
+- Search the web and fetch/read pages (through the hidden WebView — see [Tool reference](../reference/tools.md)) — only through a subagent, typically a `researcher`.
 - Send you notifications and schedule reminders (`cron`).
 - Read your last-known device location, or request a fresh GPS fix, if the location toggle and the Android permission are both granted.
 - Send and receive messages over Telegram, if you've paired a bot.
-- Run Python code in-process (unless you disable `python_exec`).
-- Spawn subagents and run long-running background tasks.
+- Run Python code in-process (unless you disable `python_exec`) — only through a subagent, typically a `coder` or an `analyst`.
+- Spawn subagents, steer and stop them, and run long-running background tasks.
 - Run commands on a remote machine over SSH — but only on an alias you registered, only once you have accepted its host key (in both authentication modes), only through a `sysadmin` subagent, and only if you enabled `tools.ssh` (off by default).
 
 **Cannot:**
@@ -111,7 +117,8 @@ Two things this does **not** protect against, stated plainly: a command the agen
 - Reach private/loopback/link-local network addresses with its web tools, unless you've added them to `security.ssrfWhitelist`.
 - Meaningfully resist a compromised or adversarial model once inside `python_exec` — that boundary is the Android sandbox, not Jenny's own guardrails.
 - Escape the workspace boundary through file tools when `security.restrictToWorkspace` is `true` — the fail-closed policy rejects paths outside it rather than silently widening scope.
-- SSH to a machine you didn't register, accept a host key on your behalf, or read its own SSH private key — the alias is the only target it can name, and the key lives outside every path its tools can resolve. (A host configured with `auth: "password"` is the one gap: the password is in `config.json`, inside the workspace, so the file tools can read it just as they can read the Telegram token and the API keys.)
+- SSH to a machine you didn't register, or accept a host key on your behalf — the alias is the only target it can name.
+- Read its own SSH private key, **while `security.restrictToWorkspace` is `true`** (the default): the key lives outside every path its tools can then resolve. Turn that setting off and `read_file` reaches it like any other file. (A host configured with `auth: "password"` is a gap that exists either way: the password is in `config.json`, inside the workspace, so the file tools can read it just as they can read the Telegram token and the API keys.)
 
 ## Signed media URLs
 

@@ -250,7 +250,7 @@ Access to remote machines. Both gates are closed by default and **both are neces
 | `tools.ssh.commandTimeoutS` | int 1–300 | `60` | Ceiling for a single `ssh_exec`, and for the short launch/poll/stop commands `ssh_job` issues. Low on purpose: the gateway is a foreground service **without a wake lock**, so with the screen off the CPU can suspend and a waited-for command hangs. Long work belongs to `ssh_job`, which detaches it. A `timeout_s` passed by the model can only lower this, never raise it. |
 | `tools.ssh.maxOutputChars` | int 1000–50000 | `10000` | Truncation threshold for command output and for each `ssh_job` poll. The result reports how many characters were dropped. |
 | `tools.ssh.keepaliveIntervalS` | int 0–300 | `30` | Server-alive interval on the SSH session; `0` disables it. |
-| `tools.ssh.idleCloseS` | int ≥ 30 | `300` | **Declared but not consulted by the current wiring** — nothing in the connection pool reads it today. Setting it changes nothing. |
+| `tools.ssh.idleCloseS` | int ≥ 30 | `300` | How long a pooled connection may sit unused before it is closed. Enforced by a reaper in both backends (the Android `SshBridge` and the dev backend), which wakes at most once a minute and drops any session idle past this. It exists because a phone's connection is not free to keep alive: a forgotten session survives a wifi-to-mobile switch as a socket that will fail on the next command anyway. The floor of 30 is enforced by the schema, so there is no way to disable the reaper from config. |
 | `tools.ssh.maxTransferBytes` | int ≥ 1024 | `52428800` | Cap for `ssh_transfer` (50 MB), in both directions. On a download it is checked with a remote `stat` before the local file is opened, so an oversize transfer leaves nothing behind. |
 
 Per host:

@@ -8,7 +8,16 @@ Settings is a single accordion of 7 sections — Personalization, Model, Tools, 
 
 Text and number fields (bot name, the advanced model parameters, the web search fields) save on a **600 ms debounce** after you stop typing — not on every keystroke, and not only on blur. Toggles, the theme picker, the model catalog, and the language switch save immediately on click, no debounce. Every successful write shows a **"Saved!"** toast; a failed write shows the error message instead (and toggles roll back visually to their previous state).
 
-There is no confirmation step anywhere in Settings except for two destructive actions (deleting a provider, restoring a backup) — everything else takes effect the instant you interact with it.
+Most controls take effect the instant you interact with them. The exceptions — everything that asks you to confirm first — are:
+
+- **Deleting a provider.**
+- **Importing a backup**, and **restoring a local snapshot**.
+- **Regenerating an SSH key** (it revokes the access already installed on the server).
+- **Deleting an SSH host.**
+- **Accepting a host key fingerprint** — a dialog showing the fingerprint, with Cancel and Accept.
+- **Replacing a host key that changed**, which asks **twice**: once in the side-by-side dialog showing the old and new fingerprints, and again in a plain confirmation. That is deliberate — a changed key is treated as a possible man-in-the-middle, not as an update.
+
+Everything not on that list saves on touch.
 
 **Silent restarts (important):** a few fields — timezone, bot name, bot icon, `tool_hint_max_length` — flip a `requires_restart` flag on the backend when changed. The current WebUI never reads or shows that flag: you get the same "Saved!" toast as any other field, with no indication that the change won't fully apply until you restart the app. If you rename the bot and it still introduces itself with the old name, restart Jenny.
 
@@ -52,7 +61,7 @@ Below the catalog, "API keys" is a plain credential keychain — it does not ind
 
 The UI refuses to delete the last remaining provider ("Cannot delete the last provider") — but this check is client-side only; there is no equivalent guard on the backend, so this protection exists only inside the WebUI, not as a data-level invariant.
 
-**Editing a provider — read before you touch this dialog.** The Edit dialog pre-fills the API Key field with the *masked hint string itself* (e.g. `sk-a...j8f9`), not the real key and not a blank field. If you edit only the Format or Base URL and press Save without retyping the key, the dialog submits that masked hint text as the new API key — overwriting your real key with the literal placeholder string. There is currently no "leave unchanged" behavior: to safely edit anything about an existing provider, retype the full API key every time you save. <!-- verified in code: jenny/templates/ui/assets/mobile-settings.js (provider edit dialog) + jenny/webui/settings_api.py update_provider -->
+**Editing a provider.** The Edit dialog leaves the API Key field **empty** and shows the masked hint (e.g. `sk-a...j8f9`) as its placeholder, with a note under it saying to leave it blank to keep the stored key. Blank means exactly that: the saved key is kept. So you can change the Format or the Base URL without retyping the key — type in that field only when you actually want to replace it.
 
 ### Advanced parameters
 
@@ -111,9 +120,11 @@ Its own section between Tools and Telegram, holding the two decisions that canno
 | **Add host** → Password | Only shown with `Password` selected. Required: saving a password host with an empty password is refused, not accepted quietly, so you can't end up with a host that looks configured and fails on the first command. Blank when editing (the saved password is never sent back to the screen) and blank means "keep the saved one". Switching the host back to key **deletes** the stored password. | none |
 | **Generate key** / **Regenerate key** | Creates an ed25519 pair *for that alias* on the device and shows the public line to paste into `~/.ssh/authorized_keys`. Regenerating asks for confirmation, because it revokes the access already installed on the server. Hidden on a password host, along with the public-key block — there is nothing to install there. | no key |
 | **Verify fingerprint** → **Accept** | Reads the key the host presents (without authenticating), shows its SHA256 fingerprint, and pins it on acceptance. | not verified |
+| **Copy public key** | On a key host that has a key, copies the full `ssh-ed25519 …` public line to the clipboard, so you can paste it into the server's `~/.ssh/authorized_keys` without transcribing it. Absent on a password host — there is nothing to install. | — |
+| **Edit host** (pencil icon) | Reopens the same dialog to change host, port, username, description, or authentication mode. The alias is the one field that cannot change. Editing the address or port **clears the accepted fingerprint** — see below. | — |
 | **Delete host** | Removes the host **and** its private key, its public key and its accepted fingerprint. | — |
 
-Every host card shows two status badges — the credential (key present/missing, or password set/missing) and the fingerprint (verified or not) — and both have to be green before the agent can connect.
+Every host card shows the two states that decide whether it can be used: the **fingerprint** state as a badge in the card header (pinned or not), and the **credential** state as plain text in the card body — "key ready"/"no key" on a key host, "password set"/"no password" on a password host. Only the fingerprint is a badge; the credential line is not, so don't go looking for a second one. Both have to be satisfied before the agent can connect, and the credential wording follows the authentication mode, because "no key" on a password host would be an alarm about something that isn't needed.
 
 Five behaviors worth knowing before you use this screen:
 

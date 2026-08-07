@@ -7,7 +7,7 @@ Every capability Jenny can invoke on its own — files, code execution, web, dev
 There is no fixed tool count. What Jenny actually has available in a given conversation depends on:
 
 - **Config toggles** — most tools can be disabled in `workspace/config.json` (a few also from Settings → Tools; see the table at the end of this page).
-- **The runtime platform** — `web_search`, `web_fetch`, `get_location`, and `ui_view` only register when an Android context is available (they are backed by Android-only bridges: a hidden WebView, the location bridge, and the WebUI query channel). On any other platform they simply do not exist.
+- **The runtime platform** — `web_search`, `web_fetch` and `get_location` only register when an Android context is available (they are backed by Android-only bridges: a hidden WebView and the location bridge). On any other platform they simply do not exist. `ui_view` registers whenever a WebUI query service is present rather than on a platform check, and `download_file` has no platform gate at all.
 - **Installed Jenny Apps** — every app under `workspace/apps/` contributes one tool per declared action, re-synced every turn.
 
 - **The agent's scope** — the main agent loads either the `orchestrator` scope (default, see `agents.defaults.orchestratorMode`) or the historical `core` scope; a subagent loads the `subagent` scope, narrowed further by its agent type. The four SSH tools sit in a scope of their own, `remote`, which **no** agent loads by default — only the `sysadmin` subagent type asks for it. The same install therefore exposes different tools to the orchestrator, to a `sysadmin` subagent, and to every other subagent.
@@ -16,11 +16,17 @@ The built-in count is **31**: 30 tools registered through the standard loader (`
 
 Below, tools are grouped into eight categories. Each entry gives the exact tool name the model calls, what it does for you in practice, the parameters worth knowing, hard numeric limits, the config toggle that controls it, and any gotcha worth knowing before you rely on it.
 
+### Reading the "Config" line — a toggle is not the only gate
+
+Ten of the tools below are marked **subagent-only**. The config toggle on their line still applies, but with `agents.defaults.orchestratorMode` at its default of `true` it is not the gate you'll hit first: the tool is simply absent from the agent you talk to, and the work reaches it by delegation. Those ten are `write_file`, `edit_file`, `apply_patch`, `find_files`, `python_exec`, `write_stdin`, `list_exec_sessions`, `web_search`, `web_fetch`, and `download_file`. Set `orchestratorMode` to `false` and the main agent loads the `core` scope instead, which has all of them.
+
 ---
 
 ## 1. Files and workspace
 
-All seven tools in this group share the same access boundary: with `security.restrictToWorkspace` at its default of `true`, every read and write is confined to the workspace, plus `skills/`, the media directory, and — if `tools.file.exposePackageSource` is on (default `true`) — a read-only view of Jenny's own source code.
+All seven tools in this group share the same access boundary — which is not the same as all seven being available to the same agent. With `security.restrictToWorkspace` at its default of `true`, every read and write any of them performs is confined to the workspace, plus `skills/`, the media directory, and — if `tools.file.exposePackageSource` is on (default `true`) — a read-only view of Jenny's own source code.
+
+Who holds which, in the default configuration: the orchestrator gets `read_file`, `list_dir` and a reduced `grep`. `write_file`, `edit_file`, `apply_patch` and `find_files` are **subagent-only**.
 
 ### read_file
 
@@ -47,7 +53,7 @@ Creates a new file, or **replaces an existing one entirely** with the given cont
 
 There is no confirmation prompt and no undo built into the tool. If Jenny overwrites something you wanted to keep, the only way back is the workspace's automatic snapshot system (see the Backup and restore page) — `write_file` itself keeps no history.
 
-Config: `tools.file.enable` (default `true`).
+Config: `tools.file.enable` (default `true`). **Subagent-only** in the default orchestrator mode.
 
 ### edit_file
 
@@ -60,7 +66,7 @@ A targeted find-and-replace inside one file: `old_text` → `new_text`.
 
 Gotcha: the matcher has "smart" fallbacks — it can preserve the surrounding quote style and re-indent the replacement to match the matched block. The text that actually lands on disk can therefore differ slightly from `new_text` as typed.
 
-Config: `tools.file.enable` (default `true`).
+Config: `tools.file.enable` (default `true`). **Subagent-only** in the default orchestrator mode.
 
 ### apply_patch
 
@@ -71,7 +77,7 @@ The default tool for code changes: a list of 1–20 structured edits in one call
 - `dry_run=true` validates every edit and returns a summary (`+N/-M` lines per file) without writing anything.
 - Multi-file changes are transactional: if any part of the write phase fails, every file touched in that call is rolled back to its pre-patch bytes.
 
-Config: `tools.file.enable` (default `true`).
+Config: `tools.file.enable` (default `true`). **Subagent-only** in the default orchestrator mode.
 
 ### list_dir
 
@@ -98,7 +104,7 @@ Finds files by path fragment, glob, or file-type shorthand — the fastest way t
 
 Results are returned as workspace-relative paths, with the same noisy-directory skip list as `list_dir`.
 
-Config: `tools.file.enable` (default `true`).
+Config: `tools.file.enable` (default `true`). **Subagent-only** in the default orchestrator mode — the orchestrator has no filename search at all, only the index-only `grep` below.
 
 ### grep
 
@@ -142,7 +148,7 @@ Runs Python code **in-process**, inside the same Chaquopy interpreter the whole 
 | Default output cap | 10,000 chars (max 50,000) |
 | Session poll window (`yield_time_ms`) | up to 30,000ms |
 
-Config: `tools.pythonExec.enable` (default `true`), `tools.pythonExec.timeout` (default 60), `tools.pythonExec.maxOutputChars` (default 10000, range 1000–50000), `tools.pythonExec.allowedModules`/`blockedModules` (explicit default lists).
+Config: `tools.pythonExec.enable` (default `true`), `tools.pythonExec.timeout` (default 60), `tools.pythonExec.maxOutputChars` (default 10000, range 1000–50000), `tools.pythonExec.allowedModules`/`blockedModules` (explicit default lists). **Subagent-only** in the default orchestrator mode: the agent you talk to cannot run code, it delegates to a `coder` or an `analyst`.
 
 Gotcha: a long-running execution holds a process-wide stdout/stderr redirect lock, so a second concurrent `python_exec`/exec-session call has to wait for it to finish (or be stopped) before its own output capture can start — a real, accepted cost of the current design, not a bug you can work around.
 
@@ -160,7 +166,7 @@ Despite the name, this **does not write to stdin**. It polls, waits for specific
 
 Sessions are only visible to the chat session that created them.
 
-Config: `tools.pythonExec.enable` (default `true`).
+Config: `tools.pythonExec.enable` (default `true`). **Subagent-only** in the default orchestrator mode, like `python_exec` itself.
 
 Gotcha: `terminate` is cooperative, checked at trace-function checkpoints in the running code. Code stuck inside a blocking C call won't stop immediately — the underlying thread can become an inert zombie rather than a truly killed process.
 
@@ -175,13 +181,15 @@ Lists the active `python_exec` sessions for the current chat: id, state, elapsed
 
 Useful for recovering a `session_id` you lost track of after context compaction.
 
-Config: `tools.pythonExec.enable` (default `true`).
+Config: `tools.pythonExec.enable` (default `true`). **Subagent-only** in the default orchestrator mode, like `python_exec` itself.
 
 ---
 
 ## 3. Web
 
-These three tools are Android-only: they need an Android context, and `web_search`/`web_fetch` specifically drive a hidden Chrome WebView rather than making raw HTTP requests, which is how they avoid the bot-detection that blocks plain HTTP clients.
+`web_search` and `web_fetch` are Android-only: they drive a hidden Chrome WebView rather than making raw HTTP requests, which is how they avoid the bot-detection that blocks plain HTTP clients, and without an Android context they do not register at all. `download_file` is **not** Android-only despite sitting in this group — it is a plain `httpx` download with no platform gate, so it registers everywhere.
+
+All three are **subagent-only** in the default orchestrator mode. Reading untrusted pages is deliberately not something the conversation you're in does directly: a `researcher` subagent fetches, and its raw page content never enters your permanent conversation.
 
 ### web_search
 
@@ -209,7 +217,7 @@ Config (also in Settings → Tools → Web Search): `tools.androidWeb.enable` (d
 
 ### download_file
 
-Downloads **any** file from the web — image, PDF, archive, whatever — and saves the raw bytes. It **always** lands in `<workspace>/downloads/`, never anywhere else, and always registers regardless of any toggle.
+Downloads **any** file from the web — image, PDF, archive, whatever — and saves the raw bytes. It **always** lands in `<workspace>/downloads/`, never anywhere else, and always registers regardless of any toggle or platform (it uses `httpx` directly, not the WebView).
 
 - Filename resolution order: explicit `filename` parameter → `Content-Disposition` header → URL basename → a generated `download-XXXXXXXX` name. Collisions get `-1`, `-2`, … suffixes.
 - If the resolved name has no extension, one is guessed from the file's magic bytes (for images) so later embedding/serving recognizes the type.
@@ -221,13 +229,13 @@ Downloads **any** file from the web — image, PDF, archive, whatever — and sa
 | Timeout | 60s |
 | Max redirects | 5, each hop re-validated against SSRF policy |
 
-Config: no dedicated toggle (always registered); `security.ssrfWhitelist` affects which addresses are reachable. Gotcha: "URL blocked" errors come from the same SSRF policy that blocks loopback/private-network addresses by default — that's intentional, and the only way around it for a legitimate private target is adding it to `ssrfWhitelist`.
+Config: no dedicated toggle (always registered) — but **subagent-only** in the default orchestrator mode, so "always registered" does not mean the agent you talk to has it; `security.ssrfWhitelist` affects which addresses are reachable. Gotcha: "URL blocked" errors come from the same SSRF policy that blocks loopback/private-network addresses by default — that's intentional, and the only way around it for a legitimate private target is adding it to `ssrfWhitelist`.
 
 ---
 
 ## 4. Device
 
-Both tools in this group are Android-only.
+`get_location` is Android-only — it needs the platform location bridge. `ui_view` is not gated on Android as such: it registers whenever a WebUI query service exists, which in the normal Android runtime is always, but the condition is the service, not the platform. Both are available to the orchestrator.
 
 ### get_location
 
@@ -333,12 +341,12 @@ Schedules reminders and recurring work. Actions: `add`, `list`, `remove`.
   - `at` — a one-shot ISO datetime; the job auto-deletes itself after it fires.
 - Naive (timezone-less) `cron_expr`/`at` values fall back to the device's configured timezone.
 - `remove` needs a `job_id` from `list`.
-- System-managed jobs (notably `dream`, memory consolidation) show up in `list` for transparency but are **protected** — removal is refused with an explanation, not silently ignored.
+- System-managed jobs show up in `list` for transparency but are **protected** — removal is refused with an explanation, not silently ignored. There are three, and `list` prints the purpose of each next to it: `dream` (memory consolidation), `atlas` (rebuilds `memory/WIKI.md` from your wikis, every 12h by default), and `heartbeat` (checks `HEARTBEAT.md` for tasks you left). Each is registered only if its own config enables it — `agents.defaults.dream.enabled`, `agents.defaults.atlas.enabled`, `gateway.heartbeat.enabled` — so a disabled one is absent from `list` rather than present and idle.
 - Jobs cannot be created from inside another cron job's own execution (no self-scheduling chains).
 
 Config: no direct user toggle; the default timezone comes from the device/config, not a tool setting.
 
-Gotcha: seeing a `dream` job in the list is expected, not a sign of something wrong — it's the memory-consolidation cron job, and it's meant to be visible but not removable.
+Gotcha: seeing `dream`, `atlas` and `heartbeat` in the list is expected, not a sign of something wrong — they are Jenny's own periodic jobs, meant to be visible but not removable. To stop one, turn it off in config; there is no way to delete it from the job list.
 
 ### spawn
 
@@ -349,18 +357,32 @@ Starts a subagent to work a task in the background and reports the result back i
 - A subagent only gets tools scoped `subagent`: file tools (including `apply_patch`), search, `python_exec` (plus its session tools `write_stdin`/`list_exec_sessions`), the web tools, `download_file`, `get_location`, introspection, and logs. It explicitly does **not** get `spawn` (no subagents spawning subagents), `cron`, `message`, `my`, `long_task`, or `ui_view`.
 - The **agent type** narrows that scope further, and comes with its own role prompt plus sampling defaults:
 
-| `agent_type` | Tools | Notes |
-|---|---|---|
-| `researcher` | `web_search`, `web_fetch`, `read_file`, `list_dir`, `write_file` | Gathers material online. **No code execution** — it is the type most exposed to untrusted pages. |
-| `writer` | `read_file`, `list_dir`, `write_file`, `apply_patch` | Docs, wiki pages, synthesis. **No network at all.** |
-| `coder` | filesystem, `find_files`, `grep`, `apply_patch`, `python_exec`, `write_stdin`, `list_exec_sessions`, `get_recent_logs` | Writes and changes code. No network. |
-| `analyst` | `python_exec`, `read_file`, `list_dir`, `write_file` | Computation, data, charts. No network. |
-| `sysadmin` | `ssh_hosts`, `ssh_exec`, `ssh_job`, `ssh_transfer`, `read_file`, `list_dir`, `write_file` | The only type that can touch a remote machine — and in exchange the only one with **neither web access nor `python_exec`**. Temperature 0. |
-| `operator` | the whole `subagent` scope | Default, and the fallback for what fits none of the above. |
+| `agent_type` | Tools | Temp. | Max iterations | Notes |
+|---|---|---|---|---|
+| `researcher` | `web_search`, `web_fetch`, `read_file`, `list_dir`, `write_file` | 0.2 | 60 | Gathers material online. **No code execution** — it is the type most exposed to untrusted pages. |
+| `writer` | `read_file`, `list_dir`, `write_file`, `apply_patch` | 0.5 | 40 | Docs, wiki pages, synthesis. **No network at all.** The highest temperature of the six, because prose is the one output where variety helps. |
+| `coder` | filesystem, `find_files`, `grep`, `apply_patch`, `python_exec`, `write_stdin`, `list_exec_sessions`, `get_recent_logs` | 0.1 | 120 | Writes and changes code. No network. The longest leash, because a build/test loop legitimately takes many steps. |
+| `analyst` | `python_exec`, `read_file`, `list_dir`, `write_file` | 0.1 | 60 | Computation, data, charts. No network. |
+| `sysadmin` | `ssh_hosts`, `ssh_exec`, `ssh_job`, `ssh_transfer`, `read_file`, `list_dir`, `write_file` | 0.0 | 60 | The only type that can touch a remote machine — and in exchange the only one with **neither web access nor `python_exec`**. |
+| `operator` | the whole `subagent` scope | manager default | manager default | Default, and the fallback for what fits none of the above. It declares no sampling defaults of its own. |
+
+Both columns are *defaults*, not ceilings you can't move: a `temperature` passed to `spawn` overrides the type's. The iteration count is different — the effective cap is `min(type cap, agents.defaults.maxToolIterations)`, where that setting defaults to **200**. So the type's number is what you normally get, and lowering `maxToolIterations` lowers every type at once (setting it to 30 caps even `coder` at 30); raising it above 200 never lifts a type past its own number.
 
 `sysadmin` is also the only type that loads a second scope (`subagent` + `remote`). The SSH tools are kept out of the `subagent` scope precisely so that `operator` — which means "everything in that scope" — cannot inherit a remote shell by accident; granting them takes naming their scope explicitly.
 
-**A type can also declare tools it cannot work without.** `sysadmin` requires the four SSH tools, `researcher` requires the two web ones. If *every* required tool is unavailable **and** something can say why in terms you can act on — SSH switched off, no host registered, web access off — the spawn is refused with that sentence instead of starting an agent that would improvise. When the cause is the runtime rather than a setting (the web tools off Android, where no switch would help), the spawn proceeds and the loss is only logged. Partial loss is never a refusal.
+**A type can also declare tools it cannot work without.** Five of the six do:
+
+| Type | Requires | What has to be off for the spawn to be refused |
+|---|---|---|
+| `researcher` | `web_search`, `web_fetch` | `tools.androidWeb.enable` |
+| `writer` | `read_file`, `write_file` | `tools.file.enable` |
+| `coder` | `read_file`, `write_file` | `tools.file.enable` |
+| `analyst` | `python_exec`, `read_file` | `tools.pythonExec.enable` **and** `tools.file.enable` — either one alone is partial loss, not a refusal |
+| `sysadmin` | `ssh_hosts`, `ssh_exec`, `ssh_job`, `ssh_transfer` | `tools.ssh.enable`, or an empty host list |
+
+The practical consequence: turn `tools.file.enable` off and asking for a `writer` or a `coder` is refused outright, with a message naming that setting, rather than starting an agent that would try to write a document with no write tool. `operator` requires nothing and always spawns.
+
+If *every* required tool is unavailable **and** something can say why in terms you can act on — SSH switched off, no host registered, web access off — the spawn is refused with that sentence instead of starting an agent that would improvise. When the cause is the runtime rather than a setting (the web tools off Android, where no switch would help), the spawn proceeds and the loss is only logged. Partial loss is never a refusal.
 
 The researcher/writer and researcher/coder splits are a security boundary, not a preference: whoever read untrusted web content is not the one who then runs code. An unknown `agent_type` is rejected with the list of valid ones; a persisted record carrying a type that no longer exists degrades to `operator` so its work stays relaunchable.
 
@@ -461,6 +483,30 @@ See the Mini-apps page for how apps and actions are authored. Config: `apps.enab
 Gotcha: because the tool count depends on what's installed, don't expect a stable total — it changes every time an app is added, removed, or edited.
 
 ---
+
+## The two internal registries: Dream and Atlas
+
+Neither of Jenny's two memory jobs uses the tool loader or any scope above. Each builds its own small registry by hand, with the write side narrowed to an explicit list of files, so that a run cannot touch anything it wasn't meant to — including the other job's files. Nothing here is reachable from a chat turn, and none of it appears in a tool list the model shows you.
+
+**Dream** (`jenny/agent/memory.py::build_dream_tools`) gets four tools:
+
+| Tool | What it can touch |
+|---|---|
+| `read_file` | The whole workspace, read-only |
+| `edit_file` | `skills/`, plus exactly `memory/MEMORY.md`, `SOUL.md`, `USER.md` |
+| `apply_patch` | Same as `edit_file` |
+| `write_file` | `skills/` only |
+
+**Atlas** (`jenny/agent/atlas.py::AtlasStore.build_tools`) gets seven — read wide, write to one file:
+
+| Tool | What it can touch |
+|---|---|
+| `read_file`, `list_dir`, `find_files`, `grep` | The whole workspace, read-only |
+| `write_file`, `edit_file`, `apply_patch` | Exactly one path: `memory/WIKI.md` |
+
+Atlas's write tools are built with `write_files_only=True`, which means **no directory is writable at all** — only the exact file allowlist, and that allowlist has one entry. `MEMORY.md`, `SOUL.md` and `USER.md` are deliberately outside it (they belong to Dream, and two jobs rewriting the same file on different clocks would erase each other), and so is `workspace/wikis/` itself, which is the source Atlas reads from and must never edit.
+
+The asymmetry in reading is intentional too: Atlas gets search tools and Dream doesn't, because Atlas has to survey a wiki tree it did not write, while Dream reads a fixed set of known files.
 
 ## Toggle → where it lives
 

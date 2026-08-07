@@ -50,7 +50,10 @@ class _FsTool(Tool):
         un'impostazione.
         """
         if not ctx.config.file.enable:
-            return "file tools are off (Settings > Tools > Files)"
+            # Non "Settings > ...": quel pannello non esiste. Questo
+            # interruttore vive solo in config.json, e mandare l'utente a
+            # cercare una schermata inventata e peggio che non dirgli niente.
+            return "file tools are off (tools.file.enable in config.json)"
         return None
 
     def __init__(

@@ -31,10 +31,10 @@ Not every skill is meant to be poked at by hand. A skill's frontmatter puts it i
 | Tier | What you see | Examples |
 |---|---|---|
 | **Normal** | Full card, fully manageable (edit/enable/disable/delete) | Skills you or Jenny create yourself |
-| **Locked** | Visible in the grid, but tapping it shows only a short descriptive card instead of an editor — no edit/disable/delete outside Developer mode | `cron`, `app-creator`, `skill-creator`, `llm-wiki` |
+| **Locked** | Visible in the grid, but tapping it shows only a short descriptive card instead of an editor — no edit/disable/delete outside Developer mode | `cron`, `app-creator`, `skill-creator`, `llm-wiki`, `ssh` |
 | **Internal** | Hidden from the grid entirely unless **Developer mode** is on | `memory`, `my`, `http-client`, `data-processing`, `long-goal` |
 
-Locked skills are core parts of how Jenny works (scheduling, building apps and skills, the wiki); internal skills are plumbing you're unlikely to ever need to touch directly (self-awareness bookkeeping, low-level HTTP/data helpers). Turning on **Developer mode** in Settings → System reveals both the internal skills and the management actions on locked ones. Its hint text is explicit about the intent: *"Also shows what Jenny uses to work: system skills and internal files (memory, configuration) appear in the lists. Only useful for looking under the hood."*
+Locked skills are core parts of how Jenny works (scheduling, building apps and skills, the wiki, remote machines over SSH); internal skills are plumbing you're unlikely to ever need to touch directly (self-awareness bookkeeping, low-level HTTP/data helpers). Turning on **Developer mode** in Settings → System reveals both the internal skills and the management actions on locked ones. Its hint text is explicit about the intent: *"Also shows what Jenny uses to work: system skills and internal files (memory, configuration) appear in the lists. Only useful for looking under the hood."*
 
 ## Honesty note: builtin skills don't survive a restart
 
