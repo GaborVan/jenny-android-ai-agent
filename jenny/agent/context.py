@@ -66,8 +66,15 @@ class ContextBuilder:
         workspace: Path | None = None,
         include_memory_recent_history: bool = True,
         session_key: str | None = None,
+        available_tools: list[str] | None = None,
     ) -> str:
-        """Build the system prompt from identity, bootstrap files, memory, and skills."""
+        """Build the system prompt from identity, bootstrap files, memory, and skills.
+
+        ``available_tools`` sono i tool del *turno*. Passarli esplicitamente e
+        l'unico modo perche l'inventario descriva un registry sostituito (Dream,
+        Atlas) invece di quello del loop; la callable del costruttore resta il
+        default per chi un registry per-turno non ce l'ha.
+        """
         root = workspace or self.workspace
         parts = [self._get_identity(channel=channel, workspace=root)]
 
@@ -128,12 +135,23 @@ class ContextBuilder:
         if session_summary:
             parts.append(f"[Archived Context Summary]\n\n{session_summary}")
 
-        if inventory := self._render_tool_inventory():
+        if inventory := self._render_tool_inventory(available_tools):
             parts.append(inventory)
 
         return "\n\n---\n\n".join(parts)
 
-    def _render_tool_inventory(self) -> str | None:
+    def _resolve_tool_names(self, available_tools: list[str] | None) -> list[str] | None:
+        """I nomi del turno se ci sono, altrimenti quelli del loop."""
+        if available_tools is not None:
+            return sorted(available_tools)
+        if self._available_tools is None:
+            return None
+        try:
+            return sorted(self._available_tools())
+        except Exception:
+            return None
+
+    def _render_tool_inventory(self, available_tools: list[str] | None = None) -> str | None:
         """L'elenco autoritativo dei tool, in coda a tutto il resto.
 
         Un prompt e cucito da pezzi scritti in momenti diversi — identita,
@@ -148,12 +166,7 @@ class ContextBuilder:
         registry perche una lista scritta a mano invecchierebbe come tutte le
         altre.
         """
-        if self._available_tools is None:
-            return None
-        try:
-            names = sorted(self._available_tools())
-        except Exception:
-            return None
+        names = self._resolve_tool_names(available_tools)
         if not names:
             return None
         try:
@@ -241,6 +254,7 @@ class ContextBuilder:
         workspace: Path | None = None,
         include_memory_recent_history: bool = True,
         session_key: str | None = None,
+        available_tools: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Build the complete message list for an LLM call."""
         root = workspace or self.workspace
@@ -275,6 +289,7 @@ class ContextBuilder:
                     workspace=root,
                     include_memory_recent_history=include_memory_recent_history,
                     session_key=session_key,
+                    available_tools=available_tools,
                 ),
             },
             *history,

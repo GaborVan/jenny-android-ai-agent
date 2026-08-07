@@ -546,11 +546,19 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
         history: list[dict[str, Any]],
         pending_summary: str | None,
         include_memory_recent_history: bool = True,
+        tools: ToolRegistry | None = None,
     ) -> list[dict[str, Any]]:
-        """Build the initial message list for the LLM turn."""
+        """Build the initial message list for the LLM turn.
+
+        ``tools`` e il registry *di questo turno*, che non sempre e quello del
+        loop: Dream e Atlas ne portano uno proprio. Va passato perche il prompt
+        dichiari i tool che il modello ricevera davvero — sono la stessa cosa
+        detta due volte, e devono venire dalla stessa fonte.
+        """
         scope = self.workspace_scopes.for_message(msg, session.metadata)
         chat_id = self._runtime_chat_id(msg)
         return self.context.build_messages(
+            available_tools=(tools or self.tools).tool_names,
             history=history,
             current_message=msg.content,
             media=msg.media if msg.media else None,
@@ -790,6 +798,9 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
         try:
             result = await self.runner.run(AgentRunSpec(
                 initial_messages=initial_messages,
+                # ``tools`` arriva gia risolto da ``_process_message``; il
+                # fallback resta per i chiamanti diretti (test) che entrano qui
+                # senza passare dalla FSM.
                 tools=tools or self.tools,
                 model=self.model,
                 max_iterations=self.max_iterations,
@@ -1305,7 +1316,13 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             on_stream_end=on_stream_end,
             pending_queue=pending_queue,
             ephemeral=ephemeral,
-            tools=tools,
+            # Risolto QUI, una volta, non piu in basso: il registry di questo
+            # turno decide due cose che devono coincidere — cosa il modello puo
+            # chiamare e cosa il prompt gli dichiara di avere. Finche la
+            # risoluzione stava solo davanti al runner, chi costruiva il prompt
+            # rispondeva da solo alla stessa domanda, e con un registry
+            # sostituito (Dream, Atlas) rispondeva diverso.
+            tools=tools or self.tools,
             turn_token=turn_token,
         )
 

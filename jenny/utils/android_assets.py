@@ -8,8 +8,27 @@ from loguru import logger
 if TYPE_CHECKING:
     pass
 
-_TEMPLATES_MANIFEST = [
+# File del workspace che appartengono all'utente o a Dream. Si creano al primo
+# avvio e non si toccano mai più: `SOUL.md` e `USER.md` li riscrive Dream,
+# `AGENTS.md` e `HEARTBEAT.md` li scrive l'utente. Sovrascriverli con la copia
+# del pacchetto cancellerebbe la personalità del bot e le istruzioni scritte a
+# mano.
+_USER_OWNED_TEMPLATES = [
     "AGENTS.md", "SOUL.md", "USER.md", "HEARTBEAT.md",
+    "memory/MEMORY.md",
+]
+
+# Prompt di sistema. Non li scrive nessun utente: sono il codice sorgente del
+# comportamento dell'agente, scritto in italiano invece che in Python.
+#
+# Vanno riscritti a OGNI avvio, ed è la differenza fra un aggiornamento che
+# arriva e uno che no. Trattandoli come i file dell'utente — la cosa che questo
+# codice faceva prima — una correzione a un prompt raggiungeva solo le
+# installazioni nuove: su un telefono aggiornato da mesi restava per sempre il
+# testo della versione in cui era stato installato. Un file *nuovo* arrivava, un
+# file *corretto* no, il che è il modo peggiore di sbagliare perché sembra che
+# funzioni.
+_SYSTEM_PROMPT_TEMPLATES = [
     "agent/identity.md", "agent/tool_contract.md", "agent/subagent_system.md",
     "agent/subagent_announce.md", "agent/skills_section.md", "agent/apps_section.md",
     "agent/platform_policy.md", "agent/cron_reminder.md",
@@ -19,8 +38,9 @@ _TEMPLATES_MANIFEST = [
     "agent/_snippets/untrusted_content.md",
     "agent/types/researcher.md", "agent/types/writer.md", "agent/types/coder.md",
     "agent/types/analyst.md", "agent/types/sysadmin.md", "agent/types/operator.md",
-    "memory/MEMORY.md",
 ]
+
+_TEMPLATES_MANIFEST = [*_USER_OWNED_TEMPLATES, *_SYSTEM_PROMPT_TEMPLATES]
 
 _SKILLS_MANIFEST = [
     "cron/SKILL.md",
@@ -340,7 +360,21 @@ def _write_bytes_force(target: Path, data: bytes) -> None:
     target.write_bytes(data)
 
 
-def extract_package_dir(package: str, dest: Path, *, skip_existing: bool = False) -> int:
+def extract_package_dir(
+    package: str,
+    dest: Path,
+    *,
+    skip_existing: bool = False,
+    only: list[str] | None = None,
+) -> int:
+    """Estrae i file di *package* in *dest*.
+
+    ``only`` restringe l'estrazione a un sottoinsieme del manifest, e serve a
+    chi deve applicare politiche diverse a gruppi di file dello stesso package
+    (i prompt di sistema si riscrivono sempre, i file dell'utente mai). Resta un
+    sottoinsieme *dichiarato*: una voce fuori dal manifest è un errore, non un
+    file che appare in silenzio.
+    """
     manifest = _get_manifest(package)
     if manifest is None:
         # Design a manifest esplicito (vedi .agent/gotchas.md): un package senza
@@ -351,6 +385,13 @@ def extract_package_dir(package: str, dest: Path, *, skip_existing: bool = False
             "(add it to _TEMPLATES_MANIFEST/_UI_MANIFEST/_SKILLS_MANIFEST)"
         )
     files = manifest
+    if only is not None:
+        unknown = sorted(set(only) - set(manifest))
+        if unknown:
+            raise ValueError(
+                f"files not in the manifest for package {package!r}: {', '.join(unknown)}"
+            )
+        files = list(only)
     logger.debug("Using static manifest for {}", package)
 
     if not files:

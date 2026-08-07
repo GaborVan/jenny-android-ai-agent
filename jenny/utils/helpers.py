@@ -693,8 +693,30 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
 
     added: list[str] = []
 
-    # Extract templates/ (top-level .md + agent/ + memory/ etc.) — skip existing to preserve user edits
-    extract_package_dir("jenny.templates", workspace, skip_existing=True)
+    # I template si dividono in due, e le due metà hanno politiche opposte.
+    #
+    # Quelli dell'utente (AGENTS.md, SOUL.md, USER.md, HEARTBEAT.md, MEMORY.md)
+    # si creano una volta e non si toccano più: SOUL e USER li riscrive Dream,
+    # gli altri l'utente, e la copia del pacchetto è solo un punto di partenza.
+    #
+    # I prompt di sistema (agent/**) sono invece codice: nessuno li edita a mano,
+    # e riscriverli a ogni avvio è ciò che fa arrivare una correzione. Erano
+    # trattati come i primi, e la conseguenza si è vista in produzione — un
+    # telefono aggiornato per mesi girava ancora con i prompt della versione in
+    # cui era stato installato, perché un file nuovo veniva estratto e uno
+    # corretto no.
+    from jenny.utils.android_assets import (
+        _SYSTEM_PROMPT_TEMPLATES,
+        _USER_OWNED_TEMPLATES,
+    )
+
+    extract_package_dir(
+        "jenny.templates", workspace, skip_existing=True, only=_USER_OWNED_TEMPLATES,
+    )
+    n_prompts = extract_package_dir(
+        "jenny.templates", workspace, only=_SYSTEM_PROMPT_TEMPLATES,
+    )
+    added.append(f"agent prompts ({n_prompts} files)")
 
     # Extract UI assets into workspace/ui/
     n_ui = extract_package_dir("jenny.templates.ui", workspace / "ui")
