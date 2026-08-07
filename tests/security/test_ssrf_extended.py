@@ -313,3 +313,44 @@ def test_app_server_policy_never_grants_loopback_even_with_lan_whitelist():
             assert ok, f"whitelist ha priorità sul blocklist per design attuale, got: {err}"
     finally:
         configure_ssrf_whitelist([])
+
+
+def test_the_whitelist_cannot_open_the_phone_to_ssh():
+    """Il pavimento del loopback non e negoziabile, nemmeno dalla whitelist.
+
+    ``_is_blocked`` consulta ``_allowed_networks`` prima di ogni blocklist:
+    chi apriva una fascia per ``web_fetch`` apriva anche l'SSH verso il telefono
+    stesso, e con esso l'API del gateway raggiunta dall'interno. La docstring di
+    ``validate_ssh_target`` prometteva il contrario.
+    """
+    configure_ssrf_whitelist(["127.0.0.0/8", "100.64.0.0/10"])
+    try:
+        with patch(
+            "jenny.security.network.socket.getaddrinfo",
+            _fake_resolve("me.example", ["127.0.0.1"]),
+        ):
+            ok, err = validate_ssh_target("me.example")
+        assert not ok
+        assert "the phone itself" in err
+
+        # La stessa whitelist, nella stessa chiamata, continua a valere dove
+        # deve: il pavimento riguarda il loopback, non la whitelist in se.
+        with patch(
+            "jenny.security.network.socket.getaddrinfo",
+            _fake_resolve("ts.example", ["100.100.1.1"]),
+        ):
+            assert validate_url_target("http://ts.example/x")[0]
+    finally:
+        configure_ssrf_whitelist([])
+
+
+def test_ipv6_loopback_is_covered_by_the_same_floor():
+    configure_ssrf_whitelist(["::/0"])
+    try:
+        with patch(
+            "jenny.security.network.socket.getaddrinfo",
+            _fake_resolve("me6.example", ["::1"]),
+        ):
+            assert not validate_ssh_target("me6.example")[0]
+    finally:
+        configure_ssrf_whitelist([])

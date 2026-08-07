@@ -138,8 +138,15 @@ class SshHostConfig(Base):
     Host e username invece il modello li *vede*, elencati da ``ssh_hosts``:
     senza non potrebbe scegliere fra due alias né dire all'utente su quale
     macchina ha agito. Non sono segreti — i segreti sono la chiave privata, che
-    vive fuori dal workspace e che nessun tool legge, e la ``password`` qui
-    sotto, che nessun tool legge e nessun risultato di tool contiene.
+    vive fuori dal workspace, e la ``password`` qui sotto.
+
+    Su quella password serve una precisazione, perché questo commento diceva il
+    falso: nessun tool *SSH* la legge e nessun risultato di tool la contiene, ma
+    sta in chiaro in ``config.json``, che è *dentro* il workspace. Qualunque tipo
+    di agente con ``read_file`` può quindi leggerla — ``researcher`` compreso,
+    che è l'unico che ingerisce pagine non fidate e ha anche ``web_fetch``. È la
+    stessa esposizione delle chiavi API dei provider e del token Telegram, ed è
+    esattamente ciò che la chiave privata evita stando fuori dal workspace.
 
     ``host_key_fingerprint`` è **solo per display** nella UI. L'enforcement vero
     è il file ``known_hosts`` accanto alla chiave (vedi

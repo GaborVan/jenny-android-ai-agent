@@ -103,6 +103,7 @@ _AGENT_TYPES: tuple[AgentType, ...] = (
         tools=frozenset((*_FS_READ, "write_file", "apply_patch")),
         temperature=0.5,
         max_iterations=40,
+        requires=frozenset(("read_file", "write_file")),
     ),
     # Scrive e modifica codice: filesystem completo, patch, esecuzione, sessioni
     # exec e log. ``find_files``/``grep`` sono inclusi deliberatamente (vedi
@@ -122,6 +123,7 @@ _AGENT_TYPES: tuple[AgentType, ...] = (
         )),
         temperature=0.1,
         max_iterations=120,
+        requires=frozenset(("read_file", "write_file")),
     ),
     # Calcolo, dati, grafici. Nessuna rete: gira codice, quindi non deve poter
     # anche scaricare cio che esegue.
@@ -130,6 +132,7 @@ _AGENT_TYPES: tuple[AgentType, ...] = (
         tools=frozenset(("python_exec", *_FS_READ, "write_file")),
         temperature=0.1,
         max_iterations=60,
+        requires=frozenset(("python_exec", "read_file")),
     ),
     # Amministra macchine remote via SSH. E l'unico tipo che esce dal telefono
     # verso una macchina terza, e per questo e anche il piu stretto:

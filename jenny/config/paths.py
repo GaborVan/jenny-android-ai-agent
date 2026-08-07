@@ -100,11 +100,14 @@ def get_ssh_dir() -> Path:
     Sta accanto al workspace, non dentro (su Android: ``filesDir/ssh`` mentre il
     workspace è ``filesDir/workspace``). Le tre conseguenze sono tutte volute:
 
-    * i tool filesystem dell'agente non possono leggerla —
-      ``resolve_allowed_path`` rifiuta un path fuori dalla radice workspace, e a
-      differenza di ``config.json`` (che sta *dentro* il workspace e che
-      l'agente può quindi già leggere) una chiave SSH privata dà accesso a una
-      macchina terza;
+    * i tool filesystem dell'agente non possono leggerla **finché
+      ``security.restrict_to_workspace`` resta acceso** (il default):
+      ``resolve_allowed_path`` rifiuta un path fuori dalla radice workspace. Con
+      quell'impostazione spenta la radice diventa illimitata e la chiave torna
+      leggibile — è una rinuncia esplicita dell'utente, non una svista, ma qui
+      la conseguenza è più pesante che altrove: a differenza di ``config.json``
+      (che sta *dentro* il workspace e che l'agente può già leggere) una chiave
+      SSH privata dà accesso a una macchina terza;
     * non entra negli snapshot né nel backup cifrato esportabile, perché
       ``snapshot/engine.py`` cammina solo la radice del workspace;
     * resta comunque nello storage privato dell'app.

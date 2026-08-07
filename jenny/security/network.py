@@ -172,6 +172,10 @@ def validate_ssh_target(host: str) -> tuple[bool, str]:
     the SSH tool as a bridge back to the gateway's own API — and so do
     link-local/metadata and 0.0.0.0/8 (see ``_SSH_BLOCKED_NETWORKS``).
 
+    The loopback check is deliberately made **before** the blocklist, because
+    the blocklist yields to ``security.ssrfWhitelist`` and this must not: a
+    range opened for ``web_fetch`` would otherwise open the phone to SSH too.
+
     Unlike the URL validators this takes a bare hostname: SSH has no scheme to
     parse, so ``_validate_target`` (which requires http/https) does not apply.
 
@@ -200,6 +204,15 @@ def validate_ssh_target(host: str) -> tuple[bool, str]:
         return False, f"Cannot resolve hostname: {hostname}"
 
     for addr in addrs:
+        # Il pavimento, controllato PRIMA della whitelist. ``_is_blocked``
+        # consulta ``_allowed_networks`` per primo, quindi chi apre una fascia
+        # per ``web_fetch`` la aprirebbe anche qui: bastava mettere in whitelist
+        # un intervallo che copre 127.0.0.0/8 perche l'agente potesse aprire una
+        # sessione SSH verso il telefono stesso, e con essa raggiungere l'API del
+        # gateway dall'interno. Il loopback e la sola cosa che questa policy
+        # promette senza condizioni: qui non si negozia.
+        if _normalize_addr(addr).is_loopback:
+            return False, f"Blocked: {hostname} resolves to the phone itself ({addr})"
         if _is_blocked(addr, _SSH_BLOCKED_NETWORKS):
             return False, f"Blocked: {hostname} resolves to {addr}"
 

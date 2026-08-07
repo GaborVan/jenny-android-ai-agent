@@ -40,6 +40,19 @@ class _FsTool(Tool):
     def enabled(cls, ctx: Any) -> bool:
         return ctx.config.file.enable
 
+    @classmethod
+    def disabled_reason(cls, ctx: Any) -> str | None:
+        """Un solo interruttore spegne tutti i tool sui file, e si vede poco.
+
+        Senza questa frase un subagent che vive di filesystem — ``writer``,
+        ``coder``, ``analyst`` — partirebbe con zero tool e riporterebbe di aver
+        fallito, che si legge come un problema del modello invece che di
+        un'impostazione.
+        """
+        if not ctx.config.file.enable:
+            return "file tools are off (Settings > Tools > Files)"
+        return None
+
     def __init__(
         self,
         workspace: Path | None = None,
