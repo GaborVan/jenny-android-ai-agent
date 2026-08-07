@@ -87,11 +87,14 @@ Everything about how the agent talks to the model and manages its own context.
 | `agents.defaults.consolidationRatio` | float 0.1–0.95 | `0.5` | Fraction of the live context consolidated when a consolidation runs. |
 | `agents.defaults.dream.enabled` | bool | `true` | Registers the periodic Dream memory-consolidation job at startup. |
 | `agents.defaults.dream.intervalH` | int ≥ 1 | `2` | Hours between Dream runs. The interval restarts on every app launch. |
+| `agents.defaults.atlas.enabled` | bool | `true` | Registers the periodic Atlas job, which compiles `memory/WIKI.md` from `workspace/wikis/`. With no wikis present the job exits before reaching the provider. |
+| `agents.defaults.atlas.intervalH` | int ≥ 1 | `12` | Hours between Atlas checks. A tick that finds the wiki unchanged since the last run costs nothing. |
+| `agents.defaults.atlas.maxContextTokens` | int ≥ 100 | `1200` | Cap on the wiki-directory block injected into every system prompt; a longer `memory/WIKI.md` is truncated at injection time. |
 | `agents.defaults.maxToolIterations` | int | `200` | Hard ceiling on tool calls in a single turn. |
 | `agents.defaults.maxToolResultChars` | int | `16000` | Tool output above this is truncated before it reaches the model. |
 | `agents.defaults.contextBlockLimit` | int \| null | `null` | Optional cap on context blocks; unset means no extra limit. |
 
-`dream` has exactly **two** fields — `enabled` and `intervalH`. Older docs mentioned `cron`, `modelOverride` and `maxBatchSize`; none of them exist. See [Memory and Dream](../using/memory.md).
+`dream` has exactly **two** fields — `enabled` and `intervalH`. Older docs mentioned `cron`, `modelOverride` and `maxBatchSize`; none of them exist. `atlas` adds `maxContextTokens` to the same pair; which wiki supplies its entity list follows `wiki.defaultWiki`. See [Memory, Dream and Atlas](../using/memory.md).
 
 ### Behavior and identity
 
@@ -342,5 +345,5 @@ How switching behaves:
 - [Providers and models](./providers.md) — choosing formats, base URLs, and models
 - [Tool reference](./tools.md) — what each tool actually does with these toggles
 - [Security model](../internals/security-model.md) — workspace policy, SSRF, and where the real boundaries are
-- [Memory and Dream](../using/memory.md), [Scheduling and proactivity](../using/scheduling.md), [Telegram bridge](../using/telegram.md), [Backup and restore](../using/backup.md)
+- [Memory, Dream and Atlas](../using/memory.md), [Scheduling and proactivity](../using/scheduling.md), [Telegram bridge](../using/telegram.md), [Backup and restore](../using/backup.md)
 - [Troubleshooting](../using/troubleshooting.md) — what to do when a config change breaks the boot

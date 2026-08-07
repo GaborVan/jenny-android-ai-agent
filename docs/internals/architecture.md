@@ -171,8 +171,17 @@ Session history is the near-term conversation replay. Memory is the longer-term 
 | Long-term memory | `<workspace>/memory/MEMORY.md` | Facts and durable context Dream writes back |
 | Consolidation source history | `<workspace>/memory/history.jsonl` | Append-only log Dream reads from; capped at 1000 entries (oldest dropped first) |
 | Bootstrap identity files | `<workspace>/SOUL.md`, `<workspace>/USER.md`, seeded from `jenny/templates/` | Identity/persona and user-facts files Dream also updates |
+| Wiki directory | `<workspace>/memory/WIKI.md` (+ `.atlas_state.json`, optional `WIKI_POLICY.md`) | Derived from `<workspace>/wikis/` by Atlas; injected into every system prompt |
 
-Dream is implemented in `jenny/agent/memory.py` and scheduled by the runtime when `agents.defaults.dream.enabled` is true (default `true`, every `dream.interval_h` hours, default `2`). Its interval is a periodic-from-boot schedule, not wall-clock-anchored, so it restarts counting from zero every time the app (and therefore the gateway process) restarts. See [Memory and Dream](../using/memory.md) for the user-facing behavior.
+Dream is implemented in `jenny/agent/memory.py` and scheduled by the runtime when `agents.defaults.dream.enabled` is true (default `true`, every `dream.interval_h` hours, default `2`). Its interval is a periodic-from-boot schedule, not wall-clock-anchored, so it restarts counting from zero every time the app (and therefore the gateway process) restarts. See [Memory, Dream and Atlas](../using/memory.md) for the user-facing behavior.
+
+**Atlas** applies the same pattern to the wiki. It lives in `jenny/agent/atlas.py`, is registered next to Dream (`agents.defaults.atlas`, default every 12 hours) and compiles `<workspace>/wikis/` into `memory/WIKI.md`, which `ContextBuilder` injects as a second subsection of the `# Memory` block. Three properties distinguish it from Dream:
+
+- **Deterministic scan, model-side judgement.** `AtlasStore.build_inventory()` walks the wikis in Python and puts the page list in the prompt; the ephemeral turn classifies rather than explores. Read-only tools (`read_file`, `list_dir`, `find_files`, `grep`) are there for disambiguation only.
+- **Fingerprint gate.** `jenny/utils/wiki_paths.py::wiki_fingerprint` hashes `(path, mtime, size)` across the wiki sources plus the optional user policy file, skipping `log/` and `audit/`. An unchanged fingerprint short-circuits the run before any provider call. It is recorded in `memory/.atlas_state.json` only when the turn completed **and** wrote — `MemoryStore.internal_run_should_commit`, the same rule that governs Dream's cursor.
+- **Single-file write sandbox.** `AtlasStore.build_tools()` passes `write_files_only=True` to the filesystem tools, so no directory is writable and the allowlist contains exactly `memory/WIKI.md`. Dream's registry excludes that path in turn. The two jobs cannot overwrite each other, and neither can write to the wiki itself.
+
+The cron branch (`runtime/cron_dispatch.py::_run_atlas`) and the `/atlas` command both call the single `run_atlas()` entry point.
 
 ## Security Boundaries
 

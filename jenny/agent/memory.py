@@ -16,6 +16,7 @@ from jenny.utils.helpers import (
     ensure_dir,
     strip_think,
     truncate_text,
+    truncate_text_to_tokens,
 )
 from jenny.utils.path import atomic_write
 from jenny.utils.prompt_templates import render_template
@@ -32,7 +33,7 @@ class MemoryStore:
     """Pure file I/O for memory files: MEMORY.md, history.jsonl, SOUL.md, USER.md."""
 
     _DEFAULT_MAX_HISTORY = 1000
-    _INTERNAL_HISTORY_SESSION_PREFIXES = ("cron:", "dream:")
+    _INTERNAL_HISTORY_SESSION_PREFIXES = ("cron:", "dream:", "atlas:")
     _INTERNAL_HISTORY_SESSION_KEYS = {"heartbeat"}
 
     def __init__(self, workspace: Path, max_history_entries: int = _DEFAULT_MAX_HISTORY):
@@ -40,6 +41,11 @@ class MemoryStore:
         self.max_history_entries = max_history_entries
         self.memory_dir = ensure_dir(workspace / "memory")
         self.memory_file = self.memory_dir / "MEMORY.md"
+        # Rubrica compilata da Atlas a partire da workspace/wikis/. Vive qui
+        # accanto a MEMORY.md perché è memoria a tutti gli effetti, ma è un file
+        # distinto con un proprietario distinto: Dream non ha il permesso di
+        # scriverlo e Atlas non ha il permesso di scrivere MEMORY.md.
+        self.wiki_file = self.memory_dir / "WIKI.md"
         self.history_file = self.memory_dir / "history.jsonl"
         self.soul_file = workspace / "SOUL.md"
         self.user_file = workspace / "USER.md"
@@ -64,11 +70,30 @@ class MemoryStore:
     def read_memory(self) -> str:
         return self.read_file(self.memory_file)
 
+    # -- WIKI.md (wiki directory, managed by Atlas) --------------------------
+
+    def read_wiki_memory(self) -> str:
+        return self.read_file(self.wiki_file)
+
     # -- context injection (used by context.py) ------------------------------
 
     def get_memory_context(self) -> str:
         long_term = self.read_memory()
         return f"## Long-term Memory\n{long_term}" if long_term else ""
+
+    def get_wiki_memory_context(self, max_tokens: int | None = None) -> str:
+        """Blocco rubrica per il system prompt, troncato al tetto configurato.
+
+        Il troncamento sta qui e non nel prompt di Atlas perché è l'ultima
+        linea di difesa: un run che produce un file lungo il doppio del dovuto
+        peserebbe altrimenti su ogni turno fino al run successivo.
+        """
+        content = self.read_wiki_memory().strip()
+        if not content:
+            return ""
+        if max_tokens is not None and max_tokens > 0:
+            content = truncate_text_to_tokens(content, max_tokens)
+        return f"## Wiki Directory\n{content}"
 
     # -- history.jsonl — append-only, JSONL format ---------------------------
 
@@ -412,10 +437,51 @@ class MemoryStore:
         return tools
 
     @staticmethod
-    def dream_run_completed(resp: object | None) -> bool:
-        """Return True only when an ephemeral Dream agent turn completed cleanly."""
+    def internal_run_completed(resp: object | None) -> bool:
+        """Return True only when an ephemeral internal agent turn completed cleanly."""
         metadata = getattr(resp, "metadata", None)
         return isinstance(metadata, dict) and metadata.get("_stop_reason") == "completed"
+
+    @staticmethod
+    def dream_run_completed(resp: object | None) -> bool:
+        """Return True only when an ephemeral Dream agent turn completed cleanly."""
+        return MemoryStore.internal_run_completed(resp)
+
+    @staticmethod
+    def internal_run_should_commit(
+        resp: object | None,
+        file_states: object | None,
+    ) -> bool:
+        """Return True quando un run interno può registrare il proprio progresso.
+
+        Regola condivisa da Dream (avanzamento del cursore su ``history.jsonl``)
+        e da Atlas (avanzamento del fingerprint della wiki). In entrambi i casi
+        il progresso è un'affermazione — "questo input è stato digerito" — e
+        farla dopo un run che non ha prodotto nulla per un blocco di policy
+        significa perdere quell'input per sempre. Si registra quindi solo se il
+        run:
+
+        - è completato pulito (``internal_run_completed``), **e**
+        - ha scritto almeno un file (``writes_ok > 0``), **oppure** non ha mai
+          tentato una scrittura (``writes_attempted == 0``) — il caso legittimo
+          "non c'era niente da cambiare".
+
+        Se ha tentato scritture e nessuna è riuscita NON si registra: l'input va
+        riprocessato al run seguente.
+
+        ``file_states`` è tollerante a ``None`` / oggetti senza i contatori
+        (fallback conservativo: nessun avanzamento) per non far esplodere il
+        chiamante se il registry non è quello costruito qui.
+        """
+        if not MemoryStore.internal_run_completed(resp):
+            return False
+        writes_ok = getattr(file_states, "writes_ok", None)
+        writes_attempted = getattr(file_states, "writes_attempted", None)
+        if not isinstance(writes_ok, int) or not isinstance(writes_attempted, int):
+            return False
+        if writes_ok > 0:
+            return True
+        return writes_attempted == 0
 
     @staticmethod
     def dream_should_advance_cursor(
@@ -441,15 +507,7 @@ class MemoryStore:
         (fallback conservativo: nessun avanzamento) per non far esplodere il
         chiamante se il registry non è quello di :meth:`build_dream_tools`.
         """
-        if not MemoryStore.dream_run_completed(resp):
-            return False
-        writes_ok = getattr(file_states, "writes_ok", None)
-        writes_attempted = getattr(file_states, "writes_attempted", None)
-        if not isinstance(writes_ok, int) or not isinstance(writes_attempted, int):
-            return False
-        if writes_ok > 0:
-            return True
-        return writes_attempted == 0
+        return MemoryStore.internal_run_should_commit(resp, file_states)
 
     # -- message formatting utility ------------------------------------------
 
@@ -494,34 +552,41 @@ class MemoryStore:
         return f"dream:{datetime.now():%Y%m%d-%H%M%S}"
 
     @staticmethod
-    def prune_dream_sessions(sessions_dir: Path, *, keep: int = 10) -> list[str]:
-        """Remove the oldest Dream session files, keeping only the N most recent.
+    def prune_internal_sessions(
+        sessions_dir: Path, prefix: str, *, keep: int = 10
+    ) -> list[str]:
+        """Remove the oldest ``<prefix>_*.jsonl`` session files, keeping N.
 
-        Only files matching ``dream_*.jsonl`` are considered. Non-dream session
-        files are never touched.
+        Only files matching the prefix are considered; sessions belonging to
+        anything else are never touched.
 
-        Returns the original ``dream:...`` session keys of the files that were
-        actually removed, so callers can also evict any in-memory bookkeeping
-        (``SessionManager`` cache, active tasks, session locks) keyed by the
-        same value — deleting the on-disk file alone leaves those caches
-        growing forever.
+        Returns the original ``<prefix>:...`` session keys of the files that
+        were actually removed, so callers can also evict any in-memory
+        bookkeeping (``SessionManager`` cache, active tasks, session locks)
+        keyed by the same value — deleting the on-disk file alone leaves those
+        caches growing forever.
         """
-        dream_files = sorted(
-            sessions_dir.glob("dream_*.jsonl"), key=lambda p: p.stat().st_mtime,
+        files = sorted(
+            sessions_dir.glob(f"{prefix}_*.jsonl"), key=lambda p: p.stat().st_mtime,
         )
-        if len(dream_files) <= keep:
+        if len(files) <= keep:
             return []
 
-        to_remove = dream_files[: len(dream_files) - keep]
+        to_remove = files[: len(files) - keep]
         removed_keys: list[str] = []
         for path in to_remove:
             try:
                 path.unlink()
-                logger.debug("Pruned old dream session: {}", path.stem)
+                logger.debug("Pruned old {} session: {}", prefix, path.stem)
                 removed_keys.append(path.stem.replace("_", ":", 1))
             except OSError:
-                logger.warning("Failed to prune dream session {}", path)
+                logger.warning("Failed to prune {} session {}", prefix, path)
         return removed_keys
+
+    @classmethod
+    def prune_dream_sessions(cls, sessions_dir: Path, *, keep: int = 10) -> list[str]:
+        """Remove the oldest Dream session files, keeping only the N most recent."""
+        return cls.prune_internal_sessions(sessions_dir, "dream", keep=keep)
 
 
 # ---------------------------------------------------------------------------

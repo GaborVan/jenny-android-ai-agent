@@ -44,6 +44,42 @@ class DreamConfig(Base):
         return f"every {hours}h"
 
 
+class AtlasConfig(Base):
+    """Atlas wiki-directory configuration.
+
+    Atlas è il gemello di Dream sul lato wiki: compila ``memory/WIKI.md``
+    leggendo ``workspace/wikis/``. Il default è ``enabled`` perché senza wiki
+    il job esce prima di qualunque chiamata al provider — a workspace vuoto
+    costa zero token.
+    """
+
+    _HOUR_MS = 3_600_000
+
+    enabled: bool = True  # Register the periodic Atlas job on startup
+    # Dodici ore, non due come Dream: una wiki cambia con la cadenza con cui
+    # l'utente ci fa ingest, non con quella delle conversazioni. Il fingerprint
+    # rende comunque gratuiti i tick a wiki ferma.
+    interval_h: int = Field(default=12, ge=1)
+    # Tetto del blocco iniettato in *ogni* system prompt: la rubrica è utile
+    # perché è corta. Oltre questa soglia viene troncata a valle, così un run
+    # generoso non si porta dietro il costo su tutti i turni successivi.
+    max_context_tokens: int = Field(
+        default=1200,
+        ge=100,
+        validation_alias=AliasChoices("maxContextTokens", "max_context_tokens"),
+        serialization_alias="maxContextTokens",
+    )
+
+    def build_schedule(self) -> CronSchedule:
+        """Build the runtime schedule from the configured interval."""
+        return CronSchedule(kind="every", every_ms=self.interval_h * self._HOUR_MS)
+
+    def describe_schedule(self) -> str:
+        """Return a human-readable summary for logs and startup output."""
+        hours = self.interval_h
+        return f"every {hours}h"
+
+
 class AgentDefaults(Base):
     """Default agent configuration."""
 
@@ -118,6 +154,7 @@ class AgentDefaults(Base):
     max_messages: int = Field(default=120, ge=0)
     consolidation_ratio: float = Field(default=0.5, ge=0.1, le=0.95)
     dream: DreamConfig = Field(default_factory=DreamConfig)
+    atlas: AtlasConfig = Field(default_factory=AtlasConfig)
     model_preset: str | None = Field(
         default=None,
         validation_alias=AliasChoices("modelPreset", "model_preset"),

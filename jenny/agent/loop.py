@@ -162,6 +162,7 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
         max_messages: int = 120,
         hooks: list[AgentHook] | None = None,
         disabled_skills: list[str] | None = None,
+        wiki_directory_max_tokens: int | None = None,
         tools_config: ToolsConfig | None = None,
         runtime_events: RuntimeEventBus | None = None,
         model_presets_config: dict[str, Any] | None = None,
@@ -229,6 +230,7 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             timezone=timezone,
             disabled_skills=disabled_skills,
             orchestrator=self.orchestrator_mode,
+            wiki_directory_max_tokens=wiki_directory_max_tokens,
         )
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
@@ -363,6 +365,7 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             extract_document_text=config.extract_document_text,
             timezone=defaults.timezone,
             disabled_skills=defaults.disabled_skills,
+            wiki_directory_max_tokens=defaults.atlas.max_context_tokens,
             session_ttl_minutes=defaults.session_ttl_minutes,
             consolidation_ratio=defaults.consolidation_ratio,
             max_messages=defaults.max_messages,
