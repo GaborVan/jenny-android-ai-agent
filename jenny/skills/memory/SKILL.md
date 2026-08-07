@@ -1,6 +1,6 @@
 ---
 name: memory
-description: Two-layer memory system with Dream-managed knowledge files.
+description: Two-layer memory system with Dream-managed knowledge files and an Atlas-managed wiki directory.
 always: true
 internal: true
 ---
@@ -12,6 +12,8 @@ internal: true
 - `SOUL.md` — Bot personality and communication style. **Managed by Dream.** Do NOT edit.
 - `USER.md` — User profile and preferences. **Managed by Dream.** Do NOT edit.
 - `memory/MEMORY.md` — Long-term facts (project context, important events). **Managed by Dream.** Do NOT edit.
+- `memory/WIKI.md` — Directory of the user's wikis: people, projects and systems that have a wiki page, plus the list of wikis. **Managed by Atlas.** Do NOT edit. Its entries link to wiki pages — follow the link when you need detail, and don't restate its content into the files above.
+- `memory/WIKI_POLICY.md` — Optional. The user's own rules for what belongs in the directory. Edit only when the user asks to change those rules.
 - `memory/history.jsonl` — append-only JSONL, not loaded into context. Prefer the built-in `grep` tool to search it.
 
 ## Search Past Events
@@ -33,5 +35,6 @@ Examples (replace `keyword`):
 ## Important
 
 - **Do NOT edit SOUL.md, USER.md, or MEMORY.md.** They are automatically managed by Dream.
+- **Do NOT edit memory/WIKI.md.** It is rebuilt from the wiki by Atlas; hand edits are overwritten on the next run. To change what goes in it, change `memory/WIKI_POLICY.md` or the wiki itself.
 - If you notice outdated information, it will be corrected when Dream runs next.
 - Users can view Dream's activity with the `/dream-log` command.

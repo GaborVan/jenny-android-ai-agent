@@ -260,6 +260,21 @@ class GatewayContainer:
         else:
             logger.info("Dream: disabled")
 
+        # Register Atlas system job (idempotent on restart). Nessuno snapshot
+        # pre-run come per Dream: Atlas riscrive solo memory/WIKI.md, che è
+        # derivato dalla wiki e viene ricostruito dal run successivo.
+        atlas_cfg = config.agents.defaults.atlas
+        if atlas_cfg.enabled:
+            self.cron.register_system_job(CronJob(
+                id="atlas",
+                name="atlas",
+                schedule=atlas_cfg.build_schedule(),
+                payload=CronPayload(kind="system_event"),
+            ))
+            logger.info("Atlas: {}", atlas_cfg.describe_schedule())
+        else:
+            logger.info("Atlas: disabled")
+
         # Register Heartbeat system job (idempotent on restart).
         if hb_cfg.enabled:
             self.cron.register_system_job(CronJob(

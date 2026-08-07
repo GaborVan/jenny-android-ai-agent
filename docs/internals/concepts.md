@@ -84,14 +84,17 @@ Every inbound message from either channel routes into the same single unified co
 
 ## Memory, sessions, and Dream
 
-Jenny uses two related stores:
+Jenny uses three related stores:
 
 | Store | Location | Purpose |
 |---|---|---|
 | Sessions | `<workspace>/sessions/*.jsonl` | Recent conversation turns replayed into model context; compacted after 15 minutes idle by default, capped at 120 messages |
 | Memory | `<workspace>/memory/MEMORY.md` and `<workspace>/memory/history.jsonl` | Long-term facts and consolidated history that survive session compaction |
+| Wiki directory | `<workspace>/memory/WIKI.md` | Index of `<workspace>/wikis/` — derived, not remembered: Atlas rebuilds it from the wiki whenever the wiki changes |
 
-Dream is a periodic consolidation job (`jenny/agent/memory.py`): every 2 hours by default, it reads accumulated `history.jsonl` entries (capped at 1000, oldest dropped first) and rewrites `MEMORY.md`, `SOUL.md`, `USER.md`, and skill files — it prunes stale material as well as adding new material, and it takes a workspace snapshot right before running so a bad consolidation can be rolled back. Dream's interval restarts from zero every time the app (and its gateway process) restarts; it is not anchored to wall-clock time. See [Memory and Dream](../using/memory.md) for the full user-facing design.
+Dream is a periodic consolidation job (`jenny/agent/memory.py`): every 2 hours by default, it reads accumulated `history.jsonl` entries (capped at 1000, oldest dropped first) and rewrites `MEMORY.md`, `SOUL.md`, `USER.md`, and skill files — it prunes stale material as well as adding new material, and it takes a workspace snapshot right before running so a bad consolidation can be rolled back. Dream's interval restarts from zero every time the app (and its gateway process) restarts; it is not anchored to wall-clock time.
+
+Atlas (`jenny/agent/atlas.py`) is its counterpart on the wiki side: every 12 hours by default it fingerprints `<workspace>/wikis/` and, only if something changed, runs one ephemeral turn that rewrites `memory/WIKI.md` — the single file it is allowed to write. No snapshot precedes it, because that file is derived and the next run reconstructs it. See [Memory, Dream and Atlas](../using/memory.md) for the full user-facing design of both.
 
 ## Tools and safety
 
@@ -113,6 +116,6 @@ Tool behavior is part of the model contract: names, schemas, and error messages 
 - [Settings](../reference/settings.md) for what's actually reachable from the UI;
 - [Providers and models](../reference/providers.md) for provider setup;
 - [WebSocket protocol](../reference/websocket.md) for wire-level details;
-- [Memory and Dream](../using/memory.md) for the consolidation pipeline;
+- [Memory, Dream and Atlas](../using/memory.md) for the consolidation pipeline;
 - [The agent turn](./agent-turn.md) for a closer look at context, compaction, and the three memory levels;
 - [Security model](./security-model.md) for the containment boundaries mentioned above.

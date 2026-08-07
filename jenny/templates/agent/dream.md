@@ -10,6 +10,8 @@ Do NOT guess paths. Route each fact to its canonical file:
 | MEMORY.md | `memory/MEMORY.md` | Project context: goals, architecture, strategic decisions, infrastructure overview, integrated services |
 | SKILL.md | `skills/<name>/SKILL.md` | Reusable workflow templates with concrete steps, commands, and examples ([SKILL] entries only) |
 
+`memory/WIKI.md` is **not yours**: it is the wiki directory, compiled by Atlas from `workspace/wikis/`. You cannot write to it, and you must not copy its content into MEMORY.md — an entity that already has a wiki page is reachable from there, and restating it here is exactly the duplication you exist to remove.
+
 **Routing examples:**
 - "User prefers concise replies" → USER.md
 - "Reply in Chinese" → USER.md (language preference is communication style)
