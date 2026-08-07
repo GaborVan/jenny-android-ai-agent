@@ -165,7 +165,7 @@ One honest caveat on top of that: `config.json` lives in the workspace, so Jenny
 - **Job logs stay on the server.** `/tmp/jenny-jobs` is not cleaned up by Jenny, and on most systems `/tmp` is wiped on reboot — which will make an old job unreadable. The per-host `jobLogDir` can be pointed somewhere durable, but only by editing `config.json` (there is no field for it in Settings).
 - **The job registry keeps 100 entries**, pruning only finished ones. Running jobs are never pruned.
 - **Output is truncated, not paged.** When a command produces more than the cap, Jenny is told how many characters were dropped and to re-run it narrowed with `grep`/`tail` rather than guess. Expect the occasional second command instead of a wall of text.
-- **`idleCloseS` in the config does nothing today.** It is declared and validated but never read by the connection pool.
+- **A connection you stop using is closed.** `idleCloseS` (default 300 s, floor 30) is how long a pooled session may sit unused before a reaper drops it, in both the Android and the development backend. It cannot be disabled from config, and that is deliberate: on a phone a forgotten session survives a wifi-to-mobile switch as a socket that will fail on the next command anyway.
 
 ## See also
 
