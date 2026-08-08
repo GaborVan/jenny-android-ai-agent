@@ -406,10 +406,15 @@ class StateHandlersMixin:
                 # e passato a ``InboundMessage``, quindi la scrittura e visibile
                 # fuori dal turno appena l'await ritorna. Stesso idioma gia usato
                 # per ``INTERNAL_CONTINUATION_PENDING_META`` in ``loop.py``.
-                # "Ha parlato" si legge dal MessageTool esattamente come fa
-                # ``_assemble_outbound``: una consegna verso il target d'origine
-                # in questo turno.
-                message_tool = self.tools.get("message")
+                # "Ha parlato" si legge dal MessageTool: una consegna verso il
+                # target d'origine in questo turno. Il registry del turno viene
+                # prima di quello di default — deliberatamente diverso da
+                # ``_assemble_outbound``, che legge solo ``self.tools``: il flag
+                # ``_sent_in_turn`` sta in una ContextVar *per istanza*, quindi
+                # con un registry sostituito (l'idioma di Dream/Atlas) leggere
+                # l'istanza di default darebbe sempre ``False`` e ogni ciclo
+                # risulterebbe muto senza che nulla lo segnali.
+                message_tool = (ctx.tools or self.tools).get("message")
                 ctx.msg.metadata[CRON_SPOKE_META] = bool(
                     isinstance(message_tool, MessageTool) and message_tool._sent_in_turn
                 )

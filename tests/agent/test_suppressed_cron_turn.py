@@ -291,6 +291,33 @@ class TestMonitorSpokeSignal:
 
         assert metadata[CRON_SPOKE_META] is False
 
+    async def test_a_delivery_through_a_per_turn_registry_is_reported_as_spoken(
+        self, loop: AgentLoop
+    ) -> None:
+        """``_sent_in_turn`` vive in una ContextVar *per istanza*: leggere il
+        MessageTool di default mentre il turno ne usa un altro darebbe sempre
+        ``False``, e il monitor risulterebbe muto a ogni ciclo senza che nulla
+        lo segnali. Il registry del turno deve avere la precedenza."""
+        from jenny.agent.tools.registry import ToolRegistry
+
+        # Il MessageTool di default resta a mani vuote: se la FSM leggesse
+        # quello, il turno passerebbe per silenzioso.
+        self._message_tool(loop, sent=False)
+
+        turn_tool = MessageTool(send_callback=AsyncMock(), workspace=loop.workspace)
+        turn_tool.start_turn()
+        turn_tool._sent_in_turn = True
+        turn_registry = ToolRegistry()
+        turn_registry.register(turn_tool)
+
+        metadata = _cron_metadata(monitor=True)
+        ctx = _ctx(loop, metadata=metadata, suppress=True, final_content="")
+        ctx.tools = turn_registry
+
+        await loop._state_respond(ctx)
+
+        assert metadata[CRON_SPOKE_META] is True
+
     async def test_the_flag_lands_in_the_very_dict_the_caller_handed_over(
         self, loop: AgentLoop
     ) -> None:
