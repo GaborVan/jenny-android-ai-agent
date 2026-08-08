@@ -564,6 +564,8 @@ class CronService:
     def list_jobs(self, include_disabled: bool = False) -> list[CronJob]:
         """List all jobs."""
         store = self._load_store()
+        if store is None:
+            return []
         jobs = store.jobs if include_disabled else [j for j in store.jobs if j.enabled]
         return sorted(jobs, key=lambda j: j.state.next_run_at_ms or float('inf'))
 
@@ -762,13 +764,22 @@ class CronService:
     def get_job(self, job_id: str) -> CronJob | None:
         """Get a job by ID."""
         store = self._load_store()
+        if store is None:
+            return None
         return next((j for j in store.jobs if j.id == job_id), None)
 
     def status(self) -> dict:
         """Get service status."""
         store = self._load_store()
+        # I lettori **degradano**, non abortiscono. Una query di stato è la
+        # prima cosa che ``GatewayContainer.build`` chiama, prima ancora di
+        # registrare i job: se decidesse lei di sollevare, il rifiuto
+        # arriverebbe da "quanti job ci sono" invece che da chi quel rifiuto
+        # lo sa spiegare. La decisione di non partire resta di
+        # ``register_system_job`` e ``start``, che dicono anche cosa fare col
+        # file ``.corrupt-<ts>``.
         return {
             "enabled": self._running,
-            "jobs": len(store.jobs),
+            "jobs": len(store.jobs) if store is not None else 0,
             "next_wake_at_ms": self._get_next_wake_ms(),
         }
