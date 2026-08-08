@@ -262,8 +262,10 @@ class CronService:
         - When the on-disk store exists but is unreadable: keep using the
           previous in-memory ``self._store`` if we already have one (so a
           transient corruption does not drop live jobs); only the very first
-          load (during ``start``) can return ``None`` to signal an unrecoverable
-          state to the caller.
+          load can return ``None`` to signal an unrecoverable state to the
+          caller. Quel primo caricamento avviene in ``register_system_job``
+          (``GatewayContainer.build``), non in ``start``: entrambi devono
+          quindi controllare il ``None``.
         """
         if self._timer_active and self._store:
             return self._store
@@ -359,20 +361,32 @@ class CronService:
         self._running = True
         loaded = self._load_store()
         if loaded is None:
-            # Store file existed but was corrupt and has been preserved with
-            # a ``.corrupt-<ts>`` suffix.  Bail out instead of starting with
-            # an empty store; that would call ``_save_store`` and overwrite
-            # the now-renamed (but still recoverable) data with [].
             self._running = False
-            raise RuntimeError(
-                f"cron store at {self.store_path} is corrupt and was preserved; "
-                "refusing to start with an empty job list. "
-                "Inspect the .corrupt-<ts> backup and restore manually."
-            )
+            raise self._corrupt_store_error()
         self._recompute_next_runs()
         self._save_store()
         self._arm_timer()
         logger.info("Cron service started with {} jobs", len(self._store.jobs if self._store else []))
+
+    def _corrupt_store_error(self) -> RuntimeError:
+        """Store corrotto su disco: rifiuta invece di ripartire da zero.
+
+        Ripartire con una lista vuota chiamerebbe ``_save_store`` e
+        sovrascriverebbe con ``[]`` i dati che ``_load_jobs`` ha appena messo
+        da parte come ``.corrupt-<ts>`` — recuperabili fino a quel momento.
+
+        Vive qui, e non inline in ``start``, perché il primo caricamento non
+        avviene in ``start``: ``GatewayContainer.build`` registra i job di
+        sistema prima, quindi è ``register_system_job`` a vedere per primo il
+        ``None``. Con la guardia solo dentro ``start`` questo caso finiva in un
+        ``AttributeError`` su ``store.jobs``, e il messaggio scritto apposta
+        per l'utente non veniva mai stampato.
+        """
+        return RuntimeError(
+            f"cron store at {self.store_path} is corrupt and was preserved; "
+            "refusing to start with an empty job list. "
+            "Inspect the .corrupt-<ts> backup and restore manually."
+        )
 
     def stop(self) -> None:
         """Stop the cron service."""
@@ -601,6 +615,8 @@ class CronService:
     def register_system_job(self, job: CronJob) -> CronJob:
         """Register an internal system job (idempotent on restart)."""
         store = self._load_store()
+        if store is None:
+            raise self._corrupt_store_error()
         now = _now_ms()
         previous = next((j for j in store.jobs if j.id == job.id), None)
         # Il conto alla rovescia sopravvive al riavvio. Ricalcolarlo qui a ogni

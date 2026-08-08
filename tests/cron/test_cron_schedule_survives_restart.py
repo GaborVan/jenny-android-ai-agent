@@ -119,6 +119,24 @@ async def test_user_recurring_job_also_keeps_its_deadline(tmp_path) -> None:
         second.stop()
 
 
+def test_corrupt_store_is_reported_not_crashed(tmp_path) -> None:
+    """Store corrotto: il messaggio per l'utente, non un ``AttributeError``.
+
+    ``GatewayContainer.build`` registra i job di sistema **prima** di
+    ``start``, quindi è qui che il primo caricamento incontra lo store
+    corrotto. Con la guardia solo dentro ``start`` il gateway moriva su
+    ``store.jobs`` di ``None`` e la spiegazione non veniva mai stampata.
+    """
+    path = tmp_path / "cron" / "jobs.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("{ questo non e' JSON ", encoding="utf-8")
+
+    service = CronService(path)
+
+    with pytest.raises(RuntimeError, match="corrupt and was preserved"):
+        service.register_system_job(_atlas_job())
+
+
 @pytest.mark.asyncio
 async def test_cron_expression_jobs_are_still_recomputed(tmp_path) -> None:
     """``cron`` è già ancorato all'orologio: resta ricalcolato come prima."""
