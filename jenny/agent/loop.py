@@ -56,6 +56,7 @@ from jenny.command import CommandContext, CommandRouter, register_builtin_comman
 from jenny.config.schema import AgentDefaults
 from jenny.cron.session_turns import (
     cron_history_overrides,
+    is_monitor_cron_turn,
 )
 from jenny.providers.base import LLMProvider
 from jenny.runtime.context import get_android_context
@@ -1322,6 +1323,13 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             on_stream_end=on_stream_end,
             pending_queue=pending_queue,
             ephemeral=ephemeral,
+            # Un cron in modalita monitor gira in silenzio: l'outbound finale e
+            # soppresso SEMPRE, e l'unico modo che il modello ha di parlare e
+            # chiamare il tool ``message`` durante il turno. Non c'e un token
+            # sentinella da parsare ne una chiamata LLM in piu: riusiamo lo
+            # stesso ``suppress_response`` gia usato dalle goal continuation,
+            # cablandolo qui a monte invece che a meta turno.
+            suppress_response=is_monitor_cron_turn(msg.metadata),
             # Risolto QUI, una volta, non piu in basso: il registry di questo
             # turno decide due cose che devono coincidere — cosa il modello puo
             # chiamare e cosa il prompt gli dichiara di avere. Finche la

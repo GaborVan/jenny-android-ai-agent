@@ -12,6 +12,7 @@ from jenny.agent.tools.path_utils import resolve_workspace_path
 from jenny.agent.tools.schema import ArraySchema, StringSchema, tool_parameters_schema
 from jenny.bus.events import OutboundMessage
 from jenny.config.paths import get_workspace_path
+from jenny.cron.session_turns import is_monitor_cron_turn
 from jenny.security.workspace_access import current_tool_workspace
 from jenny.security.workspace_policy import _safe_expanduser
 
@@ -258,7 +259,14 @@ class MessageTool(Tool, ContextAware):
         # resta sul canale d'origine e non viene diffuso agli altri canali
         # accoppiati (es. Telegram): il ChannelDeliverer diffonde solo con
         # questo flag (o con ``proactive=True`` dai chiamanti cron/heartbeat).
-        if not same_target:
+        # Eccezione: un turno di cron in modalita monitor. Li ``same_target`` e
+        # vero (canale/chat d'origine) ma l'utente NON e in conversazione: sta
+        # arrivando un avviso, non una risposta, e deve raggiungere anche i
+        # canali accoppiati come fa l'heartbeat (che consegna con
+        # ``proactive=True`` dal cron dispatcher). La condizione si legge dai
+        # metadata del turno gia propagati in ``set_context``: nessuno stato
+        # nuovo sul tool e nessun call site in piu da tenere allineato.
+        if not same_target or is_monitor_cron_turn(self._default_metadata.get()):
             metadata["_proactive_fanout"] = True
 
         msg = OutboundMessage(

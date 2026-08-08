@@ -19,6 +19,7 @@ from loguru import logger
 from jenny.agent.tools.message import MessageTool
 from jenny.agent.turn_types import TurnState
 from jenny.command import CommandContext
+from jenny.cron.session_turns import CRON_SPOKE_META, is_monitor_cron_turn
 from jenny.session import turn_continuation
 from jenny.session.goal_state import note_goal_turn
 from jenny.utils.document import extract_documents, prepare_attachments
@@ -395,6 +396,23 @@ class StateHandlersMixin:
 
     async def _state_respond(self, ctx: TurnContext) -> str:
         if ctx.suppress_response:
+            # Solo per i monitor: le goal continuation condividono
+            # ``suppress_response`` ma non hanno nulla da riferire al chiamante.
+            if is_monitor_cron_turn(ctx.msg.metadata):
+                # In monitor l'outbound e sempre ``None``, quindi chi ha lanciato
+                # il job (``run_bound_cron_job``) non puo dedurre dal valore di
+                # ritorno se il modello ha parlato. Glielo diciamo mutando il
+                # dict ``metadata``: e lo STESSO oggetto costruito dal chiamante
+                # e passato a ``InboundMessage``, quindi la scrittura e visibile
+                # fuori dal turno appena l'await ritorna. Stesso idioma gia usato
+                # per ``INTERNAL_CONTINUATION_PENDING_META`` in ``loop.py``.
+                # "Ha parlato" si legge dal MessageTool esattamente come fa
+                # ``_assemble_outbound``: una consegna verso il target d'origine
+                # in questo turno.
+                message_tool = self.tools.get("message")
+                ctx.msg.metadata[CRON_SPOKE_META] = bool(
+                    isinstance(message_tool, MessageTool) and message_tool._sent_in_turn
+                )
             ctx.outbound = None
             return "ok"
         ctx.outbound = self._assemble_outbound(

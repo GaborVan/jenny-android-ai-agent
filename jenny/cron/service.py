@@ -16,6 +16,7 @@ from loguru import logger
 from jenny.cron.session_turns import is_bound_cron_job
 from jenny.cron.types import (
     CronJob,
+    CronJobSilencedError,
     CronJobState,
     CronPayload,
     CronRunRecord,
@@ -49,6 +50,46 @@ class CronJobSkippedError(Exception):
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+_CRON_MODES: tuple[str, ...] = ("reminder", "monitor")
+
+
+def _parse_mode(raw: Any) -> Literal["reminder", "monitor"]:
+    """Legge ``payload.mode`` **da disco** tollerando qualunque valore.
+
+    Assente (store scritto prima che il campo esistesse) o sconosciuto (store
+    scritto da una versione più recente, o modificato a mano): in entrambi i
+    casi si ricade su ``"reminder"``. Un modo che non sappiamo eseguire non
+    deve impedire l'avvio, e parlare sempre è il ripiego che non perde nulla —
+    un job che non dice niente perché non sapevamo interpretarlo sarebbe
+    indistinguibile da un job rotto.
+
+    Volutamente **diversa** da ``_validate_mode_for_add``, che invece solleva:
+    vedi la spiegazione dell'asimmetria lì sotto.
+    """
+    return "monitor" if raw == "monitor" else "reminder"
+
+
+def _validate_mode_for_add(raw: Any) -> Literal["reminder", "monitor"]:
+    """Valida il ``mode`` che arriva da un **chiamante vivo**: solleva se ignoto.
+
+    L'asimmetria con ``_parse_mode`` è deliberata, non una svista. Dal disco
+    accettiamo tutto perché il file può venire da una versione futura e non
+    deve impedire l'avvio; da un chiamante, invece, un modo che non conosciamo
+    è un bug del chiamante, e ingoiarlo produce il guasto peggiore che questa
+    funzione possa causare: un monitor che diventa reminder in silenzio e
+    torna a parlare a ogni ciclo, senza che niente — né stato, né log, né
+    store — dica perché. Meglio rumoroso adesso che inspiegabile fra settimane.
+
+    Raises:
+        ValueError: se ``raw`` non è uno dei modi ammessi.
+    """
+    if raw not in _CRON_MODES:
+        raise ValueError(
+            f"unknown cron mode {raw!r}; expected one of: {', '.join(_CRON_MODES)}"
+        )
+    return "monitor" if raw == "monitor" else "reminder"
 
 
 def _compute_next_run(schedule: CronSchedule, now_ms: int) -> int | None:
@@ -199,6 +240,7 @@ class CronService:
                 ),
                 payload=CronPayload(
                     kind=j["payload"].get("kind", "agent_turn"),
+                    mode=_parse_mode(j["payload"].get("mode")),
                     message=j["payload"].get("message", ""),
                     session_key=j["payload"].get("sessionKey"),
                     origin_channel=j["payload"].get("originChannel"),
@@ -328,6 +370,11 @@ class CronService:
         jobs_map = {j.id: j for j in self._store.jobs}
         def _update(params: dict):
             j = CronJob.from_dict(params)
+            # Stessa tolleranza che ``_parse_jobs`` applica a jobs.json: il
+            # journal è l'altra porta d'ingresso dallo storage, e senza questa
+            # riga un ``mode`` ignoto entrerebbe verbatim nel modello, violando
+            # il Literal dichiarato in ``CronPayload.mode``.
+            j.payload.mode = _parse_mode(j.payload.mode)
             jobs_map[j.id] = j
 
         def _del(params: dict):
@@ -420,6 +467,7 @@ class CronService:
                     },
                     "payload": {
                         "kind": j.payload.kind,
+                        "mode": j.payload.mode,
                         "message": j.payload.message,
                         "sessionKey": j.payload.session_key,
                         "originChannel": j.payload.origin_channel,
@@ -629,6 +677,14 @@ class CronService:
             job.state.last_error = None
             logger.info("Cron: job '{}' completed", job.name)
 
+        except CronJobSilencedError:
+            # Esito riuscito, non mancato: il job monitor ha girato fino in
+            # fondo e ha deciso che non c'era niente da dire. Nessun
+            # ``last_error`` — un errore residuo del giro precedente qui
+            # resterebbe appeso e farebbe sembrare guasto un job sano.
+            job.state.last_status = "silenced"
+            job.state.last_error = None
+            logger.info("Cron: job '{}' completed silently", job.name)
         except CronJobSkippedError as e:
             job.state.last_status = "skipped"
             job.state.last_error = str(e) or None
@@ -695,9 +751,21 @@ class CronService:
         origin_channel: str | None = None,
         origin_chat_id: str | None = None,
         origin_metadata: dict | None = None,
+        *,
+        mode: Literal["reminder", "monitor"] = "reminder",
     ) -> CronJob:
-        """Add a new job."""
+        """Add a new job.
+
+        La firma dichiara i due literal, ma a runtime nessuno li impone: il
+        controllo vero è ``_validate_mode_for_add``, che **solleva** invece di
+        ripiegare, perché qui il valore sporco viene da chi chiama e non da un
+        file scritto da un'altra versione.
+
+        Raises:
+            ValueError: schedule non valido, o ``mode`` non riconosciuto.
+        """
         _validate_schedule_for_add(schedule)
+        mode = _validate_mode_for_add(mode)
         now = _now_ms()
 
         job = CronJob(
@@ -707,6 +775,7 @@ class CronService:
             schedule=schedule,
             payload=CronPayload(
                 kind="agent_turn",
+                mode=mode,
                 message=message,
                 session_key=session_key,
                 origin_channel=origin_channel,

@@ -4,6 +4,23 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 
+class CronJobSilencedError(Exception):
+    """Il job monitor ha deciso di non parlare: è un esito **normale**.
+
+    Non segnala un guasto — al contrario, è il caso previsto per un job in
+    ``mode="monitor"``: ha guardato, non c'era niente da riferire, e tacere è
+    la risposta giusta. Viaggia come eccezione per lo stesso motivo di
+    ``CronJobSkippedError`` (``cron/service.py``): la decisione nasce in fondo
+    alla callback, dove l'unico modo di dire "chiudi qui senza consegnare
+    niente" senza far passare un valore sentinella per tutti gli strati
+    intermedi è sollevare.
+
+    Sta in ``types.py`` e non accanto a ``CronJobSkippedError`` perché la
+    sollevano i chiamanti (il runner del turno), che importano già i tipi cron
+    ma non devono dipendere dal servizio.
+    """
+
+
 @dataclass
 class CronSchedule:
     """Schedule definition for a cron job."""
@@ -22,6 +39,10 @@ class CronSchedule:
 class CronPayload:
     """What to do when the job runs."""
     kind: Literal["system_event", "agent_turn"] = "agent_turn"
+    # "reminder" parla sempre; "monitor" gira in silenzio e parla solo se ha
+    # qualcosa da dire. Default "reminder": gli store scritti prima di questo
+    # campo si ricaricano con il comportamento che avevano.
+    mode: Literal["reminder", "monitor"] = "reminder"
     message: str = ""
     session_key: str | None = None  # original session key for correct session recording
     origin_channel: str | None = None
@@ -33,7 +54,7 @@ class CronPayload:
 class CronRunRecord:
     """A single execution record for a cron job."""
     run_at_ms: int
-    status: Literal["ok", "error", "skipped"]
+    status: Literal["ok", "error", "skipped", "silenced"]
     duration_ms: int = 0
     error: str | None = None
 
@@ -43,7 +64,7 @@ class CronJobState:
     """Runtime state of a job."""
     next_run_at_ms: int | None = None
     last_run_at_ms: int | None = None
-    last_status: Literal["ok", "error", "skipped"] | None = None
+    last_status: Literal["ok", "error", "skipped", "silenced"] | None = None
     last_error: str | None = None
     run_history: list[CronRunRecord] = field(default_factory=list)
 

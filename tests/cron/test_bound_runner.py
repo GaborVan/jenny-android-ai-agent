@@ -18,13 +18,18 @@ import pytest
 from jenny.agent.tools.cron import CronTool
 from jenny.agent.tools.registry import ToolRegistry
 from jenny.bus.events import InboundMessage, OutboundMessage
-from jenny.cron.bound_runner import run_bound_cron_job
+from jenny.cron.bound_runner import MONITOR_KEEP_RECENT_MESSAGES, run_bound_cron_job
 from jenny.cron.session_turns import (
     CRON_DEFER_UNTIL_IDLE_META,
+    CRON_MONITOR_META,
+    CRON_SPOKE_META,
     CRON_TRIGGER_META,
+    cron_monitor_spoke,
     is_bound_cron_job,
+    is_monitor_cron_turn,
+    monitor_session_key,
 )
-from jenny.cron.types import CronJob, CronPayload
+from jenny.cron.types import CronJob, CronJobSilencedError, CronPayload
 from jenny.utils.prompt_templates import render_template
 from jenny.webui.metadata import WEBUI_MESSAGE_SOURCE_METADATA_KEY, WEBUI_TURN_METADATA_KEY
 
@@ -38,12 +43,14 @@ def _bound_job(
     origin_chat_id: str | None = "chat-1",
     origin_metadata: dict[str, Any] | None = None,
     session_key: str | None = "unified:default",
+    mode: str = "reminder",
 ) -> CronJob:
     return CronJob(
         id=job_id,
         name=name,
         payload=CronPayload(
             kind="agent_turn",
+            mode=mode,  # type: ignore[arg-type]
             message=message,
             session_key=session_key,
             origin_channel=origin_channel,
@@ -51,6 +58,31 @@ def _bound_job(
             origin_metadata=dict(origin_metadata or {}),
         ),
     )
+
+
+class _FakeSession:
+    """Sessione finta: tiene solo traccia delle potature richieste."""
+
+    def __init__(self, key: str) -> None:
+        self.key = key
+        self.retained: list[int] = []
+
+    def retain_recent_legal_suffix(self, keep: int) -> None:
+        self.retained.append(keep)
+
+
+class _FakeSessions:
+    """Store di sessioni finto: registra quali sessioni sono aperte e salvate."""
+
+    def __init__(self) -> None:
+        self.sessions: dict[str, _FakeSession] = {}
+        self.saved: list[str] = []
+
+    def get_or_create(self, key: str) -> _FakeSession:
+        return self.sessions.setdefault(key, _FakeSession(key))
+
+    def save(self, session: _FakeSession) -> None:
+        self.saved.append(session.key)
 
 
 class _FakeAgent:
@@ -63,16 +95,24 @@ class _FakeAgent:
         response: str | None = "fatto",
         error: Exception | None = None,
         events: list[str] | None = None,
+        spoke: bool | None = None,
     ) -> None:
         self.tools = tools if tools is not None else ToolRegistry()
+        self.sessions = _FakeSessions()
         self._response = response
         self._error = error
+        self._spoke = spoke
         self.events = events if events is not None else []
         self.received: list[InboundMessage] = []
 
     async def submit_cron_turn(self, msg: InboundMessage) -> OutboundMessage | None:
         self.events.append("submit_cron_turn")
         self.received.append(msg)
+        if self._spoke is not None:
+            # Ciò che fa la FSM in ``_state_respond`` per i turni monitor: scrive
+            # l'esito *dentro* il dict metadata del chiamante, perché l'outbound
+            # finale è sempre None e non può portare l'informazione.
+            msg.metadata[CRON_SPOKE_META] = self._spoke
         if self._error is not None:
             raise self._error
         if self._response is None:
@@ -126,6 +166,35 @@ class TestIsBoundCronJob:
     def test_false_without_origin_chat_id(self) -> None:
         job = _bound_job(origin_chat_id=None)
         assert is_bound_cron_job(job) is False
+
+
+class TestMonitorMetadataHelpers:
+    """Predicati di ``session_turns`` usati dalla FSM e dal runner."""
+
+    def test_a_monitor_turn_needs_both_the_cron_trigger_and_the_monitor_flag(self) -> None:
+        assert is_monitor_cron_turn({CRON_TRIGGER_META: {}, CRON_MONITOR_META: True}) is True
+
+    def test_the_monitor_flag_alone_is_not_a_cron_turn(self) -> None:
+        assert is_monitor_cron_turn({CRON_MONITOR_META: True}) is False
+
+    def test_a_cron_turn_without_the_flag_is_a_plain_reminder(self) -> None:
+        assert is_monitor_cron_turn({CRON_TRIGGER_META: {}}) is False
+
+    def test_absent_metadata_is_not_a_monitor_turn(self) -> None:
+        assert is_monitor_cron_turn(None) is False
+
+    def test_only_a_literal_true_counts_as_having_spoken(self) -> None:
+        assert cron_monitor_spoke({CRON_SPOKE_META: True}) is True
+        assert cron_monitor_spoke({CRON_SPOKE_META: False}) is False
+        # Un valore verosimile ma non booleano non deve valere per consegna:
+        # nel dubbio si tace, invece di dichiarare un avviso mai partito.
+        assert cron_monitor_spoke({CRON_SPOKE_META: "yes"}) is False
+        assert cron_monitor_spoke({}) is False
+        assert cron_monitor_spoke(None) is False
+
+    def test_each_monitor_gets_its_own_session_namespaced_by_job_id(self) -> None:
+        assert monitor_session_key("job-m") == "cron:job-m"
+        assert monitor_session_key("job-m") != "unified:default"
 
 
 class TestRunBoundCronJobValidation:
@@ -308,3 +377,221 @@ class TestRunBoundCronJobError:
             await run_bound_cron_job(job, agent=agent, cron=cron)
 
         assert events == ["set_cron_context:True", "submit_cron_turn", "reset_cron_context"]
+
+
+class TestReminderModeIsUnchanged:
+    """Caratterizzazione del percorso ``reminder``: è il 99% dell'uso reale.
+
+    La modalità monitor ha aggiunto rami dentro ``run_bound_cron_job``; questi
+    test fissano il comportamento che un promemoria normale aveva prima, così
+    che una regressione si veda qui e non sul telefono dell'utente.
+    """
+
+    async def test_a_reminder_runs_in_the_session_it_was_created_from(self) -> None:
+        job = _bound_job(job_id="job-r", session_key="unified:default")
+        agent = _FakeAgent()
+        cron = _FakeCronRecorder()
+
+        await run_bound_cron_job(job, agent=agent, cron=cron)
+
+        assert agent.received[0].session_key_override == "unified:default"
+        # Nessuna sessione isolata aperta né potata: quella è roba da monitor.
+        assert agent.sessions.sessions == {}
+        assert agent.sessions.saved == []
+
+    async def test_a_reminder_run_record_carries_no_delivery_key(self) -> None:
+        job = _bound_job()
+        agent = _FakeAgent(response="fatto")
+        cron = _FakeCronRecorder()
+
+        await run_bound_cron_job(job, agent=agent, cron=cron)
+
+        assert [record["status"] for _run_id, record in cron.records] == ["queued", "ok"]
+        assert all("delivery" not in record for _run_id, record in cron.records)
+
+    async def test_a_silent_reminder_is_still_a_plain_ok(self) -> None:
+        """Un reminder che non produce testo NON solleva ``CronJobSilencedError``."""
+        job = _bound_job()
+        agent = _FakeAgent(response=None)
+        cron = _FakeCronRecorder()
+
+        result = await run_bound_cron_job(job, agent=agent, cron=cron)
+
+        assert result == ""
+        assert cron.records[-1][1]["status"] == "ok"
+
+    async def test_a_reminder_turn_is_never_flagged_as_monitor(self) -> None:
+        job = _bound_job()
+        agent = _FakeAgent()
+        cron = _FakeCronRecorder()
+
+        await run_bound_cron_job(job, agent=agent, cron=cron)
+
+        metadata = agent.received[0].metadata
+        assert CRON_MONITOR_META not in metadata
+        assert metadata[CRON_TRIGGER_META]["prompt_ref"]["id"] == "cron.agent_turn.reminder"
+
+    async def test_a_reminder_keeps_the_stream_flag_from_its_origin_session(self) -> None:
+        """``_wants_stream`` viene rimosso solo ai monitor: un reminder deve streammare."""
+        job = _bound_job(origin_metadata={"_wants_stream": True})
+        agent = _FakeAgent()
+        cron = _FakeCronRecorder()
+
+        await run_bound_cron_job(job, agent=agent, cron=cron)
+
+        assert agent.received[0].metadata["_wants_stream"] is True
+
+
+class TestMonitorModeStaysQuiet:
+    """Un monitor che non ha nulla da riferire non deve consegnare niente."""
+
+    async def test_a_monitor_with_nothing_to_report_raises_silenced(self) -> None:
+        job = _bound_job(job_id="job-m", mode="monitor")
+        agent = _FakeAgent(response=None, spoke=False)
+        cron = _FakeCronRecorder()
+
+        with pytest.raises(CronJobSilencedError, match="job-m"):
+            await run_bound_cron_job(job, agent=agent, cron=cron)
+
+    async def test_the_silent_run_is_recorded_as_silenced_and_suppressed(self) -> None:
+        job = _bound_job(job_id="job-m", mode="monitor")
+        agent = _FakeAgent(response=None, spoke=False)
+        cron = _FakeCronRecorder()
+
+        with pytest.raises(CronJobSilencedError):
+            await run_bound_cron_job(job, agent=agent, cron=cron)
+
+        assert [record["status"] for _run_id, record in cron.records] == ["queued", "silenced"]
+        _run_id, silenced = cron.records[-1]
+        assert silenced["delivery"] == "suppressed"
+        # Nessuna ``response``: non c'è stato niente da consegnare.
+        assert "response" not in silenced
+        # ``ok`` non deve comparire da nessuna parte, altrimenti la UI mostrerebbe
+        # una consegna che non è mai avvenuta.
+        assert "ok" not in [record["status"] for _run_id, record in cron.records]
+
+    async def test_a_missing_spoke_flag_counts_as_silence(self) -> None:
+        """Se la FSM non ha scritto nulla (turno interrotto), si assume silenzio.
+
+        Il ripiego sicuro è tacere: inventare una consegna che non c'è stata
+        sarebbe peggio di perdere un avviso.
+        """
+        job = _bound_job(job_id="job-m", mode="monitor")
+        agent = _FakeAgent(response="testo mai consegnato", spoke=None)
+        cron = _FakeCronRecorder()
+
+        with pytest.raises(CronJobSilencedError):
+            await run_bound_cron_job(job, agent=agent, cron=cron)
+
+        assert CRON_SPOKE_META not in agent.received[0].metadata
+
+    async def test_a_monitor_turn_runs_in_its_own_session_not_the_users(self) -> None:
+        """La sessione isolata è ciò che tiene i controlli fuori dalla chat."""
+        job = _bound_job(job_id="job-m", mode="monitor", session_key="unified:default")
+        agent = _FakeAgent(response=None, spoke=False)
+        cron = _FakeCronRecorder()
+
+        with pytest.raises(CronJobSilencedError):
+            await run_bound_cron_job(job, agent=agent, cron=cron)
+
+        received = agent.received[0]
+        assert received.session_key_override == "cron:job-m"
+        assert received.session_key_override != "unified:default"
+        # La run record continua a nominare la sessione d'origine: è il target di
+        # consegna del job, non la sessione in cui il turno gira.
+        assert cron.records[-1][1]["session_key"] == "unified:default"
+
+    async def test_the_monitor_session_is_pruned_so_it_cannot_grow_forever(self) -> None:
+        job = _bound_job(job_id="job-m", mode="monitor")
+        agent = _FakeAgent(response=None, spoke=False)
+        cron = _FakeCronRecorder()
+
+        with pytest.raises(CronJobSilencedError):
+            await run_bound_cron_job(job, agent=agent, cron=cron)
+
+        session = agent.sessions.sessions["cron:job-m"]
+        assert session.retained == [MONITOR_KEEP_RECENT_MESSAGES]
+        assert agent.sessions.saved == ["cron:job-m"]
+
+    async def test_a_monitor_never_streams_into_the_chat_it_will_not_answer(self) -> None:
+        """``_wants_stream`` ereditato dalla sessione WebUI va rimosso.
+
+        Lasciandolo, il turno streammerebbe testo in chat per poi non consegnare
+        nulla: esattamente il silenzio che il monitor promette, rotto.
+        """
+        job = _bound_job(mode="monitor", origin_metadata={"_wants_stream": True})
+        agent = _FakeAgent(response=None, spoke=False)
+        cron = _FakeCronRecorder()
+
+        with pytest.raises(CronJobSilencedError):
+            await run_bound_cron_job(job, agent=agent, cron=cron)
+
+        assert "_wants_stream" not in agent.received[0].metadata
+
+    async def test_a_monitor_turn_is_flagged_and_uses_the_monitor_prompt(self) -> None:
+        job = _bound_job(job_id="job-m", mode="monitor", message="controlla la posta")
+        agent = _FakeAgent(response=None, spoke=False)
+        cron = _FakeCronRecorder()
+
+        with pytest.raises(CronJobSilencedError):
+            await run_bound_cron_job(job, agent=agent, cron=cron)
+
+        metadata = agent.received[0].metadata
+        assert metadata[CRON_MONITOR_META] is True
+        assert metadata[CRON_TRIGGER_META]["prompt_ref"]["id"] == "cron.agent_turn.monitor"
+        expected_prompt = render_template(
+            "agent/cron_monitor.md", strip=True, message="controlla la posta"
+        )
+        assert cron.records[-1][1]["rendered_prompt"] == expected_prompt
+        assert agent.received[0].content == expected_prompt
+
+
+class TestMonitorModeSpeaks:
+    """Quando il monitor trova qualcosa, la consegna va alla chat d'origine."""
+
+    async def test_a_monitor_that_spoke_completes_without_raising(self) -> None:
+        job = _bound_job(job_id="job-m", mode="monitor")
+        agent = _FakeAgent(response="", spoke=True)
+        cron = _FakeCronRecorder()
+
+        # Nessuna eccezione: parlare è l'esito ordinario, non un caso speciale.
+        assert await run_bound_cron_job(job, agent=agent, cron=cron) == ""
+
+    async def test_the_spoken_run_is_recorded_as_ok_delivered_by_the_message_tool(self) -> None:
+        job = _bound_job(job_id="job-m", mode="monitor")
+        agent = _FakeAgent(response="", spoke=True)
+        cron = _FakeCronRecorder()
+
+        await run_bound_cron_job(job, agent=agent, cron=cron)
+
+        assert [record["status"] for _run_id, record in cron.records] == ["queued", "ok"]
+        assert cron.records[-1][1]["delivery"] == "agent_message"
+        assert "silenced" not in [record["status"] for _run_id, record in cron.records]
+
+    async def test_the_delivery_targets_the_origin_chat_not_the_isolated_session(self) -> None:
+        job = _bound_job(
+            job_id="job-m",
+            mode="monitor",
+            origin_channel="websocket",
+            origin_chat_id="chat-9",
+            session_key="unified:default",
+        )
+        agent = _FakeAgent(response="", spoke=True)
+        cron = _FakeCronRecorder()
+
+        await run_bound_cron_job(job, agent=agent, cron=cron)
+
+        received = agent.received[0]
+        # Il turno gira isolato, ma il messaggio deve uscire dove l'utente guarda.
+        assert received.session_key_override == "cron:job-m"
+        assert received.channel == "websocket"
+        assert received.chat_id == "chat-9"
+
+    async def test_a_monitor_that_spoke_still_prunes_its_session(self) -> None:
+        job = _bound_job(job_id="job-m", mode="monitor")
+        agent = _FakeAgent(response="", spoke=True)
+        cron = _FakeCronRecorder()
+
+        await run_bound_cron_job(job, agent=agent, cron=cron)
+
+        assert agent.sessions.sessions["cron:job-m"].retained == [MONITOR_KEEP_RECENT_MESSAGES]

@@ -59,11 +59,31 @@ Two different failure modes here, both currently silent or unhelpful:
 If you asked Jenny to remind you about something and nothing arrived, this is almost always about the app being killed, not a bug in the reminder itself:
 
 - **Reminders only fire while the app (and its background service) is alive.** If Android kills the app before a one-time reminder's scheduled time, that reminder is lost **permanently and silently** — there is currently no catch-up or notification that it was missed.
-- Recurring reminders (e.g. "every 2 hours") don't catch up either: the interval restarts counting from whenever the app was last (re)started, not from the original schedule.
+- Recurring reminders (e.g. "every 2 hours") fare better: since 0.6.0 they keep their deadline across a restart, so one that came due while the app was dead fires shortly after it comes back rather than waiting a full interval. What you don't get is a replay — the cycles that fell inside the dead window are gone, not queued up one by one.
 - The fix is to exempt Jenny from battery optimization, so Android is less likely to kill the background service: **Settings → Telegram → Exempt from battery** (yes, the button lives in the Telegram section even though it helps all background scheduling, not just Telegram — it's there because Telegram's long-polling is what needs it most).
-- The built-in periodic "heartbeat" check (which reads `workspace/HEARTBEAT.md` every 30 minutes) has the same limitation: if the app was killed when a cycle was due, that cycle is simply skipped, not queued up.
+- The built-in periodic "heartbeat" check (which reads `workspace/HEARTBEAT.md` every 30 minutes) behaves the same way: the cycles that were due while the app was dead are not replayed, they just don't happen.
+- Doze can stretch things even while the app is alive — treat every interval as a floor, not a promise.
 
 See [Scheduling and proactivity](./scheduling.md) for the full model.
+
+## A periodic check never writes to me
+
+If you asked Jenny for something like *"every 10 minutes check whether the site is back up and tell me"*, she may have created it as a **monitor**: a recurring job that runs quietly and only messages you when the check actually finds something. A monitor that never speaks is usually working, not broken — so before assuming a fault, tell the three cases apart.
+
+Ask Jenny to **list your reminders** and look at the job's `Last run:` line:
+
+| What you see | What it means | What to do |
+|---|---|---|
+| `Last run: <recent time> — silenced` | It ran, it looked, there was nothing worth reporting. This is the normal outcome of a healthy monitor, exactly like Heartbeat's "I set a task and never hear anything". | Nothing. If you'd rather hear from it every time, ask for a plain reminder instead ("tell me the result every hour, even if nothing changed"). |
+| `Last run:` far in the past, or no `Last run:` at all | The app was killed and the cycles in that window simply didn't run — there's no catch-up replay, same as for Heartbeat above. | Exempt Jenny from battery optimization (**Settings → Telegram → Exempt from battery**) and keep the app from being swiped away. |
+| `Last run: <time> — error` (usually with the reason in parentheses) | The job genuinely failed — a provider error, a tool that couldn't reach the target. | Ask Jenny to check her logs (first section of this page); fix the underlying cause, or recreate the job. |
+
+Two things that look like faults but aren't:
+
+- **Silence costs tokens anyway.** Every monitor cycle is a real agent turn even when it says nothing — the check has to run before anything can decide there's nothing to report. If you see token usage from a job you never hear from, that's the mechanism, not a leak. Remove monitors you no longer need.
+- **A monitor deliberately doesn't answer in your chat.** It runs in its own private session, so you won't find a trail of its checks in the conversation. The only thing it ever puts in chat is the message it decided was worth sending.
+
+If you wanted a one-off check ("at 6pm see whether the deploy finished"), it cannot be a monitor at all — Jenny refuses that combination, because a single run that might stay silent would never reach you. Ask for a plain reminder in that case.
 
 ## Telegram bot isn't responding
 
@@ -110,7 +130,7 @@ If none of the above resolves it, gather this before reporting the problem:
 ## See also
 
 - [Chat basics](./chat.md) for what the online/offline indicator and error banners look like in context.
-- [Scheduling and proactivity](./scheduling.md) for the full reminders/heartbeat model and its limits.
+- [Scheduling and proactivity](./scheduling.md) for the full reminders/heartbeat model, the two reminder modes, and their limits.
 - [Telegram bridge](./telegram.md) for pairing, throttling, and what does and doesn't work over Telegram.
 - [Files and attachments](./attachments.md) for exact attachment limits.
 - [SSH access](./ssh.md) for the separate network policy SSH hosts are checked against, and why a restore doesn't restore access.

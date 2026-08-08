@@ -32,19 +32,43 @@ Under the hood there are three schedule kinds:
 
 | Kind | How you'd phrase it | Behavior |
 |---|---|---|
-| One-shot (`at`) | "remind me at 6pm", "in 20 minutes" | Fires once, then the job deletes itself automatically. |
+| One-shot (`at`) | "remind me at 6pm", "in 20 minutes" | Fires once, then the job deletes itself automatically. Cannot be combined with monitor mode (see below). |
 | Interval (`every`) | "every 30 minutes", "every 2 hours" | Repeats forever at a fixed interval, counted from when the job was (re)armed — not from a fixed clock time. |
 | Cron expression (`cron_expr`) | "every day at 9am", "every Monday at 8" | Standard 5-field cron syntax (e.g. `0 9 * * *`); accepts an optional IANA timezone (e.g. `America/Vancouver`) for that one job. |
 
 The timezone used when you don't specify one is your **device's timezone**, resolved once when the app starts (falls back to UTC if the device timezone can't be determined). A timezone override only applies to cron-expression schedules — one-shot and interval schedules always use the device timezone.
 
-When a reminder fires, it runs as a completely normal agent turn in the same chat you created it from, seeded with an instruction along the lines of "the scheduled time has arrived, execute this job and report the result." The reply lands in your chat exactly like any other message from Jenny — and, if the app isn't in the foreground at that moment, it also rings as an Android notification titled "Jenny ⏰ <job name>" (see [Notifications](#android-notifications) below). If a reminder fires while you're already mid-conversation with Jenny on that same chat, it politely waits and delivers once your current turn is idle, rather than interrupting it.
+When a reminder fires — a plain reminder, that is, the default mode described in [Two modes](#two-modes-one-that-always-speaks-one-that-speaks-only-if-it-has-to) below — it runs as a completely normal agent turn in the same chat you created it from, seeded with an instruction along the lines of "the scheduled time has arrived, execute this job and report the result." The reply lands in your chat exactly like any other message from Jenny — and, if the app isn't in the foreground at that moment, it also rings as an Android notification titled "Jenny ⏰ <job name>" (see [Notifications](#android-notifications) below). If a reminder fires while you're already mid-conversation with Jenny on that same chat, it politely waits and delivers once your current turn is idle, rather than interrupting it.
 
 A few smaller things worth knowing:
 
 - A reminder job cannot schedule further jobs from inside its own execution — this only matters if you ask Jenny to "set up a reminder that then sets another reminder" in one step.
 - The job's default name is just the first 30 characters of your reminder's message, unless you give it something more memorable.
 - You can list and remove reminders by asking — there is no dedicated screen for this; it's entirely conversational (e.g. "what reminders do I have?", "remove job xyz").
+
+### Two modes: one that always speaks, one that speaks only if it has to
+
+Every job also has a **mode**, and it isn't something you type — you describe what you want and Jenny picks it. The difference is whether a run that has nothing to say still writes into your chat.
+
+| Mode | How you'd ask for it | What each run does |
+|---|---|---|
+| Reminder (default) | "Remind me to take the pizza out in 20 minutes", "Every day at 9am, ask me how I slept", "Every 2 hours, check if it's raining and tell me if so" | Runs in the chat you created it from and **always** replies — even when the answer amounts to "nothing to report". |
+| Monitor | "Every 10 minutes check if my site is back up and tell me when it is", "Keep an eye on that page every hour and only ping me if the price drops", "Check the backup job each morning and only tell me if it failed" | Runs out of sight and stays quiet, unless the check actually turns up something worth your attention. When it does, it messages you deliberately. |
+
+The wording that tips Jenny toward a monitor is *only* / *just if* / *let me know when it changes*; the wording that keeps it an ordinary reminder is asking to be told something at a time, full stop. If she guesses wrong, say so ("no, only write to me if it's actually down") and she can recreate the job the other way.
+
+A monitor runs in a private session of its own, kept apart from your conversation. That has two consequences worth understanding:
+
+- Your chat doesn't fill up with hourly "still down" replies you never asked to read.
+- The job remembers its own previous checks, and that memory is precisely what lets it tell you **when something changed** instead of repeating the same sentence every cycle. That private history is trimmed to the last handful of checks, so it can't grow without bound.
+
+When a monitor does decide to speak, the delivery is proactive in the same way Heartbeat's is: it reaches the WebUI chat and, if you've paired a Telegram bot, that chat too — not just whichever one you happen to be looking at.
+
+**A monitor may stay silent forever, and that is the feature working, not failing.** Exactly as with Heartbeat below, "I set up a check and never hear anything" is the expected outcome when nothing noteworthy ever happens. To confirm it's alive, ask Jenny to list your reminders: a run that had nothing to report is recorded as `Last run: … — silenced`. That is the healthy line to see; `error` is the unhealthy one.
+
+**Silence saves you the notification, not the tokens.** Every monitor cycle is still a real agent turn against your provider — the check has to actually run before anything can conclude there's nothing to say. A monitor every 10 minutes is ~144 turns a day whether or not it ever speaks a word, so pick the loosest interval that still catches what you care about, and remove the job once the thing you were watching is settled. This is the same warning as the Heartbeat one below, for the same reason.
+
+Monitor mode only makes sense on a repeating schedule, so **it cannot be combined with a one-shot ("remind me at 6pm") job**: a single firing that might decide to say nothing would simply never reach you. Jenny refuses that combination outright rather than schedule something that can silently do nothing.
 
 ### Protected system jobs
 
@@ -81,6 +105,8 @@ Every **30 minutes** by default (`gateway.heartbeat.intervalS`, default `1800` s
 The practical rule of thumb: **write tasks under `## Active Tasks`, and delete them once they're done.** Every cycle where that section has content triggers one real LLM call — a forgotten task left in the file keeps costing tokens every 30 minutes indefinitely, even if Heartbeat never finds anything worth reporting.
 
 Example of something reasonable to put there: "Check the weather forecast around 7am and warn me if it looks like rain."
+
+**Heartbeat has one schedule for the whole file.** Every line under `## Active Tasks` is looked at on the same 30-minute beat; there's no per-task cadence, and adding a second heartbeat job isn't the way to get one. If a particular check needs its own rhythm — every 10 minutes, or only on weekday mornings — that's a monitor job ([Two modes](#two-modes-one-that-always-speaks-one-that-speaks-only-if-it-has-to) above), which gives you an independent schedule and the same "only speaks if it's worth it" behavior. Heartbeat stays the right home for the shared, ambient checklist.
 
 ## `/goal` and long-running tasks
 
@@ -155,7 +181,8 @@ None of the proactive messages above are guaranteed to make a sound — whether 
 ## Related pages
 
 - [Memory, Dream and Atlas](memory.md) — what the `dream` and `atlas` system jobs (visible in your reminders list) actually do.
-- [Telegram bridge](telegram.md) — how proactive deliveries (Heartbeat, reminders) reach a paired Telegram chat.
+- [Telegram bridge](telegram.md) — how proactive deliveries (Heartbeat, reminders, monitors) reach a paired Telegram chat.
+- [Troubleshooting](troubleshooting.md) — what to check when a reminder never arrives, and how to tell a silent monitor apart from a broken one.
 - [Slash commands](slash-commands.md) — full reference for `/goal`, `/stop`, and the rest.
 - [Android permissions](../reference/android-permissions.md) — the full permission table, including `POST_NOTIFICATIONS` and battery-optimization exemption.
 - [Configuration reference](../reference/configuration.md) — `gateway.heartbeat.*`, `agents.defaults.timezone`, `agents.defaults.maxConcurrentSubagents`, and related keys.

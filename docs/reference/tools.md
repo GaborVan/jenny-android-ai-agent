@@ -340,6 +340,12 @@ Schedules reminders and recurring work. Actions: `add`, `list`, `remove`.
   - `cron_expr` — a cron expression (`"0 9 * * *"`), optionally with an explicit `tz` (IANA name). `tz` is **only** accepted alongside `cron_expr` — passing it with `every_seconds` or `at` is an error.
   - `at` — a one-shot ISO datetime; the job auto-deletes itself after it fires.
 - Naive (timezone-less) `cron_expr`/`at` values fall back to the device's configured timezone.
+- `add` also takes an optional `mode`, which decides whether the job is allowed to stay quiet:
+  - `reminder` (default) — the job **always** messages you when it fires. This is every job created before this option existed, and every job that omits `mode`.
+  - `monitor` — a recurring check that runs in its own private session and **says nothing unless it has something to report**. Its reply is suppressed by default; the only way it reaches you is by explicitly sending a message, and its private session keeps the previous runs so it can speak only when the state actually *changed* rather than repeating the same alert every cycle. A run that stayed quiet is recorded as `silenced` and shows up that way in `list` — that is a healthy outcome, not a failure.
+  - `monitor` requires `every_seconds` or `cron_expr` and is **refused with `at`**: a one-shot job that decides to stay silent would never report anything at all.
+  - A monitor still costs a full turn every cycle even when it says nothing. Silence saves the notification, not the tokens.
+  - The mode is fixed at creation: to change it, remove the job and create it again.
 - `remove` needs a `job_id` from `list`.
 - System-managed jobs show up in `list` for transparency but are **protected** — removal is refused with an explanation, not silently ignored. There are three, and `list` prints the purpose of each next to it: `dream` (memory consolidation), `atlas` (rebuilds `memory/WIKI.md` from your wikis, every 12h by default), and `heartbeat` (checks `HEARTBEAT.md` for tasks you left). Each is registered only if its own config enables it — `agents.defaults.dream.enabled`, `agents.defaults.atlas.enabled`, `gateway.heartbeat.enabled` — so a disabled one is absent from `list` rather than present and idle.
 - Jobs cannot be created from inside another cron job's own execution (no self-scheduling chains).

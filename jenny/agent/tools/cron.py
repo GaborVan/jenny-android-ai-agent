@@ -18,6 +18,11 @@ from jenny.cron.types import CronJob, CronJobState, CronSchedule
 from jenny.session.keys import UNIFIED_SESSION_KEY
 from jenny.utils.helpers import safe_zoneinfo, validate_timezone_name
 
+# Modi accettati da action='add'. Vive qui e non in cron/types.py perché è la
+# lista che il tool valida e mostra all'LLM; il tipo canonico resta CronPayload.
+_JOB_MODES = ("reminder", "monitor")
+_DEFAULT_JOB_MODE = "reminder"
+
 _CRON_PARAMETERS = tool_parameters_schema(
     action=StringSchema("Action to perform", enum=["add", "list", "remove"]),
     name=StringSchema(
@@ -40,6 +45,12 @@ _CRON_PARAMETERS = tool_parameters_schema(
         "Naive values use the tool's default timezone."
     ),
     job_id=StringSchema("REQUIRED when action='remove'. Job ID to remove (obtain via action='list')."),
+    mode=StringSchema(
+        "Optional for action='add'. 'reminder' (default) always messages the user when it fires; "
+        "'monitor' runs silently and speaks only when the check finds something worth reporting. "
+        "'monitor' requires every_seconds or cron_expr; it cannot be used with at.",
+        enum=["reminder", "monitor"],
+    ),
     required=["action"],
     description=(
         "Action-specific parameters: add requires a non-empty message plus one schedule "
@@ -119,6 +130,9 @@ class CronTool(Tool, ContextAware):
     def description(self) -> str:
         return (
             "Schedule reminders and recurring tasks. Actions: add, list, remove. "
+            "mode='reminder' (default) always speaks when it fires; mode='monitor' is a recurring "
+            "check that runs silently and speaks only when something changed or is worth "
+            "reporting (needs every_seconds or cron_expr, never at). "
             f"If tz is omitted, cron expressions and naive ISO times default to {self._default_timezone}."
         )
 
@@ -129,6 +143,14 @@ class CronTool(Tool, ContextAware):
             errors.append("message is required when action='add'")
         if action == "remove" and not str(params.get("job_id") or "").strip():
             errors.append("job_id is required when action='remove'")
+        # Il valore ammesso lo controlla già l'enum dello schema; qui resta solo
+        # la regola che lo schema non sa esprimere.
+        mode = str(params.get("mode") or "").strip()
+        # Un one-shot che decide di tacere non avvisa mai nessuno: la
+        # combinazione non ha un comportamento sensato, quindi si rifiuta invece
+        # di crearla e lasciarla scattare a vuoto.
+        if mode == "monitor" and str(params.get("at") or "").strip():
+            errors.append("mode='monitor' cannot be used with at; use every_seconds or cron_expr")
         return errors
 
     async def execute(
@@ -141,12 +163,13 @@ class CronTool(Tool, ContextAware):
         tz: str | None = None,
         at: str | None = None,
         job_id: str | None = None,
+        mode: str | None = None,
         **kwargs: Any,
     ) -> str:
         if action == "add":
             if self._in_cron_context.get():
                 return "Error: cannot schedule new jobs from within a cron job execution"
-            return self._add_job(name, message, every_seconds, cron_expr, tz, at)
+            return self._add_job(name, message, every_seconds, cron_expr, tz, at, mode)
         elif action == "list":
             return self._list_jobs()
         elif action == "remove":
@@ -161,6 +184,7 @@ class CronTool(Tool, ContextAware):
         cron_expr: str | None,
         tz: str | None,
         at: str | None,
+        mode: str | None = None,
     ) -> str:
         if not message:
             return (
@@ -175,6 +199,13 @@ class CronTool(Tool, ContextAware):
         origin_chat_id = self._origin_chat_id.get()
         if not origin_channel or not origin_chat_id:
             return "Error: scheduled cron jobs must be created from a chat session"
+        job_mode = (mode or _DEFAULT_JOB_MODE).strip() or _DEFAULT_JOB_MODE
+        if job_mode not in _JOB_MODES:
+            return (
+                f"Error: invalid mode '{mode}'. Use mode=\"reminder\" for a job that always "
+                "messages the user, or mode=\"monitor\" for a recurring check that stays silent "
+                "unless it finds something worth reporting."
+            )
         if tz and not cron_expr:
             return "Error: tz can only be used with cron_expr"
         if tz:
@@ -191,6 +222,14 @@ class CronTool(Tool, ContextAware):
                 return err
             schedule = CronSchedule(kind="cron", expr=cron_expr, tz=effective_tz)
         elif at:
+            # Un monitor tace quando non c'è niente da dire: se scatta una volta
+            # sola, quel silenzio è definitivo e il job non serve a nulla.
+            if job_mode == "monitor":
+                return (
+                    "Error: mode=\"monitor\" cannot be scheduled with 'at', because a one-shot "
+                    "job that decides to stay silent never reports anything. Use every_seconds "
+                    "or cron_expr for a monitor, or mode=\"reminder\" for a one-time reminder."
+                )
             try:
                 dt = datetime.fromisoformat(at)
             except ValueError:
@@ -209,6 +248,7 @@ class CronTool(Tool, ContextAware):
             name=name or message[:30],
             schedule=schedule,
             message=message,
+            mode=job_mode,
             delete_after_run=delete_after,
             session_key=session_key,
             origin_channel=origin_channel,
@@ -271,7 +311,15 @@ class CronTool(Tool, ContextAware):
         lines = []
         for j in jobs:
             timing = self._format_timing(j.schedule)
-            parts = [f"- {j.name} (id: {j.id}, {timing})"]
+            # Solo i monitor si annunciano: un reminder è il caso normale e la
+            # sua riga resta identica a prima.
+            mode = getattr(j.payload, "mode", _DEFAULT_JOB_MODE)
+            mode_note = (
+                ", monitor (silent unless it has something to report)"
+                if mode == "monitor"
+                else ""
+            )
+            parts = [f"- {j.name} (id: {j.id}, {timing}{mode_note})"]
             if j.payload.kind == "system_event":
                 parts.append(f"  Purpose: {self._system_job_purpose(j)}")
                 parts.append("  Protected: visible for inspection, but cannot be removed.")
