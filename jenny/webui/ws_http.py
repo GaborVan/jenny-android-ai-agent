@@ -615,8 +615,14 @@ class GatewayHTTPHandler:
         level = _query_first(query, "level")
         if level not in ("warning", "error"):
             level = "error"
-        source = _query_first(query, "source")[:100] or "unknown"
-        message = _query_first(query, "message")[:800]
+        # ``_query_first`` restituisce None se il parametro manca, e affettare
+        # None solleva TypeError: una richiesta senza ``source`` o ``message``
+        # faceva fallire con 500 la rotta che nel docstring qui sopra promette
+        # di rispondere sempre 200 — e per giunta è la rotta che esiste per
+        # *segnalare* i guasti del client. ``level`` aveva già il suo default;
+        # questi due no.
+        source = (_query_first(query, "source") or "")[:100] or "unknown"
+        message = (_query_first(query, "message") or "")[:800]
         logger.log(
             level.upper(),
             "[webui-client] source={} {}",
