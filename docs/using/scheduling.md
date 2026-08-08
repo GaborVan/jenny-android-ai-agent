@@ -58,7 +58,17 @@ When you ask Jenny to list reminders, you'll also see three jobs you didn't crea
 
 `dream` runs the memory-consolidation pass and `atlas` rebuilds the wiki directory (`memory/WIKI.md`), both described in [Memory, Dream and Atlas](memory.md); `heartbeat` is described next.
 
-**Atlas never says anything.** Unlike a reminder or Heartbeat, it produces no chat message and no notification whether it ran, skipped, or failed — the only visible output is `memory/WIKI.md` changing and the entity list Jenny quotes in later turns getting more accurate. That silence is deliberate (a directory rebuild is not news), but it means the 12-hourly token cost is invisible too: when your wikis *have* changed, every run is a real turn against your provider, and you will only see it in Settings → System → Token usage. If you don't use the wiki at all, the job costs nothing and you can leave it alone; if you want it off anyway, that is `agents.defaults.atlas.enabled`. `/atlas` runs it on demand, and `/atlas force` runs it even when the fingerprint says nothing changed.
+**Atlas never says anything.** Unlike a reminder or Heartbeat, it produces no chat message and no notification whether it ran, skipped, or failed — the only visible output is `memory/WIKI.md` changing and the entity list Jenny quotes in later turns getting more accurate. That silence is deliberate (a directory rebuild is not news), but it means the six-hourly token cost is invisible too: when your wikis *have* changed, every run is a real turn against your provider, and you will only see it in Settings → System → Token usage. If you don't use the wiki at all, the job costs nothing and you can leave it alone; if you want it off anyway, that is `agents.defaults.atlas.enabled`. `/atlas` runs it on demand, and `/atlas force` runs it even when the fingerprint says nothing changed.
+
+### If the reminder list itself gets damaged
+
+Your reminders live in one file, `cron/jobs.json` inside the workspace, and a phone can leave a file unreadable — storage trouble, or the system killing the process mid-write.
+
+Since 0.6.5 that file is handled the same way as `config.json`. Jenny keeps the previous good copy as `cron/jobs.json.bak` and refreshes it before every save. If the live file can't be read at startup, the backup is used and promoted; if there's no usable backup either, the unreadable file is set aside as `cron/jobs.json.corrupt-<timestamp>` and Jenny starts with **no reminders at all**. Either way the app comes online, and Settings shows a notice saying which of the two happened and where the broken file went.
+
+That notice matters more here than it does for settings. A reminder that has stopped existing looks exactly like a reminder that hasn't come due yet, so without being told, you'd find out when it didn't go off. If you see the "started with none" version, your own reminders need recreating — the system jobs above come back on their own.
+
+The single case where Jenny still refuses to start is when the broken file can't be moved aside at all. Starting anyway would mean the next save overwrites it, and that file is the only copy of your reminders left.
 
 ## Heartbeat: a periodic checklist
 

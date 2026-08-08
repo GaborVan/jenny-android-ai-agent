@@ -121,6 +121,8 @@
     "system": "System",
     "configRecoveredBackup": "Settings were restored from the last good backup: config.json could not be read at startup.",
     "configRecoveredDefaults": "config.json could not be read and there was no usable backup, so Jenny started on defaults — your API key needs setting up again. The unreadable file was kept aside:",
+    "cronRecoveredBackup": "Your scheduled reminders were restored from the last good backup: the job list could not be read at startup. Check that they are all there.",
+    "cronRecoveredEmpty": "The scheduled reminder list could not be read and there was no usable backup, so Jenny started with none: the ones you had created will not fire again and need recreating. The unreadable file was kept aside:",
     "themeLabel": "Theme",
     "mascotSection": "Mascot",
     "mascotVisible": "Show mascot",

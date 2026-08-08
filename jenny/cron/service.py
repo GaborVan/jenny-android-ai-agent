@@ -8,7 +8,7 @@ from contextlib import suppress
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Coroutine, Literal
+from typing import Any, Callable, Coroutine, Literal, NamedTuple
 
 from filelock import SoftFileLock
 from loguru import logger
@@ -25,6 +25,22 @@ from jenny.cron.types import (
 from jenny.utils.path import atomic_write
 
 _LockClass = SoftFileLock
+
+
+class _LoadedStore(NamedTuple):
+    """Esito di una lettura dello store, ripiego incluso.
+
+    ``recovered_from`` (``"backup"`` | ``"empty"`` | ``None``) viaggia insieme
+    ai job invece di essere registrato subito sul ``RuntimeContext``: chi legge
+    il file non sa se in memoria c'è già uno snapshot più fresco, e avvisare
+    l'utente di una perdita che non c'è stata è un modo lento di far ignorare
+    gli avvisi.
+    """
+
+    jobs: list[CronJob]
+    version: int
+    recovered_from: str | None
+    quarantined: Path | None
 
 
 class CronJobSkippedError(Exception):
@@ -140,83 +156,170 @@ class CronService:
             changed = self._enforce_agent_binding(job) or changed
         return changed
 
-    def _load_jobs(self) -> tuple[list[CronJob], int] | None:
-        """Load jobs from disk.
+    @property
+    def _backup_path(self) -> Path:
+        return self.store_path.with_name(self.store_path.name + ".bak")
+
+    def _rotate_backup(self) -> None:
+        """Conserva l'ultimo contenuto *valido* come ``jobs.json.bak``.
+
+        Solo se quello attuale si rilegge come JSON: un salvataggio partito da
+        uno store già rotto distruggerebbe l'ultimo backup buono, che è
+        esattamente quello che serve un istante dopo.
+        """
+        if not self.store_path.exists():
+            return
+        try:
+            content = self.store_path.read_text(encoding="utf-8")
+            json.loads(content)
+        except (OSError, json.JSONDecodeError):
+            return
+        try:
+            atomic_write(self._backup_path, content, fsync_dir=False)
+        except OSError as e:
+            # Rete di sicurezza, non requisito: il salvataggio vero procede.
+            logger.warning("Could not refresh the cron store backup: {}", e)
+
+    def _parse_jobs(self, path: Path) -> tuple[list[CronJob], int]:
+        """Parse *path* into ``(jobs, version)``. Solleva se il file non è usabile."""
+        data = json.loads(path.read_text(encoding="utf-8"))
+        jobs: list[CronJob] = []
+        version = data.get("version", 1)
+        for j in data.get("jobs", []):
+            job = CronJob(
+                id=j["id"],
+                name=j["name"],
+                enabled=j.get("enabled", True),
+                schedule=CronSchedule(
+                    kind=j["schedule"]["kind"],
+                    at_ms=j["schedule"].get("atMs"),
+                    every_ms=j["schedule"].get("everyMs"),
+                    expr=j["schedule"].get("expr"),
+                    tz=j["schedule"].get("tz"),
+                ),
+                payload=CronPayload(
+                    kind=j["payload"].get("kind", "agent_turn"),
+                    message=j["payload"].get("message", ""),
+                    session_key=j["payload"].get("sessionKey"),
+                    origin_channel=j["payload"].get("originChannel"),
+                    origin_chat_id=j["payload"].get("originChatId"),
+                    origin_metadata=j["payload"].get("originMetadata") or {},
+                ),
+                state=CronJobState(
+                    next_run_at_ms=j.get("state", {}).get("nextRunAtMs"),
+                    last_run_at_ms=j.get("state", {}).get("lastRunAtMs"),
+                    last_status=j.get("state", {}).get("lastStatus"),
+                    last_error=j.get("state", {}).get("lastError"),
+                    run_history=[
+                        CronRunRecord(
+                            run_at_ms=r["runAtMs"],
+                            status=r["status"],
+                            duration_ms=r.get("durationMs", 0),
+                            error=r.get("error"),
+                        )
+                        for r in j.get("state", {}).get("runHistory", [])
+                    ],
+                ),
+                created_at_ms=j.get("createdAtMs", 0),
+                updated_at_ms=j.get("updatedAtMs", 0),
+                delete_after_run=j.get("deleteAfterRun", False),
+            )
+            jobs.append(job)
+        return jobs, version
+
+    def _quarantine_store(self) -> Path | None:
+        """Sposta di lato lo store illeggibile. ``None`` se non ci è riuscita.
+
+        La distinzione è tutto: finché il file rotto è ancora al suo posto, il
+        primo ``_save_store`` lo sovrascrive e i job dell'utente non esistono
+        più da nessuna parte. Una volta spostato, invece, ripartire da una
+        lista vuota è recuperabile — ed è la scelta che facciamo.
+        """
+        stamp = int(time.time())
+        target = self.store_path.with_suffix(self.store_path.suffix + f".corrupt-{stamp}")
+        # Due corruzioni nello stesso secondo non devono sovrascriversi a
+        # vicenda: ``rename`` non chiede il permesso, e la seconda cancellerebbe
+        # in silenzio la prova della prima.
+        suffix = 0
+        while target.exists():
+            suffix += 1
+            target = self.store_path.with_suffix(
+                self.store_path.suffix + f".corrupt-{stamp}_{suffix}"
+            )
+        try:
+            self.store_path.rename(target)
+        except OSError as e:
+            logger.error("Could not set aside the broken cron store at {}: {}", self.store_path, e)
+            return None
+        return target
+
+    def _load_jobs(self) -> _LoadedStore | None:
+        """Load jobs from disk, recovering from ``jobs.json.bak`` when needed.
+
+        Stessa politica di ``config.json`` (vedi ``config/loader.py``): un file
+        illeggibile non deve impedire l'avvio, ma non deve nemmeno sparire in
+        silenzio. Nell'ordine: il file vivo, poi il backup dell'ultimo
+        salvataggio buono, poi una lista vuota.
+
+        Il ripiego lo *riporta* soltanto: decidere se accettarlo — e quindi se
+        avvisare l'utente — tocca a ``_load_store``, che è l'unico a sapere se
+        esiste già uno snapshot in memoria più fresco del file su disco.
 
         Returns:
-            ``(jobs, version)`` tuple on success or when no store file exists
-            (in which case an empty list and version 1 are returned).
-            ``None`` when the store file exists but cannot be parsed; the
-            corrupt file is preserved with a ``.corrupt-<ts>`` suffix so the
-            caller can decide whether to overwrite or bail out.  Returning a
-            sentinel here is important: silently treating a parse error as an
-            empty job list would cause the next ``_save_store`` to wipe every
-            job from disk.
+            ``None`` solo quando il file rotto **non** si è potuto spostare di
+            lato, perché salvarci sopra distruggerebbe l'unica copia rimasta.
         """
-        jobs: list[CronJob] = []
-        version = 1
-        if self.store_path.exists():
+        if not self.store_path.exists():
+            return _LoadedStore([], 1, None, None)
+
+        try:
+            jobs, version = self._parse_jobs(self.store_path)
+        except Exception:
+            logger.exception("Failed to load cron store at {}", self.store_path)
+        else:
+            return _LoadedStore(jobs, version, None, None)
+
+        backup = self._backup_path
+        if backup.exists():
             try:
-                data = json.loads(self.store_path.read_text(encoding="utf-8"))
-                jobs = []
-                version = data.get("version", 1)
-                for j in data.get("jobs", []):
-                    job = CronJob(
-                        id=j["id"],
-                        name=j["name"],
-                        enabled=j.get("enabled", True),
-                        schedule=CronSchedule(
-                            kind=j["schedule"]["kind"],
-                            at_ms=j["schedule"].get("atMs"),
-                            every_ms=j["schedule"].get("everyMs"),
-                            expr=j["schedule"].get("expr"),
-                            tz=j["schedule"].get("tz"),
-                        ),
-                        payload=CronPayload(
-                            kind=j["payload"].get("kind", "agent_turn"),
-                            message=j["payload"].get("message", ""),
-                            session_key=j["payload"].get("sessionKey"),
-                            origin_channel=j["payload"].get("originChannel"),
-                            origin_chat_id=j["payload"].get("originChatId"),
-                            origin_metadata=j["payload"].get("originMetadata") or {},
-                        ),
-                        state=CronJobState(
-                            next_run_at_ms=j.get("state", {}).get("nextRunAtMs"),
-                            last_run_at_ms=j.get("state", {}).get("lastRunAtMs"),
-                            last_status=j.get("state", {}).get("lastStatus"),
-                            last_error=j.get("state", {}).get("lastError"),
-                            run_history=[
-                                CronRunRecord(
-                                    run_at_ms=r["runAtMs"],
-                                    status=r["status"],
-                                    duration_ms=r.get("durationMs", 0),
-                                    error=r.get("error"),
-                                )
-                                for r in j.get("state", {}).get("runHistory", [])
-                            ],
-                        ),
-                        created_at_ms=j.get("createdAtMs", 0),
-                        updated_at_ms=j.get("updatedAtMs", 0),
-                        delete_after_run=j.get("deleteAfterRun", False),
-                    )
-                    jobs.append(job)
+                jobs, version = self._parse_jobs(backup)
             except Exception:
-                # Preserve the corrupt file for forensic recovery instead of
-                # letting the next save overwrite it with an empty job list.
-                backup = self.store_path.with_suffix(
-                    self.store_path.suffix + f".corrupt-{int(time.time())}"
-                )
+                logger.exception("Cron store backup at {} is unusable too", backup)
+            else:
+                quarantined = self._quarantine_store()
+                if quarantined is None:
+                    return None
+                # Il backup diventa il file vivo, altrimenti ogni avvio
+                # rifarebbe il recupero e il primo salvataggio ripartirebbe da
+                # un grezzo rotto.
                 with suppress(OSError):
-                    self.store_path.rename(backup)
-                logger.exception(
-                    "Failed to load cron store at {}. "
-                    "Corrupt file preserved at {}. "
-                    "Refusing to overwrite to avoid data loss.",
-                    self.store_path,
-                    backup,
+                    atomic_write(self.store_path, backup.read_text(encoding="utf-8"))
+                logger.warning(
+                    "Cron store recovered from {}; broken file kept at {}", backup, quarantined
                 )
-                return None
-        return jobs, version
+                return _LoadedStore(jobs, version, "backup", quarantined)
+
+        quarantined = self._quarantine_store()
+        if quarantined is None:
+            return None
+        logger.warning(
+            "Cron store could not be recovered; starting with no jobs. Broken file kept at {}",
+            quarantined,
+        )
+        return _LoadedStore([], 1, "empty", quarantined)
+
+    @staticmethod
+    def _record_recovery(kind: str, quarantined: Path) -> None:
+        """Segna sul ``RuntimeContext`` che lo store cron è stato recuperato.
+
+        Import locale come in ``config/loader.py``: ``cron.service`` non deve
+        dipendere dal runtime per caricare dei job.
+        """
+        from jenny.runtime.context import get_runtime_context
+
+        ctx = get_runtime_context()
+        ctx.cron_recovered_from = kind
+        ctx.cron_quarantine_path = quarantined
 
     def _merge_action(self):
         if not self._action_path.exists():
@@ -277,8 +380,17 @@ class CronService:
             if self._store is not None:
                 return self._store
             return None
-        jobs, version = loaded
-        self._store = CronStore(version=version, jobs=jobs)
+        if loaded.recovered_from is not None and self._store is not None:
+            # Corruzione arrivata *dopo* un avvio riuscito (su Android: una
+            # lettura parziale, un processo ucciso a metà). Lo snapshot in
+            # memoria è almeno fresco quanto il ``.bak`` e più fresco di una
+            # lista vuota: si tiene quello, e il prossimo salvataggio lo
+            # riscrive su disco. Nessun avviso all'utente, perché qui non ha
+            # perso niente — è il caso in cui il ripiego non serve.
+            return self._store
+        if loaded.recovered_from is not None and loaded.quarantined is not None:
+            self._record_recovery(loaded.recovered_from, loaded.quarantined)
+        self._store = CronStore(version=loaded.version, jobs=loaded.jobs)
         self._merge_action()
         if self._enforce_store_agent_bindings() and self._running:
             self._save_store()
@@ -337,6 +449,7 @@ class CronService:
             ]
         }
 
+        self._rotate_backup()
         atomic_write(self.store_path, json.dumps(data, indent=2, ensure_ascii=False))
 
     @staticmethod
@@ -369,23 +482,26 @@ class CronService:
         logger.info("Cron service started with {} jobs", len(self._store.jobs if self._store else []))
 
     def _corrupt_store_error(self) -> RuntimeError:
-        """Store corrotto su disco: rifiuta invece di ripartire da zero.
+        """Store illeggibile **e** non spostabile: l'unico caso che rifiuta.
 
-        Ripartire con una lista vuota chiamerebbe ``_save_store`` e
-        sovrascriverebbe con ``[]`` i dati che ``_load_jobs`` ha appena messo
-        da parte come ``.corrupt-<ts>`` — recuperabili fino a quel momento.
+        Da 0.6.5 un file rotto non impedisce più l'avvio: ``_load_jobs`` prova
+        il ``.bak``, altrimenti mette il file da parte come ``.corrupt-<ts>`` e
+        riparte senza job, registrandolo perché la WebUI lo dica. Quella scelta
+        regge su una condizione precisa — che la copia forense esista davvero.
+
+        Se il rename fallisce, il file rotto è ancora al suo posto e il primo
+        ``_save_store`` ci scriverebbe sopra: i job dell'utente non esisterebbero
+        più da nessuna parte. Lì, e solo lì, non partire è la risposta giusta.
 
         Vive qui, e non inline in ``start``, perché il primo caricamento non
         avviene in ``start``: ``GatewayContainer.build`` registra i job di
         sistema prima, quindi è ``register_system_job`` a vedere per primo il
-        ``None``. Con la guardia solo dentro ``start`` questo caso finiva in un
-        ``AttributeError`` su ``store.jobs``, e il messaggio scritto apposta
-        per l'utente non veniva mai stampato.
+        ``None``.
         """
         return RuntimeError(
-            f"cron store at {self.store_path} is corrupt and was preserved; "
-            "refusing to start with an empty job list. "
-            "Inspect the .corrupt-<ts> backup and restore manually."
+            f"cron store at {self.store_path} is corrupt and could not be set aside; "
+            "refusing to start, because saving would overwrite the only copy left. "
+            "Move the file out of the way manually and start again."
         )
 
     def stop(self) -> None:

@@ -121,6 +121,8 @@
     "system": "Sistema",
     "configRecoveredBackup": "Le impostazioni sono state recuperate dall'ultimo backup valido: all'avvio config.json non era leggibile.",
     "configRecoveredDefaults": "config.json non era leggibile e non c'era un backup utilizzabile, quindi Jenny è partita dai valori predefiniti — la chiave API va rimessa. Il file illeggibile è stato messo da parte qui:",
+    "cronRecoveredBackup": "I promemoria programmati sono stati recuperati dall'ultimo backup valido: all'avvio l'elenco dei job non era leggibile. Controlla che ci siano tutti.",
+    "cronRecoveredEmpty": "L'elenco dei promemoria programmati non era leggibile e non c'era un backup utilizzabile, quindi Jenny è partita senza nessuno: quelli che avevi creato non suoneranno più e vanno ricreati. Il file illeggibile è stato messo da parte qui:",
     "themeLabel": "Tema",
     "mascotSection": "Mascotte",
     "mascotVisible": "Mostra la mascotte",

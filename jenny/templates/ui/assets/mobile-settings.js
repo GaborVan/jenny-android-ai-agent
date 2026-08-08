@@ -72,6 +72,7 @@ export class SettingsController {
     // motore LLM, capacità dell'agente, canali, dati, diagnostica.
     this.contentEl.innerHTML = [
       this._renderConfigRecovery(d),
+      this._renderCronRecovery(d),
       this._section('personalization', 'ti-palette', i18n.t('settings.personalization'), this._renderPersonalization(d)),
       this._section('models', 'ti-cpu', i18n.t('settings.model'), this._renderModelSettings(d)),
       this._section('tools', 'ti-tool', i18n.t('settings.tools'), this._renderTools(d)),
@@ -92,13 +93,33 @@ export class SettingsController {
     const info = d.config_recovery;
     if (!info) return '';
     const fromDefaults = info.restored_from === 'defaults';
-    const text = fromDefaults
-      ? i18n.t('settings.configRecoveredDefaults')
-      : i18n.t('settings.configRecoveredBackup');
-    const where = info.broken_file
-      ? `<div class="settings-notice-path">${escapeHtml(info.broken_file)}</div>`
+    return this._recoveryNotice(
+      i18n.t(fromDefaults ? 'settings.configRecoveredDefaults' : 'settings.configRecoveredBackup'),
+      info.broken_file,
+      fromDefaults,
+    );
+  }
+
+  /* Stesso avviso per lo store dei job cron. Merita una riga sua e non una
+     variante di quella sopra: qui, con restored_from = "empty", a mancare sono
+     i promemoria che l'utente aveva creato — e quelli non si notano assenti,
+     si notano solo quando non suonano. */
+  _renderCronRecovery(d) {
+    const info = d.cron_recovery;
+    if (!info) return '';
+    const empty = info.restored_from === 'empty';
+    return this._recoveryNotice(
+      i18n.t(empty ? 'settings.cronRecoveredEmpty' : 'settings.cronRecoveredBackup'),
+      info.broken_file,
+      empty,
+    );
+  }
+
+  _recoveryNotice(text, brokenFile, strong) {
+    const where = brokenFile
+      ? `<div class="settings-notice-path">${escapeHtml(brokenFile)}</div>`
       : '';
-    return `<div class="settings-notice${fromDefaults ? ' settings-notice-strong' : ''}">
+    return `<div class="settings-notice${strong ? ' settings-notice-strong' : ''}">
       <i class="ti ti-alert-triangle"></i>
       <div>
         <div>${text}</div>
