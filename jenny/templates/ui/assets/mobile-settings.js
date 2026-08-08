@@ -7,7 +7,7 @@ import { AppState } from './shared/state.js';
 import { confirmDialog, detailDialog } from './shared/dialog.js';
 import { THEMES, DEFAULT_THEME, setTheme } from './shared/theme.js';
 import { advancedMode, setAdvancedMode } from './shared/advanced-mode.js';
-import { mascotVisible, setMascotVisible, mascotSide, setMascotSide,
+import { mascotVisible, setMascotVisible,
   mascotColor, setMascotColor, mascotSize, setMascotSize,
   MASCOT_SIZES } from './shared/mascot.js';
 import { homeView, setHomeView, HOME_VIEW_CHOICES } from './shared/home-view.js';
@@ -700,15 +700,16 @@ export class SettingsController {
   // ── Mascotte ───────────────────────────────────────────────────────
 
   /* Blocco della sezione "Personalizzazione", sotto la passerella dei temi:
-     mini-label, toggle di visibilità, taglia, lato e variante colore.
+     mini-label, toggle di visibilità, taglia e variante colore.
      Le opzioni restano SEMPRE a schermo: nasconderle a mascotte spenta faceva
      sembrare che l'unica scelta fosse tenerla o buttarla via — chi la spegneva
      subito non scopriva mai che era personalizzabile. Da spenta si vedono
      inerti (attributo `disabled`), come promessa di cosa si ottiene
-     riaccendendola. */
+     riaccendendola.
+     Il lato NON si sceglie qui: lo decide il lancio (v. mobile-jenny.js), e
+     un'impostazione che cambia da sola al primo lancio sarebbe una bugia. */
   _renderMascot() {
     const visible = mascotVisible();
-    const side = mascotSide();
     const color = mascotColor();
     const size = mascotSize();
     const off = visible ? '' : ' disabled';
@@ -735,19 +736,6 @@ export class SettingsController {
       <div class="settings-field"${visible ? '' : ' data-settings-off'}>
         <label class="settings-label">${i18n.t('settings.mascotSize')}</label>
         <div class="settings-seg">${sizeButtons}</div>
-      </div>
-      <div class="settings-field"${visible ? '' : ' data-settings-off'}>
-        <label class="settings-label">${i18n.t('settings.mascotSide')}</label>
-        <div class="settings-seg">
-          <button class="settings-seg-btn${side === 'left' ? ' active' : ''}" data-mascot-side="left"${off}>
-            ${i18n.t('settings.mascotSideLeft')}
-            ${side === 'left' ? '<i class="ti ti-check"></i>' : ''}
-          </button>
-          <button class="settings-seg-btn${side === 'right' ? ' active' : ''}" data-mascot-side="right"${off}>
-            ${i18n.t('settings.mascotSideRight')}
-            ${side === 'right' ? '<i class="ti ti-check"></i>' : ''}
-          </button>
-        </div>
       </div>
       <div class="settings-field settings-toggle-row"${visible ? '' : ' data-settings-off'}>
         <label class="settings-label">${i18n.t('settings.mascotColor')}</label>
@@ -1079,8 +1067,8 @@ export class SettingsController {
     const advToggle = this.contentEl.querySelector('#advanced-mode-toggle');
     if (advToggle) advToggle.addEventListener('change', () => setAdvancedMode(advToggle.checked));
 
-    // Mascotte: toggle visibilità (re-render per mostrare/nascondere il
-    // blocco scelta lato) + scelta del lato
+    // Mascotte: toggle visibilità (re-render per accendere/spegnere le
+    // opzioni sotto) + scelta della taglia
     const mascotToggle = this.contentEl.querySelector('#mascot-visible-toggle');
     if (mascotToggle) {
       mascotToggle.addEventListener('change', () => {
@@ -1088,12 +1076,6 @@ export class SettingsController {
         this.render();
       });
     }
-    this.contentEl.querySelectorAll('[data-mascot-side]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        setMascotSide(btn.dataset.mascotSide);
-        this.render();
-      });
-    });
     this.contentEl.querySelectorAll('[data-mascot-size]').forEach(btn => {
       btn.addEventListener('click', () => {
         setMascotSize(btn.dataset.mascotSize);
@@ -1122,8 +1104,8 @@ export class SettingsController {
       });
     });
 
-    // Language selector — solo i bottoni seg con data-locale (quelli del
-    // lato mascotte condividono la classe ma hanno data-mascot-side).
+    // Language selector — solo i bottoni seg con data-locale (quelli della
+    // taglia mascotte condividono la classe ma hanno data-mascot-size).
     this.contentEl.querySelectorAll('.settings-seg-btn[data-locale]').forEach(btn => {
       btn.addEventListener('click', () => {
         const locale = btn.dataset.locale;

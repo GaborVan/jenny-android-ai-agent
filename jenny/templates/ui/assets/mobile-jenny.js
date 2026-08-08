@@ -1,6 +1,7 @@
 /** Jenny companion — la mascotte che vive sul bordo di ogni vista.
  *
- * A riposo sporge dal bordo destro. Richiamata (swipe verso l'interno o tap)
+ * A riposo sporge dal bordo dove l'hai lasciata (sinistro finché non la
+ * lanci da qualche parte, v. settle()). Richiamata (swipe verso l'interno o tap)
  * esce in overlay con una minichat a un turno: campo "Chiedi qui" in basso,
  * pensa, risponde con un fumetto sopra la testa. In chat niente minichat:
  * è solo presente all'angolo — la conversazione vera è già aperta.
@@ -13,7 +14,9 @@ import { AppState } from './shared/state.js';
 import { wsManager } from './shared/ws-manager.js';
 import { sessionManager } from './shared/session-manager.js';
 import { i18n } from './shared/i18n.js';
-import { mascotVisible, mascotSide, poseUrl, applyMascotSize } from './shared/mascot.js';
+import {
+  mascotVisible, mascotSide, setMascotSide, poseUrl, applyMascotSize,
+} from './shared/mascot.js';
 
 const ART = {
   idle: '/html-mobile/assets/jenny-idle.webp',
@@ -78,7 +81,11 @@ const FALL_G = 1300; // gravità della caduta al rilascio (px/s²) — rientro c
 const FLOOR_REST = 0.12; // rimbalzo sul pavimento molto smorzato
 const WALK_SPEED = 150; // rientro a passo costante (px/s), tipo camminata
 const GETUP_MS = 700; // pausa a terra dopo il tonfo (tempo per "rialzarsi")
-const OUT_SHIFT_PX = 35; // delta right tra docked (-75px) e out (-40px), v. CSS
+/* Delta di ancoraggio fra docked e out, in frazioni di --jenny-size: sono i
+   due valori del CSS (-0.469 docked, -0.25 out, v. .jenny-duo[.out]). In
+   frazione e non in px perché la stessa camminata deve finire esattamente sul
+   bordo alle tre taglie, non solo a quella media. */
+const OUT_SHIFT_RATIO = 0.469 - 0.25;
 const RETURN_TIMEOUT_MS = 6000; // failsafe: oltre, snap allo stato finale (caduta + camminata)
 
 /* Riduce il markdown della risposta a testo piano da fumetto. */
@@ -164,9 +171,10 @@ export class JennyCompanion {
   }
 
   /* ── Gesture di sistema (Android) ──
-     Jenny vive sul bordo destro: uno swipe che parte da lì viene letto come
-     back edge-swipe di sistema. Riportiamo la sua area (in px fisici) al bridge
-     nativo JennyNative, che la esclude via setSystemGestureExclusionRects.
+     Jenny vive su un bordo verticale, e da entrambi uno swipe che parte da lì
+     viene letto come back edge-swipe di sistema. Riportiamo la sua area (in px
+     fisici) al bridge nativo JennyNative, che la esclude via
+     setSystemGestureExclusionRects.
      No-op su WebView senza il bridge (browser desktop, ecc.). */
   _updateGestureExclusion() {
     const api = window.JennyNative;
@@ -401,11 +409,19 @@ export class JennyCompanion {
   }
 
   /* Lato dello schermo (mirroring completo, v. mobile-style.css .side-left):
-     arte specchiata + ancoraggi minichat riflessi via CSS su questa classe. */
-  _applySide() {
-    const left = mascotSide() === 'left';
+     arte specchiata + ancoraggi minichat riflessi via CSS su questa classe.
+     Non è una preferenza: è dove l'hai lasciata l'ultima volta, quindi lo
+     stato si scrive qui e non passa dall'evento 'mascotchange'. */
+  _setSide(side) {
+    const left = side === 'left';
     this.el.classList.toggle('side-left', left);
     this.mc.classList.toggle('side-left', left);
+    setMascotSide(side);
+    this._updateGestureExclusion();
+  }
+
+  _applySide() {
+    this._setSide(mascotSide());
   }
 
   /* ── Drag / tap ── */
@@ -426,6 +442,8 @@ export class JennyCompanion {
       phase: 'held', // held -> fall -> down (a terra) -> slide
       downUntil: 0,
       grounded: false, // true dal primo contatto col pavimento (per la posa ground)
+      settled: true, // false dal rilascio finché settle() non sceglie bordo e arrivo
+      targetOut: false, // stato out voluto dal gesto, applicato a fine volo
       dir: 1, // facing: 1 verso destra (arte originale), -1 verso sinistra (flip)
       x: 0, y: 0, vx: 0, vy: 0,
       th: 0, om: 0, axS: 0,
@@ -484,6 +502,7 @@ export class JennyCompanion {
       fs.py = e.clientY;
       fs.phase = 'held';
       fs.after = null;
+      fs.settled = true; // niente da assestare finché non la si lascia andare
       fs.grounded = false;
       fs.dir = 1;
       fs.onEl = null;
@@ -497,6 +516,39 @@ export class JennyCompanion {
       fs.raf = requestAnimationFrame(loop);
     };
 
+    /* Atterraggio: sceglie il bordo più vicino al punto in cui è caduta e ce
+       la manda a piedi. Il cambio di lato si applica subito, non a fine volo:
+       con .flying attivo l'ancoraggio non transiziona, e il layer vive in
+       coordinate viewport (fs.x/fs.y), quindi ri-misurare la base del
+       transform lo lascia esattamente dov'è — nessun salto. Solo dopo si sa
+       dov'è il dock, e quindi dove deve arrivare la camminata. */
+    const settle = () => {
+      if (fs.settled) return;
+      fs.settled = true;
+      const side = fs.x < vw() / 2 ? 'left' : 'right';
+      if (side !== mascotSide()) {
+        this._setSide(side);
+        // Attraversare lo schermo è già il gesto: la si ritrova a riposo sul
+        // bordo nuovo, non aperta.
+        fs.targetOut = false;
+      }
+      const r = this.el.getBoundingClientRect();
+      fs.bx = r.left + fs.w * PIVOT_X;
+      fs.by = r.top + fs.h * PIVOT_Y;
+      const wasOut = this.el.classList.contains('out');
+      if (fs.targetOut === wasOut) {
+        fs.xT = fs.bx;
+        fs.after = null;
+        return;
+      }
+      // Il cambio di classe out avviene solo a fine volo (fs.after): la x di
+      // arrivo la anticipa di uno scarto d'ancoraggio, verso l'interno se si
+      // apre e verso il bordo se si chiude.
+      const shift = fs.w * OUT_SHIFT_RATIO * (side === 'left' ? -1 : 1);
+      fs.xT = fs.bx + (fs.targetOut ? -shift : shift);
+      fs.after = () => this._setOut(fs.targetOut);
+    };
+
     /* Chiude il volo: applica l'eventuale cambio di stato e ripulisce.
        Il cambio classe avviene con .flying ancora attivo (transition: none),
        così il right nuovo non viene animato: lei è già lì col transform. */
@@ -505,10 +557,21 @@ export class JennyCompanion {
       fs.active = false;
       cancelAnimationFrame(fs.raf);
       clearTimeout(fs.snapT);
+      // Uscite di sicurezza (deadline, snapT, app in background, tastiera):
+      // il volo finisce senza che lei abbia mai toccato terra, ma il gesto
+      // dell'utente va onorato lo stesso.
+      settle();
       if (fs.after) fs.after();
+      // Il nuovo ancoraggio va *committato* mentre .flying vale ancora, non
+      // solo scritto: senza questo flush il browser confronta lo stile di
+      // prima con quello di dopo la rimozione di .flying, vede la transizione
+      // riattivata e anima lo scarto che lei ha già percorso a piedi — cioè un
+      // salto all'indietro seguito da uno scivolamento di 0.3s.
+      void this.el.offsetWidth;
       this.fly.style.transform = '';
       this.el.classList.remove('flying');
       this._syncArt();
+      this._updateGestureExclusion();
     };
     this._abortFlight = () => {
       dragging = false;
@@ -558,8 +621,10 @@ export class JennyCompanion {
       fs.y += fs.vy * dt;
 
       // Pareti morbide: in mano e in caduta (lanciarla = rimbalza), ma NON in
-      // slide — il dock sta oltre il bordo destro e le pareti le
+      // slide — il dock sta oltre il bordo dello schermo e le pareti le
       // impedirebbero di arrivare (la condizione d'arrivo non scatterebbe mai).
+      // Sono anche quelle che tengono fs.x dentro il viewport, quindi rendono
+      // significativo il confronto con la metà schermo in settle().
       if (fs.phase !== 'slide') {
         const mL = fs.w * PIVOT_X * 0.5;
         const mR = vw() - mL;
@@ -622,6 +687,10 @@ export class JennyCompanion {
       fs.last = now;
       if (fs.phase === 'down' && now >= fs.downUntil) fs.phase = 'slide';
       step(dt);
+      // Toccato terra (fall -> down): da qui in poi si sa dov'è caduta, quindi
+      // quale bordo le tocca. Prima del disegno, perché settle() sposta la
+      // base del transform.
+      if (!fs.settled && fs.phase !== 'fall') settle();
 
       const tx = (fs.x - fs.bx).toFixed(1);
       const ty = (fs.y - fs.by).toFixed(1);
@@ -708,8 +777,9 @@ export class JennyCompanion {
       fs.py = e.clientY;
     });
 
-    /* Rilascio: decide lo stato finale con le soglie di sempre, poi lascia
-       cadere sulla y di partenza e scivolare alla x dello stato scelto. */
+    /* Rilascio: decide con le soglie di sempre se il gesto era un apri/chiudi,
+       poi la lascia cadere sulla y di partenza. Dove atterrerà — e quindi su
+       che bordo finirà — non si sa ancora: lo fissa settle() al tonfo. */
     const finish = (clientX) => {
       if (!dragging) return;
       clearHoldTimer();
@@ -727,19 +797,15 @@ export class JennyCompanion {
 
       const dx = clientX - startX;
       const out = this.el.classList.contains('out');
-      // Lato sinistro: mirroring completo dello swipe di apertura/chiusura
-      // (v. shared/mascot.js). A destra sideSign=1 e la formula coincide
-      // esattamente col comportamento originale (regressione zero).
+      // Apri/chiudi è relativo al bordo su cui si trova adesso: da sinistra i
+      // versi si specchiano (v. .jenny-duo.side-left in mobile-style.css).
       const sideSign = mascotSide() === 'left' ? -1 : 1;
-      fs.xT = fs.bx;
+      fs.targetOut = out;
+      if (!out && dx * sideSign < -DRAG_THRESHOLD) fs.targetOut = true;
+      else if (out && dx * sideSign > DRAG_THRESHOLD) fs.targetOut = false;
+      fs.xT = fs.bx; // provvisorio: la x di arrivo vera la fissa settle()
       fs.after = null;
-      if (!out && dx * sideSign < -DRAG_THRESHOLD) {
-        fs.after = () => this._setOut(true);
-        fs.xT = fs.bx - OUT_SHIFT_PX * sideSign;
-      } else if (out && dx * sideSign > DRAG_THRESHOLD) {
-        fs.after = () => this._setOut(false);
-        fs.xT = fs.bx + OUT_SHIFT_PX * sideSign;
-      }
+      fs.settled = false;
       fs.phase = 'fall';
       fs.deadline = performance.now() + RETURN_TIMEOUT_MS;
       // Failsafe anche senza rAF (es. pagina nascosta): chiusura garantita.
@@ -804,9 +870,18 @@ export class JennyCompanion {
     this.scrim.classList.add('open');
     this.mc.classList.add('open');
     this.mc.dataset.state = 'ask';
+    // Il campo prende il fuoco da solo: la minichat si apre per scrivere, e
+    // chiederle di aprirla e poi toccare il campo è un tap di troppo. Va fatto
+    // qui e in modo sincrono — siamo ancora dentro il gesto dell'utente
+    // (tap o rilascio del drag), l'unico momento in cui la WebView Android
+    // accetta di alzare la tastiera senza che l'utente tocchi l'input.
+    this.input.focus();
   }
 
   _closeMini() {
+    // Simmetrico al focus di _openMini: chiudendola la tastiera se ne deve
+    // andare con lei, non restare aperta su un campo che non si vede più.
+    this.input.blur();
     this.scrim.classList.remove('open');
     this.mc.classList.remove('open');
     this.mc.dataset.state = 'ask';

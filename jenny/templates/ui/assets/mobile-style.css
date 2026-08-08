@@ -4139,7 +4139,7 @@ body {
   gap: 4px;
 }
 
-/* Bottone segmented condiviso (lingua, lato mascotte, ...): in lista
+/* Bottone segmented condiviso (lingua, taglia mascotte, ...): in lista
    verticale occupa la riga, dentro .settings-seg si divide la riga. */
 .settings-seg {
   display: flex;
