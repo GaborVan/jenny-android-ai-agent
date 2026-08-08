@@ -262,8 +262,10 @@ class CronService:
         - When the on-disk store exists but is unreadable: keep using the
           previous in-memory ``self._store`` if we already have one (so a
           transient corruption does not drop live jobs); only the very first
-          load (during ``start``) can return ``None`` to signal an unrecoverable
-          state to the caller.
+          load can return ``None`` to signal an unrecoverable state to the
+          caller. Quel primo caricamento avviene in ``register_system_job``
+          (``GatewayContainer.build``), non in ``start``: entrambi devono
+          quindi controllare il ``None``.
         """
         if self._timer_active and self._store:
             return self._store
@@ -359,20 +361,32 @@ class CronService:
         self._running = True
         loaded = self._load_store()
         if loaded is None:
-            # Store file existed but was corrupt and has been preserved with
-            # a ``.corrupt-<ts>`` suffix.  Bail out instead of starting with
-            # an empty store; that would call ``_save_store`` and overwrite
-            # the now-renamed (but still recoverable) data with [].
             self._running = False
-            raise RuntimeError(
-                f"cron store at {self.store_path} is corrupt and was preserved; "
-                "refusing to start with an empty job list. "
-                "Inspect the .corrupt-<ts> backup and restore manually."
-            )
+            raise self._corrupt_store_error()
         self._recompute_next_runs()
         self._save_store()
         self._arm_timer()
         logger.info("Cron service started with {} jobs", len(self._store.jobs if self._store else []))
+
+    def _corrupt_store_error(self) -> RuntimeError:
+        """Store corrotto su disco: rifiuta invece di ripartire da zero.
+
+        Ripartire con una lista vuota chiamerebbe ``_save_store`` e
+        sovrascriverebbe con ``[]`` i dati che ``_load_jobs`` ha appena messo
+        da parte come ``.corrupt-<ts>`` — recuperabili fino a quel momento.
+
+        Vive qui, e non inline in ``start``, perché il primo caricamento non
+        avviene in ``start``: ``GatewayContainer.build`` registra i job di
+        sistema prima, quindi è ``register_system_job`` a vedere per primo il
+        ``None``. Con la guardia solo dentro ``start`` questo caso finiva in un
+        ``AttributeError`` su ``store.jobs``, e il messaggio scritto apposta
+        per l'utente non veniva mai stampato.
+        """
+        return RuntimeError(
+            f"cron store at {self.store_path} is corrupt and was preserved; "
+            "refusing to start with an empty job list. "
+            "Inspect the .corrupt-<ts> backup and restore manually."
+        )
 
     def stop(self) -> None:
         """Stop the cron service."""
@@ -389,8 +403,29 @@ class CronService:
         for job in self._store.jobs:
             if self._enforce_agent_binding(job):
                 continue
-            if job.enabled:
-                job.state.next_run_at_ms = _compute_next_run(job.schedule, now)
+            if not job.enabled:
+                continue
+            computed = _compute_next_run(job.schedule, now)
+            # Solo ``every`` è relativo, quindi solo ``every`` poteva perdersi
+            # qui: ricalcolarlo a ogni avvio significava "N ore di uptime
+            # ininterrotto", non "ogni N ore". Su Android, dove il processo
+            # viene ucciso e rilanciato, una scadenza lunga (Atlas, 12h) non
+            # arrivava mai. Conservare quella salvata fa sì che il conto non
+            # arretri mai e che una scadenza mancata a app spenta venga
+            # recuperata al primo tick.
+            # ``at`` e ``cron`` restano ricalcolati: sono già ancorati
+            # all'orologio, non derivano dal momento dell'avvio.
+            if job.schedule.kind == "every" and job.state.next_run_at_ms is not None:
+                # Il tetto copre un orologio che è saltato in avanti e un
+                # intervallo accorciato a mano: senza, una scadenza assurda
+                # salvata una volta resterebbe tale per sempre.
+                job.state.next_run_at_ms = (
+                    min(job.state.next_run_at_ms, computed)
+                    if computed is not None
+                    else job.state.next_run_at_ms
+                )
+                continue
+            job.state.next_run_at_ms = computed
 
     def _get_next_wake_ms(self) -> int | None:
         """Get the earliest next run time across all jobs."""
@@ -529,6 +564,8 @@ class CronService:
     def list_jobs(self, include_disabled: bool = False) -> list[CronJob]:
         """List all jobs."""
         store = self._load_store()
+        if store is None:
+            return []
         jobs = store.jobs if include_disabled else [j for j in store.jobs if j.enabled]
         return sorted(jobs, key=lambda j: j.state.next_run_at_ms or float('inf'))
 
@@ -580,9 +617,31 @@ class CronService:
     def register_system_job(self, job: CronJob) -> CronJob:
         """Register an internal system job (idempotent on restart)."""
         store = self._load_store()
+        if store is None:
+            raise self._corrupt_store_error()
         now = _now_ms()
-        job.state = CronJobState(next_run_at_ms=_compute_next_run(job.schedule, now))
-        job.created_at_ms = now
+        previous = next((j for j in store.jobs if j.id == job.id), None)
+        # Il conto alla rovescia sopravvive al riavvio. Ricalcolarlo qui a ogni
+        # avvio rendeva "ogni N ore" un sinonimo di "dopo N ore di uptime
+        # ininterrotto": su un telefono, dove il servizio viene ucciso e
+        # rilanciato, un job lungo come Atlas (12h) poteva non scattare mai,
+        # perché ogni ripartenza spostava la scadenza di altre 12 ore.
+        # Conservando lo stato la scadenza non arretra mai, quindi il job
+        # arriva a scattare anche a colpi di sessioni brevi; se è gia passata
+        # mentre l'app era spenta, ci pensa il primo tick — è il recupero che
+        # "ogni N ore" promette.
+        # Si riparte da zero solo se la pianificazione è cambiata: un nuovo
+        # intervallo deve valere subito, non dopo la scadenza del vecchio.
+        if (
+            previous is not None
+            and previous.schedule == job.schedule
+            and previous.state.next_run_at_ms is not None
+        ):
+            job.state = previous.state
+            job.created_at_ms = previous.created_at_ms
+        else:
+            job.state = CronJobState(next_run_at_ms=_compute_next_run(job.schedule, now))
+            job.created_at_ms = now
         job.updated_at_ms = now
         store.jobs = [j for j in store.jobs if j.id != job.id]
         store.jobs.append(job)
@@ -705,13 +764,22 @@ class CronService:
     def get_job(self, job_id: str) -> CronJob | None:
         """Get a job by ID."""
         store = self._load_store()
+        if store is None:
+            return None
         return next((j for j in store.jobs if j.id == job_id), None)
 
     def status(self) -> dict:
         """Get service status."""
         store = self._load_store()
+        # I lettori **degradano**, non abortiscono. Una query di stato è la
+        # prima cosa che ``GatewayContainer.build`` chiama, prima ancora di
+        # registrare i job: se decidesse lei di sollevare, il rifiuto
+        # arriverebbe da "quanti job ci sono" invece che da chi quel rifiuto
+        # lo sa spiegare. La decisione di non partire resta di
+        # ``register_system_job`` e ``start``, che dicono anche cosa fare col
+        # file ``.corrupt-<ts>``.
         return {
             "enabled": self._running,
-            "jobs": len(store.jobs),
+            "jobs": len(store.jobs) if store is not None else 0,
             "next_wake_at_ms": self._get_next_wake_ms(),
         }

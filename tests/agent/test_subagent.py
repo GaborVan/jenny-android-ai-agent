@@ -5,10 +5,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from jenny.agent.agent_types import AGENT_TYPES
 from jenny.agent.subagent import SubagentManager
 from jenny.agent.tools.filesystem import FileToolsConfig
 from jenny.bus.queue import MessageBus
 from jenny.config.schema import ToolsConfig
+from jenny.config.tool_schemas import SshConfig, SshHostConfig
 from jenny.providers.base import LLMProvider
 
 
@@ -79,3 +81,47 @@ def test_subagent_respects_file_tool_toggle(tmp_path):
         "write_file",
     }
     assert file_tools.isdisjoint(tools.tool_names)
+
+
+def _sysadmin_manager(workspace: Path, *, ssh_enabled: bool, hosts: bool) -> SubagentManager:
+    provider = MagicMock(spec=LLMProvider)
+    provider.get_default_model.return_value = "test"
+    host_list = (
+        [SshHostConfig(alias="box", host="example.com", username="u")] if hosts else []
+    )
+    return SubagentManager(
+        provider=provider,
+        workspace=workspace,
+        bus=MessageBus(),
+        model="test",
+        max_tool_result_chars=16_000,
+        tools_config=ToolsConfig(ssh=SshConfig(enable=ssh_enabled, hosts=host_list)),
+    )
+
+
+def test_sysadmin_gets_the_ssh_tools_through_the_real_build_path(tmp_path):
+    """Regressione su due difetti indipendenti che si mascheravano a vicenda.
+
+    Il test NON passa ``tools_config`` a ``_build_tools``: deve attraversare
+    ``_subagent_tools_config()``, cioè il percorso vero dello spawn. Erano due:
+    ``enabled()`` leggeva ``ctx.config.tools.ssh`` mentre ``ToolContext.config``
+    è già una ``ToolsConfig``, e ``_subagent_tools_config()`` ricostruiva la
+    config senza la sezione ``ssh`` (quindi default: spento, zero host). Con uno
+    solo dei due corretto il registry restava senza SSH, e un ctx sintetico non
+    lo avrebbe mostrato.
+    """
+    sm = _sysadmin_manager(tmp_path, ssh_enabled=True, hosts=True)
+
+    names = sm._build_tools(agent_type=AGENT_TYPES["sysadmin"]).tool_names
+
+    assert {"ssh_hosts", "ssh_exec", "ssh_job", "ssh_transfer"} <= set(names)
+
+
+@pytest.mark.parametrize(("ssh_enabled", "hosts"), [(False, True), (True, False)])
+def test_sysadmin_without_the_toggle_or_a_host_gets_no_ssh(tmp_path, ssh_enabled, hosts):
+    """L'allowlist del tipo non è un permesso: il gate resta la config utente."""
+    sm = _sysadmin_manager(tmp_path, ssh_enabled=ssh_enabled, hosts=hosts)
+
+    names = sm._build_tools(agent_type=AGENT_TYPES["sysadmin"]).tool_names
+
+    assert {"ssh_hosts", "ssh_exec", "ssh_job", "ssh_transfer"}.isdisjoint(names)

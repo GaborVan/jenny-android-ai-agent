@@ -126,6 +126,30 @@ class WebSocketManager extends EventTarget {
     return true;
   }
 
+  /* Osservazione dell'attività fine di un subagent. Il gateway spinge i frame
+     `subagent_activity` SOLO a chi ha mandato un watch: è per questo che la
+     modale deve dire quando apre e quando chiude, e non c'è nessun polling da
+     sostituire — a modale chiusa il costo lato server è esattamente zero.
+
+     `since` è il cursore da cui ripartire: 0 alla prima apertura, l'ultimo `seq`
+     consegnato dopo un reconnect (così non si duplica e non si perde nulla).
+     Ritorna false se il socket non è aperto: il chiamante riproverà al prossimo
+     `chat:open`, che è anche il momento in cui il watch va rifatto perché il
+     gateway ha dimenticato la connessione caduta. */
+  sendSubagentWatch(taskId, since = 0) {
+    if (!this.chatWs || this.chatWs.readyState !== WebSocket.OPEN) return false;
+    this.chatWs.send(JSON.stringify({
+      type: 'subagent_watch', task_id: String(taskId), since: Number(since) || 0,
+    }));
+    return true;
+  }
+
+  sendSubagentUnwatch(taskId) {
+    if (!this.chatWs || this.chatWs.readyState !== WebSocket.OPEN) return false;
+    this.chatWs.send(JSON.stringify({ type: 'subagent_unwatch', task_id: String(taskId) }));
+    return true;
+  }
+
   /* Risposta a una ui_query del server (tool ui_view): il discriminatore
      client→server è `type`. Con `error` set, `payload` viene omesso. */
   sendUiResult(correlationId, payload, error = null) {

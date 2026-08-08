@@ -4,7 +4,7 @@ import base64
 import mimetypes
 import platform
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from jenny.agent.memory import MemoryStore
 from jenny.agent.skills import SkillsLoader
@@ -18,6 +18,10 @@ from jenny.utils.helpers import (
 )
 from jenny.utils.prompt_templates import render_template
 
+# Fallback quando ContextBuilder è costruito senza config (test, tool isolati):
+# stesso valore del default di ``AtlasConfig.max_context_tokens``.
+_DEFAULT_WIKI_DIRECTORY_TOKENS = 1200
+
 
 class ContextBuilder:
     """Builds the context (system prompt + messages) for the agent."""
@@ -28,9 +32,30 @@ class ContextBuilder:
     _MAX_HISTORY_TOKENS = 8_000  # hard cap on recent history section size (tokens)
     _RUNTIME_CONTEXT_END = "[/Runtime Context]"
 
-    def __init__(self, workspace: Path, timezone: str | None = None, disabled_skills: list[str] | None = None):
+    def __init__(
+        self,
+        workspace: Path,
+        timezone: str | None = None,
+        disabled_skills: list[str] | None = None,
+        orchestrator: bool = False,
+        available_tools: Callable[[], list[str]] | None = None,
+        wiki_directory_max_tokens: int | None = None,
+    ):
         self.workspace = workspace
         self.timezone = timezone
+        # Callable e non lista: il registry non esiste ancora quando ``AgentLoop``
+        # costruisce questo oggetto, e comunque i tool delle Jenny App cambiano
+        # a runtime. Chiuderlo su una lista significherebbe pubblicare un
+        # inventario vecchio, cioe rifare il difetto che deve chiudere.
+        self._available_tools = available_tools
+        # Modalita orchestratore: i template ricevono il flag e omettono le
+        # istruzioni sui tool che in quello scope non esistono. Un prompt che
+        # descrive tool assenti non e solo contesto sprecato: invita il modello a
+        # chiamarli.
+        self.orchestrator = orchestrator
+        # Tetto del blocco "Wiki Directory" compilato da Atlas. ``None`` lascia
+        # il default dello schema; il valore reale arriva da AgentLoop.from_config.
+        self.wiki_directory_max_tokens = wiki_directory_max_tokens or _DEFAULT_WIKI_DIRECTORY_TOKENS
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace, disabled_skills=set(disabled_skills) if disabled_skills else None)
 
@@ -41,20 +66,50 @@ class ContextBuilder:
         workspace: Path | None = None,
         include_memory_recent_history: bool = True,
         session_key: str | None = None,
+        available_tools: list[str] | None = None,
+        orchestrator: bool | None = None,
     ) -> str:
-        """Build the system prompt from identity, bootstrap files, memory, and skills."""
+        """Build the system prompt from identity, bootstrap files, memory, and skills.
+
+        ``available_tools`` sono i tool del *turno*. Passarli esplicitamente e
+        l'unico modo perche l'inventario descriva un registry sostituito (Dream,
+        Atlas) invece di quello del loop; la callable del costruttore resta il
+        default per chi un registry per-turno non ce l'ha.
+
+        ``orchestrator`` e per-turno per lo stesso motivo, e per un difetto
+        gemello: era un flag del costruttore, quindi Dream e Atlas — che girano
+        con un registry proprio e con la scrittura come unico mestiere — si
+        vedevano recapitare il blocco che dice "non puoi scrivere file, delega
+        con ``spawn``". Nessuno dei due ha ``spawn``.
+        """
+        orchestrating = self.orchestrator if orchestrator is None else orchestrator
         root = workspace or self.workspace
-        parts = [self._get_identity(channel=channel, workspace=root)]
+        parts = [self._get_identity(channel=channel, workspace=root, orchestrating=orchestrating)]
 
         bootstrap = self._load_bootstrap_files(root)
         if bootstrap:
             parts.append(bootstrap)
 
-        parts.append(render_template("agent/tool_contract.md"))
+        parts.append(render_template("agent/tool_contract.md", orchestrator=orchestrating))
+        if orchestrating:
+            parts.append(render_template("agent/orchestrator.md"))
 
+        # Il blocco memoria ha due sottosezioni con due proprietari distinti:
+        # "Long-term Memory" (MEMORY.md, scritto da Dream) e "Wiki Directory"
+        # (memory/WIKI.md, scritto da Atlas). Vanno composte in modo
+        # indipendente: annidare la seconda dentro la guardia della prima
+        # farebbe sparire la rubrica ogni volta che MEMORY.md è ancora il
+        # template intatto. Heading unico e ordine fisso tengono stabile il
+        # prefisso del prompt per la cache del provider.
+        memory_sections: list[str] = []
         memory = self.memory.get_memory_context()
         if memory and not self._is_template_content(self.memory.read_memory(), "memory/MEMORY.md"):
-            parts.append(f"# Memory\n\n{memory}")
+            memory_sections.append(memory)
+        wiki_directory = self.memory.get_wiki_memory_context(self.wiki_directory_max_tokens)
+        if wiki_directory:
+            memory_sections.append(wiki_directory)
+        if memory_sections:
+            parts.append("# Memory\n\n" + "\n\n".join(memory_sections))
 
         always_skills = self.skills.get_always_skills()
         if always_skills:
@@ -88,9 +143,60 @@ class ContextBuilder:
         if session_summary:
             parts.append(f"[Archived Context Summary]\n\n{session_summary}")
 
+        if inventory := self._render_tool_inventory(available_tools, orchestrating):
+            parts.append(inventory)
+
         return "\n\n---\n\n".join(parts)
 
-    def _get_identity(self, channel: str | None = None, workspace: Path | None = None) -> str:
+    def _resolve_tool_names(self, available_tools: list[str] | None) -> list[str] | None:
+        """I nomi del turno se ci sono, altrimenti quelli del loop."""
+        if available_tools is not None:
+            return sorted(available_tools)
+        if self._available_tools is None:
+            return None
+        try:
+            return sorted(self._available_tools())
+        except Exception:
+            return None
+
+    def _render_tool_inventory(
+        self, available_tools: list[str] | None = None, orchestrating: bool | None = None,
+    ) -> str | None:
+        """L'elenco autoritativo dei tool, in coda a tutto il resto.
+
+        Un prompt e cucito da pezzi scritti in momenti diversi — identita,
+        contratto dei tool, skill, documenti dell'utente — e nessuno di quei
+        pezzi sa quali tool esistono davvero in questo processo. Bastano due
+        frasi in disaccordo per farne vincere una a caso: e successo con
+        ``grep``, che il contratto dichiarava assente e una skill mostrava in
+        cinque esempi.
+
+        Sta in fondo perche la prosa piu vicina alla fine e quella che il
+        modello segue quando due istruzioni si contraddicono, e viene dal
+        registry perche una lista scritta a mano invecchierebbe come tutte le
+        altre.
+        """
+        names = self._resolve_tool_names(available_tools)
+        if not names:
+            return None
+        try:
+            return render_template(
+                "agent/tool_inventory.md",
+                tool_names=names,
+                orchestrator=self.orchestrator if orchestrating is None else orchestrating,
+                strip=True,
+            )
+        except Exception:
+            # Workspace di una versione precedente, dove questo template non e
+            # ancora stato estratto: si perde l'inventario, non il prompt.
+            return None
+
+    def _get_identity(
+        self,
+        channel: str | None = None,
+        workspace: Path | None = None,
+        orchestrating: bool | None = None,
+    ) -> str:
         """Get the core identity section."""
         root = workspace or self.workspace
         try:
@@ -106,6 +212,7 @@ class ContextBuilder:
             runtime=runtime,
             platform_policy=render_template("agent/platform_policy.md"),
             channel=channel or "",
+            orchestrator=self.orchestrator if orchestrating is None else orchestrating,
         )
 
     @staticmethod
@@ -162,6 +269,8 @@ class ContextBuilder:
         workspace: Path | None = None,
         include_memory_recent_history: bool = True,
         session_key: str | None = None,
+        available_tools: list[str] | None = None,
+        orchestrator: bool | None = None,
     ) -> list[dict[str, Any]]:
         """Build the complete message list for an LLM call."""
         root = workspace or self.workspace
@@ -196,6 +305,8 @@ class ContextBuilder:
                     workspace=root,
                     include_memory_recent_history=include_memory_recent_history,
                     session_key=session_key,
+                    available_tools=available_tools,
+                    orchestrator=orchestrator,
                 ),
             },
             *history,

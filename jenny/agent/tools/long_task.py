@@ -93,6 +93,8 @@ class _GoalToolsMixin(ContextAware):
 class LongTaskTool(Tool, _GoalToolsMixin):
     """Begin or replace focus on a long-running objective stored on the session."""
 
+    _scopes = {"core", "orchestrator"}
+
     def __init__(self, sessions: Any) -> None:
         _GoalToolsMixin.__init__(self, sessions)
 
@@ -170,6 +172,8 @@ class LongTaskTool(Tool, _GoalToolsMixin):
 )
 class CompleteGoalTool(Tool, _GoalToolsMixin):
     """Mark the active sustained goal finished after all required work is verified."""
+
+    _scopes = {"core", "orchestrator"}
 
     def __init__(self, sessions: Any) -> None:
         _GoalToolsMixin.__init__(self, sessions)

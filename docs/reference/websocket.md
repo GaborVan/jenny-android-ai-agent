@@ -163,6 +163,31 @@ Reasoning frames only flow when the channel's `showReasoning` is `true` (default
 
 `model_preset` is omitted when no named preset is active. WebUI clients use this event to keep the displayed model badge in sync across slash commands, config reloads, and settings changes.
 
+**`subagent_status`** — snapshot of the background subagents, pushed on every state transition:
+
+```json
+{
+  "event": "subagent_status",
+  "chat_id": "default",
+  "running": [{
+    "task_id": "d2ee4342", "lineage_id": "aa94c60b", "attempt": 1,
+    "label": "fix parser", "agent_type": "coder", "state": "running",
+    "phase": "awaiting_tools", "iteration": 2,
+    "elapsed_s": 12.5, "idle_s": 0.5, "last_tool": "grep"
+  }],
+  "recent": [{
+    "task_id": "822ead40", "lineage_id": "b202f4e6", "attempt": 1,
+    "label": "price research", "agent_type": "researcher", "state": "failed",
+    "stop_reason": "error", "result_summary": "page not reachable",
+    "ended_at": 1785841304.462998, "can_restart": true
+  }]
+}
+```
+
+`state` is one of `running`, `done`, `failed`, `cancelled`, `stalled`; `recent` is newest-first and capped at 10 entries. `idle_s` is seconds since the last observed sign of progress — it is what distinguishes a subagent stuck for four minutes from one working for four minutes. `can_restart` reflects the cap on *automatic* restarts only: a human pressing Relaunch is never refused.
+
+The frame is a recomputable refresh hint — it is never persisted to the transcript and never retried, since the next snapshot replaces it. The same payload is served verbatim by `GET /api/subagents`, which is how the WebUI panel comes back after a page reload instead of waiting for the next transition. `POST`-style actions ride on GET like every other gateway route (see the transport constraint in [Write a mini-app](../contribute/write-a-mini-app.md)): `GET /api/subagents/<task_id>/restart` (always a manual relaunch) and `GET /api/subagents/<task_id>/cancel`.
+
 **`attached`** — confirmation for `attach` inbound envelopes (see [The shared chat](#the-shared-chat)):
 
 ```json

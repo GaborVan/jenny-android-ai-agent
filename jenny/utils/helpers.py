@@ -425,15 +425,36 @@ def _render_tool_result_reference(
     original_size: int,
     preview: str,
     truncated_preview: bool,
+    total_lines: int,
+    next_offset: int | None = None,
 ) -> str:
+    """Riferimento a un output tool spillato su file.
+
+    Il riferimento invita a rileggere il file, e ``read_file`` pagina per RIGA:
+    dire solo quanti caratteri sono stati salvati costringeva il modello a
+    inventarsi un ``offset``, e un offset oltre la fine torna
+    "Error: offset N is beyond end of file" — un errore tool a tutti gli effetti,
+    speso per una domanda a cui questo testo poteva rispondere. Quindi porta il
+    conteggio delle righe e, quando la preview e tagliata, la riga esatta da cui
+    riprendere.
+    """
     result = (
         f"[tool output persisted]\n"
         f"Full output saved to: {filepath}\n"
-        f"Original size: {original_size} chars\n"
+        f"Original size: {original_size} chars, {total_lines} lines\n"
         f"Preview:\n{preview}"
     )
     if truncated_preview:
-        result += "\n...\n(Read the saved file if you need the full output.)"
+        if next_offset is not None and next_offset <= total_lines:
+            result += (
+                f"\n...\n(Preview cut. read_file(path, offset={next_offset}) resumes "
+                f"where it stops; the file has {total_lines} lines.)"
+            )
+        else:
+            result += (
+                f"\n...\n(Preview cut. Read the saved file for the full output; "
+                f"it has {total_lines} lines.)"
+            )
     return result
 
 
@@ -493,18 +514,28 @@ def maybe_persist_tool_result(
     except Exception:
         logger.exception("Failed to clean stale tool result buckets in {}", root)
     path = bucket / f"{safe_filename(tool_call_id)}.{suffix}"
+    # Il conteggio righe deve descrivere il file SCRITTO, non il payload: nel
+    # caso JSON su disco finisce la serializzazione indentata dei blocchi, che ha
+    # righe diverse dal testo concatenato della preview. Per lo stesso motivo la
+    # riga da cui riprendere ha senso solo quando i due coincidono.
+    reserialized = suffix == "json" and isinstance(content, list)
+    stored = (
+        json.dumps(content, ensure_ascii=False, indent=2) if reserialized else text_payload
+    )
     if not path.exists():
-        if suffix == "json" and isinstance(content, list):
-            atomic_write(path, json.dumps(content, ensure_ascii=False, indent=2))
-        else:
-            atomic_write(path, text_payload)
+        atomic_write(path, stored)
 
     preview = text_payload[:_TOOL_RESULT_PREVIEW_CHARS]
+    # Righe *complete* nella preview: ogni "\n" ne chiude una. L'offset punta
+    # quindi all'ultima riga mostrata a meta, che va riletta per intero.
+    next_offset = None if reserialized else preview.count("\n") + 1
     return _render_tool_result_reference(
         path,
         original_size=len(text_payload),
         preview=preview,
         truncated_preview=len(text_payload) > _TOOL_RESULT_PREVIEW_CHARS,
+        total_lines=len(stored.splitlines()),
+        next_offset=next_offset,
     )
 
 
@@ -662,8 +693,30 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
 
     added: list[str] = []
 
-    # Extract templates/ (top-level .md + agent/ + memory/ etc.) — skip existing to preserve user edits
-    extract_package_dir("jenny.templates", workspace, skip_existing=True)
+    # I template si dividono in due, e le due metà hanno politiche opposte.
+    #
+    # Quelli dell'utente (AGENTS.md, SOUL.md, USER.md, HEARTBEAT.md, MEMORY.md)
+    # si creano una volta e non si toccano più: SOUL e USER li riscrive Dream,
+    # gli altri l'utente, e la copia del pacchetto è solo un punto di partenza.
+    #
+    # I prompt di sistema (agent/**) sono invece codice: nessuno li edita a mano,
+    # e riscriverli a ogni avvio è ciò che fa arrivare una correzione. Erano
+    # trattati come i primi, e la conseguenza si è vista in produzione — un
+    # telefono aggiornato per mesi girava ancora con i prompt della versione in
+    # cui era stato installato, perché un file nuovo veniva estratto e uno
+    # corretto no.
+    from jenny.utils.android_assets import (
+        _SYSTEM_PROMPT_TEMPLATES,
+        _USER_OWNED_TEMPLATES,
+    )
+
+    extract_package_dir(
+        "jenny.templates", workspace, skip_existing=True, only=_USER_OWNED_TEMPLATES,
+    )
+    n_prompts = extract_package_dir(
+        "jenny.templates", workspace, only=_SYSTEM_PROMPT_TEMPLATES,
+    )
+    added.append(f"agent prompts ({n_prompts} files)")
 
     # Extract UI assets into workspace/ui/
     n_ui = extract_package_dir("jenny.templates.ui", workspace / "ui")

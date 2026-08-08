@@ -40,6 +40,22 @@ class _FsTool(Tool):
     def enabled(cls, ctx: Any) -> bool:
         return ctx.config.file.enable
 
+    @classmethod
+    def disabled_reason(cls, ctx: Any) -> str | None:
+        """Un solo interruttore spegne tutti i tool sui file, e si vede poco.
+
+        Senza questa frase un subagent che vive di filesystem — ``writer``,
+        ``coder``, ``analyst`` — partirebbe con zero tool e riporterebbe di aver
+        fallito, che si legge come un problema del modello invece che di
+        un'impostazione.
+        """
+        if not ctx.config.file.enable:
+            # Non "Settings > ...": quel pannello non esiste. Questo
+            # interruttore vive solo in config.json, e mandare l'utente a
+            # cercare una schermata inventata e peggio che non dirgli niente.
+            return "file tools are off (tools.file.enable in config.json)"
+        return None
+
     def __init__(
         self,
         workspace: Path | None = None,
@@ -50,9 +66,16 @@ class _FsTool(Tool):
         extra_write_allowed_files: list[Path] | None = None,
         file_states: FileStates | None = None,
         restrict_to_workspace: bool | None = None,
+        write_files_only: bool = False,
     ):
         self._workspace = workspace
         self._allowed_dir = allowed_dir
+        # "Nessuna directory scrivibile, solo questi file esatti". Serve a un
+        # runner isolato che produce un unico artefatto (Atlas → memory/WIKI.md):
+        # senza questo, ``allowed_dir=None`` significa "eredita la radice dello
+        # scope", cioè l'intero workspace scrivibile. Va usato insieme a
+        # ``extra_write_allowed_files``; da solo nega qualunque scrittura.
+        self._write_files_only = write_files_only
         # Legacy alias: extra_allowed_dirs is read-only. Write-capable tools
         # must opt in via extra_write_allowed_dirs.
         self._extra_read_allowed_dirs = [
@@ -146,6 +169,23 @@ class _FsTool(Tool):
         # Dream lo usa per non avanzare il cursore quando ha provato a scrivere
         # ma è stato bloccato.
         self._file_states.record_write_attempt()
+        if self._write_files_only:
+            # Bypassa ``_effective_allowed_root``: passare ``allowed_dir=None``
+            # più un'allowlist di file non vuota fa scattare la modalità
+            # "solo questi file" di ``resolve_allowed_path`` (fail-closed se
+            # l'allowlist è vuota).
+            access = current_tool_workspace(
+                self._workspace,
+                restrict_to_workspace=self._restrict_to_workspace,
+            )
+            return resolve_workspace_path(
+                path,
+                access.project_path,
+                None,
+                None,
+                self._extra_write_allowed_files,
+                include_media_dir=False,
+            )
         return self._resolve_with_extra(
             path,
             self._extra_write_allowed_dirs,
@@ -233,7 +273,7 @@ def _parse_page_range(pages: str, total: int) -> tuple[int, int]:
 )
 class ReadFileTool(_FsTool):
     """Read file contents with optional line-based pagination."""
-    _scopes = {"core", "subagent"}
+    _scopes = {"core", "orchestrator", "subagent"}
 
     _MAX_CHARS = 128_000
     _DEFAULT_LIMIT = 2000
@@ -732,7 +772,7 @@ class EditFileTool(_FsTool):
 )
 class ListDirTool(_FsTool):
     """List directory contents with optional recursion."""
-    _scopes = {"core", "subagent"}
+    _scopes = {"core", "orchestrator", "subagent"}
 
     _DEFAULT_MAX = 200
     _IGNORE_DIRS = {

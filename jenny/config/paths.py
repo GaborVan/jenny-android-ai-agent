@@ -18,8 +18,15 @@ def set_workspace_dir(path: str | Path) -> None:
     nel ``RuntimeContext`` (unica fonte di verità).
     """
     from jenny.runtime.context import get_runtime_context
+    from jenny.utils.prompt_templates import forget_templates_root
 
     get_runtime_context().workspace_dir = Path(path) if path else None
+    # L'ambiente Jinja e memoizzato sulla radice dei template, che *e* il
+    # workspace: senza questo, cambiare workspace lascia in piedi un loader che
+    # legge ancora dal precedente. In produzione succede una volta all'avvio,
+    # nei test a ogni caso — ed e li che un prompt costruito dai file di un
+    # altro test non fallisce, mente.
+    forget_templates_root()
 
 
 def get_config_path() -> Path:
@@ -85,6 +92,31 @@ def get_uploads_dir() -> Path:
     referenziati per path e letti on-demand dall'agente.
     """
     return ensure_dir(get_workspace_path() / "uploads")
+
+
+def get_ssh_dir() -> Path:
+    """Chiave privata SSH e ``known_hosts``, **fuori dal workspace**.
+
+    Sta accanto al workspace, non dentro (su Android: ``filesDir/ssh`` mentre il
+    workspace è ``filesDir/workspace``). Le tre conseguenze sono tutte volute:
+
+    * i tool filesystem dell'agente non possono leggerla **finché
+      ``security.restrict_to_workspace`` resta acceso** (il default):
+      ``resolve_allowed_path`` rifiuta un path fuori dalla radice workspace. Con
+      quell'impostazione spenta la radice diventa illimitata e la chiave torna
+      leggibile — è una rinuncia esplicita dell'utente, non una svista, ma qui
+      la conseguenza è più pesante che altrove: a differenza di ``config.json``
+      (che sta *dentro* il workspace e che l'agente può già leggere) una chiave
+      SSH privata dà accesso a una macchina terza;
+    * non entra negli snapshot né nel backup cifrato esportabile, perché
+      ``snapshot/engine.py`` cammina solo la radice del workspace;
+    * resta comunque nello storage privato dell'app.
+
+    Il prezzo, da documentare per l'utente: un restore del workspace **non**
+    ripristina l'accesso SSH. Si rigenera la chiave e si reinstalla la pubblica
+    sul server.
+    """
+    return ensure_dir(get_workspace_path().parent / "ssh")
 
 
 def get_webui_dir() -> Path:

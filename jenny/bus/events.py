@@ -9,6 +9,24 @@ from typing import Any
 # render it and other channels may ignore unknown keys.
 OUTBOUND_META_AGENT_UI = "_agent_ui"
 
+# Snapshot dello stato dei subagent (running + terminati recenti). Il valore è il
+# payload JSON descritto in ``SubagentManager.status_snapshot``, identico a quello
+# servito da ``GET /api/subagents``: una sola forma, due trasporti. Chi produce lo
+# snapshot (il manager) e chi lo rende (WebUI) non si conoscono, quindi la chiave
+# vive qui, nel modulo foglia che entrambi importano.
+OUTBOUND_META_SUBAGENT_STATUS = "_subagent_status"
+
+# Attività fine di **un** subagent (la finestra di eventi descritta da
+# ``SubagentActivityLog.tail_window``, più ``task_id``). Distinta dallo snapshot
+# qui sopra per una ragione di costo, non di stile: lo snapshot è coarse e va a
+# tutti i client, questo è high-frequency e va **solo** alle connessioni che
+# stanno guardando quel task. Il trasporto normale è il pump del canale WS
+# (``ws_sender._pump_subagent_activity_once``), che legge il ring direttamente;
+# questa chiave esiste perché un produttore che pubblichi la finestra sul bus
+# atterri comunque come frame dedicato invece che come bolla vuota — è la stessa
+# rete di sicurezza che ``OUTBOUND_META_SUBAGENT_STATUS`` fornisce allo snapshot.
+OUTBOUND_META_SUBAGENT_ACTIVITY = "_subagent_activity"
+
 # Channel name for messages that stay inside the agent (cron, Dream, heartbeat,
 # subagents) and are never delivered to a real chat channel. Defined here — a
 # leaf module with no internal deps — so core (loop/cron/delivery) can import it
@@ -26,6 +44,7 @@ COORDINATION_FLAGS = (
     "_turn_end", "_file_edit_events", "_goal_status",
     "_session_updated", "_runtime_model_updated", "_app_data_changed",
     "_apps_list_changed", "_user_echo",
+    "_subagent_status", "_subagent_activity",
 )
 
 

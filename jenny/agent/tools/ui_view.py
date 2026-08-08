@@ -31,6 +31,8 @@ def _cap_html(html: str) -> str:
 class UiViewTool(Tool, ContextAware):
     """Restituisce l'HTML della schermata che l'utente sta guardando."""
 
+    _scopes = {"core", "orchestrator"}
+
     QUERY_TIMEOUT_S = 6.0
 
     def __init__(self, ui_query: Any) -> None:

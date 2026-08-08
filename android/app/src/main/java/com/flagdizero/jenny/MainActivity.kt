@@ -529,6 +529,11 @@ class MainActivity : AppCompatActivity() {
         wv.settings.setSupportZoom(false)
         wv.settings.builtInZoomControls = false
         wv.settings.textZoom = 100
+        // La dichiarazione di intenti, per chi legge il codice e per gli strumenti
+        // di sistema. Quel che *impedisce* davvero l'autofill sta in
+        // NoAutofillWebView, che non consegna nulla da compilare: questo flag da
+        // solo non basta, e il commento la sopra spiega perche.
+        wv.importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
         wv.webChromeClient = object : WebChromeClient() {
             override fun onShowFileChooser(
                 view: WebView?,

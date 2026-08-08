@@ -19,7 +19,9 @@ Both live under **Settings → Backup & restore** (see the [Settings reference](
 
 ## Encrypted backup (.jbk)
 
-This is disaster recovery: a single file containing your entire workspace — memory, conversation history, settings, API keys, mini-apps, wiki content — plus the full local snapshot history, all encrypted. It's meant to leave the device.
+This is disaster recovery: a single file containing your whole workspace — memory, conversation history, settings, API keys, mini-apps, wiki content — plus the full local snapshot history, all encrypted. It's meant to leave the device.
+
+**One thing it does not contain: your SSH keys.** The private key for each registered host, and the `known_hosts` file holding the fingerprints you accepted, live in `<filesDir>/ssh` — *beside* the workspace, not inside it, so that the agent's file tools cannot reach them. Export and snapshot both walk the workspace root only, so neither ever sees them. The host list itself is in `config.json`, which *is* in the workspace, so a restore brings your hosts back looking complete — with no key behind them. See [After a restore, SSH is not restored](#after-a-restore-ssh-is-not-restored) below.
 
 ### Exporting
 
@@ -44,7 +46,7 @@ The export/import picker uses Android's standard document APIs, so Drive should 
 5. Jenny decrypts and validates the backup first, **then** takes a `pre-restore` snapshot of your **current** state, and finally shows a non-cancellable **"Restore ready"** dialog with a single **Restart now** button. You cannot back out of this dialog with the Android back button.
 6. Tapping Restart now kills and relaunches the app. The actual workspace swap happens at that restart, not before — the app restarts itself to do the swap cleanly.
 
-What actually gets replaced: the whole workspace tree is swapped for the one in the backup. Your current workspace isn't deleted immediately — it's kept as an internal safety copy for 7 days in case something goes wrong, but that copy is not reachable from the UI; it exists purely as an emergency recovery mechanism, not something you can browse or restore from yourself.
+What actually gets replaced: the whole workspace tree is swapped for the one in the backup — and only the workspace tree, which is why the SSH key directory next to it is neither replaced nor restored. Your current workspace isn't deleted immediately — it's kept as an internal safety copy for 7 days in case something goes wrong, but that copy is not reachable from the UI; it exists purely as an emergency recovery mechanism, not something you can browse or restore from yourself.
 
 **The snapshot history is the one exception to "replace everything."** The snapshot history bundled inside the `.jbk` is merged additively into your local snapshot store — nothing is thrown away. After the restore, you can see both the snapshots that came with the backup and the ones you had locally before, including the `pre-restore` snapshot the import just took. So even after a full restore, you can still step back to the moment right before you imported.
 
@@ -58,6 +60,21 @@ Whether restoring during onboarding skips the rest of the setup wizard on the ne
 - A backup file with an absurd iteration count (corrupted or hostile) is rejected immediately — iterations above 10,000,000 are refused before the expensive key derivation even runs.
 - Export and import both require the native Android bridge; on a browser or a non-Android build you'll see **"Backup is only available in the Android app."**
 - Deriving the key from your passphrase takes roughly a second on-device (that's the point of 600,000 PBKDF2 iterations) — export and import are not instant.
+
+### After a restore, SSH is not restored
+
+This is the one failure the restore flow does not warn you about, so check it deliberately if you use SSH.
+
+A restore replaces the workspace. Your registered hosts live in `config.json` inside the workspace, so they all come back: aliases, addresses, usernames, descriptions, and the fingerprint strings shown in Settings. The private keys and `known_hosts` do not — they were never in the backup, because they sit outside the workspace. Nothing in the restore touches `<filesDir>/ssh` either way.
+
+What that means depends on where you restore:
+
+- **Same device, app still installed** (a restore to undo a bad state): the key directory was never removed, so SSH keeps working. Nothing to do.
+- **New phone, or after an uninstall/reinstall** (the case backups exist for): the key directory is empty. Settings shows the full host list, but every SSH call fails. There is no error at export time and no warning at import time telling you this happened.
+
+The fix is manual and per host: open **Settings → SSH**, tap **Generate key** on each host, copy the new public line into that server's `~/.ssh/authorized_keys`, and then **Verify fingerprint** again to re-pin the host key. Password hosts are the exception — the password is stored in `config.json`, so it comes back with the workspace and only the fingerprint needs re-accepting.
+
+The remote job registry is also left behind on purpose: `.jenny/ssh_jobs/**` is excluded from snapshots and backups (see below), so pending `ssh_job` entries do not survive a restore.
 
 ## Local snapshots
 
@@ -86,7 +103,11 @@ If nothing changed since the last snapshot, no new one is created — you get a 
 
 ### What's excluded
 
-Snapshots never capture the UI bundle, log files, temporary files, or the snapshot store itself. Symlinks are always skipped, unconditionally — if a path in your workspace is a symlink, it simply isn't included in any snapshot or backup.
+Snapshots never capture the UI bundle, log files, temporary files, `__pycache__`, or the snapshot store itself. Symlinks are always skipped, unconditionally — if a path in your workspace is a symlink, it simply isn't included in any snapshot or backup.
+
+`.jenny/ssh_jobs/**`, the registry of remote jobs started with `ssh_job`, is excluded too, for two separate reasons. It is throwaway operational state — ids, byte cursors and process ids belonging to a machine that isn't this phone, meaningless after a restore. And it holds the full text of every command sent to a server plus the server-side log paths, which would otherwise be the one SSH trace that leaves the device inside an exported `.jbk`, while the private key (outside the workspace) does not.
+
+And, as covered above, the SSH key directory is outside the workspace entirely, so it is not "excluded" so much as never in scope.
 
 ### Restoring from a snapshot
 

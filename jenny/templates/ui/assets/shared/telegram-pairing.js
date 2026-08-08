@@ -71,7 +71,7 @@ export class TelegramPairingWidget {
       <div class="onboarding-field">
         <label class="onboarding-label" for="tg-token">${i18n.t('settings.telegram.token')}</label>
         <input type="password" class="onboarding-input" id="tg-token"
-               placeholder="123456789:AA..." autocomplete="new-password" data-lpignore="true">
+               placeholder="123456789:AA..." autocomplete="off" data-lpignore="true">
         ${hint}
       </div>
       <div class="onboarding-nav">

@@ -52,11 +52,13 @@ class WebSocketDispatcher:
         onboarding_event: asyncio.Event | None = None,
         on_settings_changed: Callable[[], None] | None = None,
         ui_query: Any | None = None,
+        get_subagent_manager: Callable[[], Any | None] | None = None,
     ):
         self.config = config
         self.bus = bus
         self._session_manager = session_manager
         self._snapshot_service = snapshot_service
+        self._get_subagent_manager = get_subagent_manager
         self._webui_runtime_model_name = webui_runtime_model_name
         self._onboarding_event = onboarding_event
         self._on_settings_changed = on_settings_changed
@@ -91,6 +93,7 @@ class WebSocketDispatcher:
             disabled_skills=set(self.config.agents.defaults.disabled_skills),
             runtime_model_name=self._webui_runtime_model_name,
             snapshot_service=self._snapshot_service,
+            get_subagent_manager=self._get_subagent_manager,
             logger=logger,
             onboarding_event=self._onboarding_event,
             on_settings_changed=self._on_settings_changed,

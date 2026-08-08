@@ -215,6 +215,9 @@ class GatewayContainer:
             webui_runtime_model_name=self._webui_runtime_model_name,
             onboarding_event=self.onboarding_event,
             on_settings_changed=self._on_settings_changed,
+            # Late-binding come ``get_agent`` per il cron: l'agente può essere
+            # creato dopo il gateway (onboarding) e riassegnato da set_agent.
+            get_subagent_manager=lambda: getattr(self._agent, "subagents", None),
         )
 
         if self.channels.enabled:
@@ -256,6 +259,21 @@ class GatewayContainer:
             logger.info("Dream: {}", dream_cfg.describe_schedule())
         else:
             logger.info("Dream: disabled")
+
+        # Register Atlas system job (idempotent on restart). Nessuno snapshot
+        # pre-run come per Dream: Atlas riscrive solo memory/WIKI.md, che è
+        # derivato dalla wiki e viene ricostruito dal run successivo.
+        atlas_cfg = config.agents.defaults.atlas
+        if atlas_cfg.enabled:
+            self.cron.register_system_job(CronJob(
+                id="atlas",
+                name="atlas",
+                schedule=atlas_cfg.build_schedule(),
+                payload=CronPayload(kind="system_event"),
+            ))
+            logger.info("Atlas: {}", atlas_cfg.describe_schedule())
+        else:
+            logger.info("Atlas: disabled")
 
         # Register Heartbeat system job (idempotent on restart).
         if hb_cfg.enabled:
@@ -334,6 +352,18 @@ class GatewayContainer:
 
     async def run(self) -> None:
         try:
+            # Prima cosa a event loop vivo: fissa su disco lo stamp di
+            # ``configVersion``. Le migrazioni di schema valgono già in memoria,
+            # ma senza questa scrittura ripartirebbero a ogni parse — e il
+            # config viene letto più volte per boot.
+            from jenny.config.store import persist_schema_migrations
+            try:
+                await persist_schema_migrations()
+            except Exception:
+                # Un config non scrivibile non deve impedire l'avvio: la
+                # migrazione in memoria è già applicata, si riproverà al
+                # prossimo boot.
+                logger.opt(exception=True).warning("Could not persist config schema version")
             await self.cron.start()
             await self.snapshot.start()
             tasks = [self.channels.start()]
@@ -359,6 +389,17 @@ class GatewayContainer:
             from jenny.agent.tools.exec_session import DEFAULT_EXEC_SESSION_MANAGER
 
             DEFAULT_EXEC_SESSION_MANAGER.shutdown()
+            # Pool SSH: le sessioni sono socket verso una macchina di qualcun
+            # altro, e lasciarle cadere senza disconnettere significa lasciare
+            # processi ssh appesi *sul server* fino al suo timeout. Costa nulla
+            # quando SSH non è mai stato usato (il pool è vuoto), e non deve mai
+            # impedire il resto dello shutdown.
+            try:
+                from jenny.agent.tools.ssh_transport import get_ssh_backend
+
+                await get_ssh_backend().close_all()
+            except Exception:
+                logger.opt(exception=True).debug("Could not close ssh connections")
             if self._agent:
                 flushed = self._agent.sessions.flush_all()
                 if flushed:

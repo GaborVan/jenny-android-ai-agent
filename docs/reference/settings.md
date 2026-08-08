@@ -2,13 +2,22 @@
 
 Every control in the Settings screen, what it does, and its default value.
 
-Settings is a single accordion of 6 sections — Personalization, Model, Tools, Telegram, Backup & restore, System — all collapsed the first time you open the screen. There is no global Save button: almost every field saves itself, with a "Saved!" toast confirming the write. A few controls (theme, mascot, Home button, language, Developer mode) live entirely on the device and never touch `config.json` at all — those are called out explicitly below.
+Settings is a single accordion of 7 sections — Personalization, Model, Tools, SSH, Telegram, Backup & restore, System — all collapsed the first time you open the screen. There is no global Save button: almost every field saves itself, with a "Saved!" toast confirming the write. A few controls (theme, mascot, Home button, language, Developer mode) live entirely on the device and never touch `config.json` at all — those are called out explicitly below.
 
 ## How saving works
 
 Text and number fields (bot name, the advanced model parameters, the web search fields) save on a **600 ms debounce** after you stop typing — not on every keystroke, and not only on blur. Toggles, the theme picker, the model catalog, and the language switch save immediately on click, no debounce. Every successful write shows a **"Saved!"** toast; a failed write shows the error message instead (and toggles roll back visually to their previous state).
 
-There is no confirmation step anywhere in Settings except for two destructive actions (deleting a provider, restoring a backup) — everything else takes effect the instant you interact with it.
+Most controls take effect the instant you interact with them. The exceptions — everything that asks you to confirm first — are:
+
+- **Deleting a provider.**
+- **Importing a backup**, and **restoring a local snapshot**.
+- **Regenerating an SSH key** (it revokes the access already installed on the server).
+- **Deleting an SSH host.**
+- **Accepting a host key fingerprint** — a dialog showing the fingerprint, with Cancel and Accept.
+- **Replacing a host key that changed**, which asks **twice**: once in the side-by-side dialog showing the old and new fingerprints, and again in a plain confirmation. That is deliberate — a changed key is treated as a possible man-in-the-middle, not as an update.
+
+Everything not on that list saves on touch.
 
 **Silent restarts (important):** a few fields — timezone, bot name, bot icon, `tool_hint_max_length` — flip a `requires_restart` flag on the backend when changed. The current WebUI never reads or shows that flag: you get the same "Saved!" toast as any other field, with no indication that the change won't fully apply until you restart the app. If you rename the bot and it still introduces itself with the old name, restart Jenny.
 
@@ -52,7 +61,7 @@ Below the catalog, "API keys" is a plain credential keychain — it does not ind
 
 The UI refuses to delete the last remaining provider ("Cannot delete the last provider") — but this check is client-side only; there is no equivalent guard on the backend, so this protection exists only inside the WebUI, not as a data-level invariant.
 
-**Editing a provider — read before you touch this dialog.** The Edit dialog pre-fills the API Key field with the *masked hint string itself* (e.g. `sk-a...j8f9`), not the real key and not a blank field. If you edit only the Format or Base URL and press Save without retyping the key, the dialog submits that masked hint text as the new API key — overwriting your real key with the literal placeholder string. There is currently no "leave unchanged" behavior: to safely edit anything about an existing provider, retype the full API key every time you save. <!-- verified in code: jenny/templates/ui/assets/mobile-settings.js (provider edit dialog) + jenny/webui/settings_api.py update_provider -->
+**Editing a provider.** The Edit dialog leaves the API Key field **empty** and shows the masked hint (e.g. `sk-a...j8f9`) as its placeholder, with a note under it saying to leave it blank to keep the stored key. Blank means exactly that: the saved key is kept. So you can change the Format or the Base URL without retyping the key — type in that field only when you actually want to replace it.
 
 ### Advanced parameters
 
@@ -96,6 +105,36 @@ A single toggle, **"Share my location"**, default **on**. Its hint text explains
 This toggle is a software gate only — it does **not** request or manage the Android location permission. If the OS permission was never granted, turning this toggle on does nothing by itself; both the toggle and the Android permission have to be satisfied for location to actually reach the agent. <!-- TODO: verify on-device (O-10): UI state when the Android permission is denied while the toggle is on -->
 
 Two related values exist only in `config.json`, with no UI control: `tools.location.telegram_ttl_s` (default 3600 — how long a location shared from Telegram stays valid) and `tools.location.fresh_timeout_s` (default 15 — how long Jenny waits for a fresh GPS fix). See [Location](../using/location.md).
+
+## SSH
+
+Its own section between Tools and Telegram, holding the two decisions that cannot be delegated to the agent: **which machines exist**, and **which host key is the right one**.
+
+| Control | Effect | Default |
+|---|---|---|
+| **Enable SSH access** | Master switch (`tools.ssh.enable`). Off means the agent has no SSH tools at all; the host list stays visible and editable so you can fix things with the switch down. | **Off** |
+| **Add host** → Alias | The only name the agent ever uses for this machine, and also the name of its key file. 1–32 chars, `A–Z a–z 0–9 - _`, must start alphanumeric. **Cannot be changed later** — there is no rename. | — |
+| **Add host** → Host / Port / User | Address, port and login account. | port 22 |
+| **Add host** → Description | Free text, shown **to the model** so it can pick between machines ("the home NAS"). Not decoration. | empty |
+| **Add host** → Authentication | `ed25519 key` or `Password` (`auth`). Existing hosts stay on key — the default did not change under them. | **ed25519 key** |
+| **Add host** → Password | Only shown with `Password` selected. Required: saving a password host with an empty password is refused, not accepted quietly, so you can't end up with a host that looks configured and fails on the first command. Blank when editing (the saved password is never sent back to the screen) and blank means "keep the saved one". Switching the host back to key **deletes** the stored password. | none |
+| **Generate key** / **Regenerate key** | Creates an ed25519 pair *for that alias* on the device and shows the public line to paste into `~/.ssh/authorized_keys`. Regenerating asks for confirmation, because it revokes the access already installed on the server. Hidden on a password host, along with the public-key block — there is nothing to install there. | no key |
+| **Verify fingerprint** → **Accept** | Reads the key the host presents (without authenticating), shows its SHA256 fingerprint, and pins it on acceptance. | not verified |
+| **Copy public key** | On a key host that has a key, copies the full `ssh-ed25519 …` public line to the clipboard, so you can paste it into the server's `~/.ssh/authorized_keys` without transcribing it. Absent on a password host — there is nothing to install. | — |
+| **Edit host** (pencil icon) | Reopens the same dialog to change host, port, username, description, or authentication mode. The alias is the one field that cannot change. Editing the address or port **clears the accepted fingerprint** — see below. | — |
+| **Delete host** | Removes the host **and** its private key, its public key and its accepted fingerprint. | — |
+
+Every host card shows the two states that decide whether it can be used: the **fingerprint** state as a badge in the card header (pinned or not), and the **credential** state as plain text in the card body — "key ready"/"no key" on a key host, "password set"/"no password" on a password host. Only the fingerprint is a badge; the credential line is not, so don't go looking for a second one. Both have to be satisfied before the agent can connect, and the credential wording follows the authentication mode, because "no key" on a password host would be an alarm about something that isn't needed.
+
+Five behaviors worth knowing before you use this screen:
+
+- **Enabling is not symmetric with disabling.** Switching SSH *off* applies immediately, even to a subagent already working on a server — that is the emergency stop. Switching it *on*, or adding your first host, needs an **app restart** before the agent actually has the tools, because they are built at startup. Adding a second host to an install that already worked is live, no restart.
+- **There is no trust-on-first-use.** Until you have accepted a fingerprint, every SSH call for that alias fails and tells the agent to ask you. A fingerprint reading older than 10 minutes is refused and has to be taken again.
+- **Pinning is required in both authentication modes, and matters more with a password.** With a key, an unverified host gets a signature it can't reuse; with a password, it gets your password. The fingerprint dialog says so explicitly on a password host. There is no way to skip the step in either mode.
+- **A changed host key is treated as an attack, not an update.** If a host presents a key different from the one you accepted, Jenny shows both fingerprints side by side and requires a second explicit confirmation to replace it.
+- **Editing the address or port of an existing host clears its verified fingerprint** (and forgets the `known_hosts` line), because a verification of the old address says nothing about the new one. You have to verify again.
+
+The private key and the `known_hosts` file live **outside** the workspace, so they are not in snapshots and not in an encrypted backup: after a restore you have to generate new keys and reinstall them on each server. A **password** does not get that treatment — it is stored in `config.json` like the Telegram token and the API keys, unencrypted at rest, inside the workspace and therefore inside backups. That's the trade: more convenient, weaker, and a dedicated key can be revoked without touching the password you log in with yourself. One field has no UI at all — the per-host `jobLogDir` (default `/tmp/jenny-jobs`), which is `config.json`-only. Full walkthrough: [SSH access](../using/ssh.md).
 
 ## Telegram
 
@@ -146,15 +185,18 @@ Settings intentionally does not expose everything the backend supports. The foll
 - `agents.defaults.reasoning_effort` = `adaptive` — the Advanced Parameters select saves the effort (see above), but `adaptive` is not one of the values the endpoint accepts, so that one value is config-only
 - `gateway.heartbeat.*` — the proactive Heartbeat cadence and behavior
 - `agents.defaults.dream.*` — Dream memory-consolidation schedule
+- `agents.defaults.atlas.*` — Atlas wiki-directory schedule and the token cap on the block it injects
 - `websocket.show_reasoning` — whether the "reasoning" pill is shown/recorded at all for the WebUI channel (default true); no toggle in Settings
 - `tools.*.enable` toggles for individual tools (file tools, `python_exec`, `my`, introspection, diagnostics, etc.) — only Web Search and Location get a Tools-section UI; everything else is config-only
 - `tools.location.telegram_ttl_s`, `tools.location.fresh_timeout_s` — see Location above
+- `tools.ssh.*` beyond the on/off switch and the host list — timeouts, output and transfer caps, keepalive, and the per-host `job_log_dir`; the SSH section covers hosts, keys and fingerprints and nothing else
 - `security.restrict_to_workspace`, `security.ssrf_whitelist` — sandboxing and network policy
 
 ## Cross-references
 
 - [Configuration (config.json)](configuration.md) — full key-by-key reference for everything above and beyond the UI
 - [Themes and mascot](../using/themes-mascot.md)
+- [SSH access](../using/ssh.md)
 - [Telegram bridge](../using/telegram.md)
 - [Backup and restore](../using/backup.md)
 - [Location](../using/location.md)

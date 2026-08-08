@@ -16,6 +16,8 @@ There is no in-app "new wiki" form: everything starts as a chat request.
 
 **The wiki does not update itself.** Ingesting a source doesn't automatically compile it into pages, and pages don't automatically get relinted after you edit them — each of those steps only happens when you (or a scheduled task you've set up) explicitly asks Jenny to do it.
 
+The one thing that *does* happen on its own is the reverse direction: a background job called **Atlas** reads your wikis every 12 hours and compiles a short directory of them into `memory/WIKI.md`, which Jenny loads at the start of every conversation. It never writes to the wiki — it only reads it. See [Atlas](./memory.md#atlas-the-wiki-side-of-memory).
+
 ## Multiple wikis
 
 You can have more than one wiki side by side — for example, one about a research topic and a separate one for a hobby project. Each one lives under `workspace/wikis/<name>/`, entirely isolated from the others; Jenny works on one wiki root at a time and won't mix content across them unless you ask it to. A top-level `wikis/_index.md` file lists all of them.

@@ -8,11 +8,39 @@ import { ImageHandler } from './shared/image-handler.js';
 import { openImageLightbox } from './shared/image-lightbox.js';
 import { i18n } from './shared/i18n.js';
 import { getProviderBrand } from './shared/provider-brand.js';
+import { detailDialog } from './shared/dialog.js';
+import {
+  saActions,
+  saActivityFrame,
+  saActivityIngest,
+  saActivityInit,
+  saActivityRows,
+  saDigestView,
+  saIsTerminal,
+  saVisibleCards,
+} from './shared/subagent-policy.js';
 
 const TOOL_ICONS = {
   start: 'ti-loader-2',
   end: 'ti-check',
   error: 'ti-x',
+};
+
+/* Icona per kind di attività di un subagent. Tabella e non if/else perché è la
+   sola cosa che distingue una riga dall'altra a colpo d'occhio: su un telefono
+   tenuto in una mano si legge l'icona prima del testo, e "sta pensando" contro
+   "ha finito un tool" deve essere una differenza di forma, non di lettura.
+   `thinking` ha due icone perché ha due etichette dal server (ragionamento e
+   testo che si sta formando): sono due attività diverse per chi guarda. */
+const SA_EVENT_ICONS = {
+  tool: 'ti-tool',
+  thinking: 'ti-brain',
+  writing: 'ti-pencil',
+  iteration: 'ti-repeat',
+  phase: 'ti-flag',
+  message_in: 'ti-mail',
+  result: 'ti-circle-check',
+  error: 'ti-alert-triangle',
 };
 
 function initMarked() {
@@ -158,6 +186,35 @@ export class ChatController {
     this._sessionInfoPopover = null;
     this._sessionInfoTimer = null;
     this._fileEditPaths = new Map();
+
+    // Pannello subagent: lo stato arriva dal frame WS `subagent_status` a ogni
+    // transizione, e dal polling di /api/subagents mentre qualcosa gira (fra
+    // due transizioni elapsed/idle invecchierebbero senza che nessuno lo dica).
+    this.subagentsEl = document.getElementById('subagents');
+    this.subagentsBody = document.getElementById('subagents-body');
+    this.subagentsHead = document.getElementById('subagents-head');
+    this.subagentsCount = document.getElementById('subagents-count');
+    this._subagentSnapshot = { running: [], recent: [] };
+    this._subagentsOpen = false;
+    this._subagentPollTimer = null;
+    this._lastStalledIds = '';
+    // Task id visti *vivi* in questo turno. È il filtro che tiene il pannello
+    // sul lavoro vivo: una voce terminale si mostra solo se la sua transizione
+    // è stata osservata qui, mai perché il server la serve in `recent`
+    // (v. shared/subagent-policy.js::saVisibleCards).
+    this._subagentLiveIds = new Set();
+    this._subagentHasRunning = false;
+    // Stream di attività della modale (uno solo: la modale è una). `null` = modale
+    // chiusa, che è anche la condizione per cui il gateway non spinge nulla.
+    this._saStream = null;
+    this._saWatching = false;
+    this._saStatus = 'idle';
+    this._saStick = true;
+    this._saResyncing = false;
+    // Task per cui il blocco "cosa ha fatto davvero" è già in chat: la transizione
+    // terminale la vediamo una volta, ma `_renderSubagents` gira a ogni poll.
+    this._saDigestSeen = new Set();
+    this._setupSubagentPanel();
 
     i18n.load(i18n.locale).then(() => this._updatePlaceholders());
     i18n.onLocaleChange(() => this._updatePlaceholders());
@@ -756,6 +813,10 @@ export class ChatController {
   activate() {
     this._active = true;
     sessionManager.ensureAttached();
+    // Rientro in chat: lo snapshot può essere invecchiato (le transizioni
+    // avvenute a vista nascosta sono arrivate, ma elapsed/idle no se il poll
+    // era spento perché non girava nulla).
+    this._refreshSubagents();
     if (!this._initialHistoryLoaded) {
       this.loadInitialHistory();
     }
@@ -805,6 +866,19 @@ export class ChatController {
         break;
       case 'goal_status':
         this._handleGoalStatus(msg.status, msg.started_at);
+        break;
+      case 'subagent_status':
+        // Frame dedicato (ws_sender.send_subagent_status): mai una bolla, mai
+        // persistito nel transcript. Stessa forma di GET /api/subagents.
+        this._renderSubagents({ running: msg.running, recent: msg.recent });
+        break;
+      case 'subagent_activity':
+        // Finestra di attività fine, spinta solo a chi ha mandato un watch:
+        // arriva se e solo se la modale è aperta (v. _attachSubagentStream).
+        this._handleSubagentActivity(msg);
+        break;
+      case 'subagent_unwatched':
+        this._handleSubagentUnwatched(msg);
         break;
       case 'error':
         this._handleError(msg.detail || msg.reason || 'Unknown error');
@@ -1006,6 +1080,7 @@ export class ChatController {
 
   _handleTurnEnd(latencyMs) {
     this._appendLatency(this._currentMsg, latencyMs);
+    this._dropTerminatedSubagents();
 
     this._resetStreamState();
     // Niente scroll forzato: se l'utente è risalito a leggere, a fine turno
@@ -1034,9 +1109,15 @@ export class ChatController {
       this.scrollToBottom();
       return;
     }
-    if (msg.kind === 'tool_hint' || msg.tool_events) {
+    const isHint = msg.kind === 'tool_hint';
+    if (isHint || msg.tool_events) {
       this._ensureAiMessage();
-      this._renderToolEvents(msg.tool_events || []);
+      if (msg.tool_events?.length) this._renderToolEvents(msg.tool_events);
+      // Hint testuale senza tool_events — è il caso delle transizioni dei
+      // subagent ("subagent started: fix parser"): riga di trace subordinata,
+      // non una bolla. Prima di questo ramo il testo non veniva reso da
+      // nessuna parte (il ramo sotto lo salta perché kind === 'tool_hint').
+      else if (isHint && msg.text) this._renderTraceRow(msg.text);
     }
 
     if (msg.text && msg.kind !== 'tool_hint') {
@@ -1063,6 +1144,17 @@ export class ChatController {
 
     if ((msg.text && msg.kind !== 'tool_hint') || msg.media_urls?.length) this._bumpUnread();
     this.scrollToBottom();
+  }
+
+  /* Riga di trace testuale nella meta-row del turno, accanto ai chip dei tool:
+     stessa gerarchia visiva (subordinata alla risposta), nessuna bolla. */
+  _renderTraceRow(text) {
+    const msg = this._currentMsg;
+    if (!msg) return;
+    const row = document.createElement('div');
+    row.className = 'chat-trace';
+    row.textContent = text;
+    this._ensureMetaRow(msg).appendChild(row);
   }
 
   _renderToolEvents(events, targetMsg = null) {
@@ -1270,6 +1362,1086 @@ export class ChatController {
         this._goalBanner.remove();
         this._goalBanner = null;
       }
+    }
+  }
+
+  /* ── Pannello subagent ──────────────────────────────────────────────────
+     Jenny orchestra: il lavoro vero lo fanno i subagent, fino a cinque in
+     parallelo. Senza questo pannello la chat resta muta per minuti e l'utente
+     non sa né cosa sta girando né come sbloccarlo.
+
+     Il pannello mostra il LAVORO VIVO, non lo storico. Una card terminale resta
+     per il turno corrente — così la transizione si vede — e sparisce a
+     `turn_end`; niente di un turno passato viene mai renderizzato, nemmeno
+     dopo un reload (il filtro sta in shared/subagent-policy.js). Il duplicato
+     era doppio danno: l'esito è già riassunto dall'orchestratore nella chat, e
+     una card recente occupava spazio sopra il composer per sempre.
+
+     Le due cose che il pannello deve rendere ovvie sono `idle` (fermo ≠ al
+     lavoro) e Stop. Con più di un subagent le card stanno su UNA riga che scorre
+     di lato (`.is-carousel`): su uno schermo quadrato la pila verticale mangiava
+     metà della chat, e l'altezza è la stessa da uno a cinque. Il dettaglio
+     completo non ci sta su una card: lo apre il tap (v. _openSubagentDetail). */
+
+  _setupSubagentPanel() {
+    if (!this.subagentsEl || !this.subagentsHead || !this.subagentsBody) return;
+    this.subagentsHead.addEventListener('click', () => this._toggleSubagents());
+    // Event delegation: le righe vengono ricostruite a ogni snapshot, un
+    // listener per bottone si perderebbe insieme al nodo.
+    this.subagentsBody.addEventListener('click', (e) => {
+      const btn = e.target.closest('.sa-btn');
+      if (btn) {
+        // stopPropagation: il tap su Stop è un'azione, non una richiesta di
+        // dettaglio. Senza questo il bottone fermerebbe il job E aprirebbe la
+        // modale, che è il gesto più fastidioso possibile.
+        e.stopPropagation();
+        if (btn.disabled || !btn.dataset.taskId) return;
+        if (btn.dataset.action === 'stop') this._stopSubagent(btn.dataset.taskId, btn);
+        else this._restartSubagent(btn.dataset.taskId, btn);
+        return;
+      }
+      const row = e.target.closest('.sa-row');
+      if (row && row.dataset.taskId) this._openSubagentDetail(row.dataset.taskId);
+    });
+    // La card è role="button": Invio/Spazio devono aprire il dettaglio come il
+    // tap, altrimenti da tastiera il contenuto della modale è inaccessibile.
+    this.subagentsBody.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      const row = e.target.closest('.sa-row');
+      if (!row || !row.dataset.taskId || e.target.closest('.sa-btn')) return;
+      e.preventDefault();
+      this._openSubagentDetail(row.dataset.taskId);
+    });
+    i18n.onLocaleChange(() => this._renderSubagents(this._subagentSnapshot));
+    // A vista nascosta non c'è nulla da invecchiare: il poll si spegne e riparte
+    // con una lettura immediata al ritorno in foreground (v. _syncSubagentPolling).
+    document.addEventListener('visibilitychange', () => {
+      const visible = document.visibilityState === 'visible';
+      this._syncSubagentPolling(this._subagentHasRunning);
+      if (visible) this._refreshSubagents();
+    });
+    // Sopravvivere al reload è il caso comune, non l'eccezione: su Android il
+    // processo della WebView muore e il frame WS di transizione è già passato.
+    // Al reload solo i vivi compaiono: `_subagentLiveIds` è vuoto, quindi i
+    // terminati che il server serve in `recent` non ripopolano il pannello.
+    this._refreshSubagents();
+  }
+
+  _toggleSubagents(force) {
+    if (!this.subagentsHead || !this.subagentsBody) return;
+    this._subagentsOpen = force === undefined ? !this._subagentsOpen : !!force;
+    this.subagentsHead.setAttribute('aria-expanded', this._subagentsOpen ? 'true' : 'false');
+    this.subagentsBody.hidden = !this._subagentsOpen;
+  }
+
+  async _refreshSubagents() {
+    try {
+      this._renderSubagents(await api.getSubagents());
+    } catch (_) {
+      // Best-effort: lo stato è ricalcolabile, il prossimo frame o poll lo porta.
+    }
+  }
+
+  /* Poll solo mentre c'è qualcosa che gira *e* la vista è davanti: il manager
+     pubblica uno snapshot per *transizione di stato*, quindi fra due transizioni
+     elapsed/idle invecchierebbero e un job piantato sembrerebbe fermo da 3
+     secondi per sempre. A zero running non c'è nulla che invecchi: timer spento.
+
+     Questi 5 secondi restano l'orologio del pannello *coarse* e nient'altro. Lo
+     stream di attività della modale non li usa e non ne aggiunge un secondo: è
+     tutto push (frame `subagent_activity` solo a chi guarda), e l'HTTP lo tocca
+     solo per tappare un buco dichiarato o per un digest espanso a mano. La
+     ragione per cui il poll non si può togliere è che elapsed/idle/stato delle
+     card non stanno nello stream: quello racconta *un* task, il pannello ne
+     mostra fino a tre, e li mostra anche a modale chiusa.
+
+     A vista nascosta il timer si spegne: in background non c'è nessun numero da
+     rinfrescare, e Android strozza comunque i timer di una WebView non visibile —
+     al ritorno in foreground si fa una lettura sola, che è più fresca di quanto
+     sarebbero stati venti tick recuperati. */
+  _syncSubagentPolling(hasRunning) {
+    this._subagentHasRunning = !!hasRunning;
+    const wanted = !!hasRunning && document.visibilityState !== 'hidden';
+    if (wanted && !this._subagentPollTimer) {
+      this._subagentPollTimer = setInterval(() => this._refreshSubagents(), 5000);
+    } else if (!wanted && this._subagentPollTimer) {
+      clearInterval(this._subagentPollTimer);
+      this._subagentPollTimer = null;
+    }
+  }
+
+  _renderSubagents(snapshot) {
+    if (!this.subagentsEl || !this.subagentsBody) return;
+    const running = Array.isArray(snapshot?.running) ? snapshot.running : [];
+    const recent = Array.isArray(snapshot?.recent) ? snapshot.recent : [];
+    this._subagentSnapshot = { running, recent };
+
+    // `recent` arriva sempre intero dal server (lo consumano anche il tool
+    // subagent_status e GET /api/subagents): è qui che diventa "solo ciò che è
+    // terminato sotto gli occhi dell'utente in questo turno".
+    const view = saVisibleCards(this._subagentSnapshot, this._subagentLiveIds);
+    this._subagentLiveIds = view.liveIds;
+    const lingering = view.lingering;
+    const total = running.length + lingering.length;
+
+    // Zero card = pannello assente, non pannello chiuso: sopra il composer
+    // nemmeno i 34px dell'header collassato sono gratis.
+    this.subagentsEl.hidden = total === 0;
+    const stalled = running.filter(e => e.state === 'stalled');
+    this.subagentsEl.classList.toggle('has-stalled', stalled.length > 0);
+    if (this.subagentsCount) {
+      this.subagentsCount.textContent = lingering.length
+        ? i18n.t('subagents.headCountFinished', {
+            running: running.length,
+            finished: lingering.length,
+          })
+        : i18n.t('subagents.headCount', { running: running.length });
+    }
+
+    // Uno stallo nuovo apre il pannello da sé: è esattamente il momento in cui
+    // l'utente deve vederlo. Se lo richiude, non lo riapriamo per lo stesso job.
+    const stalledIds = stalled.map(e => e.task_id).join(',');
+    if (stalledIds && stalledIds !== this._lastStalledIds) this._toggleSubagents(true);
+    this._lastStalledIds = stalledIds;
+
+    // Prima i vivi, poi i terminati che stanno lingerando: nessuna intestazione
+    // di sezione, il conteggio nell'header e il colore di stato di ogni card
+    // bastano. Le intestazioni costavano due righe di pannello.
+    const parts = [
+      ...running.map(e => this._subagentRunningRow(e)),
+      ...lingering.map(e => this._subagentRecentRow(e)),
+    ];
+    // Carosello solo da due card in su; con una sola non c'è niente da
+    // scorrere e la riga prende tutta la larghezza.
+    this.subagentsBody.classList.toggle('is-carousel', total > 1);
+    this.subagentsBody.classList.toggle('is-single', total === 1);
+    // innerHTML azzera lo scorrimento: senza questo, il poll ogni 5s
+    // riporterebbe il carosello all'inizio mentre l'utente sta scorrendo.
+    const scrollLeft = this.subagentsBody.scrollLeft;
+    this.subagentsBody.innerHTML = parts.join('');
+    this.subagentsBody.scrollLeft = scrollLeft;
+
+    // Un subagent appena terminato guadagna in chat il suo blocco "cosa ha fatto
+    // davvero"; se la modale è aperta, le sue righe statiche invecchiano a ogni
+    // snapshot e vanno riscritte (elapsed/idle, e lo stato che può cambiare
+    // mentre la si guarda).
+    this._noteFinishedSubagents(lingering);
+    this._refreshSubagentDetailStatic();
+
+    this._syncSubagentPolling(running.length > 0);
+  }
+
+  /* Fine turno: le card terminali hanno finito di esistere. Restavano solo per
+     mostrare la transizione, e l'esito è già nella risposta dell'orchestratore.
+     Si azzera l'insieme dei vivi e si ri-renderizza: i subagent ancora in corso
+     (un job può sopravvivere al turno che l'ha lanciato) si re-iscrivono da soli
+     dentro saVisibleCards, quindi non perdono il diritto a lingerare dopo. */
+  _dropTerminatedSubagents() {
+    this._subagentLiveIds = new Set();
+    this._renderSubagents(this._subagentSnapshot);
+  }
+
+  /* Traduzione con fallback sul valore grezzo: phase e state arrivano dal
+     backend e possono guadagnare valori nuovi prima dei file i18n. */
+  _saEnum(group, value) {
+    const raw = String(value || '');
+    if (!raw) return '';
+    const key = `subagents.${group}.${raw}`;
+    const translated = i18n.t(key);
+    return translated === key ? raw : translated;
+  }
+
+  _saDuration(seconds) {
+    const total = Math.max(0, Math.round(Number(seconds) || 0));
+    if (total < 60) return `${total}s`;
+    const mins = Math.floor(total / 60);
+    if (mins < 60) return `${mins}m ${String(total % 60).padStart(2, '0')}s`;
+    return `${Math.floor(mins / 60)}h ${String(mins % 60).padStart(2, '0')}m`;
+  }
+
+  /* Riga alta della card: solo etichetta e stato. Il tipo di agente sta nella
+     meta (v. _saTypeChip): in carosello la card è larga ~290px e la pillola qui
+     rubava 50px all'etichetta, che è l'unica cosa che dice *quale* job è. */
+  _saHead(entry) {
+    const label = escapeHtml(entry.label || i18n.t('subagents.untitled'));
+    return `<div class="sa-top">` +
+      `<span class="sa-label">${label}</span>` +
+      `<span class="sa-state">${escapeHtml(this._saEnum('state', entry.state))}</span>` +
+    `</div>`;
+  }
+
+  _saTypeChip(entry) {
+    const type = escapeHtml(entry.agent_type || '');
+    return type ? `<span class="sa-type">${type}</span>` : '';
+  }
+
+  _subagentRunningRow(entry) {
+    const state = String(entry.state || 'running');
+    // elapsed e idle aprono la riga meta e non si comprimono: sono i due numeri
+    // che rispondono a "è fermo o sta lavorando?", e accostati la risposta si
+    // legge senza fare conti. Troncabile è solo la coda (fase, iterazione,
+    // ultimo tool), perché l'ellipsis mangia sempre da destra.
+    const rest = [
+      this._saEnum('phase', entry.phase),
+      `#${Number(entry.iteration) || 0}`,
+      entry.last_tool ? String(entry.last_tool) : '',
+    ].filter(Boolean).join(' · ');
+    const idleWarn = state === 'stalled' ? ' sa-idle-warn' : '';
+    const meta = `<div class="sa-meta">` +
+      this._saTypeChip(entry) +
+      `<span class="sa-clock">${escapeHtml(this._saDuration(entry.elapsed_s))}</span>` +
+      `<span class="sa-idle${idleWarn}">` +
+        escapeHtml(i18n.t('subagents.idle', { duration: this._saDuration(entry.idle_s) })) +
+      `</span>` +
+      (rest ? `<span class="sa-rest">${escapeHtml(rest)}</span>` : '') +
+    `</div>`;
+    const hint = state === 'stalled'
+      ? `<div class="sa-hint">${escapeHtml(i18n.t('subagents.stalledHint'))}</div>`
+      : '';
+    return this._saCard(entry, state, this._saHead(entry) + meta + hint);
+  }
+
+  _subagentRecentRow(entry) {
+    const state = String(entry.state || 'done');
+    const rest = [
+      i18n.t('subagents.attempt', { n: Number(entry.attempt) || 1 }),
+      entry.stop_reason ? String(entry.stop_reason) : '',
+    ].filter(Boolean).join(' · ');
+    const meta = `<div class="sa-meta">` +
+      this._saTypeChip(entry) +
+      `<span class="sa-rest">${escapeHtml(rest)}</span>` +
+    `</div>`;
+    // Una riga di riassunto e nulla più: la card terminale vive un turno, e chi
+    // vuole l'esito intero lo apre con un tap. La nota sul tetto dei rilanci
+    // automatici è finita nella modale, dove sta accanto al bottone che spiega.
+    const summary = entry.result_summary
+      ? `<div class="sa-summary">${escapeHtml(String(entry.result_summary))}</div>`
+      : '';
+    return this._saCard(entry, state, this._saHead(entry) + meta + summary);
+  }
+
+  /* Card: testo a sinistra, azioni ammesse dallo stato a destra (v.
+     shared/subagent-policy.js). Con zero azioni la colonna destra non viene
+     emessa affatto e la card si accorcia ai suoi 40px di testo — è il guadagno
+     di aver toccato la matrice, e serve un tap sulla card per il resto. */
+  _saCard(entry, state, mainHtml) {
+    const taskId = escapeHtml(String(entry.task_id || ''));
+    const buttons = saActions(state, 'card').map(action => (
+      action === 'stop'
+        ? this._saButton(taskId, 'stop', 'ti-player-stop', 'subagents.stop')
+        : this._saButton(taskId, 'restart', 'ti-refresh', 'subagents.relaunch')
+    ));
+    const actions = buttons.length ? `<div class="sa-actions">${buttons.join('')}</div>` : '';
+    return `<div class="sa-row state-${escapeHtml(state)}" data-task-id="${taskId}" ` +
+      `role="button" tabindex="0" aria-label="${escapeHtml(i18n.t('subagents.openDetail'))}">` +
+      `<div class="sa-main">${mainHtml}</div>` +
+      actions +
+    `</div>`;
+  }
+
+  /* Bottone icona: l'etichetta vive in aria-label/title, non come testo, così
+     i controlli stanno nella colonna destra della card senza rinunciare al
+     target da 40px né al nome per lo screen reader. */
+  _saButton(taskId, action, icon, labelKey) {
+    const label = escapeHtml(i18n.t(labelKey));
+    const cls = action === 'stop' ? 'sa-btn sa-btn-stop' : 'sa-btn';
+    return `<button class="${cls}" type="button" data-action="${action}" ` +
+      `data-task-id="${taskId}" title="${label}" aria-label="${label}">` +
+      `<i class="ti ${icon}"></i></button>`;
+  }
+
+  /* ── Modale di dettaglio ────────────────────────────────────────────────
+     La card sta su una riga e mostra etichetta, orologi e stato: tutto il resto
+     — il task per intero, l'esito completo, e soprattutto lo *stream di ciò che
+     il subagent sta facendo adesso* — sta qui. È ciò che giustifica una card
+     così piccola. Le azioni sono quelle della matrice per la superficie 'modal':
+     in più della card c'è Rilancia su un job fallito, che sulla card sarebbe un
+     tap troppo facile per un'operazione che di solito rifallisce identica.
+
+     La prima versione impilava tutto in fila: otto righe chiave/valore, lo
+     stream, l'incarico, la coda tool, l'esito. Su uno schermo quadrato era
+     illeggibile per tre motivi precisi, e sono i tre che questa forma toglie:
+     niente dominava (tutto 10-11px dello stesso peso), la storia dei tool era
+     raccontata DUE volte (la coda ferma dello snapshot e lo stream vivo), e i
+     contenitori di scroll erano annidati tre volte (corpo, lista, `<pre>`).
+
+     Adesso la modale è un TELAIO, non una pagina: un posto per ogni domanda, e
+     una domanda per posto.
+
+       #sa-sum     una riga  — stato, da quanto, fermo da quanto, tipo
+       #sa-focus   l'esito   — solo a lavoro finito: è LA risposta, sta in alto
+       #sa-stream  attività  — l'unica parte che scorre e l'unica che cresce
+       #sa-more    pieghe    — incarico e diagnostica, chiuse per default
+
+     Cosa è sparito, e perché non manca: fase e iterazione (lo stream le emette
+     già come eventi, con l'ora), la coda tool dello snapshot come blocco a sé
+     (ora è il contenuto di ripiego della lista quando lo stream non ha nulla),
+     e la ginnastica di scroll per far vedere lo stream — in un telaio la parte
+     viva è in vista per costruzione. */
+  _openSubagentDetail(taskId) {
+    // Una modale sola: se ne è già aperta una, `detailDialog` rifiuterebbe e
+    // resteremmo con un watch appeso a un corpo che non è nostro.
+    if (this._saStream) return;
+    const entry = this._findSubagentEntry(taskId);
+    if (!entry) return;
+    const state = String(entry.state || '');
+    const closed = detailDialog({
+      title: String(entry.label || i18n.t('subagents.untitled')),
+      bodyHtml: this._subagentDetailHtml(entry, state),
+      actions: this._saDialogActions(state),
+    });
+    // La modale si è aperta ⇒ il nostro guscio è nel DOM. È il solo modo di
+    // saperlo senza che detailDialog cambi contratto.
+    if (!document.getElementById('sa-stream')) return;
+    this._attachSubagentStream(taskId);
+    // Prima passata sulle parti che vivono nel DOM (esito, nota sul tetto): il
+    // markup le crea vuote, e riempirle da un posto solo evita che l'apertura e
+    // il refresh possano dire due cose diverse.
+    this._refreshSubagentDetailStatic();
+    closed.then((chosen) => {
+      // Ogni via d'uscita passa da qui: X, backdrop, Esc e gesto Indietro di
+      // Android risolvono la stessa Promise (v. shared/dialog.js), quindi non
+      // esiste una chiusura che lasci il gateway a spingere frame a nessuno.
+      this._detachSubagentStream();
+      if (chosen === 'stop') this._stopSubagent(taskId);
+      else if (chosen === 'restart') this._restartSubagent(taskId);
+    });
+  }
+
+  _findSubagentEntry(taskId) {
+    // Id vuoto = nessuno, non "il primo senza id": un entry malformato non deve
+    // poter diventare la voce che la modale mostra.
+    if (!taskId) return null;
+    const snap = this._subagentSnapshot || {};
+    const all = [...(snap.running || []), ...(snap.recent || [])];
+    return all.find(e => String(e?.task_id || '') === String(taskId)) || null;
+  }
+
+  _saDialogActions(state) {
+    return saActions(state, 'modal').map(action => (
+      action === 'stop'
+        ? { id: 'stop', label: i18n.t('subagents.stop') }
+        : { id: 'restart', label: i18n.t('subagents.relaunch'), variant: 'primary' }
+    ));
+  }
+
+  /* Le quattro zone del telaio, in quest'ordine. `#sa-focus` nasce vuoto e
+     nascosto perché l'esito esiste solo a lavoro finito — e un lavoro può
+     finire con la modale aperta, quindi il posto deve essere già lì. */
+  _subagentDetailHtml(entry, state) {
+    return `<div class="sa-sum is-${escapeHtml(state)}" id="sa-sum">` +
+        this._saSumHtml(entry, state) +
+      `</div>` +
+      `<div class="sa-focus" id="sa-focus" hidden></div>` +
+      this._saStreamShellHtml() +
+      `<div class="sa-more" id="sa-more">${this._saFoldsHtml(entry)}</div>`;
+  }
+
+  /* Riepilogo: una riga per le sole cose che si guardano SEMPRE — stato, da
+     quanto va, da quanto è fermo, che tipo di agente è. Erano cinque righe
+     chiave/valore incolonnate, e incolonnate costavano mezzo schermo per dire
+     quello che accostato si legge in un colpo: "in corso · 4m 10s · fermo 2s".
+     Il pallino ripete lo stato in forma, non in lettere: è il colore che si
+     vede prima di leggere, ed è l'unico posto della modale che ce l'ha. */
+  _saSumHtml(entry, state) {
+    const parts = [
+      `<span class="sa-sum-state"><i class="sa-sum-dot"></i>` +
+        `${escapeHtml(this._saEnum('state', state))}</span>`,
+    ];
+    if (entry.elapsed_s !== undefined) {
+      parts.push(`<span class="sa-clock">${escapeHtml(this._saDuration(entry.elapsed_s))}</span>`);
+      // "Fermo da" solo mentre è in gioco: accostato all'elapsed distingue "al
+      // lavoro da 4 minuti" da "piantato da 4 minuti", ed è la ragione per cui i
+      // due numeri stanno vicini. Su un lavoro concluso non significa niente —
+      // "concluso · 2m 04s · fermo 0s" è una riga che si legge due volte per
+      // scoprire che la terza voce non diceva nulla.
+      if (!saIsTerminal(state)) {
+        parts.push(`<span class="sa-idle">` +
+          escapeHtml(i18n.t('subagents.idle', { duration: this._saDuration(entry.idle_s) })) +
+        `</span>`);
+      }
+    }
+    if (entry.agent_type) {
+      parts.push(`<span class="sa-type">${escapeHtml(String(entry.agent_type))}</span>`);
+    }
+    // Lo stallo è l'unico stato che chiede qualcosa a chi guarda: la riga che lo
+    // spiega sta sotto il riepilogo, non in una piega.
+    const hint = state === 'stalled'
+      ? `<span class="sa-sum-hint">${escapeHtml(i18n.t('subagents.stalledHint'))}</span>`
+      : '';
+    return parts.join('') + hint;
+  }
+
+  /* Esito in alto, e solo a lavoro finito. Mentre gira, la domanda è "cosa sta
+     facendo" e la risposta è lo stream; quando ha finito, la domanda è "com'è
+     andata" e la risposta è questa — che prima era un `<pre>` monospazio in
+     fondo, dopo l'incarico, cioè l'ultima cosa raggiungibile della modale.
+     `error` vince su `result_summary`: se c'è, è l'esito. */
+  _saFocusView(entry, state) {
+    const error = String(entry.error || '');
+    const text = error || String(entry.result_summary || '');
+    if (!text || !saIsTerminal(state)) return { show: false, cls: '', text: '' };
+    const bad = !!error || state === 'failed';
+    return { show: true, cls: bad ? 'is-error' : (state === 'done' ? 'is-ok' : ''), text };
+  }
+
+  _saApplyFocus(entry, state) {
+    const el = document.getElementById('sa-focus');
+    if (!el) return;
+    const view = this._saFocusView(entry, state);
+    const sig = view.show ? `${view.cls}|${view.text}` : '';
+    // Firma e non riscrittura cieca: l'esito è testo lungo che scorre dentro sé,
+    // e rifarlo a ogni snapshot riporterebbe in cima chi lo sta leggendo.
+    if (el.dataset.sig === sig) return;
+    el.dataset.sig = sig;
+    el.hidden = !view.show;
+    el.className = `sa-focus ${view.cls}`.trim();
+    el.innerHTML = view.show
+      ? `<div class="sa-focus-key">${escapeHtml(i18n.t('subagents.detail.outcome'))}</div>` +
+        `<div class="sa-focus-text">${escapeHtml(view.text)}</div>`
+      : '';
+  }
+
+  /* Pieghe: l'incarico (testo che l'utente ha già scritto lui) e la diagnostica
+     (tipo, tentativo, lignaggio, fase, iterazione, motivo di uscita). Servono, ma
+     non a colpo d'occhio: aperte in cima costavano la metà utile della modale
+     per rispondere a domande che nessuno stava facendo.
+
+     `<details>` nativo e non un toggle nostro: tiene lo stato aperto/chiuso da
+     sé, e quindi sopravvive al refresh dello snapshot senza che il refresh debba
+     saperlo. */
+  _saFoldsHtml(entry) {
+    let html = '';
+    if (entry.task) {
+      html += this._saFold('subagents.detail.task',
+        `<pre class="sa-detail-pre">${escapeHtml(String(entry.task))}</pre>`);
+    }
+    html += this._saFold('subagents.detail.diagnostics',
+      `<div id="sa-diag">${this._saDiagRowsHtml(entry)}</div>`);
+    // Il rilancio manuale non è mai rifiutato: `can_restart` è il tetto dei
+    // tentativi *automatici*. Quando è esaurito lo si dice qui, in fondo, accanto
+    // al bottone che chiarisce.
+    html += `<p class="sa-detail-note" id="sa-cap-note" hidden></p>`;
+    return html;
+  }
+
+  _saFold(labelKey, innerHtml) {
+    return `<details class="sa-fold">` +
+      `<summary class="sa-fold-head">` +
+        `<i class="ti ti-chevron-right sa-fold-chevron"></i>` +
+        `<span>${escapeHtml(i18n.t(labelKey))}</span>` +
+      `</summary>` +
+      `<div class="sa-fold-body">${innerHtml}</div>` +
+    `</details>`;
+  }
+
+  _saDiagRowsHtml(entry) {
+    const rows = [];
+    const row = (labelKey, value) => {
+      if (value === '' || value === null || value === undefined) return;
+      rows.push(
+        `<div class="sa-detail-row">` +
+          `<span class="sa-detail-key">${escapeHtml(i18n.t(labelKey))}</span>` +
+          `<span class="sa-detail-val">${escapeHtml(String(value))}</span>` +
+        `</div>`
+      );
+    };
+    row('subagents.detail.type', entry.agent_type || '');
+    row('subagents.detail.attempt', `${Number(entry.attempt) || 1} · ${entry.lineage_id || '—'}`);
+    if (entry.phase) row('subagents.detail.phase', this._saEnum('phase', entry.phase));
+    if (entry.iteration !== undefined) row('subagents.detail.iteration', Number(entry.iteration) || 0);
+    if (entry.stop_reason) row('subagents.detail.stopReason', entry.stop_reason);
+    return rows.join('');
+  }
+
+  /* Riscritto a ogni snapshot (5s) è SOLO ciò che invecchia: riepilogo, esito,
+     diagnostica, nota sul tetto e i bottoni della testata. Le pieghe come nodi
+     no — un `innerHTML` sul loro contenitore le richiuderebbe in faccia a chi sta
+     leggendo l'incarico, che è esattamente quello che faceva la prima versione
+     (e con esso azzerava lo scroll del `<pre>` ogni cinque secondi). */
+  _refreshSubagentDetailStatic() {
+    if (!this._saStream) return;
+    const entry = this._findSubagentEntry(this._saStream.taskId);
+    if (!entry) return;
+    const state = String(entry.state || '');
+    const sum = document.getElementById('sa-sum');
+    if (sum) {
+      sum.className = `sa-sum is-${state}`;
+      sum.innerHTML = this._saSumHtml(entry, state);
+    }
+    this._saApplyFocus(entry, state);
+    // Le righe di diagnostica non hanno stato da preservare (nessuno scroll,
+    // nessun input): la piega che le contiene sì, e quella non si tocca.
+    const diag = document.getElementById('sa-diag');
+    if (diag) diag.innerHTML = this._saDiagRowsHtml(entry);
+    this._saApplyCapNote(entry);
+    this._saSyncActions(state);
+  }
+
+  _saApplyCapNote(entry) {
+    const el = document.getElementById('sa-cap-note');
+    if (!el) return;
+    const text = entry.can_restart === false
+      ? i18n.t('subagents.autoCapReached', { attempt: Number(entry.attempt) || 1 })
+      : '';
+    el.hidden = !text;
+    if (el.textContent !== text) el.textContent = text;
+  }
+
+  /* I bottoni della testata seguono lo stato. Un subagent può concludersi con la
+     modale aperta, e "Ferma" su un lavoro finito non è un bottone inutile: è una
+     bugia, e su un job fallito nasconde l'unico bottone che serve (Rilancia).
+     `detailDialog` delega il click sul contenitore, quindi rimpiazzare i bottoni
+     non stacca nessun handler — l'unico accoppiamento è il `data-action-id`, che
+     è già il suo contratto. */
+  _saSyncActions(state) {
+    const host = document.getElementById('oc-detail-actions');
+    if (!host) return;
+    const actions = this._saDialogActions(state);
+    const sig = actions.map(a => a.id).join(',');
+    if (host.dataset.saSig === sig) return;
+    host.dataset.saSig = sig;
+    host.innerHTML = actions.map(a => (
+      `<button type="button" data-action-id="${escapeHtml(a.id)}" ` +
+        `class="oc-btn ${a.variant === 'primary' ? 'oc-btn-confirm' : 'oc-btn-cancel'}">` +
+        `${escapeHtml(a.label)}</button>`
+    )).join('');
+  }
+
+  /* ── Stream di attività ─────────────────────────────────────────────────
+     Il motivo per cui questa fase esiste: la modale aperta su un subagent al
+     lavoro era quasi immobile, e non si capiva cosa stesse facendo. Adesso il
+     gateway produce una telemetria fine (una riga curata per tool, per
+     ragionamento, per iterazione) e la spinge SOLO a chi guarda: aprire la
+     modale è ciò che accende il flusso, chiuderla è ciò che lo spegne.
+
+     Le regole del filo — append o rimpiazza, cursore, buco dichiarato,
+     accoppiamento start/end, collasso dei run di ragionamento — stanno tutte in
+     shared/subagent-policy.js, senza DOM, dove un test le esegue. Qui c'è solo
+     il DOM: guscio, righe, indicatore di stato, e la disciplina dello scroll. */
+
+  _saStreamShellHtml() {
+    const t = (key) => escapeHtml(i18n.t(`subagents.activity.${key}`));
+    return `<div class="sa-stream" id="sa-stream">` +
+      `<div class="sa-stream-head">` +
+        `<span class="sa-stream-title">${t('title')}</span>` +
+        `<span class="sa-stream-live" id="sa-stream-live">` +
+          `<i class="sa-stream-dot"></i><span class="sa-stream-live-label"></span>` +
+        `</span>` +
+        `<span class="sa-stream-count" id="sa-stream-count"></span>` +
+      `</div>` +
+      `<div class="sa-stream-note" id="sa-stream-note" hidden>` +
+        `<span class="sa-stream-note-text"></span>` +
+        `<button class="sa-stream-resume" id="sa-stream-resume" type="button" hidden>` +
+          `${t('resume')}</button>` +
+      `</div>` +
+      `<div class="sa-stream-list" id="sa-stream-list" aria-live="polite"></div>` +
+      `<button class="sa-stream-jump" id="sa-stream-jump" type="button" hidden>` +
+        `<i class="ti ti-arrow-down"></i>${t('jump')}</button>` +
+    `</div>`;
+  }
+
+  _attachSubagentStream(taskId) {
+    this._saStream = saActivityInit(taskId);
+    this._saStick = true;
+    this._saResyncing = false;
+    this._saWatching = false;
+    this._saListEl = document.getElementById('sa-stream-list');
+    this._saShellEl = document.getElementById('sa-stream');
+
+    /* Auto-scroll solo se l'utente è in fondo. Se è risalito a leggere una riga,
+       strappargli la vista a ogni frame (2.5 volte al secondo) renderebbe lo
+       stream inutilizzabile proprio quando serve: quello che si guadagna in
+       "vivo" si perderebbe in "leggibile". La pillola in fondo è il modo di
+       tornare, e dice che c'è roba nuova. */
+    this._saOnScroll = () => {
+      this._saStick = this._saAtBottom();
+      this._saSyncJump();
+    };
+    if (this._saListEl) this._saListEl.addEventListener('scroll', this._saOnScroll);
+
+    this._saOnClick = (e) => {
+      if (e.target.closest('#sa-stream-jump')) {
+        this._saStick = true;
+        this._saScrollToLatest();
+        this._saSyncJump();
+        return;
+      }
+      // Il gateway ci ha sfrattati (tetto dei watch per connessione): la vista è
+      // ferma e solo un nuovo watch la fa ripartire. Il bottone lo dice e lo fa.
+      if (e.target.closest('#sa-stream-resume')) this._watchSubagent();
+    };
+    if (this._saShellEl) this._saShellEl.addEventListener('click', this._saOnClick);
+
+    /* App in background: nessuno sta guardando, quindi si smette di guardare.
+       Senza questo il gateway continuerebbe a spingere frame a una modale
+       invisibile — e su Android l'app in background è la norma, non l'eccezione. */
+    this._saOnVisibility = () => {
+      if (!this._saStream) return;
+      if (document.visibilityState === 'hidden') {
+        this._unwatchSubagent();
+        this._saStatus = 'paused';
+        this._renderSubagentStream();
+      } else {
+        this._watchSubagent();
+      }
+    };
+    document.addEventListener('visibilitychange', this._saOnVisibility);
+
+    /* Reconnect: il gateway dimentica i watch di una connessione caduta
+       (`_cleanup_connection`), quindi il watch va rifatto — e va rifatto dal
+       cursore che abbiamo già, altrimenti o si duplica la lista o si perde il
+       buco in mezzo. */
+    this._saOnWsOpen = () => this._watchSubagent();
+    wsManager.addEventListener('chat:open', this._saOnWsOpen);
+
+    this._watchSubagent();
+    this._renderSubagentStream();
+  }
+
+  _detachSubagentStream() {
+    this._unwatchSubagent();
+    if (this._saListEl && this._saOnScroll) {
+      this._saListEl.removeEventListener('scroll', this._saOnScroll);
+    }
+    if (this._saShellEl && this._saOnClick) {
+      this._saShellEl.removeEventListener('click', this._saOnClick);
+    }
+    if (this._saOnVisibility) {
+      document.removeEventListener('visibilitychange', this._saOnVisibility);
+    }
+    if (this._saOnWsOpen) wsManager.removeEventListener('chat:open', this._saOnWsOpen);
+    this._saStream = null;
+    this._saListEl = null;
+    this._saShellEl = null;
+    this._saOnScroll = null;
+    this._saOnClick = null;
+    this._saOnVisibility = null;
+    this._saOnWsOpen = null;
+    this._saStatus = 'idle';
+  }
+
+  /* Watch (ri)mandato con il cursore corrente: idempotente lato gateway (una
+     seconda watch aggiorna il cursore invece di duplicare l'iscrizione), quindi
+     riaprire da foreground o da reconnect non costa nulla e non perde nulla. */
+  _watchSubagent() {
+    const stream = this._saStream;
+    if (!stream) return;
+    const sent = wsManager.sendSubagentWatch(stream.taskId, stream.cursor);
+    this._saWatching = sent;
+    // 'offline' non è un errore: il socket si riapre da sé e `chat:open` rifà il
+    // watch. Dirlo è meglio di un indicatore verde che mente.
+    this._saStatus = sent ? 'live' : 'offline';
+    this._renderSubagentStream();
+  }
+
+  _unwatchSubagent() {
+    const stream = this._saStream;
+    if (stream && this._saWatching) wsManager.sendSubagentUnwatch(stream.taskId);
+    this._saWatching = false;
+  }
+
+  _handleSubagentActivity(msg) {
+    const applied = saActivityFrame(this._saStream, msg);
+    if (!applied.applied) return;
+    this._saStream = applied.state;
+    // Un frame in volo non riporta la vista "in diretta" se intanto abbiamo
+    // smesso di guardare (app in background, o sfratto dal gateway).
+    if (this._saWatching) this._saStatus = 'live';
+    this._renderSubagentStream();
+    // Buco dichiarato dal server: si rilegge via HTTP dal cursore di *prima*
+    // della finestra bucata. Se la risync non recupera (ring già sfrattato) il
+    // marcatore resta, ed è giusto che resti.
+    if (applied.resyncFrom !== null) this._resyncSubagentStream(applied.resyncFrom);
+  }
+
+  _handleSubagentUnwatched(msg) {
+    const stream = this._saStream;
+    if (!stream || String(msg.task_id || '') !== stream.taskId) return;
+    if (msg.reason !== 'watch_limit') return;
+    // 'client' è l'ack del nostro unwatch e non cambia nulla; 'watch_limit'
+    // invece è uno sfratto: da adesso non arriva più niente, e una vista ferma
+    // che si dichiara viva è peggio di una vista ferma.
+    this._saWatching = false;
+    this._saStatus = 'frozen';
+    this._renderSubagentStream();
+  }
+
+  async _resyncSubagentStream(since) {
+    if (this._saResyncing) return;
+    const stream = this._saStream;
+    if (!stream) return;
+    this._saResyncing = true;
+    try {
+      const payload = await api.getSubagentActivity(stream.taskId, since);
+      // La modale può essere stata chiusa o riaperta su un altro task mentre la
+      // lettura era in volo: il cursore di allora non appartiene a questa lista.
+      if (!this._saStream || this._saStream.taskId !== stream.taskId) return;
+      const merged = saActivityIngest(this._saStream, payload);
+      this._saStream = merged.state;
+      this._renderSubagentStream();
+    } catch (_) {
+      // Best-effort: il buco resta segnato, che è l'informazione onesta.
+    } finally {
+      this._saResyncing = false;
+    }
+  }
+
+  _renderSubagentStream() {
+    const listEl = this._saListEl;
+    if (!listEl || !this._saStream) return;
+    // Si misura la posizione PRIMA di toccare la lista, e la misura vince
+    // sull'evento `scroll`: una WebView non lo emette per uno scroll
+    // programmatico, e con un frame ogni 0.4s un flag stantio significherebbe o
+    // strappare la vista a chi legge o non seguire più chi è in fondo.
+    this._saStick = this._saAtBottom();
+    const view = saActivityRows(this._saStream);
+    this._syncStreamRows(listEl, this._saStreamEntries(view));
+    if (this._saStick) this._saScrollToLatest();
+    this._saSyncJump();
+    this._renderStreamStatus(view);
+  }
+
+  /* Tolleranza di 24px: "in fondo" deve restare vero dopo che il dito ha
+     rilasciato lo slancio a un pelo dal bordo, altrimenti l'auto-scroll si
+     sgancia da sé al primo swipe. */
+  _saAtBottom() {
+    const el = this._saListEl;
+    if (!el) return true;
+    return (el.scrollHeight - el.scrollTop - el.clientHeight) <= 24;
+  }
+
+  _saScrollToLatest() {
+    const el = this._saListEl;
+    if (el) el.scrollTop = el.scrollHeight;
+  }
+
+  _saSyncJump() {
+    const btn = document.getElementById('sa-stream-jump');
+    if (btn) btn.hidden = this._saStick;
+  }
+
+  /* Indicatore di stato: pallino + parola. È la differenza fra "lo stream è
+     vivo" e "stai guardando una fotografia", e su quattro stati (live, in pausa
+     perché l'app è in background, sfrattato dal gateway, socket giù) l'utente
+     deve poter capire se aspettare o toccare qualcosa. */
+  _renderStreamStatus(view) {
+    // 'idle' è lo stato a modale chiusa e non ha una parola sua: se compare (un
+    // render arrivato prima del primo watch) si legge come una pausa.
+    const status = this._saStatus === 'idle' ? 'paused' : this._saStatus;
+    const liveEl = document.getElementById('sa-stream-live');
+    if (liveEl) {
+      liveEl.className = `sa-stream-live is-${status}`;
+      const label = liveEl.querySelector('.sa-stream-live-label');
+      if (label) label.textContent = i18n.t(`subagents.activity.${status}`);
+    }
+    const countEl = document.getElementById('sa-stream-count');
+    if (countEl) {
+      countEl.textContent = view.count
+        ? i18n.t('subagents.activity.count', { count: view.count })
+        : '';
+    }
+    const noteEl = document.getElementById('sa-stream-note');
+    const resumeEl = document.getElementById('sa-stream-resume');
+    if (!noteEl) return;
+    let note = '';
+    if (status === 'frozen') note = i18n.t('subagents.activity.frozenNote');
+    else if (status === 'offline') note = i18n.t('subagents.activity.offlineNote');
+    noteEl.hidden = !note;
+    const text = noteEl.querySelector('.sa-stream-note-text');
+    if (text) text.textContent = note;
+    if (resumeEl) resumeEl.hidden = status !== 'frozen';
+  }
+
+  /* Voci da rendere, chiave + firma + markup. La chiave è l'identità della riga
+     (il `seq` che l'ha aperta), la firma è ciò che ne cambia: con le due, un
+     frame ogni 0.4s riscrive solo la riga che si è mossa — riscrivere la lista
+     intera farebbe ripartire lo spinner del tool in corso a ogni frame, cioè
+     l'unica animazione che deve girare continua. */
+  _saStreamEntries(view) {
+    if (!view.rows.length) {
+      const snapshot = this._saSnapshotEntries();
+      if (snapshot.length) return snapshot;
+    }
+    if (view.waiting) return [this._saEmptyEntry()];
+    return view.rows.map((row, index) => this._saRowEntry(row, index === 0));
+  }
+
+  /* Ripiego: lo stream non ha (ancora) nulla, ma lo snapshot porta la sua coda di
+     tool. Prima era un blocco a sé — "Tool recenti", sotto l'incarico: la stessa
+     storia raccontata due volte, una viva e una ferma, senza dire quale fosse
+     quale. Adesso è il *contenuto* della lista quando la lista è vuota, e sparisce
+     da sé al primo evento vero: una storia sola, nello stesso posto, sempre. */
+  _saSnapshotEntries() {
+    const entry = this._findSubagentEntry(this._saStream ? this._saStream.taskId : '');
+    const events = Array.isArray(entry?.tool_events) ? entry.tool_events : [];
+    return events.map((event, index) => {
+      const bad = String(event?.status || '') === 'error';
+      const name = String(event?.name || '');
+      const detail = String(event?.detail || '');
+      return {
+        key: `snap${index}`,
+        cls: `sa-ev kind-tool${bad ? ' is-error' : ''}`,
+        sig: `${name}|${detail}|${bad ? 1 : 0}`,
+        inner: `<div class="sa-ev-line">` +
+          `<i class="ti ${bad ? 'ti-alert-triangle' : 'ti-check'} sa-ev-icon"></i>` +
+          `<div class="sa-ev-body"><div class="sa-ev-main">` +
+            `<span class="sa-ev-name">${escapeHtml(name)}</span>` +
+            `<span class="sa-ev-text">${escapeHtml(detail)}</span>` +
+          `</div></div>` +
+        `</div>`,
+      };
+    });
+  }
+
+  /* Lista vuota: due frasi diverse perché sono due fatti diversi. Su un job che
+     gira è un'attesa (e l'icona gira); su un job concluso senza traccia è un
+     fatto compiuto, e uno spinner su un lavoro finito prometterebbe qualcosa che
+     non arriverà mai. */
+  _saEmptyEntry() {
+    const entry = this._findSubagentEntry(this._saStream ? this._saStream.taskId : '');
+    const over = saIsTerminal(String(entry?.state || ''));
+    return {
+      key: '__wait',
+      cls: over ? 'sa-stream-wait is-over' : 'sa-stream-wait',
+      sig: over ? 'over' : 'wait',
+      inner: over
+        ? `<i class="ti ti-minus sa-ev-icon"></i>` +
+          `<span>${escapeHtml(i18n.t('subagents.digest.empty'))}</span>`
+        : `<i class="ti ti-loader-2 sa-ev-icon"></i>` +
+          `<span>${escapeHtml(i18n.t('subagents.activity.waiting'))}</span>`,
+    };
+  }
+
+  _saRowEntry(row, isHead = false) {
+    // `writing` (il testo della risposta che si sta formando) e `thinking` (il
+    // ragionamento) arrivano con lo stesso kind ma sono due attività diverse per
+    // chi guarda: l'etichetta del server le distingue, e qui diventano due icone.
+    const kind = row.kind === 'thinking' && row.label === 'writing' ? 'writing' : row.kind;
+    // `incomplete` esiste solo nel digest: il subagent è morto a metà chiamata,
+    // quindi l'esito non è "fallito" ma "non lo sappiamo". Un'icona che gira
+    // direbbe che sta ancora andando, che in un post-mortem è falso.
+    const unknown = row.status === 'incomplete';
+    let icon;
+    if (row.kind === 'tool') {
+      if (unknown) icon = 'ti-help-circle';
+      else if (row.pending) icon = 'ti-loader-2';
+      else icon = row.status === 'error' ? 'ti-alert-triangle' : 'ti-check';
+    } else {
+      icon = SA_EVENT_ICONS[kind] || 'ti-point';
+    }
+    const classes = ['sa-ev', `kind-${kind}`];
+    if (unknown) classes.push('is-unknown');
+    else if (row.pending) classes.push('is-pending');
+    if (row.status === 'error' || row.kind === 'error') classes.push('is-error');
+    if (row.kind === 'result') classes.push('is-ok');
+    const duration = row.durationMs === null ? '' : this._saMs(row.durationMs);
+    const hole = row.missing
+      ? `<div class="sa-ev-hole">${escapeHtml(this._saHoleText(row.missing, isHead))}</div>`
+      : '';
+    const name = row.name && row.kind === 'tool'
+      ? `<span class="sa-ev-name">${escapeHtml(row.name)}</span>`
+      : '';
+    // `summary` è già curato e capato a 160 caratteri dal server: si rende com'è,
+    // mai ricostruito da name/status — quella riga è l'unica cosa che dice cosa
+    // sta succedendo, e riscriverla qui significherebbe inventarla.
+    const main = row.summary
+      ? `<div class="sa-ev-main">${name}<span class="sa-ev-text">` +
+        `${escapeHtml(row.summary)}</span></div>`
+      : (name ? `<div class="sa-ev-main">${name}</div>` : '');
+    const out = row.outcome
+      ? `<div class="sa-ev-out">${escapeHtml(row.outcome)}</div>`
+      : '';
+    return {
+      key: row.key,
+      cls: classes.join(' '),
+      sig: [
+        row.lastSeq, row.status, row.pending ? 1 : 0, row.durationMs,
+        row.repeats, row.missing, row.summary, row.outcome,
+      ].join(' '),
+      inner: hole +
+        `<div class="sa-ev-line">` +
+          `<i class="ti ${icon} sa-ev-icon"></i>` +
+          `<div class="sa-ev-body">${main}${out}</div>` +
+          (duration ? `<span class="sa-ev-dur">${escapeHtml(duration)}</span>` : '') +
+        `</div>`,
+    };
+  }
+
+  /* Eventi mancanti: quelli in testa alla lista sono "prima di qui non c'è"
+     (sfratto dal ring o taglio locale), quelli in mezzo sono un buco vero —
+     eventi esistiti che non siamo riusciti a recuperare nemmeno via HTTP. Sono
+     due frasi diverse perché sono due fatti diversi, e nessuno dei due si tace. */
+  _saHoleText(missing, isHead) {
+    return i18n.t(`subagents.activity.${isHead ? 'earlier' : 'hole'}`, { count: missing });
+  }
+
+  _saMs(ms) {
+    const total = Math.max(0, Math.round(Number(ms) || 0));
+    if (total < 1000) return `${total}ms`;
+    if (total < 60000) return `${(total / 1000).toFixed(1)}s`;
+    const mins = Math.floor(total / 60000);
+    return `${mins}m ${String(Math.floor((total % 60000) / 1000)).padStart(2, '0')}s`;
+  }
+
+  _saRowEl(entry) {
+    const el = document.createElement('div');
+    el.className = entry.cls;
+    el.dataset.key = entry.key;
+    el.dataset.sig = entry.sig;
+    el.innerHTML = entry.inner;
+    return el;
+  }
+
+  /* Diff per chiave, non innerHTML della lista: gli eventi sono append-only,
+     quindi in pratica cambia solo la coda (l'ultima riga tool che si risolve, il
+     run di ragionamento che aggiorna testo e durata). Riscrivere tutto azzererebbe
+     lo scroll e riavvierebbe le animazioni due volte al secondo. */
+  _syncStreamRows(listEl, entries) {
+    const children = Array.from(listEl.children);
+    let index = 0;
+    for (; index < entries.length; index++) {
+      const node = children[index];
+      if (!node || node.dataset.key !== entries[index].key) break;
+      if (node.dataset.sig !== entries[index].sig) {
+        node.className = entries[index].cls;
+        node.dataset.sig = entries[index].sig;
+        node.innerHTML = entries[index].inner;
+      }
+    }
+    for (let k = children.length - 1; k >= index; k--) children[k].remove();
+    if (index >= entries.length) return;
+    const frag = document.createDocumentFragment();
+    for (; index < entries.length; index++) frag.appendChild(this._saRowEl(entries[index]));
+    listEl.appendChild(frag);
+  }
+
+  /* ── Blocco "cosa ha fatto davvero" in chat ─────────────────────────────
+     Il pannello mostra il lavoro vivo e sparisce; la chat è ciò che resta. Sotto
+     la riga di transizione di un subagent finito compare un blocco richiudibile
+     che, *solo se espanso*, chiede al gateway il digest — la condensa persistita
+     con una riga per tool, durate e status. Lazy per un motivo di costo preciso:
+     la maggior parte di questi blocchi non viene mai aperta, e caricarli tutti
+     sarebbe una lettura da disco per riga di trace. */
+  _noteFinishedSubagents(lingering) {
+    for (const entry of lingering) {
+      const taskId = String(entry?.task_id || '');
+      // Solo transizioni *osservate* qui (è ciò che `lingering` garantisce) e una
+      // volta sola: `_renderSubagents` rigira a ogni poll con lo stesso snapshot.
+      if (!taskId || this._saDigestSeen.has(taskId)) continue;
+      this._saDigestSeen.add(taskId);
+      this._appendSubagentDigest(entry);
+    }
+  }
+
+  _appendSubagentDigest(entry) {
+    const taskId = String(entry.task_id || '');
+    const label = String(entry.label || i18n.t('subagents.untitled'));
+    const state = String(entry.state || '');
+    const block = document.createElement('div');
+    block.className = 'sa-digest collapsed';
+    block.dataset.taskId = taskId;
+    block.innerHTML =
+      `<button class="sa-digest-head" type="button" aria-expanded="false">` +
+        `<i class="ti ti-list-details"></i>` +
+        `<span class="sa-digest-label">${escapeHtml(i18n.t('subagents.digest.toggle'))}</span>` +
+        `<span class="sa-digest-sub">${escapeHtml(label)}</span>` +
+        `<i class="ti ti-chevron-down sa-digest-chevron"></i>` +
+      `</button>` +
+      `<div class="sa-digest-body"></div>`;
+    if (state === 'failed' || state === 'cancelled') block.classList.add('is-error');
+    block.querySelector('.sa-digest-head')
+      .addEventListener('click', () => this._toggleSubagentDigest(block));
+    // Collocazione: subito sotto la riga di trace della stessa transizione
+    // ("subagent done: <label>"), che il server pubblica per lo stesso evento —
+    // così il blocco sta sotto il messaggio del subagent e non in fondo alla
+    // chat. Senza quella riga (stato annullato, o turno già chiuso) il blocco
+    // finisce nella meta-row del turno corrente, o in coda alla chat.
+    const anchor = this._findSubagentTraceRow(label);
+    if (anchor) anchor.insertAdjacentElement('afterend', block);
+    else if (this._currentMsg) this._ensureMetaRow(this._currentMsg).appendChild(block);
+    else this.chatArea.appendChild(block);
+    this.scrollToBottom();
+  }
+
+  _findSubagentTraceRow(label) {
+    const rows = this.chatArea.querySelectorAll('.chat-trace:not([data-sa-claimed])');
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const text = rows[i].textContent || '';
+      if (!/^subagent (done|failed):/.test(text)) continue;
+      if (!text.endsWith(`: ${label}`)) continue;
+      rows[i].dataset.saClaimed = '1';
+      return rows[i];
+    }
+    return null;
+  }
+
+  async _toggleSubagentDigest(block) {
+    const opening = block.classList.contains('collapsed');
+    block.classList.toggle('collapsed', !opening);
+    const head = block.querySelector('.sa-digest-head');
+    if (head) head.setAttribute('aria-expanded', opening ? 'true' : 'false');
+    if (!opening || block.dataset.loaded) return;
+    block.dataset.loaded = '1';
+    const body = block.querySelector('.sa-digest-body');
+    body.innerHTML = `<div class="sa-digest-msg">` +
+      `${escapeHtml(i18n.t('subagents.digest.loading'))}</div>`;
+    try {
+      const view = saDigestView(await api.getSubagentDigest(block.dataset.taskId));
+      if (!view.show) {
+        // `source: "none"`: niente da mostrare, quindi niente blocco. Un accordion
+        // che si apre sul vuoto è peggio della sua assenza; il toast spiega il tap.
+        block.remove();
+        showToast(i18n.t('subagents.digest.empty'), 'info');
+        return;
+      }
+      const rows = view.rows.map(row => {
+        const entry = this._saRowEntry(row);
+        return `<div class="${entry.cls}">${entry.inner}</div>`;
+      }).join('');
+      // `source: "live"` = condensa ricavata dal ring di un subagent ancora al
+      // lavoro: è un'anteprima, e dirlo è l'unica differenza da una bugia.
+      const note = view.live
+        ? `<div class="sa-digest-live">` +
+          `${escapeHtml(i18n.t('subagents.digest.live'))}</div>`
+        : '';
+      body.innerHTML = note + `<div class="sa-digest-rows">${rows}</div>`;
+      const sub = block.querySelector('.sa-digest-sub');
+      if (sub) sub.textContent = i18n.t('subagents.digest.count', { count: view.count });
+    } catch (_) {
+      // Ritentabile: il flag di caricamento torna giù, un secondo tap riprova.
+      block.dataset.loaded = '';
+      body.innerHTML = `<div class="sa-digest-msg is-error">` +
+        `${escapeHtml(i18n.t('subagents.digest.failed'))}</div>`;
+    }
+  }
+
+  /* `btn` è opzionale: la stessa azione arriva dalla card (e allora il bottone
+     va disarmato finché la chiamata è in volo) e dalla modale, che si è già
+     chiusa e non ha nulla da disabilitare. */
+  async _stopSubagent(taskId, btn) {
+    if (btn) btn.disabled = true;
+    try {
+      await api.cancelSubagent(taskId);
+      showToast(i18n.t('subagents.stopped'), 'success');
+    } catch (e) {
+      showToast(e?.message || i18n.t('subagents.actionFailed'), 'error');
+    } finally {
+      if (btn) btn.disabled = false;
+      this._refreshSubagents();
+    }
+  }
+
+  async _restartSubagent(taskId, btn) {
+    if (btn) btn.disabled = true;
+    try {
+      await api.restartSubagent(taskId);
+      showToast(i18n.t('subagents.relaunched'), 'success');
+    } catch (e) {
+      showToast(e?.message || i18n.t('subagents.actionFailed'), 'error');
+    } finally {
+      if (btn) btn.disabled = false;
+      this._refreshSubagents();
     }
   }
 

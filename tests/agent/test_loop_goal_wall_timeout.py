@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from jenny.agent.runner import AgentRunResult
-from jenny.agent.subagent import SubagentManager, SubagentStatus
+from jenny.agent.subagent import SubagentManager, SubagentSpec, SubagentStatus
 from jenny.bus.queue import MessageBus
 
 
@@ -35,9 +35,7 @@ async def test_subagent_forwards_resolver_to_agent_run_spec(tmp_path: Path) -> N
     )
     await mgr._run_subagent(
         "t1",
-        "task",
-        "lbl",
-        {"channel": "internal", "chat_id": "direct", "session_key": "internal:direct"},
+        SubagentSpec(task="task", label="lbl", session_key="internal:direct"),
         status,
     )
     mgr.runner.run.assert_called_once()

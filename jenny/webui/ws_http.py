@@ -174,6 +174,7 @@ class GatewayHTTPHandler:
         skills_workspace_path: Path,
         disabled_skills: set[str] | None = None,
         snapshot_service: Any | None = None,
+        get_subagent_manager: Callable[[], Any | None] | None = None,
         log: Any = logger,
         onboarding_event: Any | None = None,
         on_settings_changed: Callable[[], None] | None = None,
@@ -260,6 +261,22 @@ class GatewayHTTPHandler:
             get_backup_manager=self._get_backup_manager,
             log=self._log,
         )
+
+        from jenny.webui.subagent_routes import SubagentRoutes
+
+        # Getter late-binding: durante l'onboarding l'agente (e con lui il
+        # SubagentManager) non esiste ancora, ma la WebUI è già servita.
+        self._get_subagent_manager = get_subagent_manager
+        self.subagent_routes = SubagentRoutes(
+            check_api_token=self.check_api_secret,
+            get_subagent_manager=self._resolve_subagent_manager,
+            log=self._log,
+        )
+
+    def _resolve_subagent_manager(self) -> Any | None:
+        if self._get_subagent_manager is None:
+            return None
+        return self._get_subagent_manager()
 
     def _get_backup_manager(self) -> Any | None:
         """Costruisce (una volta) il BackupManager sopra lo SnapshotService."""
@@ -529,6 +546,11 @@ class GatewayHTTPHandler:
         if backup_response is not None:
             return backup_response
 
+        # Stato/controlli dei subagent (delegato a SubagentRoutes)
+        subagent_response = await self.subagent_routes.dispatch(request, got)
+        if subagent_response is not None:
+            return subagent_response
+
         # Wiki + audit routes (delegated to WikiRoutes)
         wiki_response = await self.wiki_routes.dispatch(request, got)
         if wiki_response is not None:
@@ -593,8 +615,14 @@ class GatewayHTTPHandler:
         level = _query_first(query, "level")
         if level not in ("warning", "error"):
             level = "error"
-        source = _query_first(query, "source")[:100] or "unknown"
-        message = _query_first(query, "message")[:800]
+        # ``_query_first`` restituisce None se il parametro manca, e affettare
+        # None solleva TypeError: una richiesta senza ``source`` o ``message``
+        # faceva fallire con 500 la rotta che nel docstring qui sopra promette
+        # di rispondere sempre 200 — e per giunta è la rotta che esiste per
+        # *segnalare* i guasti del client. ``level`` aveva già il suo default;
+        # questi due no.
+        source = (_query_first(query, "source") or "")[:100] or "unknown"
+        message = (_query_first(query, "message") or "")[:800]
         logger.log(
             level.upper(),
             "[webui-client] source={} {}",

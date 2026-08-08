@@ -1,6 +1,8 @@
-# Memory and Dream
+# Memory, Dream and Atlas
 
 Jenny keeps two very different kinds of memory: the live conversation you're having right now, and a set of durable text files that survive across chats, app restarts, and (if you back up) phone changes.
+
+Two background processes maintain those files. **Dream** distils your conversations into what Jenny knows about you and your work. **Atlas** does the same for [your wikis](./wiki.md), compiling them into a directory of the people, projects and systems that matter. They have separate files and cannot write to each other's.
 
 ## The shape of memory
 
@@ -9,6 +11,7 @@ Jenny does not treat memory as one giant file. It separates it into layers, beca
 - The live chat — what you're seeing on screen right now.
 - `memory/history.jsonl` — a running archive of compressed past turns.
 - `SOUL.md`, `USER.md`, and `memory/MEMORY.md` — the durable knowledge files that Jenny actually reads at the start of every conversation.
+- `memory/WIKI.md` — the wiki directory, read at the start of every conversation too, but built from your wikis rather than from your chats.
 
 This keeps a single chat fast in the moment, while still letting Jenny build up a durable picture of you and the project over weeks of use.
 
@@ -65,6 +68,20 @@ If you run `/dream` on a chat that just started, or one that's still short, Jenn
 
 Concretely, `/dream` will tell you this and suggest enabling automatic idle compaction (`idleCompactAfterMinutes`) so completed chats become Dream input on their own, or waiting until the current chat actually gets compacted.
 
+## Atlas: the wiki side of memory
+
+Dream reads your conversations. Atlas reads [your wikis](./wiki.md) and maintains one file, `memory/WIKI.md` — a directory, not a summary. It lists every wiki you have with a one-line scope, then the entities from your main wiki that matter operationally: people you actually deal with, projects you're running, systems you operate. Each entry is one line plus a `[[wikilink]]` to the page that holds the detail.
+
+The point is what it saves you. Without it, "what's the nickname of that plant I'm monitoring?" costs Jenny a few tool calls through the wiki. With it, the answer is already in the prompt.
+
+Three things worth knowing about how Atlas behaves:
+
+- **It runs every 12 hours, but usually does nothing.** Before calling the model, Atlas fingerprints your wiki pages. If nothing changed since the last run, it stops there — no tokens, no battery. `log/` and `audit/` are deliberately excluded from that fingerprint, so routine lint and audit activity doesn't trigger pointless rebuilds.
+- **It can only write `memory/WIKI.md`.** Not `MEMORY.md`, not `SOUL.md`, not `USER.md`, and not the wiki it reads from. That's a sandbox, not a convention — the tools it runs with have no other writable path.
+- **It updates by difference.** Entries that are still correct keep their wording; new pages get added, deleted ones get removed.
+
+You can steer what goes in. Create `memory/WIKI_POLICY.md` in your workspace and write your own inclusion rules in plain language — "plants only if I've given them a nickname", "no medical topics", "skip anything archived over three months". Those rules override the generic criteria. Changing that file also changes the fingerprint, so the next run picks it up.
+
 ## The files
 
 ```text
@@ -73,9 +90,12 @@ workspace/
 ├── USER.md               # Stable knowledge about you: identity, preferences, communication style
 └── memory/
     ├── MEMORY.md         # Project facts, decisions, and durable context
+    ├── WIKI.md           # Wiki directory (Atlas output) — do not hand-edit, it gets rebuilt
+    ├── WIKI_POLICY.md    # Optional: your own rules for what belongs in the directory
     ├── history.jsonl     # Append-only history summaries (Consolidator output)
     ├── .cursor           # Consolidator write cursor
-    └── .dream_cursor     # Dream read cursor
+    ├── .dream_cursor     # Dream read cursor
+    └── .atlas_state.json # Atlas wiki fingerprint
 ```
 
 These files play different roles:
@@ -83,6 +103,7 @@ These files play different roles:
 - `SOUL.md` remembers how Jenny should behave and sound — guardrails, interaction patterns, tool-use strategy.
 - `USER.md` remembers who you are and what you prefer — identity, habits, language, tone, reply length.
 - `MEMORY.md` remembers what remains true about the work itself — goals, decisions, infrastructure.
+- `WIKI.md` remembers what's *in* your wikis — a switchboard of names and links, not the content itself.
 - `history.jsonl` remembers what happened on the way there, as compressed, timestamped summaries.
 - Recurring workflows can also be promoted into `workspace/skills/<name>/SKILL.md` by Dream, rather than staying as prose inside `MEMORY.md` or `USER.md`.
 
@@ -100,6 +121,7 @@ At the start of every conversation, Jenny's system prompt includes:
 
 - `SOUL.md` and `USER.md`, loaded as bootstrap files.
 - `MEMORY.md`, if it has real content (an untouched template file isn't injected).
+- `memory/WIKI.md`, if Atlas has built one. It sits under the same "Memory" heading as `MEMORY.md` but is injected independently — an untouched `MEMORY.md` doesn't suppress it — and is capped at roughly 1,200 tokens so a long directory can't tax every turn.
 - Any history entries from `memory/history.jsonl` that Dream hasn't processed yet (capped to the last 50 entries / roughly 8,000 tokens of text) — this is the bridge between "compacted but not yet dreamed" and the durable files.
 
 So a brand-new chat isn't a blank slate: it inherits your durable profile and project notes from the last Dream pass, plus whatever's been compacted since then but not yet folded in.
@@ -109,6 +131,7 @@ So a brand-new chat isn't a blank slate: it inherits your durable profile and pr
 | Command | What it does |
 |---------|--------------|
 | `/dream` | Runs Dream immediately instead of waiting for the next scheduled pass. Replies "Dreaming..." right away, then follows up with the outcome once it finishes (completed and how long it took, completed-but-wrote-nothing, failed, or nothing to process). |
+| `/atlas` | Rebuilds the wiki directory now. If nothing in your wikis changed since the last run it says so and spends nothing; `/atlas force` rebuilds anyway. |
 
 ## Configuration
 
@@ -132,17 +155,43 @@ Dream's configuration lives under `agents.defaults.dream` in `config.json`, and 
 | `enabled` | Whether the periodic Dream job is registered at all. | `true` |
 | `intervalH` | How often Dream runs automatically, in hours. Internally this becomes an "every N hours" schedule. | `2` |
 
+Atlas has its own block, `agents.defaults.atlas`, with the same shape plus a size cap:
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "atlas": {
+        "enabled": true,
+        "intervalH": 6,
+        "maxContextTokens": 1200
+      }
+    }
+  }
+}
+```
+
+| Field | Meaning | Default |
+|-------|---------|---------|
+| `enabled` | Whether the periodic Atlas job is registered. Leaving it on costs nothing if you have no wikis — the job exits before calling the model. | `true` |
+| `intervalH` | How often Atlas checks whether the wiki changed, in hours. | `6` |
+| `maxContextTokens` | Hard cap on the directory block injected into every prompt. A longer `WIKI.md` is truncated at injection time. | `1200` |
+
+Which wiki supplies the entity list follows `wiki.defaultWiki` (default `main`); the wiki *list* always covers every wiki under `wiki.wikisDir`.
+
 Related settings that shape *when* material reaches Dream in the first place (not Dream-specific, but relevant here) live under `agents.defaults` too: `idleCompactAfterMinutes` (idle-triggered compaction, default 15 minutes), `maxMessages` (default 120), and the consolidation ratio that controls how aggressively old messages are summarized (default 0.5). See [Configuration](../reference/configuration.md) for the full reference.
 
 None of this is exposed in the Settings UI today — Dream's interval and the compaction thresholds can currently only be changed by editing `config.json` directly. The memory files themselves need no special mode to see: `SOUL.md`, `USER.md`, `memory/MEMORY.md`, and `memory/history.jsonl` are all visible from the Workspace file browser by default. The only things the file browser hides by default are dotfiles and a handful of runtime-internal paths (`config.json`, `agent/`, `cron/`, `sessions/`, `ui/`) — including the `memory/.cursor` and `memory/.dream_cursor` cursor files, which are dotfiles. Turning on **Developer mode** in Settings → System reveals those too, but it has no effect on the memory files themselves, which were never hidden.
 
 ## Gotchas worth knowing
 
-- **The 2-hour interval restarts from zero on every app restart.** Dream's schedule is an "every N hours" timer, not a wall-clock cron job — it does not remember how much time had already elapsed before the app (or its background service) was killed. On a phone that kills the app process often, Dream can end up running noticeably less often than "every 2 hours" would suggest.
+- **"Every 2 hours" is a floor, not a promise.** Since 0.6.0 the deadline survives an app restart and a run missed while the app was dead is caught up shortly after it comes back — before that, every restart pushed it out by another 2 hours. What restarts can't fix is Android's doze: even on a process that stays alive for hours, the gap between runs stretches. Expect Dream to run somewhat less often than the number suggests.
 - **Dream prunes, not just adds.** Expect Jenny's memory to occasionally lose detail on purpose — that's Dream doing its job, not corruption. The pre-Dream snapshot is there specifically so a bad prune is recoverable.
 - **`/dream` on a short or fresh chat will say there's nothing to process.** That's because Dream reads `memory/history.jsonl`, not the live chat — see above.
 - **Memory files are visible in the file browser by default, no Developer mode needed.** If you go looking for `MEMORY.md` in the Workspace tab and don't see it, the more likely explanation is that it's still an untouched template with no real content yet. Developer mode (Settings → System) only reveals dotfiles and runtime-internal folders like `agent/`, `cron/`, and `sessions/` — it doesn't gate the memory files.
 - **If the provider is down when the Consolidator needs to summarize, it degrades to a raw `[RAW]` dump** instead of a clean summary — you don't lose the content, but it won't read as nicely until a later pass cleans it up.
+- **Hand edits to `memory/WIKI.md` don't survive.** Atlas rebuilds that file from the wiki. To change what it contains, change the wiki or write your rules into `memory/WIKI_POLICY.md`.
+- **Atlas has no pre-run snapshot, unlike Dream.** It doesn't need one: `WIKI.md` is derived from your wikis, so the worst case is losing it until the next run rebuilds it. Dream rewrites memory that exists nowhere else, which is why *it* gets a checkpoint.
 - **Dream's own model, interval, and batch size are not independently configurable today** — despite what an earlier draft of this documentation implied, there is no `modelOverride` field: Dream always uses the same model as your main agent, and there is no `maxBatchSize` or `cron` override to reach for.
 
 ## In practice

@@ -23,11 +23,12 @@ Start here if you just want to install and use the app.
 | [Tour of the WebUI](using/webui-tour.md) | The 5-tab dock, swipe navigation between views, Android back-button behavior, and the session info popover. |
 | [Chat basics](using/chat.md) | Sending messages, streaming replies, tool call pills, the reasoning block, the changed-files pill, and inline file previews. |
 | [Files and attachments](using/attachments.md) | Sending images, files, and camera captures from chat; the exact size limits and what the model actually gets to see. |
-| [Memory and Dream](using/memory.md) | How session history, idle compaction, and the two-phase Dream consolidation build Jenny's long-term memory. |
+| [Memory, Dream and Atlas](using/memory.md) | How session history, idle compaction, and the two-phase Dream consolidation build Jenny's long-term memory — and how Atlas compiles your wikis into a directory she always has to hand. |
 | [Scheduling and proactivity](using/scheduling.md) | Reminders (one-shot, recurring, cron), the heartbeat loop, goals/long tasks, and subagents — and what silently breaks when the app is killed. |
 | [Mini-apps (Jenny Apps)](using/mini-apps.md) | Chat-authored mini web apps backed by native tools, how they differ from skills, and their sandboxing limits. |
 | [Skills](using/skills.md) | Markdown-based skill folders that extend agent behavior in chat, and why built-in skill edits don't survive a restart. |
 | [Themes and mascot](using/themes-mascot.md) | The 7 UI themes, the mascot's interactions and preferences, and UI language vs. agent language. |
+| [SSH access](using/ssh.md) | Registering your own remote machines, generating the on-device key, pinning host fingerprints, short commands vs detached jobs — and why a restore doesn't bring SSH access back. |
 | [Telegram bridge](using/telegram.md) | Pairing and using the optional Telegram bridge alongside the WebUI, and what does and doesn't work over it. |
 | [Location](using/location.md) | How device location is shared with the model as context, the two-gate permission model, and the privacy trade-off. |
 | [Backup and restore](using/backup.md) | Encrypted `.jbk` backups (for disaster recovery) vs. local workspace snapshots (a time machine), and how to restore either. |

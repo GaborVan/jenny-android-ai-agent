@@ -28,6 +28,11 @@ def _environment() -> Environment:
     )
 
 
+def forget_templates_root() -> None:
+    """Scarta l'ambiente memoizzato. Da chiamare quando cambia il workspace."""
+    _environment.cache_clear()
+
+
 def render_template(name: str, *, strip: bool = False, **kwargs: Any) -> str:
     """Render ``name`` (e.g. ``agent/identity.md``, ``agent/platform_policy.md``) under ``templates/``.
 

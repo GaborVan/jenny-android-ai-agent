@@ -10,7 +10,7 @@ Two commands — `/stop` and `/status` — are handled on a "priority" fast path
 
 All server-side command responses below are **hardcoded in English**, regardless of whether the WebUI is set to Italian or English. This is true for the confirmation text, the usage/error messages, and the `/status`/`/model` output.
 
-## The 9 server commands
+## The 10 server commands
 
 | Command | Arguments | What it does |
 |---|---|---|
@@ -21,6 +21,7 @@ All server-side command responses below are **hardcoded in English**, regardless
 | `/history` | `[n]` | Prints the last `n` persisted user/assistant messages (default 10, max 50) |
 | `/goal` | `<description>` | Tells the agent to treat the request as a long-running goal |
 | `/dream` | none | Manually triggers a memory consolidation (Dream) run in the background |
+| `/atlas` | `[force]` | Rebuilds the wiki directory (`memory/WIKI.md`) from your wikis, in the background |
 | `/skill` | none | Lists the currently enabled skills with their descriptions |
 | `/help` | none | Lists all of the above (not `/clear` — see below) |
 
@@ -57,7 +58,7 @@ No active task to stop.
 No arguments. Output is a fixed-format block (rendered as plain text, not markdown), for example:
 
 ```text
-🐈 jenny v0.3.0
+🐈 jenny v0.6.0
 🧠 Model: gpt-4o
 📊 Tokens: 1234 in / 567 out (40% cached)
 📚 Context: 12k/65k (22% of input budget)
@@ -79,7 +80,7 @@ Without an argument, shows the current state:
 - Available presets: `default`, `fast`, `deep`
 ```
 
-`default` is always available and reflects the plain `agents.defaults.*` model fields; named presets come from `modelPresets` in `config.json` — there is no UI for creating presets, they exist only in the config file. See [Configuration reference](../reference/configuration.md#model-presets).
+`default` is always available and reflects the plain `agents.defaults.*` model fields; named presets come from `modelPresets` in `config.json` — there is no UI for creating presets, they exist only in the config file. See [Configuration reference](../reference/configuration.md#modelpresets).
 
 With one argument, it switches presets for future turns and confirms:
 
@@ -171,7 +172,29 @@ Dream did not complete after 4.2s; memory cursor was not advanced.
 Dream failed after 4.2s: <error>
 ```
 
-If there's no new history to process yet (common on a fresh or short chat, since Dream only reads from `memory/history.jsonl`, which is only populated after compaction), you get a longer explanation instead, ending with suggestions like enabling `idleCompactAfterMinutes`. See [Memory and Dream](./memory.md) for the full model.
+If there's no new history to process yet (common on a fresh or short chat, since Dream only reads from `memory/history.jsonl`, which is only populated after compaction), you get a longer explanation instead, ending with suggestions like enabling `idleCompactAfterMinutes`. See [Memory, Dream and Atlas](./memory.md) for the full model.
+
+### `/atlas` — rebuild the wiki directory now
+
+Triggers Atlas, the job that compiles your wikis into `memory/WIKI.md`. Like `/dream` it acknowledges immediately:
+
+```text
+Mapping the wiki...
+```
+
+and follows up with the outcome. The interesting cases are the ones where it deliberately does nothing:
+
+```text
+Atlas updated `memory/WIKI.md` in 6.4s.
+```
+```text
+The wiki hasn't changed since the last Atlas run, so `memory/WIKI.md` is already current — no tokens spent. Use `/atlas force` to rebuild it anyway.
+```
+```text
+Atlas found no wikis to map.
+```
+
+`/atlas force` skips the change check and rebuilds regardless. It does not skip the "do you have any wikis" check — with no wikis there is nothing to compile. See [Atlas](./memory.md#atlas-the-wiki-side-of-memory).
 
 ### `/skill` — list enabled skills
 
@@ -200,6 +223,7 @@ No skills available.
 /history [n] — Print the last N persisted conversation messages.
 /goal <goal> — Tell the agent to treat the request as a long-running goal.
 /dream — Manually trigger memory consolidation.
+/atlas [force] — Rebuild the wiki directory in memory/WIKI.md. Add 'force' to skip the change check.
 /skill — List enabled skills and their descriptions.
 /help — List available slash commands.
 ```
@@ -237,7 +261,7 @@ This is unrelated to slash commands but shares the same "plain files, no termina
 ## See also
 
 - [Chat basics](./chat.md) for the message composer, streaming, and the "Agent running" banner referenced above.
-- [Memory and Dream](./memory.md) for what `/dream` actually processes and why it can say there's nothing to do.
+- [Memory, Dream and Atlas](./memory.md) for what `/dream` and `/atlas` actually process, and why either can say there's nothing to do.
 - [Scheduling and proactivity](./scheduling.md) for `/goal`, reminders, and the heartbeat.
 - [Configuration reference](../reference/configuration.md) for `modelPresets` and other config-only settings.
 - [Troubleshooting](./troubleshooting.md) if a command's response looks wrong or the chat seems unresponsive.

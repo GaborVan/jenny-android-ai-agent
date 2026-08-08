@@ -36,6 +36,13 @@ from jenny.channels.http_utils import (
 from jenny.channels.http_utils import (
     query_first as _query_first,
 )
+from jenny.channels.subagent_activity_wire import (
+    UNWATCH_REASON_CLIENT,
+    UNWATCH_REASON_LIMIT,
+    SubagentWatchRegistry,
+    normalize_since,
+    normalize_task_id,
+)
 from jenny.channels.ws_logging import websockets_server_logger
 from jenny.channels.ws_parsing import (
     _MAX_FILE_BYTES,
@@ -149,6 +156,11 @@ class WebSocketChannel(OutboundSenderMixin):
         self._conns_by_id: dict[str, Any] = {}
         self._stop_event: asyncio.Event | None = None
         self._server_task: asyncio.Task[None] | None = None
+        # Attività fine dei subagent: chi guarda cosa, e l'unico task che la
+        # spinge. Il registro nasce vuoto e il task non esiste finché nessuno
+        # guarda — il costo aggiunto con il pannello chiuso è zero.
+        self._subagent_watches = SubagentWatchRegistry()
+        self._activity_pump_task: asyncio.Task[None] | None = None
 
         # RPC domanda→risposta verso un singolo client (tool ui_view). Opzionale.
         self._ui_query = ui_query
@@ -217,6 +229,12 @@ class WebSocketChannel(OutboundSenderMixin):
 
     def _cleanup_connection(self, connection: Any) -> None:
         """Remove *connection* from every subscription set; safe to call multiple times."""
+        # Punto di uscita unico: ci passano la disconnessione pulita (il
+        # ``finally`` di ``_connection_loop``), il ``ConnectionClosed`` a metà
+        # invio e il drop per backpressure (app in background su Android). Quindi
+        # è qui, e solo qui, che i watch di attività vengono dimenticati: un
+        # client che sparisce senza ``subagent_unwatch`` non lascia niente dietro.
+        self._subagent_watches.forget(connection)
         chat_ids = self._conn_chats.pop(connection, set())
         for cid in chat_ids:
             subs = self._subs.get(cid)
@@ -576,6 +594,12 @@ class WebSocketChannel(OutboundSenderMixin):
                 metadata=metadata,
             )
             return
+        if t == "subagent_watch":
+            await self._handle_subagent_watch(connection, envelope)
+            return
+        if t == "subagent_unwatch":
+            await self._handle_subagent_unwatch(connection, envelope)
+            return
         if t == "ui_result":
             # Risposta del client a una ui_query: risolvi la Future in attesa.
             # Tutta la validazione/rifiuto vive nel coordinator (modulo leaf).
@@ -585,12 +609,71 @@ class WebSocketChannel(OutboundSenderMixin):
             return
         await self._send_event(connection, "error", detail=f"unknown type: {t!r}")
 
+    # -- Osservazione dell'attività di un subagent -------------------------
+
+    async def _handle_subagent_watch(
+        self,
+        connection: Any,
+        envelope: dict[str, Any],
+    ) -> None:
+        """``{"type": "subagent_watch", "task_id": ..., "since"?: int}``.
+
+        Ordine deliberato: **prima** parte la finestra corrente, **poi** si
+        registra il watch con il cursore che quella finestra ha consegnato. Al
+        contrario il pump potrebbe infilare un delta davanti alla risposta
+        iniziale e portare avanti il cursore, e il client vedrebbe arrivare la
+        coda prima della testa.
+
+        Un task ignoto, mai esistito o già finito e ripulito non è un errore: la
+        risposta è una finestra vuota con ``latest_seq == 0``, e il watch resta
+        registrato — se quel task inizia a produrre (o è appena stato lanciato)
+        i suoi eventi arrivano dal tick successivo.
+        """
+        task_id = normalize_task_id(envelope.get("task_id"))
+        if task_id is None:
+            await self._send_event(connection, "error", detail="invalid task_id")
+            return
+        since = normalize_since(envelope.get("since"))
+        cursor = await self.send_subagent_activity_window(connection, task_id, since=since)
+        if connection not in self._conn_chats:
+            # La connessione è morta durante l'invio (``_fanout`` l'ha già
+            # ripulita): registrare il watch ora creerebbe un watcher fantasma
+            # che nessun cleanup verrebbe più a raccogliere.
+            return
+        evicted = self._subagent_watches.watch(connection, task_id, cursor=cursor)
+        for gone in evicted:
+            # Il client deve sapere quale vista è ferma: senza l'ack resterebbe
+            # in attesa di delta che non arriveranno più.
+            await self._send_event(
+                connection, "subagent_unwatched", task_id=gone, reason=UNWATCH_REASON_LIMIT
+            )
+        self._ensure_subagent_activity_pump()
+
+    async def _handle_subagent_unwatch(
+        self,
+        connection: Any,
+        envelope: dict[str, Any],
+    ) -> None:
+        """``{"type": "subagent_unwatch", "task_id": ...}``. Idempotente."""
+        task_id = normalize_task_id(envelope.get("task_id"))
+        if task_id is None:
+            await self._send_event(connection, "error", detail="invalid task_id")
+            return
+        self._subagent_watches.unwatch(connection, task_id)
+        await self._send_event(
+            connection, "subagent_unwatched", task_id=task_id, reason=UNWATCH_REASON_CLIENT
+        )
+
     # -- Outbound WebSocket events -----------------------------------------
 
     async def stop(self) -> None:
         if not self._running:
             return
         self._running = False
+        # Prima del teardown del server: il pump è l'unico task che il canale
+        # possiede oltre a quello del server, e lasciarlo vivo lo farebbe girare
+        # su un registro che stiamo per svuotare.
+        self.stop_subagent_activity_pump()
         if self._stop_event:
             self._stop_event.set()
         if self._server_task:

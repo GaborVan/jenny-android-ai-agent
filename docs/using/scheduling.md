@@ -7,8 +7,8 @@ Jenny can remind you of things, watch a checklist in the background, work a long
 **Everything in this page lives inside the app's own gateway process.** There is no server in the cloud keeping time for you. If Android kills the app (or you swipe it away, or the battery optimizer freezes it) at the moment a reminder was supposed to fire, here is what actually happens:
 
 - A **one-shot reminder** ("remind me at 6pm") whose time passed while the app was dead is lost **forever, silently**. When the gateway starts back up it recomputes each job's next run; for a one-shot whose time is already in the past, the next run comes back empty and the job is never retried or reported missed — nothing tells you it didn't happen.
-- A **recurring reminder** ("every 30 minutes", "every day") does not catch up on missed runs either. Every time the app restarts, its interval resets to "now + interval" — so a daily reminder that should have fired at 9am, if the app happened to restart at 9:05am, now fires roughly 24 hours from the restart, not from the original schedule.
-- The same applies to the built-in Heartbeat and Dream jobs described below: their clocks also restart from zero whenever the app restarts.
+- A **recurring reminder** ("every 30 minutes", "every day") keeps its deadline across restarts, and *does* catch up: a daily reminder that came due at 9am while the app was dead fires shortly after the app comes back, not 24 hours later. Before 0.6.0 this was not the case — every restart reset the interval to "now + interval", so on a phone that restarts the app often, a long interval could go indefinitely without ever firing. The same fix covers the three built-in jobs below.
+- **Catch-up is not the same as punctuality.** The deadline is honoured, but only once the app is running again, and Android's doze can stretch the gap well past the nominal interval even while the app lives: on a test device a 30-minute job was observed firing between 30 and 83 minutes apart. Treat every interval here as a floor, not a promise.
 
 None of this is announced anywhere in the app. If reminders matter to you, the practical fix is to keep the app from being killed:
 
@@ -48,7 +48,17 @@ A few smaller things worth knowing:
 
 ### Protected system jobs
 
-When you ask Jenny to list reminders, you'll also see two jobs you didn't create: **`dream`** and **`heartbeat`**. These are system-managed and will show up as protected — visible for inspection, but Jenny will refuse to remove them if asked (a removal attempt gets a reply along the lines of "this is a protected system-managed cron job" and cannot be removed). `dream` runs the memory-consolidation pass described in [Memory and Dream](memory.md); `heartbeat` is described next.
+When you ask Jenny to list reminders, you'll also see three jobs you didn't create: **`dream`**, **`atlas`** and **`heartbeat`**. These are system-managed and will show up as protected — visible for inspection, but Jenny will refuse to remove them if asked (a removal attempt gets a reply along the lines of "this is a protected system-managed cron job" and cannot be removed). The way to stop one is its config switch, not the reminder list.
+
+| Job | Runs | Config | What it costs you |
+|---|---|---|---|
+| `dream` | every **2 hours** | `agents.defaults.dream.enabled` (default on), `agents.defaults.dream.intervalH` (default `2`) | One agent run — a real turn against your provider, several calls if it uses tools — whenever there is new conversation to consolidate. Takes a snapshot first, so a bad run is undoable. |
+| `atlas` | every **6 hours** | `agents.defaults.atlas.enabled` (default on), `agents.defaults.atlas.intervalH` (default `6`) | Nothing at all when your wikis haven't changed — a fingerprint check runs first and the job exits before touching the provider. One agent run when they have. |
+| `heartbeat` | every **30 minutes** | `gateway.heartbeat.enabled` (default on), `gateway.heartbeat.intervalS` (default `1800`) | Nothing when `## Active Tasks` is empty; one real turn plus a second silent judgment call when it isn't. See below. |
+
+`dream` runs the memory-consolidation pass and `atlas` rebuilds the wiki directory (`memory/WIKI.md`), both described in [Memory, Dream and Atlas](memory.md); `heartbeat` is described next.
+
+**Atlas never says anything.** Unlike a reminder or Heartbeat, it produces no chat message and no notification whether it ran, skipped, or failed — the only visible output is `memory/WIKI.md` changing and the entity list Jenny quotes in later turns getting more accurate. That silence is deliberate (a directory rebuild is not news), but it means the 12-hourly token cost is invisible too: when your wikis *have* changed, every run is a real turn against your provider, and you will only see it in Settings → System → Token usage. If you don't use the wiki at all, the job costs nothing and you can leave it alone; if you want it off anyway, that is `agents.defaults.atlas.enabled`. `/atlas` runs it on demand, and `/atlas force` runs it even when the fingerprint says nothing changed.
 
 ## Heartbeat: a periodic checklist
 
@@ -83,16 +93,42 @@ What changes once a goal is active:
 
 ## Subagents (`spawn`)
 
-When Jenny decides a task is complex or slow enough to run independently, she can delegate it to a subagent — a second, short-lived agent instance working in the background — rather than asking you to wait.
+**Delegation is not the exception, it is how Jenny works.** With `agents.defaults.orchestratorMode` at its default of `true`, the agent you talk to is an *orchestrator*: it can read files, search, schedule, message you and drive subagents, but it cannot write files, run code, or touch the web itself. Anything in those categories reaches a subagent by definition, not because Jenny judged the task big enough. What is left to judgment is *how* the work is split, not whether to split it.
+
+The reason is context. Everything the main agent does stays in your conversation permanently, and a page fetch or a test run is exactly the kind of large, low-value output that would sit there forever. A subagent's tool output lives and dies with the subagent; only its conclusion comes back.
+
+### The six kinds of subagent
+
+`spawn` picks a **type**, and the type decides which tools that agent gets. The split is a safety boundary, not a convenience: whoever reads untrusted web pages is never also the one who runs code.
+
+| Type | For | Notably cannot |
+|---|---|---|
+| `researcher` | Gathering material online | Run code |
+| `writer` | Docs, wiki pages, synthesis from material already gathered | Reach the network at all |
+| `coder` | Writing and changing code, running tests | Reach the network |
+| `analyst` | Computation, data, charts | Reach the network |
+| `sysadmin` | Remote machines over SSH | Use the web, or run code locally |
+| `operator` | Everything else — the default | (holds the general subagent toolset) |
+
+Full tool lists and sampling defaults are in the [Tool reference](../reference/tools.md).
+
+### Watching and steering the work
+
+Because a subagent can run for minutes, the chat gives you a **Subagents panel** just above the message box: one card per running job with its type, elapsed time, idle time and current step, plus **Stop** and **Relaunch** buttons and a tap-through detail sheet showing what it actually did. It appears when work starts and disappears when the turn ends. See [Chat basics](chat.md#the-subagents-panel).
+
+Jenny has the same controls from her side: she can check on a subagent's status, send it a correction mid-run ("no, use the other table") without restarting it, relaunch a failed one, and cancel one that's going nowhere. Those tools exist only in orchestrator mode and are never given to a subagent — a subagent cannot drive its siblings.
+
+### How a delegation behaves
 
 - You'll see this happen as a short confirmation in chat, something like *"Subagent [research] started (id: xxxxxxxx). I'll notify you when it completes."* — after that the chat is free for you to keep talking about anything else.
 - When the subagent finishes, its result is fed back in as a fresh turn of the main conversation: Jenny reads the outcome and summarizes it for you naturally (the announcement is explicitly told not to mention "subagent" or task IDs in the final reply, so it may just read like an ordinary answer).
-- By default only **1** subagent can run at a time (`agents.defaults.maxConcurrentSubagents`, default `1`). Asking for a second one while the first is still running gets a plain "concurrency limit reached" reply instead of being queued.
+- By default up to **3** subagents can run at a time (`agents.defaults.maxConcurrentSubagents`, default `3`), and one slot is always kept free for a short job — so an ordinary delegation is refused once two are already running. Asking for one past the limit gets a plain "concurrency limit reached" reply instead of being queued.
 - A subagent is **blind to your conversation** — it only knows what task text it was handed. If a delegated task comes back disappointing, the usual cause is that the task description didn't carry enough context, not that the subagent "misunderstood."
 - Subagents use the same model/provider as your main agent and consume tokens like a full turn — delegating is not free.
 - `/goal` refuses to start while a subagent is still active on the session.
 - `/stop` disowns any subagents running for that chat: their in-flight work is abandoned, and if one finishes anyway after being disowned, its stale result is silently discarded rather than injected into the chat.
-- If the app process dies while a subagent is working, that work is gone — subagent state lives only in memory, not on disk.
+- A subagent that goes quiet for longer than `agents.defaults.subagentStallThresholdSeconds` (default 180s) is flagged as stalled. It is never cancelled for you: relaunching is a decision, and a subagent that starts making progress again is un-flagged on its own.
+- If the app process dies while a subagent is working, its in-flight work is gone. What survives is a small record of each finished attempt (task, outcome, result summary) under `workspace/subagents/records/`, kept for the last 20 attempts per chat and 7 days — enough to see what happened and replay the work.
 
 ## Android notifications
 
@@ -108,7 +144,7 @@ None of the proactive messages above are guaranteed to make a sound — whether 
 
 ## Related pages
 
-- [Memory and Dream](memory.md) — what the `dream` system job (visible in your reminders list) actually does.
+- [Memory, Dream and Atlas](memory.md) — what the `dream` and `atlas` system jobs (visible in your reminders list) actually do.
 - [Telegram bridge](telegram.md) — how proactive deliveries (Heartbeat, reminders) reach a paired Telegram chat.
 - [Slash commands](slash-commands.md) — full reference for `/goal`, `/stop`, and the rest.
 - [Android permissions](../reference/android-permissions.md) — the full permission table, including `POST_NOTIFICATIONS` and battery-optimization exemption.

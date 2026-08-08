@@ -55,6 +55,8 @@ _CRON_PARAMETERS = tool_parameters_schema(
 class CronTool(Tool, ContextAware):
     """Tool to schedule reminders and recurring tasks."""
 
+    _scopes = {"core", "orchestrator"}
+
     def __init__(self, cron_service: CronService, default_timezone: str = "UTC"):
         self._cron = cron_service
         self._default_timezone = default_timezone
@@ -251,9 +253,16 @@ class CronTool(Tool, ContextAware):
 
     @staticmethod
     def _system_job_purpose(job: CronJob) -> str:
-        if job.name == "dream":
-            return "Dream memory consolidation for long-term memory."
-        return "System-managed internal job."
+        # Un job di sistema che l'utente vede elencato senza sapere cosa fa e
+        # solo un motivo di sospetto: questi tre girano da soli e spendono
+        # token, quindi devono sapersi presentare. Chi ne aggiunge un quarto lo
+        # aggiunga anche qui.
+        purposes = {
+            "dream": "Dream memory consolidation for long-term memory.",
+            "atlas": "Atlas wiki directory: rebuilds memory/WIKI.md from your wikis.",
+            "heartbeat": "Heartbeat: checks HEARTBEAT.md for tasks you left for Jenny.",
+        }
+        return purposes.get(job.name, "System-managed internal job.")
 
     def _list_jobs(self) -> str:
         jobs = self._cron.list_jobs()

@@ -55,7 +55,7 @@ def _resolve_target(target: str) -> Any:
 class GetSourceTool(Tool):
     """Return the source code of a jenny module, class, or function."""
 
-    _scopes = {"core", "subagent"}
+    _scopes = {"core", "orchestrator", "subagent"}
 
     name = "get_source"
     description = (

@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from jenny.agent.loop import AgentLoop
-from jenny.agent.subagent import SubagentManager, SubagentStatus
+from jenny.agent.subagent import SubagentManager, SubagentSpec, SubagentStatus
 from jenny.agent.tools.search import FindFilesTool, GrepTool
 from jenny.bus.queue import MessageBus
 
@@ -288,14 +288,87 @@ async def test_search_tools_reject_paths_outside_workspace(tmp_path: Path) -> No
 
 
 def test_agent_loop_registers_grep(tmp_path: Path) -> None:
+    """I tool di ricerca stanno nello scope "core": l'orchestratore li delega."""
     bus = MessageBus()
     provider = MagicMock()
     provider.get_default_model.return_value = "test-model"
 
-    loop = AgentLoop(bus=bus, provider=provider, workspace=tmp_path, model="test-model")
+    loop = AgentLoop(
+        bus=bus, provider=provider, workspace=tmp_path, model="test-model",
+        orchestrator_mode=False,
+    )
 
     assert "find_files" in loop.tools.tool_names
     assert "grep" in loop.tools.tool_names
+
+
+def test_orchestrator_loop_gets_grep_as_an_index_only(tmp_path: Path) -> None:
+    """L'orchestratore ha ``grep``, ma solo per sapere *dove* guardare.
+
+    Prima non l'aveva affatto, e il costo si e visto sul telefono: senza
+    ricerca sfogliava i file a fette di duecento righe, venti turni per una
+    cosa sola, con il contesto da 59k a 89k token in due minuti. La modalita
+    ``content`` resta pero fuori: e l'unica che produce output grosso, e
+    l'output dell'orchestratore resta nella conversazione per sempre.
+    """
+    bus = MessageBus()
+    provider = MagicMock()
+    provider.get_default_model.return_value = "test-model"
+
+    loop = AgentLoop(
+        bus=bus, provider=provider, workspace=tmp_path, model="test-model",
+        orchestrator_mode=True,
+    )
+
+    assert "find_files" not in loop.tools.tool_names
+    grep = loop.tools.get("grep")
+    assert grep is not None
+    assert grep._index_only is True
+    assert grep.parameters["properties"]["output_mode"]["enum"] == [
+        "files_with_matches", "count",
+    ]
+
+
+def test_core_loop_keeps_the_full_grep(tmp_path: Path) -> None:
+    provider = MagicMock()
+    provider.get_default_model.return_value = "test-model"
+
+    loop = AgentLoop(
+        bus=MessageBus(), provider=provider, workspace=tmp_path, model="test-model",
+        orchestrator_mode=False,
+    )
+
+    grep = loop.tools.get("grep")
+    assert grep._index_only is False
+    assert "content" in grep.parameters["properties"]["output_mode"]["enum"]
+
+
+async def test_index_only_grep_returns_paths_when_asked_for_content(tmp_path: Path) -> None:
+    """Chiedere ``content`` non e un errore: si ottengono i percorsi e una nota.
+
+    Lo schema gia esclude quella modalita, ma una skill puo insegnarla lo
+    stesso. Rispondere con i file giusti e una riga di spiegazione costa un
+    turno in meno di un rifiuto, e insegna la mossa successiva.
+    """
+    (tmp_path / "note.txt").write_text("alpha\nbeta\n", encoding="utf-8")
+    grep = GrepTool(workspace=tmp_path, allowed_dir=tmp_path, index_only=True)
+
+    out = await grep.execute(pattern="beta", output_mode="content")
+
+    assert "note.txt" in out
+    assert "> 2| beta" not in out
+    assert "matching lines are not available here" in out
+
+
+async def test_index_only_grep_caps_the_number_of_files(tmp_path: Path) -> None:
+    for i in range(GrepTool._INDEX_HEAD_LIMIT + 20):
+        (tmp_path / f"f{i:03d}.txt").write_text("needle\n", encoding="utf-8")
+    grep = GrepTool(workspace=tmp_path, allowed_dir=tmp_path, index_only=True)
+
+    out = await grep.execute(pattern="needle", head_limit=1000)
+
+    assert out.count(".txt") == GrepTool._INDEX_HEAD_LIMIT
+    assert "pagination" in out
 
 
 @pytest.mark.asyncio
@@ -324,7 +397,7 @@ async def test_subagent_registers_grep(tmp_path: Path) -> None:
     mgr._announce_result = AsyncMock()
 
     status = SubagentStatus(task_id="sub-1", label="label", task_description="search task", started_at=time.monotonic())
-    await mgr._run_subagent("sub-1", "search task", "label", {"channel": "internal", "chat_id": "direct"}, status)
+    await mgr._run_subagent("sub-1", SubagentSpec(task="search task", label="label"), status)
 
     assert "find_files" in captured["tool_names"]
     assert "grep" in captured["tool_names"]

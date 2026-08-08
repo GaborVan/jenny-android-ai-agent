@@ -40,7 +40,7 @@ from jenny.agent.tool_error_policy import (
     WORKSPACE_VIOLATION_MARKERS,
     classify_violation,
 )
-from jenny.agent.tool_execution import ToolExecutionMixin
+from jenny.agent.tool_execution import ToolErrorBudget, ToolExecutionMixin
 from jenny.agent.tools.registry import ToolRegistry
 from jenny.agent.usage_accounting import (
     accumulate_usage,
@@ -125,6 +125,12 @@ class AgentRunSpec:
     max_iterations_message: str | None = None
     concurrent_tools: bool = False
     fail_on_tool_error: bool = False
+    # Quanti errori tool recuperabili il run tollera prima che
+    # ``fail_on_tool_error`` scatti. ``None`` = comportamento storico (il primo
+    # errore chiude il run); un intero attiva il budget di
+    # ``ToolErrorBudget``. Senza ``fail_on_tool_error`` e ignorato: nessun errore
+    # tool e fatale e non c'e niente da razionare.
+    tool_error_budget: int | None = None
     workspace: Path | None = None
     session_key: str | None = None
     context_window_tokens: int | None = None
@@ -180,6 +186,10 @@ class _RunCounters:
     external_lookup_counts: dict[str, int] = field(default_factory=dict)
     # Per-turn throttle for repeated attempts against the same outside target.
     workspace_violation_counts: dict[str, int] = field(default_factory=dict)
+    # Tolleranza agli errori tool, contata sul RUN e non sul turno: e la sua
+    # continuita fra un turno e l'altro che rende osservabile un agente che
+    # sbaglia un po' ogni volta senza mai fermarsi.
+    tool_errors: ToolErrorBudget = field(default_factory=ToolErrorBudget)
     empty_content_retries: int = 0
     length_recovery_count: int = 0
     blank_truncation_retries: int = 0
@@ -402,7 +412,7 @@ class AgentRunner(RequestExecutionMixin, ToolExecutionMixin):
         # ``state`` raggruppa i contatori/accumulatori condivisi tra i rami; gli
         # helper lo mutano per riferimento (stessa istanza), così i reset e le
         # accumulazioni restano visibili all'iterazione successiva.
-        state = _RunCounters()
+        state = _RunCounters(tool_errors=ToolErrorBudget.from_spec(spec))
 
         for iteration in range(spec.max_iterations):
             messages_for_model = self._govern_context(spec, messages, iteration)
@@ -649,6 +659,7 @@ class AgentRunner(RequestExecutionMixin, ToolExecutionMixin):
             response.tool_calls,
             state.external_lookup_counts,
             state.workspace_violation_counts,
+            tool_errors=state.tool_errors,
         )
         state.tool_events.extend(new_events)
         state.tools_used.extend(

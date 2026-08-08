@@ -11,10 +11,12 @@ from jenny.agent.hook import AgentHookContext
 from jenny.agent.runner import AgentRunResult
 from jenny.agent.subagent import (
     SubagentManager,
+    SubagentSpec,
     SubagentStatus,
     _SubagentHook,
 )
 from jenny.bus.queue import MessageBus
+from jenny.config.schema import AgentDefaults
 from jenny.providers.base import LLMProvider
 
 # ---------------------------------------------------------------------------
@@ -36,6 +38,12 @@ def _manager(tmp_path: Path, **kw) -> SubagentManager:
     )
     defaults.update(kw)
     return SubagentManager(**defaults)
+
+
+def _spec(task: str = "do task", label: str = "label", **kw) -> SubagentSpec:
+    defaults = dict(origin_channel="internal", origin_chat_id="direct")
+    defaults.update(kw)
+    return SubagentSpec(task=task, label=label, **defaults)
 
 
 def _make_hook_context(**overrides) -> AgentHookContext:
@@ -242,6 +250,147 @@ class TestSpawn:
         block.set()
         await _drain_subagent_tasks(sm)
 
+    def test_default_concurrency_leaves_room_for_a_reserved_slot(self):
+        """Tre slot, uno dei quali resta riservato ai job quick.
+
+        Tre e non cinque: ogni slot e una richiesta LLM in volo da un telefono, e
+        oltre non cede la CPU ma il rate limit del provider. Il numero e comunque
+        > 1, altrimenti la riserva si annulla (``_check_capacity``) e il fan-out
+        si serializza — che era il bug osservato sul device.
+        """
+        assert AgentDefaults().max_concurrent_subagents == 3
+        assert AgentDefaults().max_concurrent_subagents > 1
+
+    @pytest.mark.asyncio
+    async def test_reserves_one_slot_for_quick_spawns(self, tmp_path):
+        """Uno spawn normale non puo prendere l'ultimo slot: senza riserva i
+        long-running saturano il pool e non resta modo di fare un job breve."""
+        from jenny.agent.subagent import SubagentConcurrencyLimitError
+
+        sm = _manager(tmp_path, max_concurrent_subagents=5)
+        block = asyncio.Event()
+
+        async def _slow_run(spec):
+            await block.wait()
+            return AgentRunResult(final_content="done", messages=[], stop_reason="completed")
+        sm.runner.run = _slow_run
+
+        for i in range(4):
+            await sm.spawn(f"long task {i}", session_key="s1")
+        assert sm.get_running_count() == 4
+
+        with pytest.raises(SubagentConcurrencyLimitError) as exc_info:
+            await sm.spawn("fifth long task", session_key="s1")
+        assert exc_info.value.reserved is True
+        assert exc_info.value.running == 4
+        assert exc_info.value.limit == 5
+        assert "reserved" in str(exc_info.value)
+        assert sm.get_running_count() == 4
+
+        # Lo slot riservato accetta un job quick.
+        await sm.spawn("quick check", session_key="s1", quick=True)
+        assert sm.get_running_count() == 5
+
+        # Pool pieno: nemmeno un quick entra, e il rifiuto non è quello riservato.
+        with pytest.raises(SubagentConcurrencyLimitError) as exc_info:
+            await sm.spawn("another quick", session_key="s1", quick=True)
+        assert exc_info.value.reserved is False
+
+        block.set()
+        await _drain_subagent_tasks(sm)
+
+    @pytest.mark.asyncio
+    async def test_single_slot_config_still_spawns(self, tmp_path):
+        """Con limite 1 la riserva si annulla, altrimenti non partirebbe nulla."""
+        sm = _manager(tmp_path, max_concurrent_subagents=1)
+        sm.runner.run = AsyncMock(return_value=AgentRunResult(
+            final_content="done", messages=[], stop_reason="completed",
+        ))
+        assert "started" in await sm.spawn("task", session_key="s1")
+        await _drain_subagent_tasks(sm)
+
+
+# ---------------------------------------------------------------------------
+# retention Tier-1 alla terminazione
+# ---------------------------------------------------------------------------
+
+
+class TestTerminalRetention:
+    @pytest.mark.asyncio
+    async def test_completed_subagent_leaves_a_record(self, tmp_path):
+        sm = _manager(tmp_path)
+        sm.runner.run = AsyncMock(return_value=AgentRunResult(
+            final_content="the answer is 42", messages=[], stop_reason="completed",
+        ))
+        sm.bus.publish_inbound = AsyncMock()
+
+        await sm.spawn("compute", label="computer", session_key="s1")
+        await _drain_subagent_tasks(sm)
+
+        # Lo status vivo è sparito, ma il lavoro non è svanito con lui.
+        assert sm.list_statuses() == {}
+        records = sm.list_records("s1")
+        assert len(records) == 1
+        record = records[0]
+        assert record.state == "done"
+        assert record.stop_reason == "completed"
+        assert record.attempt == 1
+        assert record.lineage_id
+        assert record.spec.task == "compute"
+        assert record.spec.label == "computer"
+        assert record.spec.agent_type == "operator"
+        assert "the answer is 42" in record.result_summary
+        assert record.ended_at >= record.started_at
+
+    @pytest.mark.asyncio
+    async def test_failed_subagent_record_carries_the_error(self, tmp_path):
+        sm = _manager(tmp_path)
+        sm.runner.run = AsyncMock(side_effect=RuntimeError("LLM down"))
+        sm.bus.publish_inbound = AsyncMock()
+
+        await sm.spawn("compute", session_key="s1")
+        await _drain_subagent_tasks(sm)
+
+        record = sm.list_records("s1")[0]
+        assert record.state == "failed"
+        assert record.phase == "error"
+        assert "LLM down" in (record.error or "")
+
+    @pytest.mark.asyncio
+    async def test_cancelled_subagent_is_recorded_as_cancelled(self, tmp_path):
+        sm = _manager(tmp_path)
+        block = asyncio.Event()
+
+        async def _slow_run(spec):
+            await block.wait()
+            return AgentRunResult(final_content="done", messages=[], stop_reason="completed")
+        sm.runner.run = _slow_run
+
+        await sm.spawn("compute", session_key="s1")
+        assert await sm.cancel_by_session("s1") == 1
+        await _drain_subagent_tasks(sm)
+
+        record = sm.list_records("s1")[0]
+        assert record.state == "cancelled"
+
+        block.set()
+
+    @pytest.mark.asyncio
+    async def test_retention_failure_does_not_break_the_subagent(self, tmp_path):
+        """La persistenza del record non puo uccidere il subagent."""
+        sm = _manager(tmp_path)
+        sm.runner.run = AsyncMock(return_value=AgentRunResult(
+            final_content="done", messages=[], stop_reason="completed",
+        ))
+        sm.bus.publish_inbound = AsyncMock()
+        sm._records.append = MagicMock(side_effect=OSError("read-only fs"))
+
+        await sm.spawn("compute", session_key="s1")
+        await _drain_subagent_tasks(sm)
+
+        assert sm._running_tasks == {}
+        sm.bus.publish_inbound.assert_awaited_once()
+
 
 # ---------------------------------------------------------------------------
 # _run_subagent
@@ -257,8 +406,7 @@ class TestRunSubagent:
         ))
         with patch.object(sm, "_announce_result", new_callable=AsyncMock) as mock_announce:
             await sm._run_subagent(
-                "t1", "do task", "label",
-                {"channel": "internal", "chat_id": "direct"},
+                "t1", _spec(),
                 SubagentStatus(task_id="t1", label="label", task_description="do task", started_at=time.monotonic()),
             )
             mock_announce.assert_called_once()
@@ -273,10 +421,7 @@ class TestRunSubagent:
         ))
         status = SubagentStatus(task_id="t1", label="label", task_description="do task", started_at=time.monotonic())
         with patch.object(sm, "_announce_result", new_callable=AsyncMock) as mock_announce:
-            await sm._run_subagent(
-                "t1", "do task", "label",
-                {"channel": "internal", "chat_id": "direct"}, status,
-            )
+            await sm._run_subagent("t1", _spec(), status)
             assert mock_announce.call_args.args[-2] == "error"
 
     @pytest.mark.asyncio
@@ -285,10 +430,7 @@ class TestRunSubagent:
         sm.runner.run = AsyncMock(side_effect=RuntimeError("LLM down"))
         status = SubagentStatus(task_id="t1", label="label", task_description="do task", started_at=time.monotonic())
         with patch.object(sm, "_announce_result", new_callable=AsyncMock) as mock_announce:
-            await sm._run_subagent(
-                "t1", "do task", "label",
-                {"channel": "internal", "chat_id": "direct"}, status,
-            )
+            await sm._run_subagent("t1", _spec(), status)
             assert status.phase == "error"
             assert "LLM down" in status.error
             assert mock_announce.call_args.args[-2] == "error"
@@ -301,10 +443,7 @@ class TestRunSubagent:
         ))
         status = SubagentStatus(task_id="t1", label="label", task_description="do task", started_at=time.monotonic())
         with patch.object(sm, "_announce_result", new_callable=AsyncMock):
-            await sm._run_subagent(
-                "t1", "do task", "label",
-                {"channel": "internal", "chat_id": "direct"}, status,
-            )
+            await sm._run_subagent("t1", _spec(), status)
             assert status.phase == "done"
             assert status.stop_reason == "completed"
 

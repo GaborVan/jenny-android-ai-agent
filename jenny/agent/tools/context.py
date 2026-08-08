@@ -10,6 +10,15 @@ _CURRENT_REQUEST_CONTEXT: ContextVar["RequestContext | None"] = ContextVar(
     default=None,
 )
 
+# Identita del turno in corso, legata dall'``AgentLoop`` (vedi
+# :func:`bind_turn_id`). ContextVar e non parametro perche il contesto dei tool
+# viene ricostruito in piu punti del turno — a inizio turno e a ogni iterazione
+# dal progress hook — e il turno e informazione *ambiente* al task che lo esegue.
+_CURRENT_TURN_ID: ContextVar[str | None] = ContextVar(
+    "jenny_tool_turn_id",
+    default=None,
+)
+
 
 @dataclass(frozen=True)
 class RequestContext:
@@ -19,6 +28,11 @@ class RequestContext:
     message_id: str | None = None
     session_key: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Identita del turno che sta eseguendo il tool. Distinta da ``message_id``:
+    # quello e un id di *routing* scelto dal canale (reply/announce) e i
+    # messaggi della WebUI non ne hanno alcuno, mentre questa c'e per ogni
+    # turno. E cio su cui si delimitano le guardie per-turno dei tool.
+    turn_id: str | None = None
 
 
 @runtime_checkable
@@ -44,6 +58,35 @@ def current_request_session_key() -> str | None:
     return ctx.session_key if ctx else None
 
 
+def bind_turn_id(turn_id: str) -> Token[str | None]:
+    """Lega l'identita del turno in corso al task che lo esegue.
+
+    Un *turno* e una dispatch dell'``AgentLoop``: il messaggio in ingresso piu
+    tutte le iterazioni LLM, le tool call e le injection che ne discendono. E
+    l'unita su cui ragionano le guardie per-turno dei tool (vedi
+    ``tools/subagent_control.py``), e la stessa stringa che i log mostrano come
+    ``[turn unified:default:<ns>]``.
+
+    Perche non ``RequestContext.message_id``: quello e un id di routing che il
+    canale e libero di non mandare, e nessun messaggio della WebUI ne porta uno
+    — cioe nessun messaggio reale dell'utente. Una guardia che vi si appoggia
+    esiste solo nei test.
+
+    Ogni turno gira nel proprio task, quindi il valore legato qui non puo
+    contaminare turni concorrenti su altre sessioni.
+    """
+    return _CURRENT_TURN_ID.set(turn_id)
+
+
+def reset_turn_id(token: Token[str | None]) -> None:
+    _CURRENT_TURN_ID.reset(token)
+
+
+def current_turn_id() -> str | None:
+    """Identita del turno in corso, o ``None`` fuori da un turno."""
+    return _CURRENT_TURN_ID.get()
+
+
 @dataclass
 class ToolContext:
     config: Any
@@ -58,3 +101,12 @@ class ToolContext:
     runtime_events: Any | None = None
     android_context: Any | None = None
     ui_query_service: Any | None = None
+    # Vero quando il registry e quello dell'agente principale in modalita
+    # orchestratore. Serve ai tool che esistono in entrambi i mondi ma devono
+    # restare economici in questo: tutto cio che l'orchestratore produce resta
+    # nella conversazione per sempre, mentre l'output di un subagent no.
+    orchestrator: bool = False
+    # Registry in costruzione, valorizzato da ``ToolLoader.load``. Lo legge solo
+    # chi deve osservare l'attivita degli *altri* tool dello stesso agente (la
+    # guardia anti-polling di ``subagent_status``), non per chiamarli.
+    registry: Any | None = None

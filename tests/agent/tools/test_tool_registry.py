@@ -248,3 +248,41 @@ def test_unregister_invalidates_cache() -> None:
     second = registry.get_definitions()
     assert first is not second
     assert len(second) == 1
+
+
+# -- exec_seq ------------------------------------------------------------------
+#
+# Il contatore dice a un tool se *altri* tool sono girati dopo la sua ultima
+# chiamata (guardia anti-polling di ``subagent_status``). Il runner non passa da
+# ``registry.execute``: risolve con ``prepare_call`` e poi chiama
+# ``tool.execute`` diretto, quindi il conteggio deve stare in ``prepare_call``.
+
+
+async def test_exec_seq_advances_on_the_runner_path() -> None:
+    """Path di produzione: prepare_call + tool.execute() diretta."""
+    registry = ToolRegistry()
+    registry.register(_FakeTool("read_file"))
+
+    assert registry.exec_seq == 0
+    tool, params, error = registry.prepare_call("read_file", {})
+    assert error is None and tool is not None
+    await tool.execute(**params)
+    assert registry.exec_seq == 1
+
+
+async def test_exec_seq_counts_each_call_once_through_execute() -> None:
+    """``execute`` chiama ``prepare_call``: un solo incremento, non due."""
+    registry = ToolRegistry()
+    registry.register(_FakeTool("read_file"))
+
+    await registry.execute("read_file", {})
+    assert registry.exec_seq == 1
+    await registry.execute("read_file", {})
+    assert registry.exec_seq == 2
+
+
+async def test_exec_seq_counts_a_failed_resolution_too() -> None:
+    """Anche un tentativo fallito e "qualcosa girato in mezzo"."""
+    registry = ToolRegistry()
+    registry.prepare_call("nope", {})
+    assert registry.exec_seq == 1

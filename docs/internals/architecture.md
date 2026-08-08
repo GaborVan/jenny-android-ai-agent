@@ -113,7 +113,7 @@ Useful docs:
 
 ## Tools
 
-Tools are **explicitly registered**, not discovered by scanning the filesystem. `jenny/agent/tools/loader.py` imports a fixed list of 16 modules (`_HARDCODED_TOOL_MODULES`); each module declares a module-level `TOOLS = [...]` list of `Tool` subclasses. `ToolLoader.discover()` imports every module in the list, in order, and collects each module's `TOOLS`; a module with no `TOOLS` attribute at all raises at startup rather than silently contributing nothing, and a name collision between two registered tools also raises at startup instead of one silently overwriting the other.
+Tools are **explicitly registered**, not discovered by scanning the filesystem. `jenny/agent/tools/loader.py` imports a fixed list of 18 modules (`_HARDCODED_TOOL_MODULES`); each module declares a module-level `TOOLS = [...]` list of `Tool` subclasses. `ToolLoader.discover()` imports every module in the list, in order, and collects each module's `TOOLS`; a module with no `TOOLS` attribute at all raises at startup rather than silently contributing nothing, and a name collision between two registered tools also raises at startup instead of one silently overwriting the other.
 
 | # | Module | `TOOLS` | Tool area |
 |---|---|---|---|
@@ -133,10 +133,12 @@ Tools are **explicitly registered**, not discovered by scanning the filesystem. 
 | 14 | `introspect.py` | `GetSourceTool` | Read-only access to Jenny's own bundled Python source |
 | 15 | `diagnostics.py` | `GetRecentLogsTool` | Reads the in-memory log ring buffer |
 | 16 | `ui_view.py` | `UiViewTool` | Pull-based view of what's on screen right now; fails from Telegram, cron, or with the screen off |
+| 17 | `subagent_control.py` | `SubagentStatusTool`, `SubagentCancelTool`, `SubagentRestartTool`, `SubagentSendTool` | Drive running subagents (status/cancel/restart/send). The only module whose tools are `orchestrator`-scope **only** — never `core`, never `subagent` |
+| 18 | `ssh.py` | `SshHostsTool`, `SshExecTool`, `SshJobTool`, `SshTransferTool` | Remote machines over SSH. Scope `remote`, which no agent loads by default — only the `sysadmin` subagent type asks for it |
 
 `self.py`'s module-level `TOOLS` list is deliberately empty. `MyTool` (the `my` introspection/self-check tool) needs a live reference to the running `AgentLoop`, which the generic loader can't provide, so it is instantiated and registered by hand in `AgentLoop._register_default_tools()` (`jenny/agent/loop.py:362-365`), gated on `tools.my.enable`.
 
-`ToolLoader.discover()` therefore returns 22 tool classes across those 16 modules (verified by running it directly), plus the one manually-registered `MyTool` — 23 built-in tool classes in total. Not all of them are necessarily *registered* at runtime: `ToolLoader.load()` also checks each tool's `enabled(ctx)` against the current config and the tool's declared scope, so the live tool count for a given install depends on config toggles. On top of the built-ins, Jenny Apps register their own dynamic `<slug>_<action>` tools per turn (`AppToolsSyncer`) — see [Mini-apps](../using/mini-apps.md) and [Tool reference](../reference/tools.md) for the full, toggle-aware picture.
+`ToolLoader.discover()` therefore returns 30 tool classes across those 18 modules, plus the one manually-registered `MyTool` — 31 built-in tool classes in total. Not all of them are necessarily *registered* at runtime, and no single agent ever sees all 31: `ToolLoader.load()` filters by the caller's `scope` against each tool's `_scopes` (`core`, `orchestrator`, `subagent`, `remote`), then optionally by an `allow` list of names (that is how agent types narrow their toolset), then checks each tool's `enabled(ctx)` against the current config. The live tool count for a given install therefore depends on the config toggles *and* on which agent is asking. On top of the built-ins, Jenny Apps register their own dynamic `<slug>_<action>` tools per turn (`AppToolsSyncer`) — see [Mini-apps](../using/mini-apps.md) and [Tool reference](../reference/tools.md) for the full, toggle-aware picture.
 
 Tool behavior is part of the model contract: user-visible tool names, schemas, and error messages should be treated as an interface — changing them affects how the model uses the tool, so keep changes intentional and covered by tests.
 
@@ -171,8 +173,17 @@ Session history is the near-term conversation replay. Memory is the longer-term 
 | Long-term memory | `<workspace>/memory/MEMORY.md` | Facts and durable context Dream writes back |
 | Consolidation source history | `<workspace>/memory/history.jsonl` | Append-only log Dream reads from; capped at 1000 entries (oldest dropped first) |
 | Bootstrap identity files | `<workspace>/SOUL.md`, `<workspace>/USER.md`, seeded from `jenny/templates/` | Identity/persona and user-facts files Dream also updates |
+| Wiki directory | `<workspace>/memory/WIKI.md` (+ `.atlas_state.json`, optional `WIKI_POLICY.md`) | Derived from `<workspace>/wikis/` by Atlas; injected into every system prompt |
 
-Dream is implemented in `jenny/agent/memory.py` and scheduled by the runtime when `agents.defaults.dream.enabled` is true (default `true`, every `dream.interval_h` hours, default `2`). Its interval is a periodic-from-boot schedule, not wall-clock-anchored, so it restarts counting from zero every time the app (and therefore the gateway process) restarts. See [Memory and Dream](../using/memory.md) for the user-facing behavior.
+Dream is implemented in `jenny/agent/memory.py` and scheduled by the runtime when `agents.defaults.dream.enabled` is true (default `true`, every `dream.interval_h` hours, default `2`). Its interval is a relative `every` schedule, not a wall-clock cron expression, but the deadline is persisted in `<workspace>/cron/jobs.json` and preserved across restarts: `CronService._recompute_next_runs()` recomputes `at` and `cron` jobs and leaves an `every` job's stored deadline alone (clamped to at most `now + interval`, so a shortened interval or a clock jump still lands). A deadline that passed while the app was down therefore fires at the first tick after startup rather than being pushed forward another full interval. See [Memory, Dream and Atlas](../using/memory.md) for the user-facing behavior.
+
+**Atlas** applies the same pattern to the wiki. It lives in `jenny/agent/atlas.py`, is registered next to Dream (`agents.defaults.atlas`, default every 12 hours) and compiles `<workspace>/wikis/` into `memory/WIKI.md`, which `ContextBuilder` injects as a second subsection of the `# Memory` block. Three properties distinguish it from Dream:
+
+- **Deterministic scan, model-side judgement.** `AtlasStore.build_inventory()` walks the wikis in Python and puts the page list in the prompt; the ephemeral turn classifies rather than explores. Read-only tools (`read_file`, `list_dir`, `find_files`, `grep`) are there for disambiguation only.
+- **Fingerprint gate.** `jenny/utils/wiki_paths.py::wiki_fingerprint` hashes `(path, mtime, size)` across the wiki sources plus the optional user policy file, skipping `log/` and `audit/`. An unchanged fingerprint short-circuits the run before any provider call. It is recorded in `memory/.atlas_state.json` only when the turn completed **and** wrote — `MemoryStore.internal_run_should_commit`, the same rule that governs Dream's cursor.
+- **Single-file write sandbox.** `AtlasStore.build_tools()` passes `write_files_only=True` to the filesystem tools, so no directory is writable and the allowlist contains exactly `memory/WIKI.md`. Dream's registry excludes that path in turn. The two jobs cannot overwrite each other, and neither can write to the wiki itself.
+
+The cron branch (`runtime/cron_dispatch.py::_run_atlas`) and the `/atlas` command both call the single `run_atlas()` entry point.
 
 ## Security Boundaries
 

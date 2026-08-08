@@ -8,9 +8,9 @@ Jenny does not phone home. There is no analytics SDK, no crash reporter, and no 
 
 The WebUI itself is served entirely from `127.0.0.1` — no page, font, or script it loads comes from the internet.
 
-## The four data recipients
+## The five data recipients
 
-Data only leaves the phone through one of these four paths, each gated by a condition you control.
+Data only leaves the phone through one of these five paths, each gated by a condition you control.
 
 | Recipient | What it receives | Condition |
 |---|---|---|
@@ -18,8 +18,9 @@ Data only leaves the phone through one of these four paths, each gated by a cond
 | **Bing** | Your `web_search` queries. | Only when the agent actually calls `web_search` (`tools.androidWeb.search.enable`, default `true`). The search engine is currently fixed to Bing — there's no picker. |
 | **Sites visited by `web_fetch` / `download_file`** | Whatever a normal browser visit to that site would reveal: the site sees the request coming from a real, hidden Android WebView, with the phone's own IP address, user-agent, and WebView cookies — not an anonymized fetch. | Only when the agent calls `web_fetch` or `download_file` on a URL. |
 | **`api.telegram.org`** | Messages, if you've paired a Telegram bot: your conversation transits Telegram's servers under Telegram's terms, not Jenny's. | Only if `telegram.enabled` is `true` (default `false` — off until you explicitly connect a bot). |
+| **The SSH hosts you registered** | The commands the agent runs on that machine, and — through `ssh_transfer` — the content of any workspace file it uploads there. Files fetched with `ssh_transfer` travel the other way, from the server into the workspace. | Only if `tools.ssh.enable` is `true` (default `false`), only for an alias a person registered in Settings → SSH whose host key you accepted by hand, and only through a `sysadmin` subagent. The agent can never name an address, only one of your aliases. |
 
-A fifth, smaller case: if your configured provider is OpenRouter, Jenny adds fixed attribution headers to every request (`HTTP-Referer` pointing at Jenny's GitHub repo, `X-OpenRouter-Title: Jenny`) so OpenRouter can attribute traffic to the app. This doesn't add a new recipient — OpenRouter is already your chosen LLM provider — but it does add identifying metadata to that traffic.
+One more, smaller case: if your configured provider is OpenRouter, Jenny adds fixed attribution headers to every request (`HTTP-Referer` pointing at Jenny's GitHub repo, `X-OpenRouter-Title: Jenny`) so OpenRouter can attribute traffic to the app. This doesn't add a new recipient — OpenRouter is already your chosen LLM provider — but it does add identifying metadata to that traffic.
 
 ## What stays local
 
@@ -28,9 +29,11 @@ Everything else lives in the app's private storage (`<filesDir>/workspace` and n
 - `config.json` — including provider API keys, stored in plaintext (see the caveat below).
 - Chat history and consolidated long-term memory (`memory/history.jsonl`, `MEMORY.md`, `USER.md`).
 - Uploaded attachments (`workspace/uploads/`) and agent downloads (`workspace/downloads/`).
-- Media (images, previews) and wiki content.
+- Media (images, previews).
 - Workspace snapshots (the local "time machine" backups — see [Backup and restore](../using/backup.md)).
 - Token usage counts.
+
+**Wiki content is not on this list, and used to be.** The Atlas job (`jenny/agent/atlas.py`) runs every 12 hours by default and compiles `memory/WIKI.md`, a short directory of the entities in your wikis. To do it, the wiki inventory — every wiki, its scope, and the page titles and paths of the directory wiki — is sent to your LLM provider, and Atlas can open individual pages with `read_file` when a title alone is ambiguous. The compiled `memory/WIKI.md` is then injected into **every** system prompt, so the names and one-line descriptions it contains go to the provider on every turn, not only when Atlas runs. Turning the job off (`agents.defaults.atlas.enabled`) stops the 12-hourly pass; it does not by itself stop the agent from reading a wiki page during a normal turn, which was always possible under the workspace-to-provider chain below.
 
 ## The `allowBackup` exception
 
@@ -46,9 +49,10 @@ It's worth stating this relationship plainly, because it's easy to underestimate
 
 ## How to shrink the surface
 
-None of the four recipients above are mandatory except your LLM provider (Jenny can't function without one). To reduce what leaves the device:
+None of the five recipients above are mandatory except your LLM provider (Jenny can't function without one). To reduce what leaves the device:
 
 - **Turn off location sharing** in Settings if you don't want your last-known location included in every turn sent to the provider.
+- **Leave SSH off** unless you actually want Jenny reaching a server — it is off by default, and every registered host is a machine that receives commands and can receive workspace files.
 - **Don't enable Telegram** unless you actually want a second channel — it's off by default, and enabling it means your conversation also flows through Telegram's servers.
 - **Pick your LLM provider deliberately.** Since messages, history, and file contents all go to whichever provider you configure, your provider's own privacy policy and data-retention practice matters as much as anything Jenny does.
 - Avoid putting anything you wouldn't want reaching your LLM provider inside `workspace/`, given the chain described above.
@@ -58,4 +62,5 @@ None of the four recipients above are mandatory except your LLM provider (Jenny 
 - [Security model](./security-model.md) — the containment layers and the honest can/cannot lists.
 - [Location](../using/location.md) — the location toggle and Android permission.
 - [Telegram bridge](../using/telegram.md) — what Telegram adds and when it's active.
+- [SSH access](../using/ssh.md) — registering a host, and what the agent can send to it.
 - [Configuration reference](../reference/configuration.md) — `tools.location`, `telegram.enabled`, and related keys.

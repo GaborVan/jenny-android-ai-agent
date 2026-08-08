@@ -91,3 +91,25 @@ def test_client_log_sanitizes_level_and_truncates(tmp_path):
     assert "x" * 801 not in joined
     assert "s" * 100 in joined
     assert "s" * 101 not in joined
+
+
+def test_client_log_survives_missing_params(tmp_path):
+    """Parametri assenti: 200, non 500.
+
+    ``_query_first`` restituisce ``None`` quando il parametro manca, e
+    affettare ``None`` solleva ``TypeError``. La rotta che esiste per
+    *segnalare* i guasti del client falliva quindi con un 500 proprio sulla
+    richiesta malformata — il caso in cui serve di più. ``level`` aveva già il
+    suo default, ``source`` e ``message`` no.
+    """
+    handler = _make_handler(tmp_path)
+    records: list[str] = []
+    sink_id = logger.add(records.append, level="WARNING")
+    try:
+        # Nessun source, nessun message: solo il token di autenticazione.
+        response = handler._handle_client_log(_make_request("/api/client-log"))
+    finally:
+        logger.remove(sink_id)
+
+    assert response.status_code == 200
+    assert "unknown" in "".join(records)

@@ -30,6 +30,36 @@ class AgentHookContext:
 
 
 @dataclass(slots=True)
+class ToolResultHookContext:
+    """Esito di UNA tool call, consegnato a :meth:`AgentHook.after_execute_tool`.
+
+    Perche una dataclass propria e non :class:`AgentHookContext`: quello e stato
+    di *iterazione* e arriva una volta per batch, mentre questo arriva una volta
+    per **chiamata**. Con i tool concorrenti tre callback di questo tipo sono in
+    volo dentro la stessa iterazione, e schiacciarle in una lista condivisa e
+    esattamente la granularita sbagliata che questo hook esiste per correggere.
+
+    ``call_id`` e l'id di chiamata del provider: e cio che rende esatto
+    l'accoppiamento start/end quando lo stesso tool e in volo piu volte (tre
+    ``web_fetch`` nello stesso batch sono il caso normale, non un caso limite).
+
+    ``result`` ed ``error`` sono alternativi: ``error`` e valorizzato solo quando
+    il tool ha sollevato, negli altri casi il fallimento vive dentro ``result``
+    secondo la convenzione dei tool di Jenny (stringa che inizia per ``Error``).
+
+    ``arguments`` e ``result`` viaggiano **per riferimento** e vanno trattati
+    read-only: sono gli stessi oggetti che finiscono nella history del modello.
+    """
+
+    name: str
+    call_id: str
+    arguments: dict[str, Any]
+    result: Any = None
+    error: BaseException | str | None = None
+    duration_ms: int = 0
+
+
+@dataclass(slots=True)
 class AgentRunHookContext:
     """Run-level state snapshot exposed to runner hooks."""
 
@@ -75,6 +105,20 @@ class AgentHook:
         pass
 
     async def before_execute_tools(self, context: AgentHookContext) -> None:
+        pass
+
+    async def after_execute_tool(self, context: ToolResultHookContext) -> None:
+        """Una tool call e finita, bene o male. Default: no-op.
+
+        Contro-parte di :meth:`before_execute_tools`, ma per *chiamata* e non per
+        batch: prima di questo hook "questo tool ha finito" non era un evento
+        osservabile in nessun punto del codebase, e un tool da 8 secondi non
+        produceva un solo aggiornamento finche non finiva l'intera iterazione.
+
+        Puramente osservativo: il call site (``agent/tool_execution.py``) ne
+        isola le eccezioni, quindi un consumatore rotto non fa fallire la tool
+        call ne il turno. Non deve mutare ``context``.
+        """
         pass
 
     async def emit_reasoning(self, reasoning_content: str | None) -> None:
@@ -146,6 +190,9 @@ class CompositeHook(AgentHook):
 
     async def before_execute_tools(self, context: AgentHookContext) -> None:
         await self._for_each_hook_safe("before_execute_tools", context)
+
+    async def after_execute_tool(self, context: ToolResultHookContext) -> None:
+        await self._for_each_hook_safe("after_execute_tool", context)
 
     async def emit_reasoning(self, reasoning_content: str | None) -> None:
         await self._for_each_hook_safe("emit_reasoning", reasoning_content)

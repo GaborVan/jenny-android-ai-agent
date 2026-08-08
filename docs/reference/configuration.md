@@ -86,12 +86,15 @@ Everything about how the agent talks to the model and manages its own context.
 | `agents.defaults.maxMessages` | int ≥ 0 | `120` | Upper bound on live messages kept in the session before consolidation kicks in. |
 | `agents.defaults.consolidationRatio` | float 0.1–0.95 | `0.5` | Fraction of the live context consolidated when a consolidation runs. |
 | `agents.defaults.dream.enabled` | bool | `true` | Registers the periodic Dream memory-consolidation job at startup. |
-| `agents.defaults.dream.intervalH` | int ≥ 1 | `2` | Hours between Dream runs. The interval restarts on every app launch. |
+| `agents.defaults.dream.intervalH` | int ≥ 1 | `2` | Hours between Dream runs. The deadline survives an app restart; a run missed while the app was down happens at the next tick. |
+| `agents.defaults.atlas.enabled` | bool | `true` | Registers the periodic Atlas job, which compiles `memory/WIKI.md` from `workspace/wikis/`. With no wikis present the job exits before reaching the provider. |
+| `agents.defaults.atlas.intervalH` | int ≥ 1 | `6` | Hours between Atlas checks. A tick that finds the wiki unchanged since the last run costs nothing. |
+| `agents.defaults.atlas.maxContextTokens` | int ≥ 100 | `1200` | Cap on the wiki-directory block injected into every system prompt; a longer `memory/WIKI.md` is truncated at injection time. |
 | `agents.defaults.maxToolIterations` | int | `200` | Hard ceiling on tool calls in a single turn. |
 | `agents.defaults.maxToolResultChars` | int | `16000` | Tool output above this is truncated before it reaches the model. |
 | `agents.defaults.contextBlockLimit` | int \| null | `null` | Optional cap on context blocks; unset means no extra limit. |
 
-`dream` has exactly **two** fields — `enabled` and `intervalH`. Older docs mentioned `cron`, `modelOverride` and `maxBatchSize`; none of them exist. See [Memory and Dream](../using/memory.md).
+`dream` has exactly **two** fields — `enabled` and `intervalH`. Older docs mentioned `cron`, `modelOverride` and `maxBatchSize`; none of them exist. `atlas` adds `maxContextTokens` to the same pair; which wiki supplies its entity list follows `wiki.defaultWiki`. See [Memory, Dream and Atlas](../using/memory.md).
 
 ### Behavior and identity
 
@@ -101,7 +104,10 @@ Everything about how the agent talks to the model and manages its own context.
 | `agents.defaults.botName` | string | `"Jenny"` | Assistant name in chat and in the welcome message. Requires a restart to fully apply. |
 | `agents.defaults.botIcon` | string | `"✿"` | Emoji shown next to the name. No UI field; restart to apply. |
 | `agents.defaults.language` | string | `"it"` | Language for backend-generated text (welcome message and similar). Written once by onboarding from the UI locale. **Not** the UI language — that lives in the device's `localStorage`. |
-| `agents.defaults.maxConcurrentSubagents` | int ≥ 1 | `1` | How many `spawn`ed subagents may run at once. Beyond the limit, `spawn` returns an error so the agent can wait or reorder its work. |
+| `agents.defaults.orchestratorMode` | bool | `true` | The main agent runs as an orchestrator: it keeps `spawn`, the subagent-control tools, cron, `message`, `ui_view`, `long_task`, introspection, logs, location and **read-only** file access (`read_file`, `list_dir`), and loses the tools whose output bloats your conversation — `python_exec`, `write_file`/`edit_file`, `apply_patch`, `download_file`, the web tools, exec sessions and search. That work goes to subagents instead. Set it to `false` to give the main agent the full toolset back (the pre-0.5 behaviour); restart to apply. |
+| `agents.defaults.maxConcurrentSubagents` | int ≥ 1 | `3` | How many `spawn`ed subagents may run at once. One slot is reserved for short jobs: an ordinary spawn may take at most `limit - 1` slots (no reservation when the limit is `1`, which therefore serialises every fan-out). Beyond that, `spawn` returns an error so the agent can wait or reorder its work. Each slot is a live LLM request from a phone, so raising this hits your provider's rate limit and the battery well before it hits the CPU. Installations created before 0.5 carry the old default of `1` in their file and are moved to `3` once, with a warning in the log — see `configVersion` below. |
+| `agents.defaults.subagentStallThresholdSeconds` | int ≥ 10 | `180` | How long a subagent may go without observable progress before it is flagged `stalled`. Flagging only — nothing is cancelled; relaunching stays a decision for you or the agent. A stalled subagent that resumes goes back to `running`. |
+| `agents.defaults.subagentToolErrorBudget` | int ≥ 0 | `3` | How many recoverable tool errors a subagent may make before it gives up. It gets the same retry hint the main agent gets and carries on, instead of dying on the first one — a single mis-guessed `read_file` offset used to throw away a job that had already finished its real work. `0` restores that old behaviour. Security-boundary refusals (SSRF, workspace violations) are counted separately and are not spent from this budget. |
 | `agents.defaults.toolHintMaxLength` | int 20–500 | `40` | Truncation length of the short tool-call hints shown while the agent works. |
 | `agents.defaults.disabledSkills` | string[] | `[]` | Skill directory names excluded from the agent's skill summary, always-on injection, and subagent summaries. Applies to built-in and workspace skills alike. |
 | `agents.defaults.providerRetryMode` | `"standard"` \| `"persistent"` | `"standard"` | Retry policy for provider errors. `persistent` keeps retrying transient failures longer. |
@@ -111,6 +117,7 @@ Everything about how the agent talks to the model and manages its own context.
 | Key | Type | Default | Effect |
 |---|---|---|---|
 | `extractDocumentText` | bool | **`false`** | When false (the default), non-image attachments are saved under `workspace/uploads/` and only referenced by path — the agent reads them on demand with its file tools. Setting it to `true` restores the legacy behavior of extracting and inlining document text into the prompt on every turn. See [Files and attachments](../using/attachments.md). |
+| `configVersion` | int ≥ 0 | current | Schema version of *this file*, not of the app. It exists so a value in the file can be told apart from an old default that was merely written into it: the config is always saved with every field, so a file written when some default was X keeps X forever, and raising the default in a new release would otherwise reach nobody who upgrades. A file with a lower version (or none at all) gets the one-off migrations for the versions in between, then the number is stamped forward and persisted with the next ordinary save. From that point your values are treated as deliberate and are never rewritten. You should not need to edit this. |
 
 ## gateway
 
@@ -210,6 +217,60 @@ Defaults — allowed: `os`, `sys`, `pathlib`, `json`, `re`, `math`, `datetime`, 
 
 See [Location](../using/location.md).
 
+### tools.ssh
+
+Access to remote machines. Both gates are closed by default and **both are necessary**: this is the only capability that acts on a computer other than the phone.
+
+```json
+{
+  "tools": {
+    "ssh": {
+      "enable": true,
+      "hosts": [
+        {
+          "alias": "nas",
+          "host": "nas.home.lan",
+          "port": 22,
+          "username": "jenny",
+          "description": "The home NAS",
+          "auth": "key",
+          "jobLogDir": "/tmp/jenny-jobs"
+        }
+      ]
+    }
+  }
+}
+```
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `tools.ssh.enable` | bool | **`false`** | Master switch. **Asymmetric**: turning it off is checked on every single call, so it applies instantly (it is the emergency stop); turning it on only registers the tools at the next gateway start. |
+| `tools.ssh.hosts[]` | array | `[]` | The registered machines. An empty list means no SSH tools even with `enable: true` — the agent can only name an alias from here, never an address. |
+| `tools.ssh.connectTimeoutS` | float 1–60 | `15.0` | Connection timeout. |
+| `tools.ssh.commandTimeoutS` | int 1–300 | `60` | Ceiling for a single `ssh_exec`, and for the short launch/poll/stop commands `ssh_job` issues. Low on purpose: the gateway is a foreground service **without a wake lock**, so with the screen off the CPU can suspend and a waited-for command hangs. Long work belongs to `ssh_job`, which detaches it. A `timeout_s` passed by the model can only lower this, never raise it. |
+| `tools.ssh.maxOutputChars` | int 1000–50000 | `10000` | Truncation threshold for command output and for each `ssh_job` poll. The result reports how many characters were dropped. |
+| `tools.ssh.keepaliveIntervalS` | int 0–300 | `30` | Server-alive interval on the SSH session; `0` disables it. |
+| `tools.ssh.idleCloseS` | int ≥ 30 | `300` | How long a pooled connection may sit unused before it is closed. Enforced by a reaper in both backends (the Android `SshBridge` and the dev backend), which wakes at most once a minute and drops any session idle past this. It exists because a phone's connection is not free to keep alive: a forgotten session survives a wifi-to-mobile switch as a socket that will fail on the next command anyway. The floor of 30 is enforced by the schema, so there is no way to disable the reaper from config. |
+| `tools.ssh.maxTransferBytes` | int ≥ 1024 | `52428800` | Cap for `ssh_transfer` (50 MB), in both directions. On a download it is checked with a remote `stat` before the local file is opened, so an oversize transfer leaves nothing behind. |
+
+Per host:
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `alias` | string | required | The identity of the host and the **only** thing the model ever passes. Also the name of the key file on disk, so the Settings UI restricts it to 1–32 chars of `A–Za–z0–9_-` starting alphanumeric. Not renameable. |
+| `host` | string | required | Hostname or IP. Validated against the network policy when saved **and** again at connection time, so a name that later starts resolving to a blocked address is caught. RFC1918, IPv6 ULA and CGNAT are allowed (a home server on the LAN or over Tailscale is the point); loopback, link-local/metadata and `0.0.0.0/8` are not — those are the phone itself. |
+| `port` | int 1–65535 | `22` | |
+| `username` | string | required | Login account. |
+| `description` | string | `""` | Shown **to the model** by `ssh_hosts`, so it can pick between machines and tell you which one it acted on. |
+| `hostKeyFingerprint` | string \| null | `null` | **Display only.** The enforcement is the `known_hosts` file next to the private key; without a matching line there, the connection is refused no matter what this says. Required in both `auth` modes. |
+| `auth` | `"key"` \| `"password"` | `"key"` | How Jenny logs in. The default is unchanged, so hosts registered before this option existed keep behaving exactly as they did. |
+| `password` | string \| null | `null` | Only read when `auth` is `"password"`, where it is mandatory — Settings refuses to save a password host without one. **Stored in clear text in `config.json`**, like `telegram.botToken` and `providers[].apiKey`. Never returned by the settings API (the payload carries a `has_password` boolean instead), never in a tool argument, never in a tool result, and kept out of `repr()` so it can't fall into a log line. Switching a host back to `auth: "key"` through Settings clears it. |
+| `jobLogDir` | string | `"/tmp/jenny-jobs"` | Where `ssh_job` writes its per-job log and exit-code files **on the server**. No field in Settings — config-only. Nothing cleans these up, and `/tmp` is wiped on reboot on most systems, so point it somewhere durable if you want old job output to survive. |
+
+The private key (`<alias>_ed25519`, one per host) and `known_hosts` live in `<filesDir>/ssh` — **outside** the workspace, alongside it. That is why the agent's file tools cannot read them, and also why they are absent from snapshots and from an exported `.jbk`: a restore brings back this host list but no keys.
+
+A `password` does **not** get that protection, and the difference is worth stating plainly rather than discovering later: `config.json` is inside the workspace, so the file holding it is readable by the agent's own file tools and is included in snapshots and in an exported `.jbk` (encrypted there with your backup passphrase). The practical consequence is that a restore reactivates a password host immediately while a key host has to be set up again — convenient in one direction, and the reason a dedicated key is still the better default in the other: a key can be revoked from `authorized_keys` without changing the password you use to log in yourself. See [SSH access](../using/ssh.md).
+
 ### tools.my, introspect, diagnostics
 
 | Key | Type | Default | Effect |
@@ -233,7 +294,7 @@ The canonical home for the two policy switches.
 Two things people get wrong here:
 
 - **The old location still loads, but is not where you edit.** A legacy config carrying `tools.restrictToWorkspace` / `tools.ssrfWhitelist` and no `security` block is migrated into `security` automatically by a validator, and `tools.restrictToWorkspace` is then kept in sync as a mirror the tool layer reads. Write to `security`.
-- **The SSRF whitelist covers agent tools, not provider calls.** It gates `web_fetch`, `download_file`, the `python_exec` HTTP helpers, and media ingestion. Requests to your LLM endpoint do not go through it — a self-hosted model on a private address works without whitelisting anything (see [Local models](./local-models.md)).
+- **The SSRF whitelist covers agent tools, not provider calls.** It gates `web_fetch`, `download_file`, the `python_exec` HTTP helpers, media ingestion, and — through a looser blocklist that permits private LAN ranges — Jenny App servers and `tools.ssh` targets. Requests to your LLM endpoint do not go through it — a self-hosted model on a private address works without whitelisting anything (see [Local models](./local-models.md)).
 
 Full threat model: [Security model](../internals/security-model.md).
 
@@ -338,5 +399,5 @@ How switching behaves:
 - [Providers and models](./providers.md) — choosing formats, base URLs, and models
 - [Tool reference](./tools.md) — what each tool actually does with these toggles
 - [Security model](../internals/security-model.md) — workspace policy, SSRF, and where the real boundaries are
-- [Memory and Dream](../using/memory.md), [Scheduling and proactivity](../using/scheduling.md), [Telegram bridge](../using/telegram.md), [Backup and restore](../using/backup.md)
+- [Memory, Dream and Atlas](../using/memory.md), [Scheduling and proactivity](../using/scheduling.md), [SSH access](../using/ssh.md), [Telegram bridge](../using/telegram.md), [Backup and restore](../using/backup.md)
 - [Troubleshooting](../using/troubleshooting.md) — what to do when a config change breaks the boot

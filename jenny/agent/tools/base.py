@@ -180,6 +180,21 @@ class Tool(ABC):
         return True
 
     @classmethod
+    def disabled_reason(cls, ctx: ToolContext) -> str | None:
+        """Perche ``enabled()`` ha detto no, in una frase leggibile da un umano.
+
+        ``None`` significa "nessuna spiegazione particolare" ed e il default:
+        implementarlo conviene solo ai tool che un utente puo accendere e
+        spegnere, dove sapere *quale* interruttore e giu vale l'intera
+        differenza fra un messaggio utile e "il tool non era disponibile".
+
+        Chiamato solo quando ``enabled()`` e gia risultato falso, quindi puo
+        assumerlo. Non deve sollevare: chi lo consuma sta gia formattando un
+        errore.
+        """
+        return None
+
+    @classmethod
     def create(cls, ctx: ToolContext) -> Tool:
         return cls()
 

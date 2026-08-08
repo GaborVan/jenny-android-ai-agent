@@ -84,6 +84,7 @@ class StateHandlersMixin:
             history: list[dict[str, Any]],
             pending_summary: str | None,
             include_memory_recent_history: bool = True,
+            tools: ToolRegistry | None = None,
         ) -> list[dict[str, Any]]: ...
         async def _build_retry_wait_callback(
             self, msg: InboundMessage
@@ -313,6 +314,9 @@ class StateHandlersMixin:
             ctx.history,
             ctx.pending_summary,
             include_memory_recent_history=not ctx.ephemeral,
+            # Il registry del turno, non quello del loop: e cio che il runner
+            # ricevera, quindi e cio che il prompt deve dichiarare.
+            tools=ctx.tools,
         )
         ctx.user_persisted_early = self._persist_user_message_early(
             ctx.msg, ctx.session

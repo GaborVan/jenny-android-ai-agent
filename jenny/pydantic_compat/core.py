@@ -89,15 +89,31 @@ def _build_field_info(
 def _model_dataclass_defaults(
     model_fields: dict[str, FieldInfo],
 ) -> dict[str, Any]:
-    """Return namespace defaults suitable for dataclass consumption."""
+    """Return namespace defaults suitable for dataclass consumption.
+
+    ``repr=False`` must reach the generated dataclass, or it is decoration: the
+    flag is how this repo keeps secrets (``api_key``, ``bot_token``, the SSH
+    ``password``) out of any ``repr`` that ends up in a log line or an error
+    message. Only fields that ask for it are wrapped, so every other field keeps
+    the plain-value default it had before. Note that ``dataclass()`` puts the
+    plain default back on the class afterwards, so nothing else changes.
+    """
     defaults: dict[str, Any] = {}
     for finfo in model_fields.values():
         if finfo.default is not MISSING:
-            defaults[finfo.name] = finfo.default
+            defaults[finfo.name] = (
+                finfo.default if finfo.repr else dc_field(default=finfo.default, repr=False)
+            )
         elif finfo.default_factory is not None:
-            defaults[finfo.name] = dc_field(default_factory=finfo.default_factory)
+            defaults[finfo.name] = dc_field(
+                default_factory=finfo.default_factory, repr=finfo.repr
+            )
         else:
-            defaults[finfo.name] = MISSING
+            # Required field: MISSING stays the placeholder default, but a
+            # required secret must be hidden from the repr just the same.
+            defaults[finfo.name] = (
+                MISSING if finfo.repr else dc_field(default=MISSING, repr=False)
+            )
     return defaults
 
 
