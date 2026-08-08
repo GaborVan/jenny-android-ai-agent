@@ -20,7 +20,6 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-import asyncssh
 import pytest
 
 from jenny.agent.tools.ssh_backends.base import (
@@ -31,6 +30,13 @@ from jenny.agent.tools.ssh_backends.base import (
     SshTransportError,
 )
 from jenny.agent.tools.ssh_backends.dev import DevSshBackend, _known_hosts_entry
+
+# ``asyncssh`` non e una dipendenza runtime: su Android il client SSH e jsch
+# via bridge nativo, e il pacchetto non entra mai nei requirements del device
+# (stesso trattamento di ``cryptography``). Serve solo qui, per alzare un
+# server SSH vero in-process. Senza importorskip questi moduli fallivano in
+# *collection* su una macchina che non ce l'ha — come il runner della CI.
+asyncssh = pytest.importorskip("asyncssh")
 
 TEST_USER = "jenny"
 TEST_PASSWORD = "s3gr3t0-di-prova"

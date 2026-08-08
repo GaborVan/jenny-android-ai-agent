@@ -65,6 +65,11 @@ jobs:
       # Backend crypto dev/test per i test del backup cifrato (su Android si
       # usa javax.crypto: `cryptography` NON va mai nei requirements Android).
       - run: pip install cryptography
+      # Stesso trattamento: il backend SSH desktop (`ssh_backends/dev.py`) alza
+      # un server asyncssh in-process per la suite. Su Android il client è jsch
+      # via bridge nativo e `asyncssh` NON va mai nei requirements Android.
+      # Senza questa riga i tre moduli di test SSH fallivano in collection.
+      - run: pip install asyncssh
       - run: pip install pytest-cov
       # Il report di coverage è informativo (nessuna soglia bloccante): serve
       # a rendere visibili i moduli scoperti, non a far fallire la build.
