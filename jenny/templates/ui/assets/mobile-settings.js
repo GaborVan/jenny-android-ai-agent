@@ -305,8 +305,24 @@ export class SettingsController {
         </label>
       </div>
       <p class="settings-hint" style="margin:6px 0 10px;font-size:12px;color:var(--text-faint)">${i18n.t('settings.ssh.hint')}</p>
+      ${this._renderSshCredentialsLost(d)}
       ${list}
       <button class="settings-btn-add" id="btn-ssh-add"><i class="ti ti-plus"></i> ${i18n.t('settings.ssh.addHost')}</button>`;
+  }
+
+  /* Credenziali sparite da host che erano già stati verificati: quasi sempre
+     un workspace ripristinato da backup. Chiave privata e known_hosts vivono
+     fuori dal workspace apposta, quindi nel backup non ci sono e il ripristino
+     non può riportarli. Senza questa riga l'utente vede solo dei badge "non
+     verificato" e un tool SSH che fallisce, e sembra un guasto. */
+  _renderSshCredentialsLost(d) {
+    const aliases = d.credentials_lost || [];
+    if (!aliases.length) return '';
+    const text = i18n.t('settings.ssh.credentialsLost', { aliases: aliases.join(', ') });
+    return `<div class="settings-notice settings-notice-strong">
+      <i class="ti ti-alert-triangle"></i>
+      <div>${escapeHtml(text)}</div>
+    </div>`;
   }
 
   /* Una card per host. I due stati che decidono se l'host è usabile —

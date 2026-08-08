@@ -235,6 +235,23 @@ def _host_payload(host: SshHostConfig) -> dict[str, Any]:
     }
 
 
+def _credentials_lost(host: SshHostConfig) -> bool:
+    """L'host era stato verificato, e adesso non lo è più.
+
+    Serve a distinguere "mai configurato" da "configurato e poi perso", che
+    hanno lo stesso aspetto — nessun pin, nessuna chiave — ma vogliono due
+    messaggi opposti. Il discriminante è dove vivono le due cose:
+    ``host_key_fingerprint`` sta in ``config.json``, **dentro** il workspace, e
+    quindi un ripristino lo riporta indietro; ``known_hosts`` e la chiave
+    privata stanno **fuori** dal workspace (vedi ``config.paths.get_ssh_dir``)
+    e nel backup non entrano affatto. Impronta salvata + nessun pin è quindi la
+    firma esatta di un workspace ripristinato, ed è il momento in cui l'utente
+    va avvisato: altrimenti lo scopre da un tool SSH che fallisce e sembra un
+    guasto invece che una conseguenza voluta.
+    """
+    return bool(host.host_key_fingerprint) and not is_host_pinned(host.host, host.port)
+
+
 def ssh_settings_payload(config: Any = None) -> dict[str, Any]:
     """Stato SSH per Settings.
 
@@ -249,6 +266,10 @@ def ssh_settings_payload(config: Any = None) -> dict[str, Any]:
     return {
         "enabled": ssh.enable,
         "hosts": [_host_payload(h) for h in ssh.hosts],
+        # Alias le cui credenziali erano state configurate e non ci sono più:
+        # la UI ne fa un avviso unico che spiega il perché, invece di lasciare
+        # l'utente davanti a dei badge "non verificato" senza causa.
+        "credentials_lost": [h.alias for h in ssh.hosts if _credentials_lost(h)],
     }
 
 

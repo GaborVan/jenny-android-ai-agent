@@ -753,3 +753,49 @@ async def test_a_setting_saved_during_a_slow_probe_is_not_lost(env, monkeypatch)
     config = load_config()
     assert [p.name for p in config.providers.providers] == ["local-llama"]
     assert [h.alias for h in config.tools.ssh.hosts] == ["prod"]
+
+
+# -- credenziali perse in un ripristino ---------------------------------------
+
+
+async def test_a_restored_workspace_says_which_hosts_lost_their_credentials(env) -> None:
+    """Impronta salvata in config, nessun pin su disco: è un workspace ripristinato.
+
+    ``config.json`` sta **dentro** il workspace e torna indietro con il
+    ripristino; ``known_hosts`` e la chiave privata stanno fuori e nel backup
+    non entrano proprio. Senza questo segnale l'utente vede solo dei badge
+    "impronta da verificare" senza causa, e un tool SSH che fallisce sembra un
+    guasto invece che una conseguenza voluta.
+    """
+    await _add_host()
+
+    def _stamp(config):
+        config.tools.ssh.hosts[0].host_key_fingerprint = FINGERPRINT
+
+    from jenny.config import store
+
+    await store.mutate(_stamp)
+
+    assert ssh_api.ssh_settings_payload()["credentials_lost"] == ["prod"]
+
+
+async def test_a_host_that_was_never_verified_is_not_reported_as_lost(env) -> None:
+    """Un host appena aggiunto è nello stesso stato, ma per il motivo opposto."""
+    payload = await _add_host()
+
+    assert payload["hosts"][0]["pinned"] is False
+    assert payload["credentials_lost"] == []
+
+
+async def test_a_host_with_its_pin_intact_is_not_reported_as_lost(env) -> None:
+    await _add_host()
+    record_host_key(f"example.com {KEY_LINE}")
+
+    def _stamp(config):
+        config.tools.ssh.hosts[0].host_key_fingerprint = FINGERPRINT
+
+    from jenny.config import store
+
+    await store.mutate(_stamp)
+
+    assert ssh_api.ssh_settings_payload()["credentials_lost"] == []

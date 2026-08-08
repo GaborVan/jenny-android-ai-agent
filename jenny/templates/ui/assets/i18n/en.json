@@ -208,6 +208,7 @@
       "statusPasswordMissing": "No password",
       "statusPinned": "Fingerprint verified",
       "statusUnpinned": "Fingerprint not verified",
+      "credentialsLost": "SSH access to {aliases} has to be set up again. The private key and the verified fingerprints deliberately live outside the workspace, so they are not in the backup and a restore cannot bring them back: regenerate the key, install the public one on the server and accept the fingerprint again.",
       "noKeyYet": "Generate the key, then install it on the server.",
       "generateKey": "Generate key",
       "regenerateKey": "Regenerate key",

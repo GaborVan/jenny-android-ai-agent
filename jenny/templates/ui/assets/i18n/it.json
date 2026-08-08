@@ -208,6 +208,7 @@
       "statusPasswordMissing": "Nessuna password",
       "statusPinned": "Impronta verificata",
       "statusUnpinned": "Impronta da verificare",
+      "credentialsLost": "L'accesso SSH a {aliases} va rifatto. La chiave privata e le impronte verificate stanno fuori dal workspace apposta, quindi non entrano nel backup e un ripristino non può riportarle: rigenera la chiave, reinstalla quella pubblica sul server e riaccetta l'impronta.",
       "noKeyYet": "Genera la chiave, poi installala sul server.",
       "generateKey": "Genera chiave",
       "regenerateKey": "Rigenera chiave",
