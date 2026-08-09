@@ -71,6 +71,10 @@ export function openImageLightbox(src, options = {}) {
   closeBtn.addEventListener('click', close);
   overlay.addEventListener('click', close);
   document.addEventListener('keydown', onKey);
+  // Appeso all'elemento perché il tasto Indietro di Android arriva alla shell,
+  // che conosce solo il DOM: senza questo dovrebbe rimuovere l'overlay a mano,
+  // saltando il cleanup (listener su document, object URL revocati da onClose).
+  overlay.__jennyClose = close;
   document.body.appendChild(overlay);
   return close;
 }

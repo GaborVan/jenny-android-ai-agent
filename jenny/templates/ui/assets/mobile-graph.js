@@ -58,14 +58,7 @@ export class GraphController {
       }
 
       if (pushHistory) {
-        const url = new URL(window.location);
-        url.searchParams.set('mode', 'graph');
-        if (wiki) {
-          url.searchParams.set('wiki', wiki);
-        } else {
-          url.searchParams.delete('wiki');
-        }
-        history.pushState({ mode: 'graph', wiki }, '', url);
+        window.mobileApp.pushNav({ mode: 'graph', wiki });
       }
 
       this._updateTitle(wiki);

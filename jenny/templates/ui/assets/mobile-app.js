@@ -67,6 +67,11 @@ class MobileApp {
     this.controllers = {};
 
     this.currentMode = null;
+    // Posizione nello stack di navigazione *nostro* (0 = radice). Ogni entry
+    // spinta da pushNav se la porta dietro, così il back sa quando è arrivato
+    // in fondo. `history.length` non risponde alla domanda: conta l'intera
+    // sessione del WebView (iframe delle mini-app, reload) e non cala mai.
+    this._navPos = 0;
     // Gate di readiness dello shell nativo: alcune animazioni d'ingresso (es. la
     // caduta della mini Jenny nell'onboarding) devono partire solo quando il
     // loading nativo è sparito e il WebView è visibile, altrimenti scorrono
@@ -125,6 +130,9 @@ class MobileApp {
     window.addEventListener('popstate', (e) => {
       const state = e.state;
       if (!state) return;
+      // La entry ripristinata porta con sé la propria posizione nello stack:
+      // è così che handleHardwareBack sa se sotto c'è ancora roba nostra.
+      this._navPos = typeof state.pos === 'number' ? state.pos : 0;
       if (state.wikiPage) {
         this.switchMode('wiki', false);
         this.controllers.wiki.loadWikiPage(state.wiki, state.page || 'index.md', false);
@@ -140,13 +148,7 @@ class MobileApp {
         return;
       }
       // Sync URL with restored state
-      const url = new URL(window.location);
-      url.searchParams.set('mode', state.mode);
-      if (state.wiki) url.searchParams.set('wiki', state.wiki);
-      else url.searchParams.delete('wiki');
-      if (state.page) url.searchParams.set('page', state.page);
-      else url.searchParams.delete('page');
-      history.replaceState(state, '', url);
+      this.replaceNav(state);
     });
 
     // Persist mode changes
@@ -174,17 +176,6 @@ class MobileApp {
     // If URL has wiki param but no explicit mode, force wiki mode
     if (!urlMode && initialWiki) {
       initialMode = 'wiki';
-    }
-
-    // Set initial history state
-    if (!window.history.state) {
-      if (initialMode === 'wiki' && initialWiki) {
-        history.replaceState({ mode: 'wiki', wikiPage: true, wiki: initialWiki, page: initialPage || 'index.md' }, '', window.location.href);
-      } else if (initialMode === 'graph' && initialWiki) {
-        history.replaceState({ mode: 'graph', wiki: initialWiki }, '', window.location.href);
-      } else {
-        history.replaceState({ mode: initialMode }, '', window.location.href);
-      }
     }
 
     // Check first-run: redirect to onboarding (always when first_run is true)
@@ -216,7 +207,15 @@ class MobileApp {
 
     // Initialize sessions and load module
     await this._initSessions();
-    this.switchMode(initialMode);
+
+    // Radice dello stack. La entry iniziale *è* già la vista iniziale: va
+    // riscritta, non impilata. Prima si faceva replaceState + switchMode(push)
+    // e restavano due entry identiche, così il primo Indietro veniva ingoiato
+    // da switchMode (`mode === currentMode`) senza cambiare niente a schermo —
+    // da lì la sensazione che il tasto "salti" una pagina.
+    this._navPos = 0;
+    this.replaceNav(this._navStateFor(initialMode, initialWiki, initialPage));
+    this.switchMode(initialMode, false);
 
     // After initial mode switch, load the specific wiki graph if needed
     if (initialMode === 'graph' && initialWiki) {
@@ -306,17 +305,100 @@ class MobileApp {
     });
   }
 
-  handleHardwareBack() {
-    const apps = this.controllers.apps;
-    if (apps?._openApp) {
-      apps.handleBack();
+  /* ── Navigazione: stack unico ──────────────────────────────────────────
+     Unico punto di scrittura della history. L'URL è *derivato* dallo stato,
+     mai il contrario, così una entry ripristinata da popstate riproduce
+     esattamente la schermata che l'aveva spinta. */
+
+  _navUrl(state) {
+    const url = new URL(window.location);
+    url.searchParams.set('mode', state.mode);
+    if (state.wiki) url.searchParams.set('wiki', state.wiki);
+    else url.searchParams.delete('wiki');
+    if (state.page) url.searchParams.set('page', state.page);
+    else url.searchParams.delete('page');
+    return url;
+  }
+
+  /** Stato di navigazione per una vista (usato al boot e dai controller). */
+  _navStateFor(mode, wiki, page) {
+    if (mode === 'wiki' && wiki) return { mode: 'wiki', wikiPage: true, wiki, page: page || 'index.md' };
+    if (mode === 'graph' && wiki) return { mode: 'graph', wiki };
+    return { mode };
+  }
+
+  /** Impila una nuova schermata. Impilare due volte la stessa (ritap sullo
+      stesso link, doppio tap sulla stessa voce) è la ricetta per una pressione
+      di Indietro che non cambia niente: in quel caso si riscrive e basta. */
+  pushNav(state) {
+    const cur = history.state;
+    if (cur && cur.mode === state.mode
+        && (cur.wiki || null) === (state.wiki || null)
+        && (cur.page || null) === (state.page || null)) {
+      this.replaceNav(state);
       return;
     }
-    if (window.history.length > 1) {
+    this._navPos += 1;
+    history.pushState({ ...state, pos: this._navPos }, '', this._navUrl(state));
+  }
+
+  /** Riscrive la schermata corrente senza impilarne una nuova. */
+  replaceNav(state) {
+    history.replaceState({ ...state, pos: this._navPos }, '', this._navUrl(state));
+  }
+
+  /* Tasto Indietro hardware (MainActivity lo inoltra sempre qui: il guscio
+     nativo non ne gestisce nessun caso da solo).
+
+     Catena di consumatori, dal livello più in alto verso il basso: il primo che
+     consuma si ferma. L'invariante è che *una pressione = un cambiamento
+     visibile*, altrimenti il tasto sembra saltare le schermate. */
+  handleHardwareBack() {
+    // 1. Top layer: <dialog> modali e sheet. Con showModal() vivono sopra tutto,
+    //    quindi qualunque altra cosa facessimo resterebbe nascosta sotto.
+    //    Si passa da un evento `cancel` annullabile invece di chiamare close():
+    //    è la semantica di Esc, e c'è chi la rifiuta apposta (il dialog di
+    //    riavvio dopo un restore non deve essere chiudibile). Consumata comunque
+    //    la pressione: sotto la modale non si naviga.
+    const dialogs = document.querySelectorAll('dialog[open]');
+    if (dialogs.length) {
+      const top = dialogs[dialogs.length - 1];
+      if (top.dispatchEvent(new Event('cancel', { cancelable: true }))) top.close();
+      return;
+    }
+
+    // 2. Lightbox immagini: overlay normale, si chiude col proprio handler.
+    const lightbox = document.querySelector('.image-lightbox');
+    if (lightbox) {
+      if (typeof lightbox.__jennyClose === 'function') lightbox.__jennyClose();
+      else lightbox.remove();
+      return;
+    }
+
+    // 3. Mini-app aperta: gestisce la propria navigazione interna e, all'ultimo
+    //    livello, si chiude. Ritorna false se non c'è nessuna app aperta.
+    if (this.controllers.apps?.handleBack()) return;
+
+    // 4. Minichat della mascotte.
+    if (this.jenny?.handleBack()) return;
+
+    // 5. Drawer aperto.
+    if (this.drawer.activeDrawer) {
+      this.drawer.closeAll();
+      return;
+    }
+
+    // 6. Sotto-stato della sezione corrente (cartella del workspace, editor,
+    //    step dell'onboarding): risalire di un livello dentro la sezione viene
+    //    prima di uscirne.
+    if (this.controllers[this.currentMode]?.handleBack?.()) return;
+
+    // 7. Schermata precedente.
+    if (this._navPos > 0) {
       window.history.back();
     }
-    // At the root there is nothing above us: do nothing. This app is a launcher,
-    // so "back" must never finish the task (there is no app to exit to).
+    // Alla radice non c'è niente sopra di noi: non si fa niente. Questa app è
+    // il launcher, quindi "indietro" non deve mai chiudere il task.
   }
 
   // Android Home button / home gesture. This app is the device launcher, so
@@ -407,16 +489,11 @@ class MobileApp {
     // Update state and URL
     AppState.set('currentMode', mode);
     if (pushState) {
-      const url = new URL(window.location);
-      url.searchParams.set('mode', mode);
-      if (mode !== 'wiki' && mode !== 'graph') {
-        url.searchParams.delete('wiki');
-        url.searchParams.delete('page');
-      }
-      if (mode === 'graph' && !this.controllers.graph?.currentWiki) {
-        url.searchParams.delete('page');
-      }
-      history.pushState({ mode }, '', url);
+      // La vista graph ricorda il proprio wiki (activate() lo ricarica): senza
+      // riportarlo nello stato, tornare qui col back mostrerebbe un grafo che
+      // l'URL non descrive.
+      const wiki = mode === 'graph' ? this.controllers.graph?.currentWiki : null;
+      this.pushNav(wiki ? { mode, wiki } : { mode });
     }
   }
 

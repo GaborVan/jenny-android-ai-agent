@@ -864,6 +864,15 @@ export class JennyCompanion {
     this._updateGestureExclusion();
   }
 
+  /* Tasto Indietro hardware: con la minichat aperta lo si consuma per
+     richiuderla (scrim e tastiera comprese), come il tap sullo scrim.
+     Ritorna false se non c'era niente di aperto. */
+  handleBack() {
+    if (!this.mc?.classList.contains('open')) return false;
+    this._setOut(false);
+    return true;
+  }
+
   /* ── Minichat ── */
 
   _openMini() {

@@ -17,9 +17,9 @@ const LEGACY_SIDE_KEY = 'jenny-mascotte-side';
 const COLOR_KEY = 'jenny-mascotte-color';
 const SIZE_KEY = 'jenny-mascotte-size';
 
-/** Lato del canvas quadrato per ogni taglia. 'md' è il valore storico e resta
- *  il default; la geometria in mobile-style.css deriva tutta da --jenny-size,
- *  quindi qui basta scrivere il pixel. */
+/** Lato del canvas quadrato per ogni taglia. Il default è 'sm'; la geometria
+ *  in mobile-style.css deriva tutta da --jenny-size, quindi qui basta
+ *  scrivere il pixel. */
 export const MASCOT_SIZES = { sm: 120, md: 160, lg: 210 };
 
 export function mascotVisible() {
@@ -73,11 +73,11 @@ export function setMascotColor(on) {
 
 export function mascotSize() {
   const s = localStorage.getItem(SIZE_KEY);
-  return s in MASCOT_SIZES ? s : 'md'; // default: media (comportamento storico)
+  return s in MASCOT_SIZES ? s : 'sm'; // default: piccola
 }
 
 export function setMascotSize(size) {
-  const normalized = size in MASCOT_SIZES ? size : 'md';
+  const normalized = size in MASCOT_SIZES ? size : 'sm';
   localStorage.setItem(SIZE_KEY, normalized);
   applyMascotSize();
   window.dispatchEvent(new CustomEvent('mascotchange', {
@@ -89,7 +89,7 @@ export function setMascotSize(size) {
 }
 
 /** Scrive la taglia attiva su <html> come --jenny-size. Da chiamare anche
- *  all'avvio: il default CSS copre solo 'md'. */
+ *  all'avvio: il default CSS copre solo la taglia di default. */
 export function applyMascotSize() {
   document.documentElement.style.setProperty(
     '--jenny-size', `${MASCOT_SIZES[mascotSize()]}px`

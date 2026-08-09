@@ -151,7 +151,7 @@ export class WikiController {
       await this.loadTree();
       await this.loadAudits(null);
       this._renderLatex();
-      if (pushHistory) history.pushState({ mode: 'wiki' }, '', '/?mode=wiki');
+      if (pushHistory) window.mobileApp.pushNav({ mode: 'wiki' });
     } catch (err) {
       if (token !== this._loadToken) return;  // don't surface errors of stale loads
       const msg = err.message || '';
@@ -173,7 +173,7 @@ export class WikiController {
         this._renderBreadcrumbs();
         this.loadTree();
         this.loadAudits(null);
-        if (pushHistory) history.pushState({ mode: 'wiki' }, '', '/?mode=wiki');
+        if (pushHistory) window.mobileApp.pushNav({ mode: 'wiki' });
       } else {
         this.contentEl.innerHTML = `<p class="wiki-blockq" style="color: var(--error)">${i18n.t('common.error')}: ${escapeHtml(msg)}</p>`;
       }
@@ -211,8 +211,7 @@ export class WikiController {
       this._renderLatex();
       this._renderMermaid();
       if (pushHistory) {
-        const qs = new URLSearchParams({ wiki: this.currentWiki, page: this.currentPath });
-        history.pushState({ mode: 'wiki', wikiPage: true, wiki: this.currentWiki, page: this.currentPath }, '', `/?${qs}`);
+        window.mobileApp.pushNav({ mode: 'wiki', wikiPage: true, wiki: this.currentWiki, page: this.currentPath });
       }
       this.lastWikiPage[this.currentWiki] = this.currentPath;
     } catch (err) {

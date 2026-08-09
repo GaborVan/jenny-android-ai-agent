@@ -149,6 +149,12 @@ export class ChatController {
 
     this._deltaBuffer = '';
     this._reasoningBuffer = '';
+    // Un turno può avere più segmenti di ragionamento (uno per richiesta al
+    // modello): il flag segna il confine, non la fine.
+    this._reasoningSegmentClosed = false;
+    // Sticky bottom del box del ragionamento, gemello di `_autoScroll` per la
+    // chat: vero finché l'utente non risale a leggere dentro al box.
+    this._thinkStick = true;
     // Rendering dello streaming coalizzato a un frame: i delta aggiornano
     // sempre il buffer, ma il re-parse markdown (costoso, O(n) sul buffer
     // intero) avviene al massimo una volta per requestAnimationFrame. Evita
@@ -943,8 +949,7 @@ export class ChatController {
       this._deltaDirty = false;
     }
     if (this._reasoningDirty && this._currentThinking) {
-      const body = this._currentThinking.querySelector('.chat-thinking-body');
-      if (body) body.innerHTML = renderMarkdown(this._reasoningBuffer);
+      this._renderReasoningBody();
       this._reasoningDirty = false;
     }
     this.scrollToBottom();
@@ -957,8 +962,11 @@ export class ChatController {
     }
   }
 
-  _appendReasoningBlock(msg, text, collapsed = true) {
-    if (!msg || !text) return;
+  /* Guscio di un blocco di ragionamento: chip d'intestazione + corpo che scorre
+     dentro sé. Identico per lo storico e per il vivo — il vivo ci aggiunge la
+     pillola e la disciplina dello scroll, così un blocco finito è
+     indistinguibile da uno riletto dallo storico. */
+  _buildThinkingBlock(collapsed) {
     const thinking = document.createElement('div');
     thinking.className = `chat-thinking${collapsed ? ' collapsed' : ''}`;
 
@@ -969,8 +977,15 @@ export class ChatController {
 
     const body = document.createElement('div');
     body.className = 'chat-thinking-body';
-    body.innerHTML = renderMarkdown(text);
     thinking.appendChild(body);
+
+    return { thinking, header, body };
+  }
+
+  _appendReasoningBlock(msg, text, collapsed = true) {
+    if (!msg || !text) return;
+    const { thinking, header, body } = this._buildThinkingBlock(collapsed);
+    body.innerHTML = renderMarkdown(text);
 
     header.addEventListener('click', () => {
       thinking.classList.toggle('collapsed');
@@ -979,30 +994,101 @@ export class ChatController {
     this._ensureMetaRow(msg).appendChild(thinking);
   }
 
+  /* ── Scroll del ragionamento in diretta ──────────────────────────────────
+     Il corpo ha un `max-height`, quindi è un contenitore di scroll a sé: senza
+     una disciplina propria restava fermo in cima mentre il testo cresceva sotto
+     (e il rimpiazzo dell'innerHTML gli azzerava lo scroll a ogni frame). La
+     regola è quella della chat e della lista dei subagent: si insegue l'ultima
+     riga finché si è in fondo, si smette appena l'utente risale a leggere, e la
+     pillola è il modo — dichiarato — di tornare giù. */
+
+  /* Tolleranza di 24px come per la lista dei subagent: "in fondo" deve restare
+     vero dopo che il dito ha rilasciato lo slancio a un pelo dal bordo. */
+  _thinkAtBottom(body) {
+    if (!body) return true;
+    return (body.scrollHeight - body.scrollTop - body.clientHeight) <= 24;
+  }
+
+  _thinkScrollToLatest(body) {
+    if (body) body.scrollTop = body.scrollHeight;
+  }
+
+  _syncThinkingJump() {
+    const btn = this._currentThinking &&
+      this._currentThinking.querySelector('.chat-thinking-jump');
+    if (btn) btn.hidden = this._thinkStick;
+  }
+
+  /* Rende il buffer nel corpo tenendo lo scroll dov'è. Il rimpiazzo
+     dell'innerHTML riporta scrollTop a zero: senza salvarlo e rimetterlo, chi è
+     risalito a leggere verrebbe sbattuto in cima a ogni frame. */
+  _renderReasoningBody() {
+    const body = this._currentThinking &&
+      this._currentThinking.querySelector('.chat-thinking-body');
+    if (!body) return;
+    // La misura vince sul flag: una WebView non emette `scroll` per uno scroll
+    // programmatico, quindi il flag da solo si sgancerebbe da sé. A blocco
+    // chiuso il corpo è `display: none` e misura zero — cioè "in fondo", che è
+    // il default giusto per quando verrà aperto.
+    this._thinkStick = this._thinkAtBottom(body);
+    const top = body.scrollTop;
+    body.innerHTML = renderMarkdown(this._reasoningBuffer);
+    if (this._thinkStick) this._thinkScrollToLatest(body);
+    else body.scrollTop = top;
+    this._syncThinkingJump();
+  }
+
   _handleReasoningDelta(text) {
     this._ensureAiMessage();
 
     if (!this._currentThinking) {
-      const thinking = document.createElement('div');
-      thinking.className = 'chat-thinking collapsed';
-
-      const header = document.createElement('div');
-      header.className = 'chat-thinking-header';
-      header.innerHTML = '<i class="ti ti-brain"></i><span class="chat-thinking-label">' + i18n.t('chat.showThinking') + '</span><i class="ti ti-chevron-down chat-thinking-chevron"></i>';
-      thinking.appendChild(header);
-
-      const body = document.createElement('div');
-      body.className = 'chat-thinking-body';
-      thinking.appendChild(body);
+      const { thinking, header, body } = this._buildThinkingBlock(true);
 
       header.addEventListener('click', () => {
-        thinking.classList.toggle('collapsed');
+        const opened = !thinking.classList.toggle('collapsed');
+        // Aprire atterra sull'ultima riga, come entrare in chat.
+        if (opened && this._thinkStick) this._thinkScrollToLatest(body);
       });
+
+      /* I blocchi dei turni precedenti restano nel DOM con i loro listener:
+         senza questa guardia, scorrere dentro un ragionamento vecchio mentre ne
+         arriva uno nuovo staccherebbe *quello nuovo*. Solo il blocco vivo
+         comanda il flag. */
+      const isLive = () => this._currentThinking === thinking;
+
+      body.addEventListener('scroll', () => {
+        if (!isLive()) return;
+        this._thinkStick = this._thinkAtBottom(body);
+        this._syncThinkingJump();
+      }, { passive: true });
+
+      // Rotella (Titan 2): un colpo verso l'alto stacca subito, senza aspettare
+      // la soglia — gemello del `wheel` della chat.
+      body.addEventListener('wheel', (e) => {
+        if (!isLive()) return;
+        if (e.deltaY < 0) {
+          this._thinkStick = false;
+          this._syncThinkingJump();
+        }
+      }, { passive: true });
 
       this._ensureMetaRow(this._currentMsg).appendChild(thinking);
 
       this._currentThinking = thinking;
       this._reasoningBuffer = '';
+      this._reasoningSegmentClosed = false;
+      this._thinkStick = true;
+      this._setThinkingLive(thinking, true);
+    }
+
+    if (this._reasoningSegmentClosed) {
+      this._reasoningSegmentClosed = false;
+      // Stacco fra un segmento e il successivo: stessa giunzione con cui lo
+      // storico ricompone il ragionamento di un turno (`_ingestHistory`), così
+      // ricaricare la chat non cambia quello che si legge.
+      if (this._reasoningBuffer) this._reasoningBuffer += '\n\n';
+      // Ha ripreso a pensare: il blocco torna vivo (icona e pillola).
+      this._setThinkingLive(this._currentThinking, true);
     }
 
     this._reasoningBuffer += text;
@@ -1010,26 +1096,61 @@ export class ChatController {
     this._scheduleFlush();
   }
 
+  /* Vivo o concluso: icona della testata e presenza della pillola. Il passaggio
+     deve funzionare nei due sensi — un blocco torna vivo ogni volta che il
+     modello riprende a ragionare dopo un tool. */
+  _setThinkingLive(thinking, live) {
+    if (!thinking) return;
+    const icon = thinking.querySelector('.chat-thinking-header i');
+    if (icon) {
+      icon.className = live ? 'ti ti-brain' : 'ti ti-check';
+      // Stringa vuota e non un colore: toglie l'inline e rimette quello del CSS.
+      icon.style.color = live ? '' : 'var(--ok)';
+    }
+
+    const existing = thinking.querySelector('.chat-thinking-jump');
+    if (!live) {
+      // Non arriva più testo: la pillola non ha nessun "dopo" da promettere e se
+      // ne va. Da qui in poi il blocco è un box di scroll normale, uguale a
+      // quelli riletti dallo storico.
+      if (existing) existing.remove();
+      return;
+    }
+    if (existing) return;
+
+    const body = thinking.querySelector('.chat-thinking-body');
+    const jump = document.createElement('button');
+    jump.type = 'button';
+    jump.className = 'chat-thinking-jump';
+    jump.hidden = this._thinkStick;
+    jump.innerHTML = '<i class="ti ti-arrow-down"></i>' +
+      escapeHtml(i18n.t('chat.scrollToBottom'));
+    jump.addEventListener('click', () => {
+      this._thinkStick = true;
+      this._thinkScrollToLatest(body);
+      this._syncThinkingJump();
+    });
+    thinking.appendChild(jump);
+  }
+
   _handleReasoningEnd() {
     // Flush finale del reasoning eventualmente in coda al frame corrente,
     // così l'ultimo delta non resta invisibile se lo stream chiude prima
     // che l'rAF pendente scatti.
     if (this._reasoningDirty && this._currentThinking) {
-      const body = this._currentThinking.querySelector('.chat-thinking-body');
-      if (body) body.innerHTML = renderMarkdown(this._reasoningBuffer);
+      this._renderReasoningBody();
       this._reasoningDirty = false;
     }
-    if (this._currentThinking) {
-      const header = this._currentThinking.querySelector('.chat-thinking-header');
-      if (header) {
-        const icon = header.querySelector('i');
-        if (icon) {
-          icon.className = 'ti ti-check';
-          icon.style.color = 'var(--ok)';
-        }
-      }
-    }
-    this._reasoningBuffer = '';
+    this._setThinkingLive(this._currentThinking, false);
+    /* Il buffer NON si azzera. `reasoning_end` chiude un *segmento*, non il
+       ragionamento del turno: il modello ne apre uno nuovo ogni volta che
+       riprende a pensare dopo un tool (`request_execution.py`, dove l'end parte
+       appena il ragionamento cede il passo al testo). Azzerandolo, il primo
+       delta del segmento dopo ripartiva da vuoto e il rendering rimpiazzava il
+       testo di quello prima: il ragionamento già letto spariva dal box e
+       tornava solo ricaricando lo storico — che infatti i segmenti li concatena.
+       Qui si segna solo il confine; la riga vuota la mette il delta dopo. */
+    this._reasoningSegmentClosed = true;
   }
 
   _handleStreamEnd(fullText) {
@@ -1074,6 +1195,8 @@ export class ChatController {
     this._currentContent = null;
     this._deltaBuffer = '';
     this._reasoningBuffer = '';
+    this._reasoningSegmentClosed = false;
+    this._thinkStick = true;
     this._toolStates = {};
     this._fileEditPaths = new Map();
   }

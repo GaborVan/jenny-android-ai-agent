@@ -191,6 +191,28 @@ export class WorkspaceController {
     // Cleanup
   }
 
+  /* Tasto Indietro hardware, invocato dalla shell prima di toccare la history.
+     Ritorna true se la pressione è stata consumata qui dentro.
+
+     L'editor aperto da un'altra sezione (Apps → modifica skill) è il caso
+     particolare: la entry di quella sezione è ancora nello stack, quindi si
+     smonta l'editor ma si lascia proseguire il back, che ci torna da sé —
+     rimandarcelo con switchMode impilerebbe una entry *in avanti* mentre si
+     sta andando indietro. */
+  handleBack() {
+    if (this.viewMode === 'editor') {
+      const ret = this._returnMode;
+      this._returnMode = null;
+      this.backToExplorerAt(ret ? '' : this.currentDir);
+      return !ret;
+    }
+    if (this.currentDir) {
+      this.navigateTo(parentPath(this.currentDir));
+      return true;
+    }
+    return false;
+  }
+
   // ── Navigation ──
 
   async navigateTo(dirPath) {

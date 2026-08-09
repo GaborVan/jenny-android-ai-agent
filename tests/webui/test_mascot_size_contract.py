@@ -42,12 +42,21 @@ def test_bootstrap_and_mascot_module_agree_on_sizes():
 
 
 def test_default_size_matches_the_css_token():
-    """Il default CSS copre 'md': se cambia una delle due, cambiano entrambe."""
-    module = _sizes_from(
-        (UI_ASSETS / "shared" / "mascot.js").read_text("utf-8"),
-        r"MASCOT_SIZES\s*=\s*\{([^}]*)\}",
-    )
+    """Il default CSS copre solo la taglia di default: se cambia una, cambiano entrambe.
+
+    Il default si legge da ``mascotSize()`` invece di essere scritto qui: così
+    spostarlo (era 'md', oggi 'sm') non lascia il token CSS indietro di
+    nascosto — chi non ha mai scelto una taglia vedrebbe Jenny comparire con
+    quella vecchia e poi ridimensionarsi.
+    """
+    source = (UI_ASSETS / "shared" / "mascot.js").read_text("utf-8")
+    module = _sizes_from(source, r"MASCOT_SIZES\s*=\s*\{([^}]*)\}")
+    fallback = re.search(r"return\s+s in MASCOT_SIZES \? s : '(\w+)'", source)
+    assert fallback, "il default di mascotSize() non è più leggibile"
+    default = fallback.group(1)
+    assert default in module, f"default '{default}' non è una taglia di MASCOT_SIZES"
+
     css = (UI_ASSETS / "mobile-style.css").read_text("utf-8")
     token = re.search(r"--jenny-size:\s*(\d+)px", css)
     assert token, "--jenny-size non è più definita in :root"
-    assert int(token.group(1)) == module["md"]
+    assert int(token.group(1)) == module[default]
