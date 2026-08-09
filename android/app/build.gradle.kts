@@ -204,6 +204,13 @@ dependencies {
     // in-app (con pulsante di chiusura) invece di dirottare la WebView SPA.
     implementation("androidx.browser:browser:1.7.0")
 
+    // WorkManager: rete di sicurezza anti-doze indipendente dalle sveglie
+    // (GatewayWorker). Gira sul backend JobScheduler, e i gestori batteria dei
+    // produttori sono molto piu restii a interferire con un concetto di sistema
+    // che con un service nudo. Ferma alla 2.9.x di proposito: dalla 2.10 in su
+    // WorkManager richiede compileSdk 35, qui siamo a 34.
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
+
     // SPIKE SSH — client SSH nativo. jsch e puro Java e client-only.
     // BouncyCastle NON e opzionale su Android: X25519 e entrato in Conscrypt
     // solo con Android 14 e qui il minSdk e 26, quindi senza BC lo scambio di

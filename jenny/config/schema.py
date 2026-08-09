@@ -250,6 +250,114 @@ class SecurityConfig(Base):
     ssrf_whitelist: list[str] = Field(default_factory=list)
 
 
+# Modalità ammesse per ``PowerConfig.keep_awake``. Fuori da queste tre si
+# ricade su ``DEFAULT_KEEP_AWAKE``: un valore scritto male non deve impedire
+# l'avvio del gateway.
+KEEP_AWAKE_MODES = ("off", "turns", "always")
+DEFAULT_KEEP_AWAKE = "turns"
+
+
+class PowerConfig(Base):
+    """Gestione dell'alimentazione: wakelock e risvegli programmati (anti-doze).
+
+    Perché esiste: un foreground service **non** tiene un wakelock sulla CPU.
+    Tiene vivo il processo, non il processore. A schermo spento il device entra
+    in suspend e i timer asyncio non scattano: il loop del gateway resta fermo
+    ovunque si trovi, i cron slittano di minuti o ore e da fuori sembra che
+    Jenny si sia piantata. Solo un ``PARTIAL_WAKE_LOCK`` impedisce la sospensione
+    della CPU, e i risvegli puntuali richiedono un alarm dell'OS.
+
+    ``keep_awake`` sceglie quanto in là spingersi:
+
+    * ``"turns"`` (default) — il wakelock viene preso **solo** attorno al lavoro
+      vero (un turno dell'agente, un job cron, una sessione SSH) e rilasciato
+      subito dopo. È il compromesso: la CPU resta sveglia quando serve, il
+      telefono dorme il resto del tempo.
+    * ``"always"`` — wakelock tenuto per tutta la vita del servizio. Da usare a
+      telefono in carica: la batteria non regge un lock permanente.
+    * ``"off"`` — comportamento pre-0.6.6, nessun wakelock. Resta disponibile
+      come via di fuga se il lock dovesse creare problemi su un device.
+
+    ``wakelock_rotate_min`` ruota il lock (release + acquire) per non farlo
+    invecchiare indefinitamente; 0 disattiva la rotazione. Il watchdog misura il
+    ritardo reale del loop e ``gap_warning_min`` è la soglia oltre la quale un
+    buco di attività va segnalato invece di passare inosservato.
+    """
+
+    keep_awake: str = Field(
+        default=DEFAULT_KEEP_AWAKE,
+        validation_alias=AliasChoices("keepAwake", "keep_awake"),
+        serialization_alias="keepAwake",
+    )
+    # 0 = nessuna rotazione. Il tetto a 4 ore evita che una config assurda
+    # trasformi la "rotazione" in "mai".
+    wakelock_rotate_min: int = Field(
+        default=50,
+        ge=0,
+        le=240,
+        validation_alias=AliasChoices("wakelockRotateMin", "wakelock_rotate_min"),
+        serialization_alias="wakelockRotateMin",
+    )
+    watchdog_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("watchdogEnabled", "watchdog_enabled"),
+        serialization_alias="watchdogEnabled",
+    )
+    watchdog_interval_min: int = Field(
+        default=15,
+        ge=5,
+        le=120,
+        validation_alias=AliasChoices("watchdogIntervalMin", "watchdog_interval_min"),
+        serialization_alias="watchdogIntervalMin",
+    )
+    alarm_driven_cron: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("alarmDrivenCron", "alarm_driven_cron"),
+        serialization_alias="alarmDrivenCron",
+    )
+    alarm_clock_fallback: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("alarmClockFallback", "alarm_clock_fallback"),
+        serialization_alias="alarmClockFallback",
+    )
+    gap_warning_min: int = Field(
+        default=60,
+        ge=5,
+        validation_alias=AliasChoices("gapWarningMin", "gap_warning_min"),
+        serialization_alias="gapWarningMin",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_keep_awake(cls, data: Any) -> Any:
+        """Normalizza ``keep_awake`` e ricade su ``"turns"`` se non riconosciuto.
+
+        Deliberatamente in ``mode="before"`` e non un ``field_validator``: qui il
+        valore è ancora quello grezzo del file, quindi si intercetta anche un
+        tipo sbagliato (``true``, ``null``, un numero) che la validazione del
+        campo boccerebbe con un'eccezione. Un ``keep_awake`` scritto male è un
+        refuso, non un motivo per non far partire il gateway.
+        """
+        if not isinstance(data, dict):
+            return data
+        for key in ("keepAwake", "keep_awake"):
+            if key not in data:
+                continue
+            raw = data[key]
+            mode = raw.strip().lower() if isinstance(raw, str) else ""
+            if mode not in KEEP_AWAKE_MODES:
+                logger.warning(
+                    "Invalid power.keepAwake value {!r}; falling back to {!r}",
+                    raw,
+                    DEFAULT_KEEP_AWAKE,
+                )
+                mode = DEFAULT_KEEP_AWAKE
+            if mode != raw:
+                data = {**data, key: mode}
+            break
+        return data
+
+
 class WikiConfig(Base):
     """Wiki configuration."""
 
@@ -380,6 +488,7 @@ class Config(BaseSettings):
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
+    power: PowerConfig = Field(default_factory=PowerConfig)
     wiki: WikiConfig = Field(default_factory=WikiConfig)
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
     apps: AppsConfig = Field(default_factory=AppsConfig)

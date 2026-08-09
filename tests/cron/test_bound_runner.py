@@ -11,6 +11,7 @@ qui insieme al runner che la consuma concettualmente.
 from __future__ import annotations
 
 import re
+from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
@@ -18,7 +19,11 @@ import pytest
 from jenny.agent.tools.cron import CronTool
 from jenny.agent.tools.registry import ToolRegistry
 from jenny.bus.events import InboundMessage, OutboundMessage
-from jenny.cron.bound_runner import MONITOR_KEEP_RECENT_MESSAGES, run_bound_cron_job
+from jenny.cron.bound_runner import (
+    CRON_WAKELOCK_TIMEOUT_S,
+    MONITOR_KEEP_RECENT_MESSAGES,
+    run_bound_cron_job,
+)
 from jenny.cron.session_turns import (
     CRON_DEFER_UNTIL_IDLE_META,
     CRON_MONITOR_META,
@@ -595,3 +600,63 @@ class TestMonitorModeSpeaks:
         await run_bound_cron_job(job, agent=agent, cron=cron)
 
         assert agent.sessions.sessions["cron:job-m"].retained == [MONITOR_KEEP_RECENT_MESSAGES]
+
+
+class TestWakelock:
+    """Un job cron gira dentro un wakelock, altrimenti a schermo spento non gira.
+
+    ``keep_awake`` è spiata e non eseguita: il context manager vero è un no-op
+    fuori da Android, quindi eseguirlo non direbbe nulla. Quello che va fissato
+    è che il percorso del job ci passi dentro — la regressione, se sparisce, è
+    muta ovunque tranne che sul telefono.
+    """
+
+    @staticmethod
+    def _spy(monkeypatch: pytest.MonkeyPatch, module: str) -> list[tuple[str, str, float]]:
+        events: list[tuple[str, str, float]] = []
+
+        @asynccontextmanager
+        async def fake_keep_awake(tag: str, *, timeout_s: float = 0.0):
+            events.append(("enter", tag, timeout_s))
+            try:
+                yield True
+            finally:
+                events.append(("exit", tag, timeout_s))
+
+        monkeypatch.setattr(f"{module}.keep_awake", fake_keep_awake)
+        return events
+
+    async def test_the_job_body_runs_inside_the_wakelock(self, monkeypatch) -> None:
+        events = self._spy(monkeypatch, "jenny.cron.bound_runner")
+        agent = _FakeAgent()
+        cron = _FakeCronRecorder()
+
+        await run_bound_cron_job(_bound_job(), agent=agent, cron=cron)
+
+        assert [e[0] for e in events] == ["enter", "exit"]
+        assert events[0][1] == "cron"
+        assert events[0][2] == CRON_WAKELOCK_TIMEOUT_S
+
+    async def test_a_failing_job_still_leaves_the_block(self, monkeypatch) -> None:
+        events = self._spy(monkeypatch, "jenny.cron.bound_runner")
+        agent = _FakeAgent(error=RuntimeError("boom"))
+        cron = _FakeCronRecorder()
+
+        with pytest.raises(RuntimeError):
+            await run_bound_cron_job(_bound_job(), agent=agent, cron=cron)
+
+        assert [e[0] for e in events] == ["enter", "exit"]
+
+    async def test_a_silenced_monitor_still_leaves_the_block(self, monkeypatch) -> None:
+        # ``CronJobSilencedError`` è un esito RIUSCITO che esce per eccezione:
+        # il ramo più facile da dimenticare quando si sposta un `finally`.
+        events = self._spy(monkeypatch, "jenny.cron.bound_runner")
+        agent = _FakeAgent(response="", spoke=False)
+        cron = _FakeCronRecorder()
+
+        with pytest.raises(CronJobSilencedError):
+            await run_bound_cron_job(
+                _bound_job(job_id="job-m", mode="monitor"), agent=agent, cron=cron
+            )
+
+        assert [e[0] for e in events] == ["enter", "exit"]

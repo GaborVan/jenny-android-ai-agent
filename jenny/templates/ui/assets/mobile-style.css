@@ -41,10 +41,10 @@
   --radius-seg:    999px;
   --dock-height:   56px;
   --dock-icon:     22px;
-  /* Lato del canvas quadrato della mascotte. Default = taglia media; le altre
-     taglie la riscrivono su <html> (v. shared/mascot.js). Tutta la geometria
-     di .jenny-duo e delle bolle minichat ne deriva. */
-  --jenny-size:    160px;
+  /* Lato del canvas quadrato della mascotte. Default = taglia piccola; le
+     altre taglie la riscrivono su <html> (v. shared/mascot.js). Tutta la
+     geometria di .jenny-duo e delle bolle minichat ne deriva. */
+  --jenny-size:    120px;
   --font-sans:     'Inter', system-ui, sans-serif;
   --font-display:  'Tenor Sans', var(--font-sans);
   --font-mono:     'Fira Code', monospace;
@@ -1465,6 +1465,11 @@ body {
   color: var(--text-muted);
   max-height: 300px;
   overflow-y: auto;
+  /* Il corpo è un contenitore di scroll suo: uno swipe che arriva in fondo non
+     deve proseguire trascinando la chat sotto (stessa regola di
+     `.sa-stream-list` e `.sa-digest-body`). */
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
   border-left: 2px solid var(--accent);
   padding: 6px 12px;
   margin: 2px 0;
@@ -1475,6 +1480,31 @@ body {
 .chat-thinking-body p {
   margin: 0.3em 0;
 }
+
+/* Pillola "vai in fondo" del ragionamento in diretta: stesso mestiere della FAB
+   della chat e della pillola della lista dei subagent (`.sa-stream-jump`) —
+   compare solo quando l'utente è risalito a leggere mentre il testo continua ad
+   arrivare, ed è il modo di tornare all'ultima riga. Sta nella meta-row insieme
+   al corpo (`.chat-thinking` è `display: contents`), quindi `width: 100%` la
+   manda a capo da sé, sotto al box. */
+.chat-thinking-jump {
+  display: block;
+  width: 100%;
+  margin: 0 0 2px;
+  min-height: 28px;
+  background: var(--overlay-strong);
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius-seg);
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: 10.5px;
+  cursor: pointer;
+}
+.chat-thinking-jump i { margin-right: 4px; font-size: 12px; }
+.chat-thinking-jump:active { background: var(--active); }
+.chat-thinking-jump[hidden] { display: none; }
+/* Chiuso non c'è nessun fondo da raggiungere. */
+.chat-thinking.collapsed .chat-thinking-jump { display: none; }
 
 /* Tool call pills */
 .chat-tools {
@@ -3973,6 +4003,22 @@ body {
   padding-right: 24px;
 }
 
+/* Costo della scelta corrente di una select (v. "Tenere sveglia la CPU").
+   Il testo di una <option> nativa non va a capo: quello che non ci sta viene
+   troncato, e in una lista di compromessi la parte tagliata è proprio la
+   clausola sul costo. Qui sotto invece va a capo quanto serve, e resta legata
+   alla select dal filo verticale invece che dalla sola vicinanza. Più leggibile
+   di .settings-hint di proposito: descrive la scelta attiva, non il contorno. */
+.settings-choice-cost {
+  margin: 6px 0 0;
+  padding-left: 8px;
+  border-left: 2px solid var(--border-strong);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+.settings-choice-cost:empty { display: none; }
+
 /* Toggle switch */
 .settings-toggle-row {
   flex-direction: row;
@@ -5422,10 +5468,10 @@ body {
 .jenny-duo {
   position: absolute;
   /* L'arte è il canvas QUADRATO 3000² intero (nessun crop): il personaggio
-     occupa ~45% del quadrato, i margini sono trasparenti. 160px di quadrato
-     ≈ 72px di personaggio visibile; gli offset compensano i margini.
+     occupa ~45% del quadrato, i margini sono trasparenti. 120px di quadrato
+     ≈ 54px di personaggio visibile; gli offset compensano i margini.
      Tutta la geometria deriva da --jenny-size (impostata su :root da
-     shared/mascot.js, default 160px): i rapporti qui sotto valgono a ogni
+     shared/mascot.js, default 120px): i rapporti qui sotto valgono a ogni
      taglia, quindi cambiarne una non richiede di ritoccare gli offset. */
   right: calc(var(--jenny-size) * -0.469);
   /* Fissa per tutti gli stati: appena sopra la barra di input (dock +

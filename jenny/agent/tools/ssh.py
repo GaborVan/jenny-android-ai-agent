@@ -50,6 +50,7 @@ from jenny.agent.tools.ssh_transport import (
     get_ssh_backend,
     resolve_target,
 )
+from jenny.runtime.power import keep_awake
 from jenny.security.workspace_policy import (
     WorkspaceBoundaryError,
     _safe_expanduser,
@@ -57,6 +58,14 @@ from jenny.security.workspace_policy import (
 )
 
 _HOST_PARAM = "Alias of a registered host. Call `ssh_hosts` if you do not know the aliases."
+
+# Margine fra la scadenza del wakelock e il timeout del comando SSH. Il lock
+# deve sopravvivere al comando che protegge, altrimenti la CPU si sospende
+# proprio mentre si aspetta la risposta e il timeout scatta per un motivo che
+# non ha niente a che vedere col server. Il tetto di ``command_timeout_s`` è 300s
+# da schema, quindi il valore risultante resta abbondantemente sotto il
+# massimo accettato dal bridge.
+_SSH_WAKELOCK_MARGIN_S = 60.0
 
 # Comando mostrato nell'elenco job: abbastanza per riconoscerlo, non tanto da
 # riempire il contesto quando i job sono dieci.
@@ -319,12 +328,16 @@ class SshExecTool(_SshToolMixin, Tool):
             limit = max(1.0, min(limit, float(timeout_s)))
 
         try:
-            result = await get_ssh_backend().exec(
-                target,
-                command,
-                timeout_s=limit,
-                max_output_chars=ssh_cfg.max_output_chars,
-            )
+            # Il turno tiene già il proprio wakelock, ma con un tag diverso e
+            # una scadenza pensata per il turno; questo è il tag che in
+            # ``dumpsys power`` dice "sto aspettando una macchina remota".
+            async with keep_awake("ssh", timeout_s=limit + _SSH_WAKELOCK_MARGIN_S):
+                result = await get_ssh_backend().exec(
+                    target,
+                    command,
+                    timeout_s=limit,
+                    max_output_chars=ssh_cfg.max_output_chars,
+                )
         except SshError as exc:
             return _describe(exc)
         logger.info("ssh_exec on {}: exit {}", host, result.exit_code)

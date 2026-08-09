@@ -61,6 +61,7 @@ from jenny.cron.session_turns import (
 from jenny.providers.base import LLMProvider
 from jenny.runtime.context import get_android_context
 from jenny.runtime.location import location_runtime_line
+from jenny.runtime.power import keep_awake
 from jenny.security.workspace_access import (
     WorkspaceScopeResolver,
     bind_workspace_scope,
@@ -104,6 +105,15 @@ def _new_turn_id(session_key: str) -> str:
     in ``RequestContext.turn_id`` e letteralmente il turno tracciato nei log.
     """
     return f"{session_key}:{time.time_ns()}"
+
+
+# Scadenza del wakelock per-turno. Non e' il timeout del turno: e' la rete di
+# sicurezza che l'OS applica se il processo muore prima del `finally` che
+# rilascia. Va tenuta abbondantemente sopra la durata di un turno lungo (catena
+# di tool, subagent, retry del provider) perche' scadere a meta' turno
+# rimetterebbe la CPU a dormire proprio dove serve; e comunque finita, perche'
+# un wakelock eterno scarica la batteria senza dare spiegazioni.
+_TURN_WAKELOCK_TIMEOUT_S = 1800.0
 
 
 class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, LoopTasksMixin):
@@ -1009,7 +1019,15 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
         turn_id_token = bind_turn_id(_new_turn_id(session_key))
 
         try:
-            async with lock, gate:
+            # `keep_awake` DOPO lock e gate, non prima: l'attesa in coda dietro
+            # un altro turno puo' durare minuti, e tenere sveglia la CPU per
+            # aspettare sarebbe esattamente lo spreco che la modalita' "turns"
+            # esiste per evitare. Da qui in giu' invece si lavora davvero — LLM,
+            # tool, persistenza, pubblicazione dell'outbound — e se la CPU si
+            # sospende il turno resta congelato a meta'. Il tag e' refcontato:
+            # un turno annidato (subagent, tool che rientra) non prende un
+            # secondo lock e non lo rilascia sotto il turno esterno.
+            async with lock, gate, keep_awake("turn", timeout_s=_TURN_WAKELOCK_TIMEOUT_S):
                 # Only the task that owns the session lock may publish the
                 # active mid-turn injection queue for this session.
                 if pending is None:

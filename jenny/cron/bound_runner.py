@@ -20,12 +20,21 @@ from jenny.cron.session_turns import (
 )
 from jenny.cron.types import CronJob, CronJobSilencedError
 from jenny.cron.webui_metadata import cron_proactive_delivery_metadata
+from jenny.runtime.power import keep_awake
 from jenny.utils.prompt_templates import render_template
 
 # Coda di storico tenuta nella sessione isolata di un monitor. Stesso valore del
 # default di ``heartbeat.keep_recent_messages``: un monitor gira all'infinito e
 # senza potatura la sua sessione cresce senza limite.
 MONITOR_KEEP_RECENT_MESSAGES = 8
+
+# Scadenza del wakelock che copre l'esecuzione di un job cron. Tag distinto da
+# quello del turno perché il job può essere DIFFERITO (``CRON_DEFER_UNTIL_IDLE``)
+# e restare in attesa che la sessione si liberi: il lavoro vero è tutto dentro
+# questo blocco, e senza CPU un job che scade a schermo spento resta appeso
+# invece di girare — è la causa misurata degli scarti fra 30 e 83 minuti su un
+# cron da mezz'ora.
+CRON_WAKELOCK_TIMEOUT_S = 1800.0
 
 
 class BoundCronAgent(Protocol):
@@ -93,7 +102,26 @@ async def run_bound_cron_job(
     agent: BoundCronAgent,
     cron: CronRunRecorder,
 ) -> str | None:
-    """Execute a session-bound cron job as a normal agent session turn."""
+    """Execute a session-bound cron job as a normal agent session turn.
+
+    Guscio sottile attorno a :func:`_run_bound_cron_job`: tiene la CPU sveglia
+    per tutta la durata del job. Il turno che ne nasce prenderà anche il proprio
+    lock ``"turn"`` — sono tag diversi e indipendenti, e il conteggio di ciascuno
+    torna a zero per conto suo; qui serve comunque, perché la parte del job
+    fuori dal turno (attesa della sessione libera, scrittura delle run record,
+    potatura della sessione monitor) resta scoperta.
+    """
+    async with keep_awake("cron", timeout_s=CRON_WAKELOCK_TIMEOUT_S):
+        return await _run_bound_cron_job(job, agent=agent, cron=cron)
+
+
+async def _run_bound_cron_job(
+    job: CronJob,
+    *,
+    agent: BoundCronAgent,
+    cron: CronRunRecorder,
+) -> str | None:
+    """Corpo del job: identico a prima, senza la gestione del wakelock."""
     session_key = job.payload.session_key
     if not session_key:
         raise ValueError(f"cron job {job.id} is missing payload.session_key")

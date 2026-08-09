@@ -184,10 +184,12 @@ class SshConfig(Base):
     entrambi necessari, perché questa è la sola capacità di Jenny che agisce su
     una macchina che non è il telefono.
 
-    ``command_timeout_s`` è basso di proposito. Il gateway è un foreground
-    service **senza WakeLock**, quindi a schermo spento la CPU può sospendersi e
-    un comando lungo resterebbe appeso: i comandi lunghi vanno passati a
-    ``ssh_job``, che li stacca dalla connessione e li segue a delta.
+    ``command_timeout_s`` è basso di proposito, e il wakelock introdotto in
+    0.6.6 (``jenny/runtime/power.py``, tag ``ssh``) non è un motivo per alzarlo:
+    tiene accesa la CPU, non la connessione. Un comando lungo atteso su un canale
+    SSH aperto muore comunque al primo passaggio wifi→dati mobili, o se il
+    gateway viene riavviato. I comandi lunghi vanno passati a ``ssh_job``, che li
+    stacca dalla connessione e li segue a delta.
     """
 
     enable: bool = False

@@ -60,11 +60,18 @@ If you asked Jenny to remind you about something and nothing arrived, this is al
 
 - **Reminders only fire while the app (and its background service) is alive.** If Android kills the app before a one-time reminder's scheduled time, that reminder is lost **permanently and silently** — there is currently no catch-up or notification that it was missed.
 - Recurring reminders (e.g. "every 2 hours") fare better: since 0.6.0 they keep their deadline across a restart, so one that came due while the app was dead fires shortly after it comes back rather than waiting a full interval. What you don't get is a replay — the cycles that fell inside the dead window are gone, not queued up one by one.
-- The fix is to exempt Jenny from battery optimization, so Android is less likely to kill the background service: **Settings → Telegram → Exempt from battery** (yes, the button lives in the Telegram section even though it helps all background scheduling, not just Telegram — it's there because Telegram's long-polling is what needs it most).
 - The built-in periodic "heartbeat" check (which reads `workspace/HEARTBEAT.md` every 30 minutes) behaves the same way: the cycles that were due while the app was dead are not replayed, they just don't happen.
-- Doze can stretch things even while the app is alive — treat every interval as a floor, not a promise.
+- Doze can stretch things even while the app is alive — treat every interval as a floor, not a promise. Since 0.6.6 Jenny asks Android to wake the phone at each job's real deadline and holds the CPU awake for the length of the run, which is aimed exactly at that stretching; it doesn't make an interval a guarantee.
 
-See [Scheduling and proactivity](./scheduling.md) for the full model.
+**Start at Settings → Background activity.** This is the page that tells you which of the two problems you have — an app that was killed, or an app that was merely slowed down — instead of leaving you to guess:
+
+- **Recorded outages** lists every stretch of at least an hour (`power.gapWarningMin`) when Jenny was not running at all. Reminders and scheduled jobs due inside one of those windows did not fire. Several outages, especially recurring ones overnight, are the signature of the phone's own battery manager shutting Jenny down.
+- **Current state** shows three plain yes/no lines: whether the battery-optimization exemption is in force, whether exact alarms are permitted, and whether the CPU is being kept awake right now. A "no" on the first is the single most useful thing to fix, and the **Exempt from battery** button is on that same page (it's also offered during first-run setup, and re-offered after a system update quietly resets it).
+- When an outage has been recorded, the page adds a card saying plainly that this is the phone's battery manager rather than a Jenny fault, with a link to the [dontkillmyapp.com](https://dontkillmyapp.com/) page for your manufacturer and, where the phone allows it, a button that opens the manufacturer's own battery screen. That restriction can only be lifted by hand, there — no amount of app code can work around it.
+
+An empty outage list is genuinely good news: it means Jenny stayed up, and a missed reminder needs a different explanation (a one-shot whose time passed while the app was dead, or a monitor that ran and chose to stay quiet — see below).
+
+See [Scheduling and proactivity](./scheduling.md) for the full model, and [Configuration](../reference/configuration.md#power) for the `power.*` keys behind that page.
 
 ## A periodic check never writes to me
 
@@ -75,7 +82,7 @@ Ask Jenny to **list your reminders** and look at the job's `Last run:` line:
 | What you see | What it means | What to do |
 |---|---|---|
 | `Last run: <recent time> — silenced` | It ran, it looked, there was nothing worth reporting. This is the normal outcome of a healthy monitor, exactly like Heartbeat's "I set a task and never hear anything". | Nothing. If you'd rather hear from it every time, ask for a plain reminder instead ("tell me the result every hour, even if nothing changed"). |
-| `Last run:` far in the past, or no `Last run:` at all | The app was killed and the cycles in that window simply didn't run — there's no catch-up replay, same as for Heartbeat above. | Exempt Jenny from battery optimization (**Settings → Telegram → Exempt from battery**) and keep the app from being swiped away. |
+| `Last run:` far in the past, or no `Last run:` at all | The app was killed and the cycles in that window simply didn't run — there's no catch-up replay, same as for Heartbeat above. | Check **Settings → Background activity**: if the window shows up under "Recorded outages", the phone shut Jenny down. Exempt her from battery optimization from that same page and keep the app from being swiped away. |
 | `Last run: <time> — error` (usually with the reason in parentheses) | The job genuinely failed — a provider error, a tool that couldn't reach the target. | Ask Jenny to check her logs (first section of this page); fix the underlying cause, or recreate the job. |
 
 Two things that look like faults but aren't:
@@ -89,7 +96,7 @@ If you wanted a one-off check ("at 6pm see whether the deploy finished"), it can
 
 Telegram only works while your phone (running the app) is alive — the phone *is* the server, there's no cloud component. Check, in order:
 
-1. **Is the app actually running?** If Android killed it, or the screen has been off long enough for aggressive Doze to suspend background work, the bot goes silent. Reopening the app resumes polling immediately. The Telegram section in Settings has an "Exempt from battery" button for exactly this.
+1. **Is the app actually running?** If Android killed it, or the screen has been off long enough for aggressive Doze to suspend background work, the bot goes silent. Reopening the app resumes polling immediately. **Settings → Background activity** answers this properly: "Recorded outages" tells you whether Jenny was down and for how long, "Current state" tells you whether the battery-optimization exemption is in force, and the **Exempt from battery** button is right there. If an outage matches the silence, see the OEM guidance in [Reminders and periodic checks aren't firing](#reminders-and-periodic-checks-arent-firing) above — the phone's battery manager is the cause, and it has to be told to stop by hand. One case is *not* a fault at all: with the screen off and the phone suspended, an inbound Telegram message can simply sit in the queue until the device wakes, because the long-poll deliberately doesn't hold the CPU awake while it waits. Nothing is lost, but the reply isn't instant — see [Telegram bridge](./telegram.md#battery-exemption).
 2. **Did you burn your 5 pairing attempts?** Pairing a new bot requires sending a 6-digit code, and it's capped at 5 attempts per chat as an anti-brute-force measure — this cap also applies to you if you mistype the code repeatedly. Once it's hit, that chat can no longer pair even with the *correct* code. The fix is to go back to Settings → Telegram and either unpair or save a new token, which resets the counter.
 3. **Is the bot actually paired?** "Disable" keeps the token but turns the channel off; "Unpair" clears the pairing and generates a new code. Both are visible in Settings → Telegram.
 

@@ -6,17 +6,36 @@ Jenny can remind you of things, watch a checklist in the background, work a long
 
 **Everything in this page lives inside the app's own gateway process.** There is no server in the cloud keeping time for you. If Android kills the app (or you swipe it away, or the battery optimizer freezes it) at the moment a reminder was supposed to fire, here is what actually happens:
 
-- A **one-shot reminder** ("remind me at 6pm") whose time passed while the app was dead is lost **forever, silently**. When the gateway starts back up it recomputes each job's next run; for a one-shot whose time is already in the past, the next run comes back empty and the job is never retried or reported missed — nothing tells you it didn't happen.
+- A **one-shot reminder** ("remind me at 6pm") whose time passed while the app was dead now fires **late, once**, shortly after the app comes back. Before 0.6.6 it was lost forever and silently: recomputing the next run of a one-shot whose time had already passed came back empty, and the job sat there enabled but unrunnable — never retried, never reported missed, nothing telling you it hadn't happened. Late delivery is deliberate: for a reminder, hours late beats never.
 - A **recurring reminder** ("every 30 minutes", "every day") keeps its deadline across restarts, and *does* catch up: a daily reminder that came due at 9am while the app was dead fires shortly after the app comes back, not 24 hours later. Before 0.6.0 this was not the case — every restart reset the interval to "now + interval", so on a phone that restarts the app often, a long interval could go indefinitely without ever firing. The same fix covers the three built-in jobs below.
-- **Catch-up is not the same as punctuality.** The deadline is honoured, but only once the app is running again, and Android's doze can stretch the gap well past the nominal interval even while the app lives: on a test device a 30-minute job was observed firing between 30 and 83 minutes apart. Treat every interval here as a floor, not a promise.
+- **Catch-up is not the same as punctuality**, and until 0.6.6 it wasn't even close. A foreground service keeps the *process* alive, not the *processor*: with the screen off the phone suspends, and the timer a job was sleeping on stops advancing along with the CPU. It didn't run late because anything was slow — the clock had stopped. On a test device a 30-minute job was observed firing between 30 and 83 minutes apart for exactly that reason.
 
-None of this is announced anywhere in the app. If reminders matter to you, the practical fix is to keep the app from being killed:
+### What 0.6.6 changed, and what it didn't
 
-- Grant the battery-optimization exemption Jenny's first-run flow offers (or add it later from Android's own battery settings) so the OS is less likely to freeze the background service.
+Two mechanisms address the frozen-clock problem directly:
+
+- **The deadline now lives on Android's clock, not on Jenny's.** Alongside the in-process timer, the scheduler asks the OS to wake the phone at the next job's real deadline (`power.alarmDrivenCron`, on by default). An OS alarm fires through Doze; a suspended timer does not. So a due job no longer has to wait for the phone to wake up on its own.
+- **The CPU is held awake around the work itself.** By default (`power.keepAwake: "turns"`) Jenny takes a wake lock for the duration of a turn, a scheduled job or an SSH command, and releases it straight after. Without it a job could fire on time and then freeze halfway through — mid-provider-call, mid-tool, mid-write.
+
+And when the process is killed rather than merely frozen, several nets try to bring it back: a self-chaining watchdog alarm (`power.watchdogEnabled`, base 15 minutes, spaced out in Doze), a 15-minute periodic worker, an 8-hourly alarm-clock wake-up, plus opportunistic restarts when the network returns or you open the app. The gateway also comes back by itself after an app update, which it previously did not — it used to stay down until you next opened Jenny by hand.
+
+What none of that fixes, and you should plan around:
+
+- **A missed cron-expression occurrence is still dropped.** A `0 9 * * *` job that came due while the app was dead is recomputed from now, so that morning's run is skipped without a word; the next one arrives normally. Only one-shot and interval schedules catch up.
+- **A recovered one-shot arrives with no sense of how late it is.** It fires whenever the app next comes up — hours or days after the fact — and the message is the one you wrote, unchanged. If that would be worse than silence for a particular reminder, a one-shot is the wrong tool for it.
+- **After a reboot, nothing runs until you unlock the phone.** Jenny's workspace, config and runtime live in storage that Android keeps encrypted until the first unlock, so the gateway cannot start before it — deliberately, since the alternative is keeping your API keys and memory outside that encryption. A phone that reboots at 3am and sits locked until 8 is a phone with a five-hour hole in it.
+- **Exact alarms can be switched off.** If Android's "Alarms & reminders" permission isn't granted, Jenny falls back to inexact alarms: they still fire in Doze, but they slip. Settings → Background activity tells you which of the two you're getting.
+- **Your phone's own battery manager outranks all of it.** Samsung, Xiaomi/MIUI, Huawei/Honor, Oppo and Vivo kill background apps on their own terms, and no application code can prevent it. What Jenny can now do is *notice*: a stretch of downtime longer than `power.gapWarningMin` (default 60 minutes) is recorded and listed under **Settings → Background activity**, with the manufacturer-specific advice for turning the restriction off.
+
+So: intervals are still a floor, not a promise. The mechanisms above are aimed squarely at the frozen-timer gap, and they are the reason to expect better than 30-to-83; how much better, on a real phone under real Doze, is not something we can honestly claim yet.
+
+If reminders matter to you, the practical measures are unchanged:
+
+- Grant the battery-optimization exemption Jenny offers during first-run setup (or later from **Settings → Background activity**, or from Android's own battery settings) so the OS is less likely to freeze the background service.
 - Keep the phone charged and connected when a reminder is close to due.
 - Treat "at" reminders as best-effort, not guaranteed alarms — for anything truly time-critical, use your phone's own alarm clock as a backup.
 
-<!-- TODO: verify on-device (O-5): how reminders and the heartbeat actually behave under real Doze/battery-optimization conditions without the exemption granted — the code guarantees no catch-up, but the practical drift/skip rate under Doze hasn't been measured. -->
+<!-- TODO: verify on-device (O-5): the anti-doze work of 0.6.6 (wake lock, alarm-driven cron, watchdog, restart nets) has been unit-tested but never run on a phone. Still unmeasured: the real drift of a 30-minute job under Doze with and without the battery exemption, whether the watchdog actually catches a killed gateway on the Titan 2, and how often the recorded-outage panel finds a gap in normal use. -->
 
 ## Reminders (the `cron` tool)
 
@@ -185,5 +204,5 @@ None of the proactive messages above are guaranteed to make a sound — whether 
 - [Troubleshooting](troubleshooting.md) — what to check when a reminder never arrives, and how to tell a silent monitor apart from a broken one.
 - [Slash commands](slash-commands.md) — full reference for `/goal`, `/stop`, and the rest.
 - [Android permissions](../reference/android-permissions.md) — the full permission table, including `POST_NOTIFICATIONS` and battery-optimization exemption.
-- [Configuration reference](../reference/configuration.md) — `gateway.heartbeat.*`, `agents.defaults.timezone`, `agents.defaults.maxConcurrentSubagents`, and related keys.
+- [Configuration reference](../reference/configuration.md) — `gateway.heartbeat.*`, `agents.defaults.timezone`, `agents.defaults.maxConcurrentSubagents`, and related keys; the anti-doze knobs are under [`power`](../reference/configuration.md#power).
 - [Environment variables](../reference/environment-variables.md) — `JENNY_GOAL_INACTIVITY_TTL_H` and other `JENNY_*` knobs.

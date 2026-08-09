@@ -132,6 +132,7 @@ _UI_MANIFEST = [
     "assets/shared/advanced-mode.js",
     "assets/shared/api-client.js",
     "assets/shared/backup-flow.js",
+    "assets/shared/battery-exemption.js",
     "assets/shared/dialog.js",
     "assets/shared/home-view.js",
     "assets/shared/i18n.js",

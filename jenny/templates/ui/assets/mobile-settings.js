@@ -13,10 +13,20 @@ import { mascotVisible, setMascotVisible,
 import { homeView, setHomeView, HOME_VIEW_CHOICES } from './shared/home-view.js';
 import { TelegramPairingWidget } from './shared/telegram-pairing.js';
 import {
+  BatteryExemptionCard,
+  batteryExemptionSupported,
+  batteryExemptionNeeded,
+} from './shared/battery-exemption.js';
+import {
   runExportFlow,
   runImportFlow,
   runSnapshotRestore,
 } from './shared/backup-flow.js';
+
+// Ripiego per `power.modes` quando il payload arriva da un gateway più vecchio
+// del client: stesso ordine di `KEEP_AWAKE_MODES` in config/schema.py, dal più
+// parsimonioso al più affamato.
+const KEEP_AWAKE_CHOICES = ['off', 'turns', 'always'];
 
 export class SettingsController {
   constructor() {
@@ -56,6 +66,18 @@ export class SettingsController {
       this._tgWidget.destroy();
       this._tgWidget = null;
     }
+    // La card batteria resta in ascolto di visibilitychange finché non la si
+    // chiude: senza questo, ogni ritorno nelle impostazioni ne lascia una viva.
+    if (this._batteryCard) {
+      this._batteryCard.destroy();
+      this._batteryCard = null;
+    }
+    // Stesso motivo per il listener della diagnostica: senza, ogni ritorno
+    // nelle impostazioni ne lascia uno vivo che ricarica l'endpoint.
+    if (this._onPowerVisible) {
+      document.removeEventListener('visibilitychange', this._onPowerVisible);
+      this._onPowerVisible = null;
+    }
   }
 
   handleAction(action) {
@@ -76,6 +98,7 @@ export class SettingsController {
       this._section('personalization', 'ti-palette', i18n.t('settings.personalization'), this._renderPersonalization(d)),
       this._section('models', 'ti-cpu', i18n.t('settings.model'), this._renderModelSettings(d)),
       this._section('tools', 'ti-tool', i18n.t('settings.tools'), this._renderTools(d)),
+      this._renderBatterySection(d),
       this._section('ssh', 'ti-terminal-2', i18n.t('settings.ssh.title'), this._renderSsh()),
       this._section('telegram', 'ti-brand-telegram', i18n.t('settings.telegram.title'), this._renderTelegram()),
       this._section('backup', 'ti-database-export', i18n.t('backup.sectionTitle'), this._renderBackup()),
@@ -155,6 +178,280 @@ export class SettingsController {
       </div>
       <div class="theme-strip-eyebrow">${i18n.t('settings.language')}</div>
       ${this._renderLanguage()}`;
+  }
+
+  // ── Attività in background (doze) ──────────────────────────────────
+
+  /* Sezione a sé, non annidata sotto Telegram: il doze differisce cron, Dream,
+     Atlas, promemoria e heartbeat esattamente come rallenta il long-poll, ma
+     finché la richiesta viveva solo nella card di pairing chi Telegram non lo
+     usa non se la vedeva chiedere mai.
+
+     Due impostazioni, una storia sola: l'esenzione dice ad Android di non
+     strozzare Jenny, keepAwake decide se Jenny tiene sveglia la CPU da sé.
+     Fuori dalla WebView Android il bridge nativo non c'è e la card sparisce,
+     ma keepAwake vive nel config del gateway ed è modificabile da qualunque
+     browser: la sezione resta, con il solo controllo che ha ancora senso. */
+  _renderBatterySection(d) {
+    // Aperta d'ufficio quando l'esenzione manca: un accordion chiuso è
+    // esattamente il posto in cui il problema è rimasto invisibile finora.
+    if (batteryExemptionSupported() && batteryExemptionNeeded()) {
+      this._openSections.add('battery');
+    }
+    const card = batteryExemptionSupported()
+      ? `<div id="settings-battery-card"></div><div class="settings-divider"></div>`
+      : '';
+    return this._section(
+      'battery', 'ti-battery-charging', i18n.t('settings.battery.title'),
+      `${card}${this._renderKeepAwake(d)}<div id="settings-power-diagnostics"></div>`,
+    );
+  }
+
+  /* Wakelock anti-doze. Il costo della scelta ("i lavori slittano", "consuma
+     batteria") è l'unica cosa che qui conta — il nome da solo ("Sempre") non
+     dice cosa l'utente sta accettando — ma dentro una <option> non ci stava:
+     il testo di un'opzione nativa non va a capo, e su un telefono da 1440px la
+     frase veniva tagliata esattamente sulla clausola del costo. Quindi nella
+     select resta il nome breve e il costo vive sotto, su una riga che segue la
+     selezione (v. `_wireSections`) e che può occupare le righe che le servono.
+
+     La riga sul riavvio non è un dettaglio da nota a piè di pagina: il lock di
+     servizio si prende una volta all'avvio del gateway, quindi chi passa a
+     "Sempre" e resta a guardare non vedrebbe cambiare niente e penserebbe che
+     l'impostazione sia rotta. */
+  _renderKeepAwake(d) {
+    const power = (d && d.power) || {};
+    const current = power.keep_awake || 'turns';
+    const modes = power.modes || KEEP_AWAKE_CHOICES;
+    const options = modes.map(id =>
+      `<option value="${escapeHtml(id)}"${id === current ? ' selected' : ''}>${escapeHtml(i18n.t(`settings.battery.keepAwake.${id}`))}</option>`
+    ).join('');
+    return `
+      <div class="settings-subheading">${i18n.t('settings.battery.keepAwakeTitle')}</div>
+      <div class="settings-field">
+        <select class="settings-select" id="keep-awake-select">${options}</select>
+        <p class="settings-choice-cost" id="keep-awake-cost">${escapeHtml(this._keepAwakeCost(current))}</p>
+        <p class="settings-hint" style="margin:6px 0 0;font-size:12px;color:var(--text-faint)">${i18n.t('settings.battery.keepAwakeHint')}</p>
+        <p class="settings-hint" style="margin:6px 0 0;font-size:12px;color:var(--text-faint)"><i class="ti ti-refresh"></i> ${i18n.t('settings.battery.keepAwakeRestart')}</p>
+      </div>`;
+  }
+
+  /** Il costo della modalità, o stringa vuota se non lo conosciamo.
+   *
+   *  I modi arrivano dal gateway (`power.modes`), la copy dai file i18n: un
+   *  gateway più nuovo del client può mandarne uno che qui non ha frase, e
+   *  `i18n.t` in quel caso ritorna la chiave — stampata sotto la select
+   *  sembrerebbe un guasto. Meglio nessuna riga che "settings.battery...". */
+  _keepAwakeCost(mode) {
+    const key = `settings.battery.keepAwakeCost.${mode}`;
+    const text = i18n.t(key);
+    return text === key ? '' : text;
+  }
+
+  // ── Diagnostica energetica ─────────────────────────────────────────
+
+  /* Chiamata a parte e non dentro il payload delle impostazioni: interroga il
+     bridge Android (tre chiamate JNI) e va riletta al ritorno da un dialogo di
+     sistema, quando il resto delle impostazioni non è cambiato.
+
+     Il pannello risponde alla domanda che finora non aveva risposta: "sta
+     girando o no?". Un gateway ucciso dal gestore energetico dell'OEM non
+     lascia niente dietro di sé — nessun errore, nessuna notifica, solo
+     promemoria che smettono di arrivare — e l'utente se ne accorge giorni
+     dopo, se se ne accorge. */
+  async _loadPowerDiagnostics() {
+    const el = this.contentEl.querySelector('#settings-power-diagnostics');
+    if (!el) return;
+    let diag = null;
+    try {
+      diag = await api.getPowerDiagnostics();
+    } catch (_) {
+      // Endpoint muto (gateway vecchio, richiesta fallita): una riga sobria,
+      // non un errore rosso — qui non si è rotto niente di quello che l'utente
+      // stava facendo.
+      if (el.isConnected) {
+        el.innerHTML = `<div class="settings-divider"></div>
+          <div class="settings-empty-state">${i18n.t('settings.battery.diagUnavailable')}</div>`;
+      }
+      return;
+    }
+    // Un re-render nel frattempo ha staccato questo nodo: la risposta appartiene
+    // a un pannello che non è più nel documento, e il nuovo si ricarica da sé.
+    if (!el.isConnected) return;
+    // Fuori da Android i tre booleani non significano niente e i buchi non si
+    // misurano: meglio niente pannello che un pannello di "no".
+    if (!diag || !diag.android) { el.innerHTML = ''; return; }
+    el.innerHTML = this._renderPowerDiagnostics(diag);
+    this._wirePowerDiagnostics(el);
+  }
+
+  _renderPowerDiagnostics(diag) {
+    const rows = [
+      ['diagExempt', diag.battery_exempt],
+      ['diagExactAlarms', diag.exact_alarms],
+      ['diagWakelock', diag.wakelock_held],
+    ].map(([key, ok]) => `
+      <div class="settings-field-row">
+        <span class="settings-field-label">${i18n.t(`settings.battery.${key}`)}</span>
+        <span class="settings-field-value"><i class="ti ti-${ok ? 'check' : 'x'}"></i> ${i18n.t(ok ? 'settings.battery.diagYes' : 'settings.battery.diagNo')}</span>
+      </div>`).join('');
+    const gaps = Array.isArray(diag.gaps) ? diag.gaps : [];
+    const gapRows = gaps.length
+      ? gaps.map(g => `
+          <div class="settings-field-row">
+            <span class="settings-field-label">${escapeHtml(this._formatGapDuration(g.duration_ms))}</span>
+            <span class="settings-field-value">${escapeHtml(this._formatGapWhen(g.start_ms))}</span>
+          </div>`).join('')
+      : `<div class="settings-empty-state">${i18n.t('settings.battery.gapsEmpty')}</div>`;
+    return `
+      <div class="settings-divider"></div>
+      <div class="settings-subheading">${i18n.t('settings.battery.diagTitle')}</div>
+      ${rows}
+      ${this._renderExactAlarmRequest(diag)}
+      <div class="settings-subheading">${i18n.t('settings.battery.gapsTitle')}</div>
+      ${gapRows}
+      <p class="settings-hint" style="margin:6px 0 0;font-size:12px;color:var(--text-faint)">${i18n.t('settings.battery.gapsHint', { minutes: diag.gap_warning_min })}</p>
+      ${gaps.length ? this._renderOemGuidance() : ''}`;
+  }
+
+  /* Il permesso da cui dipende tutto il resto, e l'unico modo di concederlo.
+     Un'app che punta ad API 33 o più si ritrova SCHEDULE_EXACT_ALARM negato
+     alla prima installazione: dichiararlo nel manifest non basta, e finché
+     manca ogni sveglia degrada a inesatta — misurato su un telefono nuovo,
+     cron e watchdog partivano con dieci minuti di ritardo e il controllo di
+     rete con un'ora. La riga sopra lo diceva già, ma dirlo e basta lasciava
+     l'utente senza niente da fare.
+
+     Attaccata alla riga "Sveglie precise" e solo quando è "no": a permesso
+     concesso sarebbe un avviso che si impara a ignorare, come per la card
+     dell'esenzione. `!== false` e non `!diag.exact_alarms`: da un gateway che
+     il campo non lo manda non si deduce che il permesso manchi. */
+  _renderExactAlarmRequest(diag) {
+    if (diag.exact_alarms !== false) return '';
+    // Bridge più vecchio della UI: nessun bottone da offrire, il permesso si
+    // concede solo dalla schermata di sistema che sa aprire lui.
+    const native = window.JennyNative;
+    if (!native || typeof native.requestExactAlarmPermission !== 'function') return '';
+    return `
+      <div class="settings-notice settings-notice-strong">
+        <i class="ti ti-alarm"></i>
+        <div>
+          <div>${i18n.t('settings.battery.exactAlarmsHint')}</div>
+          <div style="margin-top:6px"><i class="ti ti-refresh"></i> ${i18n.t('settings.battery.exactAlarmsRestart')}</div>
+        </div>
+      </div>
+      <div class="onboarding-nav">
+        <button class="onboarding-btn onboarding-btn-secondary" id="btn-exact-alarms">
+          ${i18n.t('settings.battery.exactAlarmsButton')}
+        </button>
+      </div>`;
+  }
+
+  /* La carta che dice l'unica cosa che solo l'utente può fare. Compare solo
+     quando un buco è stato davvero registrato: senza prove sarebbe l'ennesimo
+     avviso preventivo che si impara a ignorare. */
+  _renderOemGuidance() {
+    const native = window.JennyNative;
+    let brandRaw = '';
+    try {
+      if (native && typeof native.deviceManufacturer === 'function') {
+        brandRaw = String(native.deviceManufacturer() || '');
+      }
+    } catch (_) { /* bridge che solleva: si resta sul link generico */ }
+    // Slug di dontkillmyapp.com: minuscolo e ridotto ad ASCII sicuro, perché
+    // Build.MANUFACTURER è testo libero deciso dall'OEM ("TCL Communication").
+    const slug = brandRaw.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    const url = slug
+      ? `https://dontkillmyapp.com/${encodeURIComponent(slug)}`
+      : 'https://dontkillmyapp.com/';
+    const brand = brandRaw || i18n.t('settings.battery.oemUnknownBrand');
+    // Il link resta un <a> normale: la WebView devia le navigazioni fuori dal
+    // gateway locale su una Chrome Custom Tab (MainActivity#openExternalUrl),
+    // mentre aprirlo dentro la SPA la sostituirebbe senza via di ritorno.
+    const link = `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">${escapeHtml(i18n.t('settings.battery.oemLink', { brand }))}</a>`;
+    const canOpen = !!(native && typeof native.openBatterySettings === 'function');
+    const button = canOpen
+      ? `<div class="onboarding-nav">
+           <button class="onboarding-btn onboarding-btn-secondary" id="btn-oem-battery">
+             ${i18n.t('settings.battery.oemButton')}
+           </button>
+         </div>`
+      : '';
+    return `
+      <div class="settings-notice settings-notice-strong">
+        <i class="ti ti-alert-triangle"></i>
+        <div>
+          <div>${i18n.t('settings.battery.oemHint')}</div>
+          <div style="margin-top:6px">${link}</div>
+        </div>
+      </div>
+      ${button}`;
+  }
+
+  _wirePowerDiagnostics(root) {
+    // Sveglie precise: al ritorno dalla schermata di sistema il pannello si
+    // ricarica da sé (il visibilitychange di `_wireSections`), quindi la riga
+    // passa a "Sì" e la richiesta sparisce senza fare niente qui.
+    const exactBtn = root.querySelector('#btn-exact-alarms');
+    if (exactBtn) {
+      exactBtn.addEventListener('click', () => {
+        const native = window.JennyNative;
+        if (!native || typeof native.requestExactAlarmPermission !== 'function') return;
+        let opened = false;
+        try {
+          opened = !!native.requestExactAlarmPermission();
+        } catch (_) { opened = false; }
+        // Sotto Android 12 il permesso non esiste e la schermata nemmeno:
+        // dirlo, invece di lasciare il tap senza conseguenze visibili.
+        if (!opened) showToast(i18n.t('settings.battery.exactAlarmsFailed'), 'error');
+      });
+    }
+    const btn = root.querySelector('#btn-oem-battery');
+    if (!btn) return;
+    btn.addEventListener('click', () => {
+      const native = window.JennyNative;
+      if (!native || typeof native.openBatterySettings !== 'function') return;
+      let opened = false;
+      try {
+        opened = !!native.openBatterySettings();
+      } catch (_) { opened = false; }
+      // Nessuna schermata raggiungibile: dirlo, invece di lasciare il tap
+      // senza conseguenze visibili. Restano le istruzioni del link.
+      if (!opened) showToast(i18n.t('settings.battery.oemOpenFailed'), 'error');
+    });
+  }
+
+  /** Durata di un buco, nella lingua dell'utente ("4h 12m"). */
+  _formatGapDuration(ms) {
+    // Arrotondato al minuto e mai a zero: un buco registrato è sopra soglia,
+    // e "0m" lo farebbe sembrare un errore di misura.
+    const totalMin = Math.max(1, Math.round((Number(ms) || 0) / 60000));
+    const days = Math.floor(totalMin / 1440);
+    const hours = Math.floor((totalMin % 1440) / 60);
+    const minutes = totalMin % 60;
+    if (days) return i18n.t('settings.battery.gapDays', { days, hours });
+    if (hours) return i18n.t('settings.battery.gapHours', { hours, minutes });
+    return i18n.t('settings.battery.gapMinutes', { minutes });
+  }
+
+  /** Quando il buco è cominciato ("ieri alle 23:40").
+   *
+   *  L'inizio e non la fine: l'ora in cui Jenny è stata uccisa è quella che si
+   *  riconosce ("ah, quando metto il telefono in carica la notte"). */
+  _formatGapWhen(startMs) {
+    const at = new Date(Number(startMs) || 0);
+    const time = at.toLocaleTimeString(i18n.locale, { hour: '2-digit', minute: '2-digit' });
+    const midnight = new Date();
+    midnight.setHours(0, 0, 0, 0);
+    const dayMs = 86400000;
+    if (at.getTime() >= midnight.getTime()) {
+      return i18n.t('settings.battery.gapToday', { time });
+    }
+    if (at.getTime() >= midnight.getTime() - dayMs) {
+      return i18n.t('settings.battery.gapYesterday', { time });
+    }
+    const date = at.toLocaleDateString(i18n.locale, { day: 'numeric', month: 'short' });
+    return i18n.t('settings.battery.gapOn', { date, time });
   }
 
   // ── Telegram ───────────────────────────────────────────────────────
@@ -1011,6 +1308,31 @@ export class SettingsController {
       this._tgWidget.refresh();
     }
 
+    // Attività in background: stessa card condivisa con onboarding e Telegram.
+    // Qui `grantedKey` è d'obbligo — è l'unica superficie che l'utente apre
+    // apposta per controllare, e "nessun messaggio" non è una risposta.
+    const batteryContainer = this.contentEl.querySelector('#settings-battery-card');
+    if (batteryContainer) {
+      if (this._batteryCard) this._batteryCard.destroy();
+      this._batteryCard = new BatteryExemptionCard(batteryContainer, {
+        tone: 'notice',
+        grantedKey: 'settings.battery.granted',
+      });
+      this._batteryCard.render();
+    }
+
+    // Diagnostica energetica: si popola da sola (chiamata a parte) e si
+    // rilegge al rientro nell'app — il permesso si concede in un dialogo di
+    // sistema, e al ritorno la pagina non ha ricevuto nessun evento.
+    if (this._onPowerVisible) {
+      document.removeEventListener('visibilitychange', this._onPowerVisible);
+    }
+    this._onPowerVisible = () => {
+      if (document.visibilityState === 'visible') this._loadPowerDiagnostics();
+    };
+    document.addEventListener('visibilitychange', this._onPowerVisible);
+    this._loadPowerDiagnostics();
+
     // Catalogo modelli unificato
     this._wireBtn('btn-change-model', () => this._toggleModelCatalog());
     const modelSearch = this.contentEl.querySelector('#model-search');
@@ -1049,6 +1371,39 @@ export class SettingsController {
           })
           .catch(() => {
             locToggle.checked = !enabled;  // rollback sull'errore
+            showToast(i18n.t('settings.saveError'));
+          });
+      });
+    }
+
+    // Wakelock anti-doze: si salva al cambio, e il toast ripete che vale dal
+    // prossimo riavvio — chi lo cambia dalla select non rilegge la riga sotto.
+    const keepAwakeSelect = this.contentEl.querySelector('#keep-awake-select');
+    if (keepAwakeSelect) {
+      // `previous` segue l'ultimo valore accettato dal server, non quello del
+      // primo render: due cambi di fila con il secondo fallito riporterebbero
+      // altrimenti la select su un modo che non è più quello salvato.
+      let previous = keepAwakeSelect.value;
+      // Il costo della scelta sta fuori dalla select (una <option> non va a
+      // capo) e segue la selezione subito, prima ancora del salvataggio: è
+      // quello che l'utente sta valutando, non la conferma di quello che ha
+      // già scelto. `textContent`: la frase viene da i18n, non da HTML.
+      const costEl = this.contentEl.querySelector('#keep-awake-cost');
+      const showCost = (mode) => {
+        if (costEl) costEl.textContent = this._keepAwakeCost(mode);
+      };
+      keepAwakeSelect.addEventListener('change', () => {
+        const mode = keepAwakeSelect.value;
+        showCost(mode);
+        api.updatePower({ keep_awake: mode })
+          .then(() => {
+            previous = mode;
+            if (this.data) this.data.power = { ...(this.data.power || {}), keep_awake: mode };
+            showToast(i18n.t('settings.battery.keepAwakeSaved'));
+          })
+          .catch(() => {
+            keepAwakeSelect.value = previous;  // rollback sull'errore
+            showCost(previous);
             showToast(i18n.t('settings.saveError'));
           });
       });

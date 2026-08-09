@@ -23,6 +23,11 @@ from jenny.cron.types import (
     CronSchedule,
     CronStore,
 )
+
+# Modulo, non simboli: i test sostituiscono ``power.schedule_wake`` &co. per
+# osservare le sveglie senza un device, e con ``from … import`` la sostituzione
+# non arriverebbe qui.
+from jenny.runtime import power
 from jenny.utils.path import atomic_write
 
 _LockClass = SoftFileLock
@@ -122,6 +127,34 @@ def _compute_next_run(schedule: CronSchedule, now_ms: int) -> int | None:
     return None
 
 
+def _next_run_with_catch_up(schedule: CronSchedule, now_ms: int) -> int | None:
+    """``_compute_next_run``, ma un one-shot già scaduto non si perde.
+
+    ``_compute_next_run`` torna ``None`` per un ``at`` con scadenza passata, ed
+    è la risposta giusta a "qual è la PROSSIMA esecuzione" — dopo che il job è
+    scattato non ce n'è una. Ma scriverla nello stato di un job ancora abilitato
+    produce l'unico stato che nessun altro percorso sa creare: ``enabled`` a
+    True con ``next_run_at_ms`` a None. All'occhio è identico a un one-shot già
+    eseguito (vedi il blocco one-shot in ``_execute_job``), e significa
+    l'opposto — ma nessuno lo ripulisce: ``_get_next_wake_ms`` lo salta, il
+    filtro dei job dovuti lo salta, e il promemoria resta lì per sempre senza
+    partire né dare errore.
+
+    Tenendo la scadenza passata, ``_arm_timer`` calcola delay 0 e il primo tick
+    lo esegue; poi il blocco one-shot di ``_execute_job`` lo disabilita o lo
+    cancella come qualunque altro ``at``. È lo stesso "meglio in ritardo che
+    mai" già promesso in ``docs/using/scheduling.md`` e già valido per
+    ``every``.
+
+    NON va usata dopo l'esecuzione: lì ``None`` è la risposta corretta e
+    ``_execute_job`` chiama apposta ``_compute_next_run``.
+    """
+    computed = _compute_next_run(schedule, now_ms)
+    if computed is None and schedule.kind == "at" and schedule.at_ms:
+        return schedule.at_ms
+    return computed
+
+
 def _validate_schedule_for_add(schedule: CronSchedule) -> None:
     """Validate schedule fields that would otherwise create non-runnable jobs."""
     if schedule.tz and schedule.kind != "cron":
@@ -160,6 +193,19 @@ class CronService:
         self._running = False
         self._timer_active = False
         self.max_sleep_ms = max_sleep_ms
+        # ── sveglia di sistema (anti-doze) ──
+        # Evento acceso da ``power.on_wake_tick`` quando l'alarm dell'OS ci
+        # risveglia; ``None`` quando le sveglie non sono in gioco (desktop/CI o
+        # ``alarm_driven_cron`` spento), e allora il timer resta il solo padrone.
+        self._wake_event: asyncio.Event | None = None
+        # Ultima scadenza *dichiarata* e ultima *applicata* al bridge. Sono due
+        # perché il bridge è async e i chiamanti no: fra la dichiarazione e
+        # l'applicazione passa un giro di loop, e nel mezzo la scadenza può
+        # cambiare di nuovo.
+        self._alarm_target_ms: int | None = None
+        self._alarm_armed_ms: int | None = None
+        self._alarm_lock = asyncio.Lock()
+        self._alarm_tasks: set[asyncio.Task] = set()
 
     def _is_unbound_agent_job(self, job: CronJob) -> bool:
         return job.payload.kind == "agent_turn" and not is_bound_cron_job(job)
@@ -520,6 +566,11 @@ class CronService:
     async def start(self) -> None:
         """Start the cron service."""
         self._running = True
+        # Prima di qualunque cosa possa armare un timer: da qui in poi una
+        # sveglia dell'OS che scatta trova un destinatario. L'aggancio va fatto
+        # sul loop del gateway, e ``start`` è l'unico punto di questa classe che
+        # gira sicuramente là dentro (vedi ``power.bind_wake_loop``).
+        self._wake_event = power.bind_wake_loop() if power.alarm_driven_cron_enabled() else None
         loaded = self._load_store()
         if loaded is None:
             self._running = False
@@ -558,6 +609,12 @@ class CronService:
         if self._timer_task:
             self._timer_task.cancel()
             self._timer_task = None
+        # In lockstep con il timer: la sveglia vive nell'AlarmManager di
+        # sistema, non nel nostro processo, quindi sopravvive allo spegnimento
+        # del servizio e — peggio — farebbe ripartire il gateway per una
+        # scadenza che nessuno sta più ascoltando.
+        self._set_wake_alarm(None)
+        self._wake_event = None
 
     def _recompute_next_runs(self) -> None:
         """Recompute next run times for all enabled jobs."""
@@ -577,8 +634,22 @@ class CronService:
             # arrivava mai. Conservare quella salvata fa sì che il conto non
             # arretri mai e che una scadenza mancata a app spenta venga
             # recuperata al primo tick.
-            # ``at`` e ``cron`` restano ricalcolati: sono già ancorati
-            # all'orologio, non derivano dal momento dell'avvio.
+            # ``cron`` resta ricalcolato: è già ancorato all'orologio, non
+            # deriva dal momento dell'avvio (l'occorrenza mancata a app spenta
+            # si perde, ma la successiva arriva da sé).
+            #
+            # ``at`` invece si recupera — vedi ``_next_run_with_catch_up``. È il
+            # caso "il telefono era spento alle 15", cioè proprio quello per cui
+            # un promemoria esiste. Il WARNING sta qui e non nell'helper: questo
+            # è l'unico punto in cui il ritardo racconta qualcosa (l'app è stata
+            # giù), mentre negli altri chiamanti sarebbe solo rumore.
+            if computed is None and job.schedule.kind == "at" and job.schedule.at_ms:
+                logger.warning(
+                    "Cron: one-shot job '{}' ({}) is {}s overdue, running it late",
+                    job.name, job.id, (now - job.schedule.at_ms) // 1000,
+                )
+                job.state.next_run_at_ms = job.schedule.at_ms
+                continue
             if job.schedule.kind == "every" and job.state.next_run_at_ms is not None:
                 # Il tetto copre un orologio che è saltato in avanti e un
                 # intervallo accorciato a mano: senza, una scadenza assurda
@@ -614,6 +685,12 @@ class CronService:
         ``due_jobs`` loop completes; by then ``self._store`` already reflects
         whatever change triggered this call, so deferring to that later call
         is safe and loses no scheduling update.
+
+        Il no-op vale **anche per la sveglia di sistema**, e per lo stesso
+        motivo: disarmarla qui significherebbe togliere al job in corso la
+        sveglia che copre la sua prossima scadenza, per poi riprogrammarla
+        subito dopo dal ``_arm_timer`` finale di ``_on_timer``. Nel mezzo,
+        però, il device potrebbe sospendersi — e resterebbe sospeso.
         """
         if self._timer_active:
             return
@@ -622,6 +699,7 @@ class CronService:
             self._timer_task.cancel()
 
         if not self._running:
+            self._set_wake_alarm(None)
             return
 
         next_wake = self._get_next_wake_ms()
@@ -631,12 +709,113 @@ class CronService:
             delay_ms = min(self.max_sleep_ms, max(0, next_wake - _now_ms()))
         delay_s = delay_ms / 1000
 
+        # La sveglia punta alla scadenza VERA, non al risveglio accorciato da
+        # ``max_sleep_ms``: quel tetto esiste per rileggere lo store e
+        # raccogliere le modifiche fatte da altre istanze mentre il device è
+        # sveglio, non per svegliare il telefono ogni cinque minuti a vuoto —
+        # che è esattamente il comportamento che i gestori energetici OEM
+        # marcano come "l'app sveglia il sistema troppo spesso". Senza scadenze
+        # in agenda (``None``) non si arma proprio niente.
+        self._set_wake_alarm(next_wake)
+
+        # Catturato adesso: se il servizio viene fermato e riavviato mentre
+        # questo tick dorme, l'evento nuovo appartiene a un altro giro e questo
+        # task è già stato cancellato.
+        wake_event = self._wake_event
+
         async def tick():
-            await asyncio.sleep(delay_s)
+            if wake_event is None:
+                # Nessuna sveglia in gioco: percorso storico, invariato.
+                await asyncio.sleep(delay_s)
+            else:
+                await self._sleep_or_wake(delay_s, wake_event)
             if self._running:
                 await self._on_timer()
 
         self._timer_task = asyncio.create_task(tick())
+
+    async def _sleep_or_wake(self, delay_s: float, wake_event: asyncio.Event) -> None:
+        """Attende il timer asyncio **o** un tick di sveglia: il primo che arriva.
+
+        Perché non basta ``asyncio.sleep``: dorme su un orologio monotono che
+        **non avanza mentre il SoC è sospeso**. A schermo spento un job da 30
+        minuti scattava dopo 83 (misurato): il timer non era in ritardo, era
+        semplicemente fermo. La sveglia RTC dell'OS arriva anche da sospeso ed è
+        l'unica che rispetti l'orario vero. Il timer resta perché copre l'altro
+        caso — modifiche allo store fatte da fuori a device sveglio — che la
+        sveglia non vede.
+
+        Che scattino entrambi non è un problema: ``asyncio.wait`` ritorna e si
+        chiama ``_on_timer`` **una volta sola**, e ``_on_timer`` rifiltra
+        comunque i job per ``next_run_at_ms``, che ``_execute_job`` ha già
+        spostato avanti.
+        """
+        waiters = [
+            asyncio.create_task(asyncio.sleep(delay_s)),
+            asyncio.create_task(wake_event.wait()),
+        ]
+        try:
+            await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            # ``asyncio.wait`` non cancella i task rimasti — nemmeno quando è il
+            # chiamante a essere cancellato, che qui succede a ogni
+            # riprogrammazione (``_arm_timer`` cancella ``self._timer_task``).
+            # Senza questo giro resterebbe appeso un task per ogni tick.
+            for waiter in waiters:
+                waiter.cancel()
+        if wake_event.is_set():
+            # Azzerato PRIMA di eseguire i job, non dopo: un tick che arrivasse
+            # mentre ``_on_timer`` gira deve lasciare l'evento acceso e
+            # provocare un altro giro (a vuoto, ma non perso). Azzerarlo dopo lo
+            # mangerebbe.
+            wake_event.clear()
+            # La sveglia dell'OS è one-shot: quella appena scattata non esiste
+            # più. Senza questo azzeramento un riarmo alla stessa scadenza
+            # verrebbe scambiato per "già armata" e non riprogrammerebbe nulla.
+            self._alarm_armed_ms = None
+
+    def _set_wake_alarm(self, at_ms: int | None) -> None:
+        """Dichiara quando il sistema deve svegliarci (``None`` = mai).
+
+        Sincrona perché i chiamanti lo sono (``_arm_timer``, ``stop``), mentre il
+        bridge verso Kotlin è async: qui si registra solo l'obiettivo e si
+        delega a un task l'applicazione. L'obiettivo è quindi sempre aggiornato
+        all'istante, anche quando l'effetto arriva un giro di loop più tardi.
+        """
+        if not power.alarm_driven_cron_enabled():
+            return
+        self._alarm_target_ms = at_ms
+        try:
+            task = asyncio.create_task(self._apply_wake_alarm())
+        except RuntimeError:
+            # Nessun loop in esecuzione (spegnimento fuori dal gateway): non
+            # c'è nulla da applicare e non è un errore.
+            return
+        # Riferimento forte finché il task non finisce: asyncio tiene solo un
+        # riferimento debole, e un task raccolto dal GC a metà lascerebbe la
+        # sveglia non programmata senza dire niente.
+        self._alarm_tasks.add(task)
+        task.add_done_callback(self._alarm_tasks.discard)
+
+    async def _apply_wake_alarm(self) -> None:
+        """Allinea la sveglia di sistema all'ultimo obiettivo dichiarato.
+
+        L'obiettivo si rilegge **dentro** il lock. Due ``_arm_timer`` ravvicinati
+        creano due task, e asyncio non garantisce in che ordine finiranno: senza
+        la rilettura, a decidere quale scadenza resta programmata sarebbe
+        l'ordine di risveglio, con la concreta possibilità che vinca la più
+        vecchia. Rileggendo, vince sempre l'ultimo che ha scritto e il task
+        rimasto indietro trova l'obiettivo già applicato e non fa nulla.
+        """
+        async with self._alarm_lock:
+            target = self._alarm_target_ms
+            if target == self._alarm_armed_ms:
+                return
+            if target is None:
+                await power.cancel_wake(power.WAKE_REQUEST_CODE_CRON)
+            else:
+                await power.schedule_wake(target, power.WAKE_REQUEST_CODE_CRON)
+            self._alarm_armed_ms = target
 
     async def _on_timer(self) -> None:
         """Handle timer tick - run due jobs."""
@@ -782,7 +961,7 @@ class CronService:
                 origin_chat_id=origin_chat_id,
                 origin_metadata=origin_metadata or {},
             ),
-            state=CronJobState(next_run_at_ms=_compute_next_run(schedule, now)),
+            state=CronJobState(next_run_at_ms=_next_run_with_catch_up(schedule, now)),
             created_at_ms=now,
             updated_at_ms=now,
             delete_after_run=delete_after_run,
@@ -825,7 +1004,10 @@ class CronService:
             job.state = previous.state
             job.created_at_ms = previous.created_at_ms
         else:
-            job.state = CronJobState(next_run_at_ms=_compute_next_run(job.schedule, now))
+            # No-op per i job di sistema, che sono tutti ``every``: sta qui solo
+            # perché OGNI punto che programma usi la stessa funzione, e nessuno
+            # reintroduca l'orfano scegliendo quella sbagliata.
+            job.state = CronJobState(next_run_at_ms=_next_run_with_catch_up(job.schedule, now))
             job.created_at_ms = now
         job.updated_at_ms = now
         store.jobs = [j for j in store.jobs if j.id != job.id]
@@ -869,7 +1051,7 @@ class CronService:
                 job.updated_at_ms = _now_ms()
                 self._enforce_agent_binding(job)
                 if job.enabled:
-                    job.state.next_run_at_ms = _compute_next_run(job.schedule, _now_ms())
+                    job.state.next_run_at_ms = _next_run_with_catch_up(job.schedule, _now_ms())
                 else:
                     job.state.next_run_at_ms = None
                 if self._running:
@@ -910,7 +1092,7 @@ class CronService:
 
         job.updated_at_ms = _now_ms()
         if job.enabled:
-            job.state.next_run_at_ms = _compute_next_run(job.schedule, _now_ms())
+            job.state.next_run_at_ms = _next_run_with_catch_up(job.schedule, _now_ms())
         else:
             job.state.next_run_at_ms = None
 

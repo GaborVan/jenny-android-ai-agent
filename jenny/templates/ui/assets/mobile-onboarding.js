@@ -5,6 +5,7 @@ import { escapeHtml, showToast } from './shared/utils.js';
 import { i18n } from './shared/i18n.js';
 import { runImportFlow } from './shared/backup-flow.js';
 import { TelegramPairingWidget } from './shared/telegram-pairing.js';
+import { BatteryExemptionCard } from './shared/battery-exemption.js';
 import { poseUrl } from './shared/mascot.js';
 
 /* ── Mini Jenny sul footer ──
@@ -56,6 +57,16 @@ export class OnboardingController {
     // boot (WebView ancora nascosto), scorre invisibile e se ne vede solo la
     // coda. whenShellReady la posticipa al momento giusto (o subito nel browser).
     window.mobileApp.whenShellReady(() => this._startJenny());
+  }
+
+  /* Tasto Indietro hardware: risale di uno step, esattamente come il pulsante
+     "Indietro" del wizard. Consuma *sempre* la pressione — dall'onboarding non
+     si esce col back (step 0 non ha un prima, e dallo step 3 la config è già
+     salvata: tornare indietro riaprirebbe un form che non ha più effetto). */
+  handleBack() {
+    if (this.step === 1) this._goToStep0();
+    else if (this.step === 2) this._goBackToStep1();
+    return true;
   }
 
   deactivate() {
@@ -410,6 +421,7 @@ export class OnboardingController {
         <p class="onboarding-desc">${i18n.t('onboarding.telegram.desc')}</p>
         ${this._progress()}
         <div id="tg-pairing-widget"></div>
+        <div id="battery-exempt-card" style="margin-top:18px"></div>
         <button id="btn-skip-telegram" class="onboarding-btn" style="margin-top:18px;opacity:.85">
           ${i18n.t('onboarding.telegram.skip')}
         </button>
@@ -428,6 +440,19 @@ export class OnboardingController {
       },
     );
     this._tgWidget.refresh();
+
+    /* Esenzione batteria: chiesta qui e non solo dentro la card Telegram,
+       perché il doze differisce cron, promemoria e controlli proattivi anche
+       a chi salta questo passo. Non è uno step suo — sarebbe un quinto muro
+       davanti alla chat — ma un riquadro che si disegna solo su Android e
+       solo se l'esenzione manca davvero. */
+    if (this._batteryCard) this._batteryCard.destroy();
+    this._batteryCard = new BatteryExemptionCard(
+      this.contentEl.querySelector('#battery-exempt-card'),
+      { tone: 'notice' },
+    );
+    this._batteryCard.render();
+
     this.contentEl.querySelector('#btn-skip-telegram')
       .addEventListener('click', () => this._complete());
   }
@@ -436,6 +461,10 @@ export class OnboardingController {
     if (this._tgWidget) {
       this._tgWidget.destroy();
       this._tgWidget = null;
+    }
+    if (this._batteryCard) {
+      this._batteryCard.destroy();
+      this._batteryCard = null;
     }
     localStorage.setItem('onboarding-complete', 'true');
     localStorage.setItem('mobile-last-mode', 'chat');

@@ -20,9 +20,14 @@ from loguru import logger
 
 from jenny.agent.tools.message import MessageTool
 from jenny.bus.events import OutboundMessage
-from jenny.cron.bound_runner import BoundCronAgent, run_bound_cron_job
+from jenny.cron.bound_runner import (
+    CRON_WAKELOCK_TIMEOUT_S,
+    BoundCronAgent,
+    run_bound_cron_job,
+)
 from jenny.cron.service import CronJobSkippedError
 from jenny.cron.session_turns import is_bound_cron_job
+from jenny.runtime.power import keep_awake
 from jenny.utils.evaluator import evaluate_response
 
 if TYPE_CHECKING:
@@ -128,7 +133,19 @@ class CronDispatcher:
         self._snapshot_before_dream = snapshot_before_dream
 
     async def dispatch(self, job: "CronJob") -> str | None:
-        """Execute a cron job through the agent."""
+        """Execute a cron job through the agent.
+
+        Il wakelock sta **qui** e non solo in ``run_bound_cron_job`` perché dream,
+        atlas e heartbeat non passano affatto da quel modulo: entrano da
+        ``process_direct``, che non è il percorso di turno coperto da
+        ``AgentLoop._dispatch``. Questo è l'unico punto attraversato da tutti e
+        quattro i tipi di job. Sul ramo bound i due blocchi si annidano sullo
+        stesso tag, che per costruzione acquisisce una volta sola.
+        """
+        async with keep_awake("cron", timeout_s=CRON_WAKELOCK_TIMEOUT_S):
+            return await self._dispatch(job)
+
+    async def _dispatch(self, job: "CronJob") -> str | None:
         agent = self._get_agent()
         if not agent:
             logger.warning("Cron: skipped job '{}' - no provider configured", job.name)

@@ -55,8 +55,12 @@ Saving a token, unpairing, and disabling all take effect immediately — the run
 
 ## Battery exemption
 
-Telegram delivery uses long polling — the app keeps an open request to Telegram's servers waiting for new messages. Android's Doze mode can throttle or suspend that when the screen is off and the phone isn't charging, which delays replies. If Jenny detects it isn't already exempt from battery optimization, the paired view shows a hint ("For instant replies even when the phone is not charging, exempt Jenny from battery optimization.") and an **Exempt from battery** button that opens the Android system prompt directly.
-<!-- TODO: verify on-device (O-5): actual delay under real Doze without the exemption -->
+Telegram delivery uses long polling — the app keeps an open request to Telegram's servers waiting for new messages. Android's Doze mode can throttle or suspend that when the screen is off and the phone isn't charging, which delays replies. If Jenny detects it isn't already exempt from battery optimization, the paired view still shows a hint ("For instant replies even when the phone is not charging, exempt Jenny from battery optimization.") and an **Exempt from battery** button that opens the Android system prompt directly.
+
+The same request is now offered in two better places — during first-run setup, and under **Settings → Background activity**, which also shows whether the exemption is currently in force and re-offers it after a system update silently reset it (Samsung and Xiaomi updates do this). The exemption was never Telegram-specific: reminders, cron jobs, Dream, Atlas and Heartbeat are throttled by Doze in exactly the same way. It lived here only because Telegram was the first place the delay became obvious.
+
+**An inbound Telegram message can still wait for the phone to wake up, and this one is not fixed.** Jenny holds the CPU awake while she *processes* an update, but not while the long-poll sits waiting for one — that wait is idle by construction and lasts up to `telegram.pollTimeoutS` (50 seconds by default), so a wake lock covering it would be held essentially all the time. That isn't the "only while working" mode you chose, it's `always` wearing a disguise. The honest consequence: with the screen off and the phone suspended, a message you send can sit in Telegram's queue until something else wakes the device. Nothing is lost — Telegram holds the update and it's processed when the phone comes back — but "instant" is not a promise anyone can make here. Setting `power.keepAwake` to `always` does remove this wait, at the cost of real battery; that is the trade, and it's the reason the setting exists. See [Configuration](../reference/configuration.md#power).
+<!-- TODO: verify on-device (O-5): actual delay under real Doze without the exemption, and how much of it the 0.6.6 scheduled wake-ups actually absorb for an inbound Telegram message -->
 
 ## What works from Telegram vs. the WebUI
 

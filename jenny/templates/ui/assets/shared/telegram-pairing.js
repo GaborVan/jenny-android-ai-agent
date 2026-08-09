@@ -9,6 +9,7 @@
 import { api } from './api-client.js';
 import { escapeHtml, showToast } from './utils.js';
 import { i18n } from './i18n.js';
+import { batteryExemptionHtml, wireBatteryExemption } from './battery-exemption.js';
 
 const POLL_MS = 2500;
 
@@ -174,29 +175,17 @@ export class TelegramPairingWidget {
     if (unpairBtn) unpairBtn.addEventListener('click', () => this._unpair());
     const disableBtn = this.el.querySelector('#tg-disable');
     if (disableBtn) disableBtn.addEventListener('click', () => this._disable());
-    const batteryBtn = this.el.querySelector('#tg-battery');
-    if (batteryBtn) {
-      batteryBtn.addEventListener('click', () => {
-        window.JennyNative.requestBatteryExemption();
-      });
-    }
+    wireBatteryExemption(this.el);
   }
 
-  /* Solo nella WebView Android e solo se l'esenzione manca: senza, a telefono
-     scollegato dalla corrente il doze rallenta il long-poll Telegram. */
+  /* Stessa card condivisa delle impostazioni e dell'onboarding, ma con il
+     copy specifico del canale: qui il doze si vede come risposta che tarda,
+     non come cron che slitta. Tono `hint` = la riga piccola di prima. */
   _batteryHtml() {
-    const native = window.JennyNative;
-    if (!native || typeof native.isBatteryExempt !== 'function') return '';
-    try {
-      if (native.isBatteryExempt()) return '';
-    } catch (_) { return ''; }
-    return `
-      <p class="onboarding-hint">${i18n.t('settings.telegram.batteryHint')}</p>
-      <div class="onboarding-nav">
-        <button class="onboarding-btn onboarding-btn-secondary" id="tg-battery">
-          ${i18n.t('settings.telegram.batteryButton')}
-        </button>
-      </div>`;
+    return batteryExemptionHtml({
+      hintKey: 'settings.telegram.batteryHint',
+      buttonKey: 'settings.telegram.batteryButton',
+    });
   }
 
   async _unpair() {

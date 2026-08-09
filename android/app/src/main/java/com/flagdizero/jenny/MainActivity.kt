@@ -7,6 +7,7 @@ import android.app.Activity
 import android.app.AlarmManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -52,6 +53,9 @@ class MainActivity : AppCompatActivity() {
         private const val MAX_RETRIES = 30
         private const val PREFS_NAME = "jenny"
         private const val PREF_BOOT_TO_CHAT = "boot_to_chat"
+        // Ultima Build.FINGERPRINT vista: cambia solo con un aggiornamento di
+        // sistema, che su Samsung e Xiaomi rimette l'app fra quelle ottimizzate.
+        private const val PREF_LAST_FINGERPRINT = "last_build_fingerprint"
         // First launch pays Chaquopy bootstrap + package extraction inside
         // GatewayService, which can take well beyond the WebView retry window.
         private const val BOOT_POLL_INTERVAL_MS = 250L
@@ -77,6 +81,16 @@ class MainActivity : AppCompatActivity() {
     // back to the plain GATEWAY_URL if the secret can't be read for any
     // reason; /webui/bootstrap will then 401, same as if this fix didn't exist.
     private var resolvedGatewayUrl: String = GATEWAY_URL
+
+    // Esito, per questo avvio, del confronto fra la fingerprint corrente e
+    // quella dell'ultimo avvio. Va latchato: la prima chiamata consuma la
+    // differenza scrivendo la nuova fingerprint, ma la risposta deve restare
+    // la stessa per tutte le superfici che la chiedono (impostazioni,
+    // onboarding, card Telegram) — altrimenti una sola di loro mostrerebbe
+    // l'avviso forte e le altre no. @Volatile: le chiamate del bridge
+    // arrivano dal thread JavaBridge della WebView, non dal main.
+    @Volatile
+    private var systemUpdateLatch: Boolean? = null
 
     private val notificationPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -891,8 +905,36 @@ class MainActivity : AppCompatActivity() {
             return pm.isIgnoringBatteryOptimizations(packageName)
         }
 
-        /** Apre la richiesta di esenzione batteria: con l'esenzione il
-         *  long-poll Telegram resta reattivo anche a telefono non in carica. */
+        /** True se il device ha cambiato build dall'ultimo avvio dell'app.
+         *
+         *  Gli aggiornamenti di sistema di Samsung e Xiaomi rimettono l'app
+         *  fra quelle ottimizzate senza dirlo a nessuno: l'utente aveva già
+         *  concesso l'esenzione e da un giorno all'altro cron e promemoria
+         *  ricominciano a slittare. Non esiste un evento per accorgersene, ma
+         *  Build.FINGERPRINT cambia a ogni OTA — confrontarla con quella
+         *  dell'ultimo avvio è l'unico segnale disponibile lato app.
+         *
+         *  Al primissimo avvio non c'è nessun "prima" da confrontare: si
+         *  registra la fingerprint e si risponde false, altrimenti ogni
+         *  installazione nuova aprirebbe con un allarme falso. */
+        @JavascriptInterface
+        fun systemUpdatedSinceLastRun(): Boolean = synchronized(this@MainActivity) {
+            systemUpdateLatch ?: run {
+                val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                val seen = prefs.getString(PREF_LAST_FINGERPRINT, null)
+                val current = Build.FINGERPRINT ?: ""
+                val changed = seen != null && seen != current
+                if (seen != current) {
+                    prefs.edit().putString(PREF_LAST_FINGERPRINT, current).apply()
+                }
+                if (changed) Log.i(TAG, "system update detected since last run")
+                systemUpdateLatch = changed
+                changed
+            }
+        }
+
+        /** Apre la richiesta di esenzione batteria: senza, il doze differisce
+         *  cron, promemoria e heartbeat e rallenta il long-poll Telegram. */
         @JavascriptInterface
         fun requestBatteryExemption() {
             runOnUiThread {
@@ -907,6 +949,163 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+
+        /** Apre la richiesta del permesso "sveglie precise" (Android 12+).
+         *
+         *  `SCHEDULE_EXACT_ALARM` è dichiarato nel manifest, ma per un'app che
+         *  punta ad API 33 o più Android lo consegna **negato**: dichiararlo
+         *  non lo concede. Senza, ogni sveglia degrada a inesatta e il sistema
+         *  la accorpa alla finestra di risveglio di qualcun altro — misurato su
+         *  un'installazione nuova: +9m il cron, +11m il watchdog, +1h la rete
+         *  oraria; concesso a mano, tutte a finestra zero. È il vincolo che
+         *  decide se il resto dell'anti-doze serve a qualcosa, e finora
+         *  dall'app non c'era modo di rimediare.
+         *
+         *  Sotto API 31 il permesso non esiste — le sveglie sono già esatte per
+         *  tutti — e nemmeno l'azione: là si risponde false invece di far
+         *  saltare la WebView con una ActivityNotFoundException.
+         *
+         *  @return false quando la schermata non risulta raggiungibile: la UI
+         *  allora lo dice, invece di lasciare il tap senza conseguenze. */
+        @JavascriptInterface
+        fun requestExactAlarmPermission(): Boolean {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return false
+            val intent = Intent(
+                android.provider.Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
+                Uri.parse("package:$packageName")
+            )
+            val reachable = canResolve(intent)
+            runOnUiThread {
+                try {
+                    startActivity(intent)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Exact alarm permission request failed", e)
+                }
+            }
+            return reachable
+        }
+
+        /** Il produttore del telefono, grezzo (`Build.MANUFACTURER`).
+         *
+         *  Alla WebUI serve per due cose: il nome da mostrare all'utente e lo
+         *  slug di dontkillmyapp.com, che ricava minuscolando questa stringa.
+         *  Vuota se Android non lo dichiara: là la UI degrada al link generico
+         *  invece di costruire un indirizzo inventato. */
+        @JavascriptInterface
+        fun deviceManufacturer(): String = (Build.MANUFACTURER ?: "").trim()
+
+        /** Porta l'utente dove la restrizione si toglie davvero.
+         *
+         *  Le schermate dei gestori energetici OEM sono API private: non sono
+         *  documentate, cambiano da una versione di ROM all'altra e su una
+         *  build diversa semplicemente non esistono. Un component name morto
+         *  fa `ActivityNotFoundException`, e un crash mentre segnaliamo un
+         *  problema sarebbe peggio del problema stesso — quindi ogni tentativo
+         *  vive nel suo try/catch e la catena finisce sempre sulla scheda
+         *  dell'app nelle impostazioni di sistema, che c'è su ogni Android.
+         *
+         *  @return false quando nemmeno il ripiego di sistema risulta
+         *  raggiungibile: la UI allora si limita al link con le istruzioni. */
+        @JavascriptInterface
+        fun openBatterySettings(): Boolean {
+            val candidates = batterySettingsCandidates()
+            val reachable = candidates.any { canResolve(it) }
+            runOnUiThread { startFirstWorking(candidates) }
+            return reachable
+        }
+    }
+
+    // ── Schermate di gestione batteria dei produttori ──
+
+    /**
+     * Ordine di preferenza dei tentativi per "portami dove si sblocca l'app":
+     * prima le schermate del produttore, dove sta l'interruttore che conta
+     * davvero (Samsung "app inattive", MIUI avvio automatico, PowerGenie di
+     * Huawei…), poi la scheda dell'app nelle impostazioni di sistema.
+     *
+     * I component name vengono dalla lista pubblica di dontkillmyapp.com e
+     * dalle segnalazioni degli utenti: sono una preferenza, non una promessa —
+     * nessuno di questi è garantito su questa ROM, e `startFirstWorking` è
+     * scritto aspettandosi che la maggior parte fallisca.
+     *
+     * Il match guarda `MANUFACTURER` e `BRAND` insieme perché i sotto-marchi
+     * non compaiono sempre nello stesso campo: su un POCO il produttore è
+     * "Xiaomi" e il brand "POCO", su un Redmi succede il contrario.
+     */
+    private fun batterySettingsCandidates(): List<Intent> {
+        val vendor = "${Build.MANUFACTURER ?: ""} ${Build.BRAND ?: ""}".lowercase()
+        fun made(vararg names: String) = names.any { vendor.contains(it) }
+        val oem: List<Pair<String, String>> = when {
+            made("samsung") -> listOf(
+                "com.samsung.android.lool" to "com.samsung.android.sm.battery.ui.BatteryActivity",
+                "com.samsung.android.lool" to "com.samsung.android.sm.ui.battery.BatteryActivity",
+                "com.samsung.android.sm" to "com.samsung.android.sm.ui.battery.BatteryActivity",
+            )
+            made("xiaomi", "redmi", "poco") -> listOf(
+                "com.miui.securitycenter" to "com.miui.powercenter.PowerSettings",
+                "com.miui.securitycenter" to
+                    "com.miui.permcenter.autostart.AutoStartManagementActivity",
+            )
+            made("huawei", "honor") -> listOf(
+                "com.huawei.systemmanager" to
+                    "com.huawei.systemmanager.optimize.process.ProtectActivity",
+                "com.huawei.systemmanager" to
+                    "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity",
+                "com.huawei.systemmanager" to
+                    "com.huawei.systemmanager.appcontrol.activity.StartupAppControlActivity",
+            )
+            made("oppo", "oneplus", "realme") -> listOf(
+                "com.coloros.safecenter" to
+                    "com.coloros.safecenter.permission.startup.StartupAppListActivity",
+                "com.coloros.safecenter" to
+                    "com.coloros.safecenter.startupapp.StartupAppListActivity",
+                "com.oppo.safe" to "com.oppo.safe.permission.startup.StartupAppListActivity",
+                "com.oneplus.security" to
+                    "com.oneplus.security.chainlaunch.view.ChainLaunchAppListActivity",
+            )
+            made("vivo", "iqoo") -> listOf(
+                "com.iqoo.secure" to "com.iqoo.secure.ui.phoneoptimize.BgStartUpManager",
+                "com.vivo.permissionmanager" to
+                    "com.vivo.permissionmanager.activity.BgStartUpManagerActivity",
+                "com.iqoo.secure" to "com.iqoo.secure.safeguard.PurviewTabActivity",
+            )
+            else -> emptyList()
+        }
+        val fallback = Intent(
+            android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            Uri.parse("package:$packageName")
+        )
+        return oem.map { Intent().setComponent(ComponentName(it.first, it.second)) } + fallback
+    }
+
+    /** True se il package manager sa dire chi apre questo Intent. */
+    private fun canResolve(intent: Intent): Boolean = try {
+        packageManager.resolveActivity(intent, 0) != null
+    } catch (e: Exception) {
+        false
+    }
+
+    /**
+     * Prova i candidati in ordine e si ferma al primo che parte.
+     *
+     * Si tenta anche quello che `canResolve` dà per irraggiungibile: dal
+     * package visibility di Android 11 la query può essere filtrata per un
+     * package che l'Activity ce l'ha eccome, e lanciarla resta permesso.
+     */
+    private fun startFirstWorking(candidates: List<Intent>) {
+        for (intent in candidates) {
+            try {
+                startActivity(intent)
+                return
+            } catch (e: Exception) {
+                Log.w(
+                    TAG,
+                    "Battery settings screen unavailable: " +
+                        "${intent.component ?: intent.action} (${e.javaClass.simpleName})"
+                )
+            }
+        }
+        Log.w(TAG, "No battery settings screen could be opened on this device")
     }
 
     // ── Backup: helper I/O (thread di background + callback JS) ──
