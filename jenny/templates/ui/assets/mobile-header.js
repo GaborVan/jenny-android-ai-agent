@@ -89,7 +89,21 @@ export class ViewTitleController {
     this.renderActions(config.actions);
   }
 
-  setTitle(title) {
+  /** Scrive il titolo della vista, ma solo se chi lo scrive è ancora il
+   *  proprietario della modalità corrente.
+   *
+   *  `titleEl` viene ripuntato soltanto da `setMode`, che `switchMode` chiama
+   *  *prima* di `deactivate`/`activate`: un caricamento lento della sezione che
+   *  si sta lasciando riprendeva dopo il cambio e scriveva il proprio titolo nel
+   *  mount della sezione di **destinazione**. Il difetto è intermittente — chat
+   *  e onboarding non hanno mount, quindi lì `titleEl` è null e non si vede
+   *  niente — e per questo era rimasto invisibile.
+   *
+   *  `ownerMode` è opzionale solo per non rompere chiamanti futuri distratti:
+   *  chi scrive un titolo asincrono deve passarlo.
+   */
+  setTitle(title, ownerMode = null) {
+    if (ownerMode && ownerMode !== this.currentMode) return;
     if (this.titleEl) this.titleEl.textContent = title;
   }
 
@@ -172,9 +186,12 @@ export class ViewTitleController {
           app.controllers.wiki.loadHome(true);
         }
       } else {
+        // Sorgente unica: la vista voluta si deposita e la carica
+        // `GraphController.activate()`. Prima qui c'era
+        // `switchMode('graph'); loadGraph(...)`, e activate() aveva già
+        // caricato per conto suo — due fetch e due settleSimulation sincroni.
         const wiki = app.controllers.wiki?.currentWiki;
-        app.switchMode('graph', false);
-        app.controllers.graph.loadGraph(wiki || null, true);
+        app.requestGraph(wiki || null, true);
       }
       return;
     }

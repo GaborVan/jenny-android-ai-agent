@@ -183,6 +183,11 @@ export class ChatController {
     this._autoScroll = true;
     this._userTouching = false;
     this._scrollThreshold = 60;
+    // Ancora della posizione di lettura, come distanza dal fondo
+    // (scrollHeight - scrollTop): a differenza di scrollTop resta valida anche
+    // se nel frattempo arrivano messaggi, che allungano il contenuto in coda.
+    // null = mai misurata (prima attivazione).
+    this._scrollAnchor = null;
     this._unreadCount = 0;
     this._fabEl = document.getElementById('chat-scroll-fab');
     this._wsListenersBound = false;
@@ -294,6 +299,7 @@ export class ChatController {
     this.chatArea.addEventListener('scroll', () => {
       this._autoScroll = this._isNearBottom();
       this._updateScrollFab();
+      this._rememberScrollAnchor();
     }, { passive: true });
 
     // Mentre il dito è giù non va MAI eseguito uno scroll programmatico
@@ -337,12 +343,82 @@ export class ChatController {
 
     // C1: delegated copy handler for code-block buttons (replaces inline onclick).
     this.chatArea.addEventListener('click', (e) => {
+      // Un link dentro il markdown di una risposta è una navigazione di main
+      // frame vera: nessun renderer riscrive gli `a` e DOMPurify conserva gli
+      // href relativi. `[report](note.md)` o `[cerca](www.google.com)` risolvono
+      // sull'origine del gateway, quindi la SPA verrebbe ricaricata SENZA il
+      // fragment `#bs=` (de-autenticata: il segreto si legge una volta sola al
+      // module-load) o, sotto `/api/`, sostituita da un 404 JSON — e con lei
+      // spariscono `window.mobileApp`, il tasto Indietro e il dock. Il ramo va
+      // in testa: qualunque altro handler viene dopo.
+      // `e.defaultPrevented` distingue i link del modello da quelli che la chat
+      // costruisce e cabla da sé (`.file-preview-action`, `.chat-file-path-link`):
+      // i loro listener diretti girano in fase target e annullano già il click,
+      // quindi quando la bolla arriva qui il click ha un padrone. Senza questo
+      // controllo "Apri nell'editor" funzionava ma mostrava anche il toast del
+      // link inerte, perché `#workspace` non è un'ancora della conversazione.
+      const link = e.target.closest('a[href]');
+      if (link && this.chatArea.contains(link)) {
+        if (!e.defaultPrevented) this._handleContentLink(e, link);
+        return;
+      }
       const btn = e.target.closest('.chat-code-copy');
       if (btn && this.chatArea.contains(btn)) { copyCodeFromButton(btn); return; }
       // Tap su un'immagine (media allegato o immagine markdown inline) → lightbox.
       const img = e.target.closest('img');
       if (img && this.chatArea.contains(img)) this._openLightbox(img.currentSrc || img.src, img.alt || '');
     });
+  }
+
+  /** Disciplina dei link dentro il markdown della chat. Tre esiti, e in nessuno
+      dei tre il main frame naviga (v. il commento nel listener della chatArea):
+      - ancora interna (`#id`) → scroll all'elemento, restando nella pagina;
+      - http/https verso un'ALTRA origine (e mailto:/tel:) → apertura fuori dalla
+        WebView, che è quel che fa già il guscio nativo per i link esterni;
+      - tutto il resto — href relativi (che risolvono sull'origine del gateway),
+        stessa origine, schemi non navigabili — → inerte, con un avviso, perché
+        aprirlo dentro la WebView significherebbe perdere la SPA. */
+  _handleContentLink(e, a) {
+    e.preventDefault();
+    const raw = a.getAttribute('href') || '';
+    if (raw.startsWith('#')) { this._scrollToChatAnchor(raw.slice(1)); return; }
+    let url = null;
+    try { url = new URL(raw, window.location.href); } catch (_) { url = null; }
+    const scheme = url?.protocol || '';
+    const isWeb = scheme === 'http:' || scheme === 'https:';
+    if ((isWeb && url.origin !== window.location.origin) || scheme === 'mailto:' || scheme === 'tel:') {
+      this._openOutsideWebView(url.href);
+      return;
+    }
+    showToast(i18n.t('common.linkNotOpenable'), 'info');
+  }
+
+  /** Scroll a un'ancora della conversazione. La ricerca è ristretta alla chat:
+      un id qualsiasi della SPA (dock, drawer, dialog) non è un bersaglio
+      legittimo per un link scritto dal modello. */
+  _scrollToChatAnchor(id) {
+    if (!id) return;
+    let target = null;
+    try {
+      target = this.chatArea.querySelector(`#${CSS.escape(id)}, [name="${CSS.escape(id)}"]`);
+    } catch (_) { target = null; }
+    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    else showToast(i18n.t('common.linkNotOpenable'), 'info');
+  }
+
+  /** Apre un URL fuori dalla WebView. `window.open` qui non apre una finestra:
+      la WebView non supporta le finestre multiple, quindi la richiesta ricade su
+      `shouldOverrideUrlLoading`, che per un'origine non-gateway apre una Chrome
+      Custom Tab (MainActivity#openExternalUrl) e lascia la SPA dov'è. Il bridge
+      JennyNative oggi non espone un metodo per gli URL esterni: se ne verrà
+      aggiunto uno, va provato qui per primo. */
+  _openOutsideWebView(href) {
+    try {
+      window.open(href, '_blank', 'noopener');
+    } catch (err) {
+      console.warn('Could not open external link:', err);
+      showToast(i18n.t('common.linkNotOpenable'), 'error');
+    }
   }
 
   /** Overlay fullscreen per un'immagine: tap-per-zoom, tap sullo sfondo / Esc per chiudere. */
@@ -397,16 +473,26 @@ export class ChatController {
     return 'file';
   }
 
-  /** Apre un allegato non renderizzabile inline: prima il bridge nativo
-      Android (ACTION_VIEW con viewer di sistema), altrimenti l'URL firmato
-      in una nuova scheda (fallback browser desktop). */
+  /** Apre un allegato non renderizzabile inline: sul telefono il bridge nativo
+      (ACTION_VIEW con il viewer di sistema), fuori dalla WebView l'URL firmato
+      in una scheda nuova.
+   *
+   *  `window.open` era il ripiego di *entrambi* i casi, e sotto Android non è
+   *  un ripiego: la WebView non ha alcun `DownloadListener` e blocca
+   *  l'apertura in una scheda nuova, quindi quando il bridge falliva il tap
+   *  sul chip non produceva niente — nessun viewer, nessun errore, nessun
+   *  segno che fosse successo qualcosa. Con il bridge presente il fallimento è
+   *  un errore da dire, non da sostituire con un'apertura che non avverrà. */
   _openMediaFile(entry) {
-    try {
-      if (entry.path && window.JennyNative?.openFile && window.JennyNative.openFile(entry.path)) {
-        return;
+    const bridge = window.JennyNative;
+    if (bridge && typeof bridge.openFile === 'function') {
+      try {
+        if (entry.path && bridge.openFile(entry.path)) return;
+      } catch (e) {
+        console.warn('Native openFile failed:', e);
       }
-    } catch (e) {
-      console.warn('Native openFile failed:', e);
+      showToast(i18n.t('chat.couldNotOpen', { path: entry.name || entry.path || '' }), 'error');
+      return;
     }
     window.open(entry.url, '_blank');
   }
@@ -446,13 +532,17 @@ export class ChatController {
     if (e.key === ' ') return;
     // I combo con modificatori sono scorciatoie, non testo.
     if (e.metaKey || e.ctrlKey || e.altKey) return;
-    // Non rubare il focus se si sta già scrivendo altrove o c'è un dialog modale
-    // aperto (i dialog nativi intrappolano comunque il focus, ma la guardia è esplicita).
+    // Non rubare il focus se si sta già scrivendo altrove.
     const el = document.activeElement;
     if (el === this.input) return;
     if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' ||
                el.tagName === 'SELECT' || el.isContentEditable)) return;
-    if (document.querySelector('dialog[open]')) return;
+    // Né se sopra la chat c'è un overlay: la guardia percorre la stessa catena
+    // di livelli del tasto Indietro (MobileApp._overlayLayers). Guardare solo
+    // `dialog[open]`, come faceva prima, lasciava scoperti lightbox, minichat,
+    // mini-app e drawer: col composer coperto i caratteri finivano in un campo
+    // invisibile.
+    if (window.mobileApp?.hasOverlayAbove()) return;
     // focus() sincrono dentro il keydown: Chromium (WebView) recapita l'inserimento
     // del carattere sull'elemento appena messo a fuoco, quindi il tasto non va perso.
     this.input.focus();
@@ -832,10 +922,52 @@ export class ChatController {
     // I messaggi possono essere arrivati mentre la vista era nascosta (scrollHeight=0 rende
     // scrollToBottom() un no-op); riallinea lo scroll ora che la vista è di nuovo visibile.
     if (this._autoScroll) this.scrollToBottom(true);
+    else this._restoreScrollAnchor();
+  }
+
+  /* Posizione di lettura della chat, misurata come distanza dal fondo.
+     Si misura *qui*, nel listener dello scroll, e non in deactivate(): il
+     cambio sezione mette il display:none sulla view **prima** di chiamarlo, e
+     un contenitore senza box legge scrollTop e scrollHeight a 0 — l'ancora
+     sarebbe sempre 0, cioè "vai in fondo", che è l'errore opposto a quello che
+     si voleva correggere. */
+  _rememberScrollAnchor() {
+    // Contenitore nascosto: 0 non è una posizione di lettura, è l'assenza di
+    // un box. Registrarlo cancellerebbe l'ancora buona.
+    if (!this.chatArea.clientHeight) return;
+    this._scrollAnchor = this.chatArea.scrollHeight - this.chatArea.scrollTop;
+  }
+
+  /* Rientro in chat di chi era risalito a leggere: prima si tornava sempre in
+     fondo, e per ritrovare il punto bisognava riscorrere tutto. Il ripristino
+     va al primo rAF utile — a display appena ripristinato le altezze non sono
+     ancora quelle definitive. */
+  _restoreScrollAnchor() {
+    if (this._scrollAnchor == null) return;
+    const anchor = this._scrollAnchor;
+    requestAnimationFrame(() => {
+      if (!this._active) return;  // già usciti di nuovo
+      this.chatArea.scrollTop = Math.max(0, this.chatArea.scrollHeight - anchor);
+      this._autoScroll = this._isNearBottom();
+      this._updateScrollFab();
+    });
+  }
+
+  /* Sotto-stato della sezione chat: il popover "Info sessione". È un livello a
+     tutti gli effetti — copre la chat e ha una sua chiusura — ma il tasto
+     Indietro lo scavalcava, uscendo dalla chat e lasciandolo a schermo. */
+  handleBack() {
+    if (!this._sessionInfoPopover) return false;
+    this._hideSessionInfo();
+    return true;
   }
 
   deactivate() {
-    // Spegne solo il type-ahead focus: fuori dalla vista chat non deve rubare i tasti.
+    // Il popover Info sessione è appeso a document.body, non alla view: il
+    // display:none del cambio sezione non lo tocca, quindi restava a schermo
+    // sopra la sezione nuova, col suo setInterval da 1s ancora vivo.
+    this._hideSessionInfo();
+    // Spegne il type-ahead focus: fuori dalla vista chat non deve rubare i tasti.
     this._active = false;
     // Per il resto è un no-op intenzionale: i listener WS restano sempre attivi (vedi
     // setupWebSocket(), bindato una sola volta nel costruttore). Il socket è condiviso tra
@@ -2926,12 +3058,12 @@ export class ChatController {
     this._sessionInfoOutsideHandler = (e) => {
       if (!popover.contains(e.target)) this._hideSessionInfo();
     };
-    this._sessionInfoEscHandler = (e) => {
-      if (e.key === 'Escape') this._hideSessionInfo();
-    };
+    // Niente listener Escape locale: Esc passa dalla catena della shell
+    // (handleHardwareBack -> handleBack di questo controller), che chiude già
+    // il popover. Un secondo handler qui è esattamente la divergenza fra copie
+    // dei livelli che quella catena esiste per eliminare.
     setTimeout(() => {
       document.addEventListener('pointerdown', this._sessionInfoOutsideHandler);
-      document.addEventListener('keydown', this._sessionInfoEscHandler);
     }, 0);
   }
 
@@ -2947,10 +3079,6 @@ export class ChatController {
     if (this._sessionInfoOutsideHandler) {
       document.removeEventListener('pointerdown', this._sessionInfoOutsideHandler);
       this._sessionInfoOutsideHandler = null;
-    }
-    if (this._sessionInfoEscHandler) {
-      document.removeEventListener('keydown', this._sessionInfoEscHandler);
-      this._sessionInfoEscHandler = null;
     }
   }
 

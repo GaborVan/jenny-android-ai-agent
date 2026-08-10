@@ -25,23 +25,38 @@ export class TelegramPairingWidget {
     this.status = null;
     this._pollTimer = null;
     this._busy = false;
+    /* Lapide del widget. `destroy()` fermava solo il timer *già acceso*: se il
+       widget veniva congedato mentre `refresh()` era sospeso sulla sua fetch,
+       la continuazione ripartiva dopo, chiamava `render()` e accendeva il
+       polling **dopo** che il proprietario aveva lasciato cadere il
+       riferimento. Da lì in poi l'oggetto viveva solo per la closure
+       dell'intervallo — irraggiungibile, non più fermabile — e interrogava il
+       gateway ogni 2,5 s per sempre, uno per ogni giro di andata e ritorno
+       nelle impostazioni. */
+    this._destroyed = false;
   }
 
   destroy() {
+    this._destroyed = true;
     this._stopPolling();
   }
 
   async refresh() {
+    let status;
     try {
-      this.status = await api.getTelegramStatus();
+      status = await api.getTelegramStatus();
     } catch (e) {
+      if (this._destroyed) return;
       this.el.innerHTML = `<div class="onboarding-hint">${escapeHtml(e.message || 'error')}</div>`;
       return;
     }
+    if (this._destroyed) return;
+    this.status = status;
     this.render();
   }
 
   render() {
+    if (this._destroyed) return;
     this._stopPolling();
     const s = this.status;
     if (!s) return;
@@ -129,9 +144,15 @@ export class TelegramPairingWidget {
   }
 
   _startPolling() {
+    // Ultimo cancello prima di accendere un timer che nessuno potrebbe più
+    // spegnere: `render()` può arrivare da una continuazione nata prima del
+    // congedo.
+    if (this._destroyed) return;
     this._pollTimer = setInterval(async () => {
+      if (this._destroyed) { this._stopPolling(); return; }
       try {
         const s = await api.getTelegramStatus();
+        if (this._destroyed) { this._stopPolling(); return; }
         if (s.paired) {
           this.status = s;
           this._stopPolling();

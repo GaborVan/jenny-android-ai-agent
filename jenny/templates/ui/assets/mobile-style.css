@@ -814,7 +814,14 @@ body {
   border-radius: 0 0 16px 16px;
   z-index: 21;
   transform: translateY(-100%);
-  transition: transform .32s cubic-bezier(.34,1.56,.64,1), box-shadow .32s cubic-bezier(.25,.1,.25,1);
+  /* Il markup dei drawer è statico e presente in tutte le sezioni, anche dove
+     non sono nemmeno apribili: fuori schermo per solo `transform` restavano
+     nella tab order e leggibili da TalkBack. La visibility non si interpola,
+     quindi la si ritarda di quanto dura lo scorrimento: l'uscita resta
+     visibile, l'entrata è immediata (v. .open). L'inerzia di ciò che sta
+     *sotto* un drawer aperto la mette DrawerManager. */
+  visibility: hidden;
+  transition: transform .32s cubic-bezier(.34,1.56,.64,1), box-shadow .32s cubic-bezier(.25,.1,.25,1), visibility 0s linear .32s;
   display: flex; flex-direction: column;
   overflow: hidden;
   box-shadow: none;
@@ -823,6 +830,8 @@ body {
 }
 .drawer.open {
   transform: translateY(0);
+  visibility: visible;
+  transition: transform .32s cubic-bezier(.34,1.56,.64,1), box-shadow .32s cubic-bezier(.25,.1,.25,1), visibility 0s linear 0s;
   box-shadow:
     0 16px 56px rgba(0,0,0,0.45),
     0 4px 16px rgba(0,0,0,0.25),
@@ -2626,6 +2635,15 @@ body {
 }
 .app-cell:hover { transform: scale(1.05); }
 .app-cell:active { background: var(--hover); transform: scale(0.95); }
+/* Celle e intestazioni sono <div> resi attivabili da tastiera (v. wireEvents in
+   mobile-apps.js): sul Titan 2 Tab è navigazione primaria, quindi l'anello di
+   fuoco deve vedersi. */
+.app-cell:focus-visible,
+.apps-section-header:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius);
+}
 .app-icon {
   width: 48px; height: 48px; border-radius: 14px;
   display: flex; align-items: center; justify-content: center;
@@ -5571,9 +5589,21 @@ body {
   cursor: pointer;
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.25s;
+  /* Lo scrim è un <button> a schermo intero con aria-label: da chiuso, senza
+     visibility, resta una tappa Tab cieca (l'anello di fuoco è invisibile) e un
+     nodo TalkBack fantasma su OGNI schermata. Che il problema fosse noto lo
+     dimostra il tabindex="-1" messo sul .jenny-duo accanto. La visibility non
+     si interpola: la si ritarda di quanto dura la dissolvenza, così l'uscita
+     resta visibile e l'entrata è immediata (v. .open). */
+  visibility: hidden;
+  transition: opacity 0.25s, visibility 0s linear 0.25s;
 }
-.jenny-scrim.open { opacity: 1; pointer-events: auto; }
+.jenny-scrim.open {
+  opacity: 1;
+  pointer-events: auto;
+  visibility: visible;
+  transition: opacity 0.25s, visibility 0s linear 0s;
+}
 /* Nascosta per preferenza (mascotte non visibile) o onboarding, v. setMode()
    in mobile-jenny.js: !important come nel media-query landscape sotto,
    così vince anche su .open. */

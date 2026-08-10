@@ -49,6 +49,17 @@ nothing when tapped:
 </rule>
 
 <rule>
+**Every internal screen change goes through `jenny.navigate(label, state)`**, and the app
+repaints the previous screen on the `popstate` event (`jenny.back()` for the app's own "←"
+buttons). The app fills the screen and the phone's back button is the only way out: a screen
+change the SDK never heard about means the next Back press closes the *whole app*, taking the
+sub-screen or the half-filled form with it. A `<dialog>` counts as a level by itself — the SDK
+sees it and closes it first — which is one more reason to use `<dialog>` rather than a
+hand-rolled overlay `<div>`. See "Internal navigation and the Android back button" in
+[references/manifest.md](references/manifest.md).
+</rule>
+
+<rule>
 **Follow the Guided Conversation Flow below.** Ask ONE question at a time. Only write files
 AFTER the user has confirmed name and actions in Phase 3.
 Never write real secrets into app.json or index.html — use `secretRef` (see Secrets below).

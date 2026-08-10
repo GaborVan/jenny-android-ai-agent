@@ -27,6 +27,10 @@ export class AppsController {
     this._jennyAppsLoaded = false;
     this.collapsedSections = new Set();
     this._openApp = null;
+    // Skill in apertura nell'editor del Workspace (v. _openSkillFile): il
+    // percorso ha due await, e una seconda apertura concorrente scriverebbe
+    // sopra `currentDir`/`_returnMode` della prima.
+    this._openingSkill = null;
     // Richieste di HTML all'app aperta in volo: nonce → { resolve, timer }.
     this._appHtmlWaiters = new Map();
     this._appHtmlSeq = 0;
@@ -275,12 +279,30 @@ export class AppsController {
   }
 
   wireEvents() {
+    // Tastiera fisica (Titan 2): celle e intestazioni sono <div>, quindi senza
+    // tabindex/role non esistono né per Tab né per TalkBack e la sezione App
+    // non è utilizzabile da tastiera per nulla. Invio e Spazio sintetizzano il
+    // click, così l'attivazione resta un percorso solo.
+    this.contentEl.querySelectorAll('.app-cell, .apps-section-header').forEach(el => {
+      el.setAttribute('tabindex', '0');
+      el.setAttribute('role', 'button');
+      el.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
+        e.preventDefault();  // lo Spazio scorrerebbe la lista sotto
+        el.click();
+      });
+    });
     this.contentEl.querySelectorAll('.apps-section-header').forEach(header => {
+      header.setAttribute(
+        'aria-expanded',
+        String(!header.closest('.apps-section')?.classList.contains('collapsed')),
+      );
       header.addEventListener('click', () => {
         const section = header.closest('.apps-section');
         const key = section?.dataset.section;
         if (!key) return;
         const isCollapsed = section.classList.toggle('collapsed');
+        header.setAttribute('aria-expanded', String(!isCollapsed));
         if (isCollapsed) this.collapsedSections.add(key);
         else this.collapsedSections.delete(key);
       });
@@ -365,6 +387,11 @@ export class AppsController {
   handleBack() {
     const open = this._openApp;
     if (!open) return false;
+    /* `depth` è ciò che l'app dichiara via `jenny:nav-state`: schermate interne
+       più <dialog> aperti. I dialog contano perché l'iframe ha origine opaca e
+       il livello `dialog` della catena, che interroga solo il documento del
+       parent, non li vede: senza questo ramo Indietro chiudeva tutta l'app
+       portandosi via il form a metà. */
     if (open.depth > 1) {
       open.iframe.contentWindow?.postMessage({ type: 'jenny:go-back' }, '*');
       return true;
@@ -377,6 +404,11 @@ export class AppsController {
     return true;
   }
 
+  /* Smontare l'overlay basta perché l'SDK non scrive la history: la profondità
+     dell'app è pura contabilità (v. jenny-sdk.js). Quando invece l'SDK spingeva
+     le schermate nella history con `pushState`, ognuna lasciava una entry nella
+     joint session history del WebView che nemmeno `iframe.remove()` toglieva —
+     e dopo la ✕ restavano pressioni di Indietro morte. */
   closeApp() {
     const open = this._openApp;
     if (!open) return;
@@ -397,7 +429,11 @@ export class AppsController {
     const msg = event.data;
     if (!msg || typeof msg !== 'object') return;
     if (msg.type === 'jenny:nav-state') {
-      open.depth = typeof msg.depth === 'number' ? msg.depth : 1;
+      // Il valore arriva da codice dell'app: si accetta solo un intero in un
+      // intervallo sensato, altrimenti un NaN (o un numero enorme) renderebbe
+      // Indietro inutile fino alla ✕.
+      const depth = Math.floor(Number(msg.depth));
+      open.depth = Number.isFinite(depth) ? Math.min(99, Math.max(1, depth)) : 1;
       return;
     }
     if (msg.type === 'jenny:discuss') {
@@ -578,7 +614,21 @@ export class AppsController {
 
   // ── Skill file editor + context sheet ──
 
+  /** Apre SKILL.md nell'editor del Workspace.
+   *
+   *  Fra il cambio di sezione e l'apertura vera ci sono due `await` (la
+   *  `ready` del controller e la lettura del file): una finestra lunga
+   *  abbastanza da riceverci dentro un secondo tap — la scheda skill si chiude
+   *  con `sheet.close()` *prima* di invocare l'azione, quindi la griglia è di
+   *  nuovo sotto il dito. Due aperture concorrenti si sovrascrivevano a
+   *  vicenda `currentDir` e `_returnMode` e potevano lasciare l'editor su un
+   *  file con il breadcrumb dell'altro. Il guard dichiara "apertura in corso" e
+   *  scarta la seconda; il flag vive in `finally`, quindi un errore non lo
+   *  lascia acceso. Il tasto Indietro non c'entra e non va toccato: qui non si
+   *  consuma nessuna pressione. */
   async _openSkillFile(name) {
+    if (this._openingSkill) return;
+    this._openingSkill = name;
     const path = `skills/${name}/SKILL.md`;
     try {
       window.mobileApp.switchMode('workspace');
@@ -590,6 +640,8 @@ export class AppsController {
     } catch (err) {
       console.error('Failed to open skill file:', err);
       showToast(i18n.t('apps.cannotOpen', { name }), 'error');
+    } finally {
+      this._openingSkill = null;
     }
   }
 

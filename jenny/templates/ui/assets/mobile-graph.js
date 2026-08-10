@@ -9,6 +9,14 @@ export class GraphController {
     this.graphWrapEl = document.getElementById('graph-wrap');
     this.currentWiki = null;
     this.teardown = null;
+    // Azzeratore del focus sul nodo, installato da renderWikiGraph (v. lì).
+    this._clearFocus = null;
+    // Token di caricamento (monotono): solo l'ultimo loadGraph disegna.
+    this._loadToken = 0;
+    // Contatore di generazione: incrementato in deactivate(), permette a una
+    // continuazione di scoprire che la *sezione* è stata abbandonata. Il token
+    // da solo non basta: è cieco all'uscita dal grafo.
+    this._gen = 0;
     // Il grafo si ridisegna comunque a ogni activate() (rientro in vista), e le
     // etichette della legenda sono data-i18n statiche già ri-tradotte da
     // _applyStaticTranslations(). Questo listener copre solo il caso in cui la
@@ -29,15 +37,37 @@ export class GraphController {
   }
 
   activate() {
-    // Landing di default sul grafo overview (index/home), non su una wiki specifica.
-    this.loadGraph(this.currentWiki, false);
+    // Sorgente unica del caricamento. Chi porta qui una vista precisa (il
+    // popstate, il boot, il pulsante Grafo dell'header) la deposita in
+    // `mobileApp` con requestGraph e la carica questo activate(): prima ogni
+    // chiamante rifaceva `loadGraph` subito dopo `switchMode`, cioè due volte.
+    // Senza richiesta si ricarica la vista corrente (landing di default sul
+    // grafo overview, non su una wiki specifica).
+    const pending = window.mobileApp?.takePendingGraph?.() || null;
+    if (pending) this.loadGraph(pending.wiki, pending.push === true);
+    else this.loadGraph(this.currentWiki, false);
   }
 
   deactivate() {
+    // Le continuazioni di loadGraph nate prima dell'uscita dalla sezione devono
+    // poter scoprire di essere state superate: il token non le copre, perché è
+    // monotono solo rispetto ad altri caricamenti *del grafo*.
+    this._gen++;
     this._cleanup();
+    this.hideLoading();
+  }
+
+  /** true se questo caricamento è stato superato da uno più recente o se nel
+   *  frattempo si è usciti dalla sezione. */
+  _stale(token, gen) {
+    return token !== this._loadToken || gen !== this._gen;
   }
 
   _cleanup() {
+    // Il focus vive nel grafo che sta per essere smontato: tenerne
+    // l'azzeratore significherebbe far consumare una pressione di Indietro a
+    // una closure che opera su nodi non più a schermo.
+    this._clearFocus = null;
     if (this.teardown) {
       this.teardown();
       this.teardown = null;
@@ -45,12 +75,19 @@ export class GraphController {
   }
 
   async loadGraph(wiki = null, pushHistory = true) {
+    // Catturati prima del primo await: la fetch del grafo può essere superata
+    // da un altro caricamento o dall'uscita dalla sezione, e disegnare dopo
+    // significherebbe sovrascrivere il grafo di qualcun altro (o quello di
+    // nessuno) e impilare una entry di history per una schermata mai vista.
+    const token = ++this._loadToken;
+    const gen = this._gen;
     this.currentWiki = wiki;
     this._cleanup();
     this.showLoading();
 
     try {
       const data = await api.getGraph(wiki);
+      if (this._stale(token, gen)) return;
       if (wiki) {
         this.renderWikiGraph(data, wiki);
       } else {
@@ -64,16 +101,19 @@ export class GraphController {
       this._updateTitle(wiki);
       this._renderBreadcrumbs(wiki);
     } catch (err) {
+      if (this._stale(token, gen)) return;
       console.error('Failed to load graph:', err);
       this.svgEl.innerHTML = `<text x="50%" y="50%" text-anchor="middle" fill="#666" font-size="12">${i18n.t('graph.failedToLoad')}</text>`;
+    } finally {
+      // Chi è stato superato non spegne lo spinner di chi lo ha superato.
+      if (!this._stale(token, gen)) this.hideLoading();
     }
-    this.hideLoading();
   }
 
   _updateTitle(wiki) {
     const title = wiki ? `Graph: ${wiki}` : i18n.t('graph.wikis');
     if (window.mobileApp?.header) {
-      window.mobileApp.header.setTitle(title);
+      window.mobileApp.header.setTitle(title, 'graph');
     }
   }
 
@@ -106,6 +146,12 @@ export class GraphController {
   }
 
   renderHomeGraph(data) {
+    // `this.teardown` va **invocato**, non solo riassegnato: la riassegnazione
+    // in fondo a questo metodo dimenticava la simulazione d3 precedente senza
+    // fermarla, e quella continuava a ticchettare per sempre su nodi non più a
+    // schermo. `_cleanup()` è idempotente, quindi ripeterlo dopo quello di
+    // loadGraph non costa niente e copre ogni altro chiamante.
+    this._cleanup();
     const svg = d3.select(this.svgEl);
     svg.selectAll('*').remove();
 
@@ -249,6 +295,9 @@ export class GraphController {
   }
 
   renderWikiGraph(data, wiki) {
+    // Come in renderHomeGraph: la simulazione precedente si ferma, non si
+    // dimentica (v. il commento lì).
+    this._cleanup();
     const svg = d3.select(this.svgEl);
     svg.selectAll('*').remove();
 
@@ -526,13 +575,25 @@ export class GraphController {
         window.mobileApp.controllers.wiki.loadWikiPage(this.currentWiki, pagePath, true);
       });
 
-    svg.on('click', () => {
-      if (!focusNodeId) return;
+    /* Uscita dal focus su un nodo. Era una closure locale, e l'unico modo di
+       uscirne era azzeccare il tap su una zona vuota dell'SVG — che a grafo
+       zoomato può non esistere. Promossa a stato del controller, così anche il
+       tasto Indietro (handleBack) la trova. Ritorna false se non c'era focus. */
+    this._clearFocus = () => {
+      if (!focusNodeId) return false;
       focusNodeId = null;
       hoverNodeId = null;
       updateVisualState();
       zoomToExtent(nodes);
-    });
+      return true;
+    };
+
+    /* Il listener è attaccato al nodo `#graph-svg`, che è statico: sopravvive sia
+       a `svg.selectAll('*').remove()` sia al cambio di sezione, mentre
+       `this._clearFocus` viene azzerato da `_cleanup()`. Il tap sullo sfondo
+       dopo un teardown (o durante la fetch che lo segue) deve quindi essere un
+       no-op, non un TypeError. */
+    svg.on('click', () => { this._clearFocus?.(); });
 
     zoomToExtent(nodes, 0);
 
@@ -540,6 +601,13 @@ export class GraphController {
       sim.stop();
       svg.selectAll('*').remove();
     };
+  }
+
+  /* Sotto-stato della sezione: il focus su un nodo è una schermata a sé (il
+     grafo è zoomato sul nodo e sui suoi vicini, il resto è spento). Uscirne
+     viene prima di uscire dalla sezione. */
+  handleBack() {
+    return this._clearFocus ? this._clearFocus() : false;
   }
 
   handleAction(action) {

@@ -33,57 +33,286 @@ def _app() -> str:
 
 
 def _method(source: str, name: str) -> str:
-    body = re.search(rf"\n  {name}\([^)]*\)\s*\{{(.*?)\n  \}}", source, re.S)
+    body = re.search(rf"\n  (?:async )?{name}\([^)]*\)\s*\{{(.*?)\n  \}}", source, re.S)
     assert body, f"{name} non trovato"
     return body.group(1)
 
 
+def _init_body(source: str) -> str:
+    body = re.search(r"\n  async init\(\)\s*\{(.*?)\n  \}", source, re.S)
+    assert body, "init() non trovato"
+    return body.group(1)
+
+
 def test_the_shell_hands_every_back_press_to_the_spa() -> None:
-    """Il presupposto della catena: il nativo non ne gestisce nessun caso da sé."""
+    """Il presupposto della catena: il nativo non ne gestisce nessun caso da sé.
+
+    **Questo test asseriva ``OnBackPressedCallback(true)``**, cioè "il guscio
+    intercetta sempre". Era il comportamento sbagliato: intercettare *sempre*
+    include i momenti in cui la SPA non esiste — tutta la ripartenza del gateway
+    (fino a ``BOOT_POLL_TIMEOUT_MS``) e, per sempre, la schermata d'errore, dove
+    l'unico comando è il pulsante Riprova. Lì il callback prendeva la pressione e
+    non ne faceva niente, senza lasciarla a nessun altro.
+
+    Il contratto vero non è "intercetta sempre", è "quando c'è una SPA, la
+    pressione va a lei e a nessun altro": il callback nasce disabilitato e vive
+    esattamente quanto la pagina a schermo.
+    """
     kotlin = MAIN_ACTIVITY.read_text(encoding="utf-8")
-    assert "OnBackPressedCallback(true)" in kotlin
+    assert "OnBackPressedCallback(false)" in kotlin
+    assert "OnBackPressedCallback(true)" not in kotlin
     assert "handleHardwareBack()" in kotlin
 
 
-def test_back_unwinds_the_layers_top_down() -> None:
+def test_the_layer_list_is_ordered_by_real_stacking() -> None:
     """L'ordine è quello di sovrapposizione: chi sta sopra si chiude per primo.
 
     Un livello fuori posto è invisibile nel codice ma non a schermo: chiudere
     (per dire) il drawer mentre una modale copre tutto lascia l'utente davanti
     alla stessa immagine, e la pressione sembra persa.
+
+    **Questo test congelava l'ordine sbagliato.** Fino a ieri asseriva mini-app
+    *prima* della minichat, cioè l'ordine che il codice aveva, non quello che gli
+    z-index impongono: ``.app-frame-overlay`` 110 < ``.jenny-scrim`` 119 <
+    ``.jenny-duo`` 120 < ``.jenny-mc`` 121 (e ``.app`` non crea stacking
+    context). Con la minichat aperta sopra una mini-app, il back chiudeva l'app
+    *sotto* e a schermo non cambiava niente. L'ordine asserito qui è ora quello
+    misurato sul CSS.
     """
-    body = _method(_app(), "handleHardwareBack")
+    body = _method(_app(), "_overlayLayers")
     layers = [
-        "dialog[open]",                              # top layer
-        ".image-lightbox",                           # overlay immagini
-        "this.controllers.apps?.handleBack()",       # mini-app
-        "this.jenny?.handleBack()",                  # minichat della mascotte
-        "this.drawer.activeDrawer",                  # drawer
-        "this.controllers[this.currentMode]?.handleBack?.()",  # sotto-stato di sezione
-        "window.history.back()",                     # schermata precedente
+        "dialog[open]",                  # top layer: showModal() sta sopra ogni z-index
+        ".image-lightbox",               # z-index 1000
+        ".jenny-mc.open",                # minichat, z-index 121
+        ".app-frame-overlay",            # mini-app, z-index 110
+        "this.drawer.activeDrawer",      # drawer
     ]
     positions = []
     for marker in layers:
-        assert marker in body, f"livello mancante nella catena del back: {marker}"
+        assert marker in body, f"livello mancante nell'elenco: {marker}"
         positions.append(body.index(marker))
-    assert positions == sorted(positions), "i livelli del back non sono in ordine di sovrapposizione"
+    assert positions == sorted(positions), (
+        "i livelli non sono in ordine di sovrapposizione reale (vedi z-index in mobile-style.css)"
+    )
+
+
+def test_every_layer_declares_a_test_and_a_dismissal() -> None:
+    """Un livello senza ``present()`` non è interrogabile da ``hasOverlayAbove``;
+    uno senza ``dismiss()`` non è chiudibile da Home. Servono entrambi."""
+    body = _method(_app(), "_overlayLayers")
+    # Contati sui `name:`, non fissati a un numero: pinnare "sono cinque"
+    # faceva fallire il test sul livello legittimo aggiunto domani, e per il
+    # motivo sbagliato. Quello che conta è che nessun livello sia sprovvisto.
+    layers = body.count("name: '")
+    assert layers >= 5, "livelli spariti dall'elenco"
+    assert body.count("present: ()") == layers
+    assert body.count("dismiss: ()") == layers
+
+
+def test_the_back_chain_walks_the_single_layer_list() -> None:
+    """Il back non riscrive i livelli a mano: li percorre."""
+    body = _method(_app(), "handleHardwareBack")
+    steps = [
+        "this._overlayLayers()",                              # 1..5 overlay
+        "this.controllers[this.currentMode]?.handleBack?.()",  # sotto-stato di sezione
+        "window.history.back()",                              # schermata precedente
+    ]
+    positions = []
+    for marker in steps:
+        assert marker in body, f"passo mancante nella catena del back: {marker}"
+        positions.append(body.index(marker))
+    assert positions == sorted(positions)
+    # Un livello presente ma che non consuma (la mini-app durante i 200 ms della
+    # dissolvenza di chiusura) non deve ingoiare la pressione.
+    assert "layer.dismiss() !== false" in body
+    # Una copia locale di un test di presenza è la ricomparsa della quarta
+    # sorgente di verità: i livelli si aggiungono solo in _overlayLayers().
+    for marker in ("dialog[open]", ".image-lightbox", ".jenny-mc", ".app-frame-overlay"):
+        assert marker not in body, f"il back riscrive un livello invece di percorrerlo: {marker}"
+
+
+def test_home_dismisses_every_layer_not_a_hand_picked_subset() -> None:
+    """Home smontava tre livelli su cinque: lightbox e minichat restavano a
+    schermo sopra la vista home, e i ``<dialog>`` venivano chiusi con ``close()``
+    diretto — scavalcando chi la chiusura la rifiuta (v. il test qui sotto)."""
+    dismiss_all = _method(_app(), "_dismissAllOverlays")
+    assert "this._overlayLayers()" in dismiss_all, "lo smontaggio percorre l'elenco, non un sottoinsieme"
+
+    body = _method(_app(), "goHome")
+    assert "this._dismissAllOverlays()" in body
+    assert "dialog[open]" not in body, "Home non chiude i dialog per conto suo"
+    assert "closeApp()" not in body, "anche la mini-app passa dall'elenco"
+    # Gli overlay non sono tutto: il sotto-stato di sezione (l'editor del
+    # workspace, la sottocartella aperta) sopravviveva al cambio vista e Home lo
+    # ritrovava intatto al rientro.
+    assert "collapseToRoot?.()" in body, "Home deve collassare anche il sotto-stato delle sezioni"
 
 
 def test_closing_a_dialog_goes_through_a_cancelable_event() -> None:
     """Chiamare ``close()`` scavalcherebbe chi rifiuta la chiusura.
 
     ``showRestartDialog`` (backup-flow) fa ``preventDefault()`` sul ``cancel``
-    apposta: dopo un restore il riavvio non è opzionale. Il back deve avere la
-    stessa semantica di Esc, non un potere in più.
+    apposta: dopo un restore il riavvio non è opzionale. Back, Home ed Esc devono
+    avere la stessa semantica di Esc nativo, non un potere in più: passano tutti
+    e tre da ``_dismissTopDialog``.
     """
-    body = _method(_app(), "handleHardwareBack")
+    body = _method(_app(), "_dismissTopDialog")
     assert "new Event('cancel', { cancelable: true })" in body
     assert ".close()" in body, "chi non rifiuta va comunque chiuso"
+    assert "if (top.dispatchEvent" in body, "close() solo se il cancel non è stato prevenuto"
+
+    layers = _method(_app(), "_overlayLayers")
+    assert "this._dismissTopDialog()" in layers
 
     backup = (ASSETS / "shared" / "backup-flow.js").read_text(encoding="utf-8")
     assert "addEventListener('cancel', (e) => e.preventDefault())" in backup, (
         "sparito il dialog non annullabile: il giro via evento `cancel` non ha più motivo di esistere"
     )
+
+
+def test_escape_is_the_same_chain_as_the_hardware_back() -> None:
+    """Sul Titan 2 la tastiera è sempre sotto le dita: Esc è la scorciatoia
+    primaria. Copriva due livelli su cinque (drawer e dialog) ed era inerte su
+    lightbox, minichat, mini-app, sotto-stato di sezione e history — cioè
+    sembrava funzionare."""
+    source = _app()
+    shortcut = re.search(r"keyboard\.register\('escape', \(\) => \{(.*?)\}\);", source, re.S)
+    assert shortcut, "shortcut Escape non trovata"
+    assert "this.handleHardwareBack();" in shortcut.group(1)
+    assert "dialog[open]" not in shortcut.group(1)
+
+
+def test_the_lightbox_no_longer_keeps_its_own_escape_listener() -> None:
+    """Instradato Esc sulla catena, il listener locale è la stessa divergenza che
+    la catena elimina. Il resto del cleanup però deve restare: ``__jennyClose``
+    è l'unico modo di chiudere la lightbox senza perdere ``onClose``
+    (revokeObjectURL)."""
+    lightbox = (ASSETS / "shared" / "image-lightbox.js").read_text(encoding="utf-8")
+    assert "addEventListener('keydown'" not in lightbox
+    assert "'Escape'" not in lightbox
+    assert "overlay.__jennyClose = close;" in lightbox
+
+    layers = _method(_app(), "_overlayLayers")
+    assert "__jennyClose" in layers, (
+        "la lightbox va chiusa dal proprio handler: remove() salta il cleanup"
+    )
+
+
+def test_the_layers_are_dismissed_through_public_entry_points() -> None:
+    """``_setOut(false)`` e ``overlay.remove()`` sono scorciatoie che saltano il
+    cleanup dei rispettivi proprietari (listener su ``document``, object URL,
+    tastiera da abbassare). La shell parla solo con gli ingressi pubblici."""
+    layers = _method(_app(), "_overlayLayers")
+    assert "this.jenny?.handleBack()" in layers
+    assert "this.controllers.apps?.handleBack()" in layers
+    assert "this.drawer.closeAll()" in layers
+    assert "_setOut(" not in _app(), "la shell non tocca lo stato interno della mascotte"
+
+
+def test_the_two_dangerous_collaborators_of_the_chain_still_exist() -> None:
+    """Gli anelli che il piano ha deciso di **non** ammutolire.
+
+    ``_overlayLayers`` chiama ``this.controllers.apps?.handleBack()`` e
+    ``this.jenny?.handleBack()``: l'optional chaining copre l'*oggetto* assente
+    (controller non ancora istanziato, mascotte spenta), non il *metodo*. Se un
+    domani uno dei due metodi sparisce o viene rinominato, la catena solleva un
+    TypeError — che finisce in ``window.onerror`` → toast → ``/api/client-log``,
+    quindi si vede.
+
+    La tentazione era ammorbidire in ``?.handleBack?.()``. Sarebbe stato il fix
+    sbagliato: trasformerebbe una rottura rumorosa in un Indietro che, con la
+    minichat o una mini-app aperta, salta *due* livelli in silenzio — l'overlay
+    resta a schermo e la pressione se ne va a chiudere la sezione sotto. Gli
+    anelli si coprono, non si ammutoliscono: questo test è quella copertura.
+
+    Il test dei collaboratori pinnava solo workspace e onboarding — i due
+    chiamati con ``?.handleBack?.()``, cioè quelli che una sparizione la
+    perdonano. I due pericolosi erano scoperti.
+    """
+    layers = _method(_app(), "_overlayLayers")
+    assert "?.handleBack?.()" not in layers, (
+        "l'optional call sul metodo trasformerebbe la rottura in un salto silenzioso di due livelli"
+    )
+
+    apps = (ASSETS / "mobile-apps.js").read_text(encoding="utf-8")
+    apps_back = _method(apps, "handleBack")
+    assert "if (!open) return false;" in apps_back, (
+        "senza mini-app aperta il livello deve lasciar proseguire la catena"
+    )
+    assert "return true;" in apps_back
+    assert "closeApp()" in apps_back
+    # Il livello mini-app ha anche un `close` per Home: smonta e basta.
+    assert "closeApp() {" in apps, "closeApp è il congedo che Home usa sul livello mini-app"
+
+    jenny = (ASSETS / "mobile-jenny.js").read_text(encoding="utf-8")
+    jenny_back = _method(jenny, "handleBack")
+    assert "return false;" in jenny_back, (
+        "a minichat chiusa il livello deve lasciar proseguire la catena"
+    )
+    assert "this._setOut(false)" in jenny_back, (
+        "la minichat si chiude dal proprio ingresso: scrim, tastiera e stato dell'arte inclusi"
+    )
+    assert "return true;" in jenny_back
+
+
+def test_the_lightbox_layer_and_its_owner_agree_on_class_and_handle() -> None:
+    """Contratto cross-file, e nessuno dei due lati sa dell'altro.
+
+    Il livello lightbox della catena cerca ``.image-lightbox`` nel documento e
+    chiama ``overlay.__jennyClose``: due stringhe scritte in ``mobile-app.js``
+    e onorate in ``shared/image-lightbox.js``. Rinominare la classe (o il
+    campo) da una parte sola non rompe niente di visibile — semplicemente
+    Indietro smette di vedere la lightbox e chiude la schermata sotto, con
+    l'immagine ancora a tutto schermo. Qui i due lati vengono confrontati.
+    """
+    layers = _method(_app(), "_overlayLayers")
+    lightbox = (ASSETS / "shared" / "image-lightbox.js").read_text(encoding="utf-8")
+
+    assert ".image-lightbox" in layers
+    assert "overlay.className = 'image-lightbox';" in lightbox, (
+        "la classe che la catena interroga non è più quella che l'overlay si mette"
+    )
+    assert "__jennyClose" in layers
+    assert "overlay.__jennyClose = close;" in lightbox, (
+        "senza l'handle esposto la catena ripiega su remove(), che salta onClose "
+        "(e con lui revokeObjectURL: gli object URL del workspace restano appesi)"
+    )
+    # Il ripiego deve restare, ma resta un ripiego.
+    assert "lightbox.remove()" in layers
+
+
+def test_the_drawer_layer_and_its_manager_agree_on_state_and_dismissal() -> None:
+    """Stesso genere di contratto: la catena legge ``drawer.activeDrawer`` come
+    test di presenza e chiama ``drawer.closeAll()`` come congedo. Sono due
+    membri di ``DrawerManager`` scritti a mano in ``mobile-app.js``; se il
+    manager smettesse di tenere ``activeDrawer`` aggiornato, il livello
+    diventerebbe invisibile alla catena *e* a ``hasOverlayAbove`` — cioè il
+    type-ahead della chat tornerebbe a rubare il fuoco sotto un drawer aperto.
+    """
+    layers = _method(_app(), "_overlayLayers")
+    drawer = (ASSETS / "mobile-drawer.js").read_text(encoding="utf-8")
+
+    assert "this.drawer.activeDrawer" in layers
+    assert "this.activeDrawer = null;" in drawer, "il manager deve azzerare lo stato alla chiusura"
+    assert re.search(r"this\.activeDrawer = id;", drawer), (
+        "il manager deve marcare quale drawer è aperto: è il test di presenza della catena"
+    )
+    assert "this.drawer.closeAll()" in layers
+    assert "\n  closeAll() {" in drawer, "closeAll è l'ingresso pubblico che la catena usa"
+
+
+def test_the_type_ahead_guard_consumes_the_layer_list() -> None:
+    """Il quarto posto in cui erano scritti i livelli. Guardando solo
+    ``dialog[open]``, con la lightbox (o la minichat, o una mini-app) aperta la
+    chat rimetteva il fuoco sul composer coperto: i caratteri della tastiera
+    fisica finivano in un campo invisibile."""
+    chat = (ASSETS / "mobile-chat.js").read_text(encoding="utf-8")
+    guard = re.sub(r"//.*", "", _method(chat, "_maybeTypeAheadFocus"))  # i commenti citano il prima
+    assert "window.mobileApp?.hasOverlayAbove()" in guard
+    assert "dialog[open]" not in guard, "la guardia non riscrive i livelli per conto suo"
+
+    api_body = _method(_app(), "hasOverlayAbove")
+    assert "this._overlayLayers()" in api_body
 
 
 def test_back_at_the_root_does_nothing_and_never_trusts_history_length() -> None:
@@ -97,14 +326,43 @@ def test_back_at_the_root_does_nothing_and_never_trusts_history_length() -> None
     assert "history.length" not in body
 
 
+"""Esenzioni dell'imbuto della history, per *path* e non per basename.
+
+``jenny-sdk.js`` gira dentro l'iframe della mini-app (history sua, v.
+``test_mini_app_navigation_contract``) e ``shared/api-client.js`` riscrive la
+entry corrente nel reload (v. il test dedicato qui sotto). Prima erano elencati
+per nome del file: un futuro ``assets/qualcosa/api-client.js`` sarebbe stato
+esentato in silenzio, cioè avrebbe potuto scrivere la history senza che nessuno
+se ne accorgesse. Anche ``vendor/`` va escluso per path: la libreria di terzi
+non è codice nostro, ma "vendor" come nome di file non deve esentare niente.
+"""
+FUNNEL_EXEMPT = {
+    # Unico esente rimasto: riscrive il *fragment* dell'URL corrente (segreto di
+    # bootstrap), non impila né sostituisce schermate. L'SDK delle mini-app era
+    # esente anche lui finché scriveva la history dall'iframe; ora non la tocca
+    # più (v. test_mini_app_navigation_contract), quindi l'esenzione è caduta:
+    # lasciarla in piedi avrebbe tenuto aperta la strada per rimettercela.
+    Path("shared") / "api-client.js",
+}
+
+
 def test_every_history_write_goes_through_the_single_funnel() -> None:
     """Un solo punto di scrittura, altrimenti le entry tornano ad accumularsi."""
-    for js in ASSETS.rglob("*.js"):
-        if js.name in {"jenny-sdk.js", "api-client.js"} or js == APP_JS:
-            continue  # sdk: gira dentro l'iframe, history propria; api-client: v. test dedicato
+    seen_exempt: set[Path] = set()
+    for js in sorted(ASSETS.rglob("*.js")):
+        rel = js.relative_to(ASSETS)
+        if "vendor" in rel.parts or js == APP_JS:
+            continue
+        if rel in FUNNEL_EXEMPT:
+            seen_exempt.add(rel)
+            continue
         source = js.read_text(encoding="utf-8")
-        assert "history.pushState" not in source, f"{js.name} scrive la history fuori da pushNav"
-        assert "history.replaceState" not in source, f"{js.name} scrive la history fuori da replaceNav"
+        assert "history.pushState" not in source, f"{rel} scrive la history fuori da pushNav"
+        assert "history.replaceState" not in source, f"{rel} scrive la history fuori da replaceNav"
+    assert seen_exempt == FUNNEL_EXEMPT, (
+        "un'esenzione dell'imbuto punta a un file che non esiste più: "
+        f"{sorted(str(p) for p in FUNNEL_EXEMPT - seen_exempt)}"
+    )
 
 
 def test_the_funnel_stamps_the_stack_position_and_refuses_twins() -> None:
@@ -118,12 +376,30 @@ def test_the_funnel_stamps_the_stack_position_and_refuses_twins() -> None:
 
 
 def test_the_boot_does_not_stack_a_twin_of_the_initial_view() -> None:
-    """La entry iniziale *è* la vista iniziale: si riscrive, non si impila."""
-    source = _app()
-    assert "this.replaceNav(this._navStateFor(initialMode, initialWiki, initialPage));" in source
-    assert "this.switchMode(initialMode, false);" in source, (
-        "switchMode(initialMode) con push impilerebbe una gemella della radice"
+    """La entry iniziale *è* la vista iniziale: si riscrive, non si impila.
+
+    **Aggiornato.** Il test citava a memoria due righe intere, nomi delle
+    variabili locali compresi: rinominare ``initialWiki`` — un'operazione che
+    non cambia niente per nessuno — lo faceva fallire, e un rosso che non
+    corrisponde a un difetto insegna solo a non fidarsi del rosso. Il contratto
+    non è come si chiamano le variabili: è che nel boot la radice venga
+    *riscritta* prima dello switch, e che lo switch non impili. Si verifica per
+    posizione e per forma della chiamata.
+    """
+    body = _init_body(_app())
+    marks = [m.start() for m in re.finditer(r"this\.replaceNav\(this\._navStateFor\(", body)]
+    assert marks, "il boot non riscrive più la entry iniziale"
+    switches = [m for m in re.finditer(r"this\.switchMode\((\w+), (\w+)\)", body)]
+    assert switches, "il boot non entra più in nessuna vista"
+    boot_switch = switches[-1]
+    assert boot_switch.group(2) == "false", (
+        "switchMode con push impilerebbe una gemella della radice appena riscritta"
     )
+    assert any(mark < boot_switch.start() for mark in marks), (
+        "la radice va riscritta *prima* dello switch, altrimenti restano due entry identiche "
+        "e il primo Indietro viene ingoiato senza cambiare niente a schermo"
+    )
+    assert "this.pushNav(" not in body, "il boot non impila: riscrive"
 
 
 def test_the_reload_leaves_no_ghost_entry() -> None:
@@ -138,12 +414,26 @@ def test_the_reload_leaves_no_ghost_entry() -> None:
 
 def test_sections_with_their_own_depth_expose_a_back_handler() -> None:
     """Cartelle ed editor del workspace, step dell'onboarding: risalire dentro
-    la sezione viene prima di uscirne."""
+    la sezione viene prima di uscirne.
+
+    **Aggiornato.** Questo test pinnava lo smontaggio dell'editor *scritto
+    dentro* ``handleBack`` (``return !ret;`` sulla riga dopo
+    ``backToExplorerAt``), cioè la forma che rendeva possibile il difetto: se il
+    teardown vive nel ramo del back, ogni altro percorso di uscita se ne scrive
+    uno suo — ed è esattamente ciò che era successo, con due smontaggi e zero
+    guard sul buffer sporco. La regola sul non impilare una entry in avanti non
+    è cambiata: si è spostata nel teardown unico, ed è lì che va verificata
+    (v. ``test_unsaved_work_contract.py``).
+    """
     workspace = (ASSETS / "mobile-workspace.js").read_text(encoding="utf-8")
     ws_back = _method(workspace, "handleBack")
     assert "parentPath(this.currentDir)" in ws_back, "il back deve risalire di una cartella"
     assert "this.viewMode === 'editor'" in ws_back
-    assert "return !ret;" in ws_back, (
+    assert "this._closeEditor({ hardwareBack: true })" in ws_back, (
+        "il back non smonta l'editor per conto suo: passa dal teardown unico"
+    )
+    close_editor = _method(workspace, "_closeEditor")
+    assert "if (hardwareBack) return false;" in close_editor, (
         "l'editor aperto da un'altra sezione lascia proseguire il back: quella entry è già nello stack"
     )
 
@@ -151,3 +441,108 @@ def test_sections_with_their_own_depth_expose_a_back_handler() -> None:
     onb_back = _method(onboarding, "handleBack")
     assert "_goToStep0()" in onb_back and "_goBackToStep1()" in onb_back
     assert "return true;" in onb_back, "dall'onboarding non si esce col back"
+
+
+def test_leaving_the_workspace_forgets_where_the_editor_came_from() -> None:
+    """``_returnMode`` è una promessa sullo *stack*, non una preferenza.
+
+    Vale "sotto la entry dell'editor c'è quella della sezione da cui l'ho
+    aperto". Uscendo dal Workspace con l'editor aperto quella promessa scade —
+    l'utente è andato altrove e la history è cambiata — ma il flag restava
+    valorizzato. Al rientro, una sola pressione di Indietro faceva due cose:
+    ``_closeEditor`` chiudeva l'editor *e*, trovando ``ret`` valorizzato,
+    lasciava proseguire la catena (``hardwareBack`` → ``return false``), che
+    portava fuori dalla sezione. Due cambiamenti visibili per una pressione, che
+    è esattamente ciò che il piano vieta.
+    """
+    workspace = (ASSETS / "mobile-workspace.js").read_text(encoding="utf-8")
+    deactivate = _method(workspace, "deactivate")
+    assert "this._returnMode = null;" in deactivate, (
+        "il flag sopravviveva al cambio sezione e regalava un Indietro che salta due livelli"
+    )
+
+
+def test_opening_a_skill_in_the_editor_is_not_re_entrant() -> None:
+    """Due ``await`` fra il cambio sezione e l'apertura vera.
+
+    ``_openSkillFile`` cambia sezione, aspetta la ``ready`` del Workspace e poi
+    la lettura del file; solo alla fine posa ``_returnMode``. La scheda skill si
+    chiude *prima* di invocare l'azione, quindi durante quella finestra la
+    griglia è di nuovo sotto il dito: due aperture concorrenti si
+    sovrascrivevano ``currentDir`` e ``_returnMode`` a vicenda, e l'editor
+    poteva restare su un file con il breadcrumb dell'altro.
+
+    Il guard sta qui e non in ``handleBack``: nessuna pressione viene consumata
+    da questo percorso, e spostare la toppa sul tasto Indietro
+    significherebbe rimettere una definizione dei livelli fuori dalla catena.
+    """
+    apps = (ASSETS / "mobile-apps.js").read_text(encoding="utf-8")
+    body = _method(apps, "_openSkillFile")
+    assert "if (this._openingSkill) return;" in body, "manca il guard di apertura in corso"
+    assert "this._openingSkill = name;" in body
+    assert "} finally {" in body and "this._openingSkill = null;" in body, (
+        "senza finally un errore lascia il guard acceso e la skill non si riapre più"
+    )
+    assert "handleBack" not in body
+
+
+def test_the_session_info_popover_is_a_layer_of_its_own() -> None:
+    """Il popover "Info sessione" copre la chat e ha una sua chiusura, ma il back
+    lo scavalcava: usciva dalla chat lasciandolo a schermo."""
+    chat = (ASSETS / "mobile-chat.js").read_text(encoding="utf-8")
+    back = _method(chat, "handleBack")
+    assert "this._sessionInfoPopover" in back
+    assert "this._hideSessionInfo()" in back
+    assert "return false;" in back, "senza popover il back deve proseguire la catena"
+
+
+def test_leaving_the_chat_takes_the_popover_with_it() -> None:
+    """Il popover è appeso a ``document.body``, non alla view: il
+    ``display: none`` del cambio sezione non lo tocca. Restava sopra la sezione
+    nuova, col proprio ``setInterval`` da 1s ancora vivo."""
+    chat = (ASSETS / "mobile-chat.js").read_text(encoding="utf-8")
+    assert "document.body.appendChild(popover)" in chat, (
+        "se il popover tornasse dentro la view, questo teardown non servirebbe più"
+    )
+    assert "this._hideSessionInfo();" in _method(chat, "deactivate")
+
+
+def test_the_graph_focus_is_reachable_from_the_back_button() -> None:
+    """Il focus su un nodo zooma il grafo e spegne tutto il resto: è una
+    schermata. L'unica uscita era il tap su una zona vuota dell'SVG — che a
+    grafo zoomato può non esistere. L'azzeratore era una closure locale di
+    ``renderWikiGraph``: ora è stato del controller, e va lasciato cadere col
+    grafo che lo possiede (altrimenti consuma una pressione operando su nodi non
+    più a schermo)."""
+    graph = (ASSETS / "mobile-graph.js").read_text(encoding="utf-8")
+    back = _method(graph, "handleBack")
+    assert "this._clearFocus" in back
+    assert "this._clearFocus = () => {" in graph, "l'azzeratore deve essere stato del controller"
+    assert "this._clearFocus = null;" in _method(graph, "_cleanup")
+
+
+def test_the_svg_background_click_tolerates_a_missing_clear_focus() -> None:
+    """Il listener sullo sfondo è registrato sul nodo statico ``#graph-svg``:
+    d3 lo attacca all'elemento, non ai figli, quindi sopravvive sia a
+    ``svg.selectAll('*').remove()`` sia al cambio di sezione. ``_cleanup()``
+    invece azzera ``this._clearFocus``, e nessuno riregistra il listener
+    (``renderHomeGraph`` non chiama mai ``svg.on('click', …)``). Il tap su una
+    zona vuota dopo il teardown — o durante la fetch che lo segue — invocava un
+    null: TypeError non gestito, quindi ``window.onerror`` → toast +
+    ``/api/client-log``. L'azzeratore va invocato in modo tollerante al null,
+    perché il listener vive più a lungo dello stato."""
+    graph = (ASSETS / "mobile-graph.js").read_text(encoding="utf-8")
+    assert "svg.on('click', () => { this._clearFocus?.(); });" in graph
+    assert "svg.on('click', () => { this._clearFocus(); });" not in graph
+
+
+def test_the_open_model_catalog_is_a_screen() -> None:
+    """Il catalogo modelli aperto occupa la vista: ci si arriva da un pulsante e
+    lo si scorre. Senza handleBack, una pressione ne saltava due di schermate."""
+    settings = (ASSETS / "mobile-settings.js").read_text(encoding="utf-8")
+    back = _method(settings, "handleBack")
+    assert "#model-catalog" in back
+    assert "this._toggleModelCatalog()" in back, (
+        "richiudere il catalogo passa dal suo toggle, non da un display scritto a mano"
+    )
+    assert "return false;" in back, "a catalogo chiuso il back deve proseguire la catena"

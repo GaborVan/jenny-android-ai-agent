@@ -46,6 +46,13 @@ export class OnboardingController {
     this.models = [];
     this._showCustomModel = false;
     this.saving = false;
+    // Token della fetch modelli: la risposta che torna dopo un cambio di step
+    // scriverebbe nel form nuovo (o riaprirebbe il campo custom su uno step che
+    // non ce l'ha). Monotono, si invalida uscendo dallo step 2.
+    this._modelsToken = 0;
+    // Wizard riaperto da Impostazioni → "Riesegui configurazione": lì il back
+    // allo step 0 deve poter *uscire*, mentre al primo avvio non si esce.
+    this._rerun = false;
     this.jennyEl = null;
     this.jennyImg = null;
     this._jennyTimers = [];
@@ -59,17 +66,43 @@ export class OnboardingController {
     window.mobileApp.whenShellReady(() => this._startJenny());
   }
 
+  /* Riapertura da Impostazioni: il wizard è raggiungibile anche a
+     configurazione fatta, e da lì il back allo step 0 deve riportare da dove si
+     è arrivati invece di inchiodare l'utente nel wizard. */
+  markRerun() {
+    this._rerun = true;
+  }
+
   /* Tasto Indietro hardware: risale di uno step, esattamente come il pulsante
      "Indietro" del wizard. Consuma *sempre* la pressione — dall'onboarding non
      si esce col back (step 0 non ha un prima, e dallo step 3 la config è già
-     salvata: tornare indietro riaprirebbe un form che non ha più effetto). */
+     salvata: tornare indietro riaprirebbe un form che non ha più effetto).
+     L'unica eccezione è il wizard riaperto da Impostazioni (v. markRerun). */
   handleBack() {
+    // Salvataggio in volo: la config sta già partendo verso il gateway e lo
+    // step successivo è deciso. Rimettere a schermo il form precedente
+    // mostrerebbe campi che non hanno più effetto, e la continuazione di
+    // `_save()` ci scriverebbe sopra lo step 3 un istante dopo. La pressione si
+    // consuma e non produce niente: è l'unico caso in cui va bene, perché a
+    // schermo c'è già l'overlay di caricamento.
+    if (this.saving) return true;
     if (this.step === 1) this._goToStep0();
     else if (this.step === 2) this._goBackToStep1();
+    else if (this.step === 0 && this._rerun) return false;
     return true;
   }
 
   deactivate() {
+    // Una fetch modelli in volo non deve più scrivere niente: al rientro il
+    // wizard riparte dallo step in cui era, e il form è stato ri-renderizzato.
+    this._modelsToken++;
+    // Il wizard riaperto da Impostazioni ha mostrato la propria voce nel dock:
+    // uscendone senza completarlo, quella voce resterebbe lì fino al prossimo
+    // reload, e fuori dal primo avvio il dock non la mostra.
+    if (this._rerun) {
+      const navOnb = document.getElementById('nav-onboarding');
+      if (navOnb) navOnb.style.display = 'none';
+    }
     this._stopJenny();
     if (this._tgWidget) {
       this._tgWidget.destroy();
@@ -133,7 +166,14 @@ export class OnboardingController {
     // i provider, quindi first_run è false e si atterra direttamente in chat.
     this.contentEl.querySelector('#btn-restore-backup').addEventListener('click', async () => {
       const staged = await runImportFlow();
-      if (staged) localStorage.setItem('onboarding-complete', '1');
+      if (!staged) return;
+      localStorage.setItem('onboarding-complete', '1');
+      // Il blocco del primo avvio va tolto insieme al marcatore, sempre. Il
+      // ripristino può concludersi senza riavvio immediato (il dialog di
+      // riavvio è rifiutabile finché resta a schermo): senza questo, il dock
+      // restava spento — classe `nav-disabled`, pointer-events:none e opacità
+      // 0.4 — con l'onboarding già dato per concluso da tutto il resto.
+      window.mobileApp?._setFirstRunLock(false);
     });
   }
 
@@ -196,15 +236,31 @@ export class OnboardingController {
     this.contentEl.querySelector('#btn-next-1').disabled = !(name.length > 0 && key.length > 0);
   }
 
+  /** Travasa i campi dello step 1 nello stato prima che il DOM che li contiene
+   *  venga rimpiazzato. `_renderStep1` li ridisegna dai valori dello stato,
+   *  quindi ciò che non è catturato qui è semplicemente perso. */
+  _captureStep1() {
+    const name = this.contentEl?.querySelector('#provider-name');
+    const key = this.contentEl?.querySelector('#api-key');
+    const base = this.contentEl?.querySelector('#api-base');
+    if (name) this.providerName = name.value.trim();
+    if (key) this.apiKey = key.value.trim();
+    if (base) this.apiBase = base.value.trim();
+  }
+
+  /* Cattura i campi come fa il gemello `_goBackToStep1`. Prima non li
+     catturava: tornare allo step 0 — col pulsante "Indietro" o col tasto
+     hardware — cancellava nome provider, chiave API e base URL appena
+     digitati, e la chiave è la cosa più scomoda da riscrivere. */
   _goToStep0() {
+    this._captureStep1();
+    this._modelsToken++;
     this.step = 0;
     this.render();
   }
 
   _goToStep2() {
-    this.providerName = this.contentEl.querySelector('#provider-name').value.trim();
-    this.apiKey = this.contentEl.querySelector('#api-key').value.trim();
-    this.apiBase = this.contentEl.querySelector('#api-base').value.trim();
+    this._captureStep1();
     this.step = 2;
     this._loadModels();
   }
@@ -212,6 +268,11 @@ export class OnboardingController {
   // ── Step 2: Model + Launch ──────────────────────────────────────────
 
   async _loadModels() {
+    // La fetch dura secondi: nel frattempo l'utente può essere tornato allo
+    // step 1 (o allo 0, o uscito dalla sezione). Senza token la risposta in
+    // ritardo scriveva nel DOM dello step nuovo — o, dal ramo d'errore,
+    // riapriva il campo "modello personalizzato" su un form che non ce l'ha.
+    const token = ++this._modelsToken;
     // Il fallback custom si rivaluta a ogni fetch: se la lista arriva, sparisce.
     this._showCustomModel = false;
     this._renderStep2();
@@ -221,6 +282,7 @@ export class OnboardingController {
     try {
       const apiBase = this.apiBase || DEFAULT_API_BASE[this.format] || '';
       const resp = await api.getProviderModels(this.providerName || this.format, this.apiKey, apiBase, this.format);
+      if (token !== this._modelsToken) return;
       this.models = (resp.models || []).map(m => m.id || m);
       // Il backend risponde 200 anche quando la lista è vuota (credenziale
       // rifiutata, errore di rete, base URL mancante, ...) e spiega il perché in
@@ -228,6 +290,7 @@ export class OnboardingController {
       this._modelsMessage = resp.models && resp.models.length ? '' : (resp.message || '');
       this._renderModelList();
     } catch (e) {
+      if (token !== this._modelsToken) return;
       const detail = e && e.message ? `: ${escapeHtml(e.message)}` : '';
       listEl.innerHTML = `<div class="onboarding-hint" style="padding:12px">${i18n.t('onboarding.couldNotFetch')}${detail}</div>`;
       this._showCustomModelField();
@@ -369,7 +432,9 @@ export class OnboardingController {
   }
 
   _goBackToStep1() {
-    this.botName = this.contentEl.querySelector('#bot-name').value.trim() || 'Jenny';
+    const nameEl = this.contentEl?.querySelector('#bot-name');
+    if (nameEl) this.botName = nameEl.value.trim() || 'Jenny';
+    this._modelsToken++;
     this.step = 1;
     this.render();
   }
@@ -468,6 +533,11 @@ export class OnboardingController {
     }
     localStorage.setItem('onboarding-complete', 'true');
     localStorage.setItem('mobile-last-mode', 'chat');
+    // Stesso motivo del ramo restore: il lock si toglie con lo stesso setter
+    // che l'ha messo. Qui segue un reload, ma affidarsi al reload significa
+    // avere un percorso che non ripulisce — ed è esattamente com'era nato il
+    // blocco a senso unico.
+    window.mobileApp?._setFirstRunLock(false);
     api.reload();
   }
 

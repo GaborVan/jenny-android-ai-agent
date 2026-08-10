@@ -114,6 +114,11 @@ export class JennyCompanion {
     this._deltaBuffer = '';
     this._agentState = 'idle';
     this._turnActive = false;
+    // Turno chiesto dalla minichat e non ancora concluso. È deliberatamente
+    // *indipendente dalla UI*: `awaiting` e la classe `thinking` descrivono
+    // cosa c'è a schermo e li azzera `_closeMini()`, questo descrive cosa c'è
+    // in volo sul WebSocket e lo chiude solo `turn_end`/`error`.
+    this._pendingTurn = false;
     this._talk = {
       timer: null, animIdx: 0, open: false,
       lastTextAt: 0, switchAt: 0,
@@ -923,6 +928,7 @@ export class JennyCompanion {
   async _send(text) {
     this.mc.dataset.state = 'think';
     this._turnActive = true;
+    this._pendingTurn = true;
     this._setAgentState('thinking'); // ferma un eventuale parlato precedente; _syncArt -> think
     this.awaiting = true;
     this._replyShown = false;
@@ -944,6 +950,9 @@ export class JennyCompanion {
       console.error('Jenny send failed:', err);
       this._showReply(i18n.t('jenny.connectionError'));
       this.awaiting = false;
+      // Niente è partito: nessun turn_end arriverà a chiudere il flag.
+      this._pendingTurn = false;
+      this._turnActive = false;
     }
   }
 
@@ -971,7 +980,21 @@ export class JennyCompanion {
       this._handleChatStream(msg);
       return;
     }
-    if (!this.awaiting && !this.el.classList.contains('thinking')) return;
+    /* La guardia scarta gli eventi di un turno che la mascotte non sta
+       seguendo. Ma le sue due condizioni — `awaiting` e la classe `thinking` —
+       sono esattamente ciò che `_closeMini()` azzera: chiudendo la minichat
+       prima della fine del turno, `turn_end` finiva qui e veniva scartato. Ed è
+       l'unico punto che invalida lo storico della chat principale, quindi la
+       domanda fatta alla minichat non compariva più: la chat restava con una
+       risposta senza domanda per tutta la sessione (un reload "riparava", cioè
+       lo scambio nel file c'era sempre stato).
+
+       Gli eventi che *chiudono* il turno passano quindi su un flag che la UI
+       non tocca. Il resto — delta, stati intermedi — resta legato a ciò che è
+       a schermo: dipingere una bolla che non si vede non serve a nessuno. */
+    const closing = msg.event === 'turn_end' || msg.event === 'error';
+    const onScreen = this.awaiting || this.el.classList.contains('thinking');
+    if (!onScreen && !(closing && this._pendingTurn)) return;
 
     switch (msg.event) {
       case 'delta':
@@ -1010,6 +1033,7 @@ export class JennyCompanion {
         break;
       case 'turn_end':
         this._turnActive = false;
+        this._pendingTurn = false;
         this.awaiting = false;
         if (this._replyTimer) {
           clearTimeout(this._replyTimer);
@@ -1021,6 +1045,7 @@ export class JennyCompanion {
         break;
       case 'error':
         this._turnActive = false;
+        this._pendingTurn = false;
         this.awaiting = false;
         this._showReply(plainText(msg.detail || msg.reason || i18n.t('jenny.genericError')));
         this._setAgentState('idle');
@@ -1076,6 +1101,11 @@ export class JennyCompanion {
       case 'turn_end':
       case 'error':
         this._turnActive = false;
+        // Un turno partito dalla minichat e concluso dopo essere passati nella
+        // sezione chat: il flag va chiuso anche qui, altrimenti resterebbe
+        // alzato per sempre (qui lo storico non serve invalidarlo, la chat è
+        // la vista attiva e riceve lo stream da sé).
+        this._pendingTurn = false;
         this._setAgentState('idle');
         break;
     }

@@ -56,33 +56,96 @@
     );
   }
 
-  let depth = 1;
+  /* ── Navigazione interna ──────────────────────────────────────────────────
+     L'SDK non tocca la history del browser, di proposito.
+
+     Verificato empiricamente in Blink: un `pushState` da un iframe
+     `sandbox="allow-scripts"` a origine opaca *riesce* (hash, query, path
+     relativo). Il problema non è che fallisca: è che le entry finiscono nella
+     joint session history del WebView, condivisa col main frame e non potabile
+     dal parent. Due pushState del figlio portano `history.length` da 2 a 4, e
+     dopo `iframe.remove()` resta 4: `closeApp()` smonta l'overlay ma le entry
+     restano, quindi dopo la ✕ l'utente si trovava una o più pressioni di
+     Indietro completamente morte (nessun popstate, nessun cambio di URL).
+
+     Qui la profondità è quindi solo contabile: la joint history resta proprietà
+     esclusiva di `pushNav`/`replaceNav` della SPA, e `back()` risintetizza un
+     evento `popstate` per l'app — che non deve cambiare una riga. */
+
+  // Pila degli stati logici dell'app: l'indice 0 è la schermata iniziale.
+  const navStack = [null];
+  // Numero di <dialog> aperti: il parent non può vederli (origine opaca).
+  let dialogsOpen = 0;
 
   function postNavState() {
+    /* `depth` somma schermate e dialog aperti: per la SPA sono livelli
+       equivalenti, ed è il ramo `depth > 1` di AppsController.handleBack() a
+       instradare la pressione qui dentro invece di chiudere tutta l'app. */
     window.parent.postMessage(
-      { type: 'jenny:nav-state', slug, depth, canGoBack: depth > 1 },
+      {
+        type: 'jenny:nav-state',
+        slug,
+        // Solo `depth`: il parent non legge altro. `screens`/`dialogs` erano
+        // nati come dettaglio diagnostico ed erano già campi morti alla
+        // nascita, per la stessa ragione per cui il flag booleano che stava
+        // qui prima è stato tolto.
+        depth: navStack.length + dialogsOpen,
+      },
       '*'
     );
   }
 
+  /* `url` resta nella firma per le app già scritte, ma non viene scritto da
+     nessuna parte: vale come etichetta leggibile della schermata. Cambiare
+     davvero l'URL significherebbe tornare a sporcare la joint history. Chi
+     vuole portarsi dietro dei dati usi `state`, che torna indietro
+     nell'evento `popstate` sintetico. */
   function navigate(url, state = null) {
-    history.pushState(state, '', url);
-    depth++;
+    navStack.push(state);
     postNavState();
   }
 
   function back() {
-    if (depth > 1) {
-      history.back();
-    }
+    if (navStack.length <= 1) return;
+    navStack.pop();
+    // Le app esistenti reagiscono a `popstate`: l'evento sintetico le lascia
+    // intatte pur avendo tolto di mezzo la history vera.
+    window.dispatchEvent(
+      new PopStateEvent('popstate', { state: navStack[navStack.length - 1] })
+    );
+    postNavState();
   }
 
-  window.addEventListener('popstate', () => {
-    if (depth > 1) {
-      depth--;
-      postNavState();
-    }
+  /* Chiude il <dialog> più in alto con la semantica di Esc: evento `cancel`
+     annullabile, `close()` solo se nessuno l'ha rifiutato. Ritorna true anche
+     quando la chiusura è stata rifiutata: la pressione è comunque stata
+     consumata dall'app, non deve proseguire e chiudere l'app intera. */
+  function closeTopDialog() {
+    const open = document.querySelectorAll('dialog[open]');
+    if (!open.length) return false;
+    const top = open[open.length - 1];
+    if (top.dispatchEvent(new Event('cancel', { cancelable: true }))) top.close();
+    syncDialogs();
+    return true;
+  }
+
+  function syncDialogs() {
+    const count = document.querySelectorAll('dialog[open]').length;
+    // L'observer vede ogni render dell'app: si parla solo quando cambia.
+    if (count === dialogsOpen) return;
+    dialogsOpen = count;
+    postNavState();
+  }
+
+  /* Un dialog si apre togliendo/mettendo l'attributo `open`, ma può anche
+     essere inserito nel DOM già aperto: si osservano entrambe le cose. */
+  new MutationObserver(syncDialogs).observe(document.documentElement, {
+    subtree: true,
+    childList: true,
+    attributes: true,
+    attributeFilter: ['open'],
   });
+  document.addEventListener('DOMContentLoaded', syncDialogs);
 
   window.addEventListener('message', (event) => {
     const msg = event.data;
@@ -97,7 +160,9 @@
       window.jenny.theme = next;
       applyAccent(msg.accent, msg.onAccent);
     } else if (msg.type === 'jenny:go-back') {
-      back();
+      // Prima il dialog più in alto, poi la schermata: l'ordine è quello della
+      // catena dei livelli della SPA, che qui dentro non arriva a guardare.
+      if (!closeTopDialog()) back();
     } else if (msg.type === 'jenny:ui-query') {
       // Jenny chiede cosa mostra questa app: l'app ha pieno accesso al proprio
       // DOM e lo rimanda al parent (che lo pota). Nonce per correlare.

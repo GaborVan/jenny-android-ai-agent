@@ -37,31 +37,78 @@ export class SettingsController {
     // Sezioni aperte, per id: sopravvive ai re-render (che ricostruiscono
     // tutto l'HTML), non alla navigazione — niente localStorage di proposito.
     this._openSections = new Set();
-    this.loadSettings();
+    // Contatore di generazione: incrementato in deactivate(). Ogni
+    // continuazione lo cattura prima del primo await ed esce se è cambiato —
+    // altrimenti scrive nel DOM (o apre modali) di una sezione già lasciata.
+    this._gen = 0;
+    /* Posizione di lettura e stato del catalogo modelli. Come `_openSections`
+       vivono nel controller: il contenitore che scorre è lo stesso che
+       `render()` riscrive per intero, quindi qualunque salvataggio — e
+       scegliere un modello *è* un salvataggio — riportava in cima una pagina
+       lunga, col catalogo richiuso e il filtro perso. */
+    this._scrollTop = 0;
+    this._catalogOpen = false;
+    this._catalogFilter = '';
+    /* Vero mentre *noi* stiamo scrivendo `scrollTop`, e vero finché il
+       contenuto asincrono di un `render()` non è ancora atterrato. Vedi
+       `_restoreScrollTop()`. */
+    this._restoringScroll = false;
+    this._restorePending = false;
+    /* La posizione va letta *mentre* la vista è visibile: `switchMode` mette il
+       display:none sulla view prima di chiamare `deactivate()`, e un
+       contenitore senza box legge scrollTop 0 — salvare lì avrebbe riportato in
+       cima a ogni rientro invece di evitarlo. */
+    this.contentEl?.addEventListener('scroll', () => {
+      // Un ripristino non è una lettura: la sua assegnazione torna clampata
+      // dalla pagina ancora corta e qui riscriverebbe `_scrollTop` col valore
+      // sbagliato, distruggendo proprio ciò che stava ripristinando.
+      if (this._restoringScroll) return;
+      // Ha scorso l'utente: da qui in poi nessun contenuto in ritardo ha più il
+      // diritto di riportarlo dov'era prima del re-render.
+      this._restorePending = false;
+      if (this.contentEl.clientHeight) this._scrollTop = this.contentEl.scrollTop;
+    }, { passive: true });
+    /* Niente `loadSettings()` qui. Il costruttore gira dentro `switchMode`,
+       che subito dopo chiama `activate()` — e `activate()` carica. Risultato:
+       due GET /api/settings e due render completi alla prima apertura, con il
+       secondo che butta via tutto il DOM del primo (widget Telegram e card
+       batteria compresi, ricreati da capo). `this.ready = this.loadSettings()`
+       non risolverebbe: `switchMode` chiama `activate()` comunque. */
   }
 
   showLoading() { this.loadingEl?.classList.add('active'); }
   hideLoading() { this.loadingEl?.classList.remove('active'); }
 
+  /** true se nel frattempo si è usciti dalla sezione. */
+  _stale(gen) { return gen !== this._gen; }
+
   async loadSettings() {
+    const gen = this._gen;
     this.showLoading();
     try {
       const settings = await api.getSettings();
+      if (this._stale(gen)) return;
       this.data = settings;
       this.render();
     } catch (err) {
+      if (this._stale(gen)) return;
       this.contentEl.innerHTML = `
         <div class="settings-error">
           <i class="ti ti-cloud-off" style="font-size:32px;color:var(--text-faint)"></i>
            <p>${i18n.t('settings.failedToLoad')}</p>
           <p style="font-size:11px;color:var(--text-faint)">${escapeHtml(err.message)}</p>
         </div>`;
+    } finally {
+      if (!this._stale(gen)) this.hideLoading();
     }
-    this.hideLoading();
   }
 
   activate() { this.loadSettings(); }
   deactivate() {
+    // Da qui in poi nessuna continuazione in volo tocca più niente: né il DOM
+    // di questa sezione, né — soprattutto — una modale sopra un'altra.
+    this._gen++;
+    this.hideLoading();
     if (this._tgWidget) {
       this._tgWidget.destroy();
       this._tgWidget = null;
@@ -78,6 +125,17 @@ export class SettingsController {
       document.removeEventListener('visibilitychange', this._onPowerVisible);
       this._onPowerVisible = null;
     }
+  }
+
+  /* Sotto-stato della sezione: il catalogo modelli aperto occupa la vista e per
+     l'utente *è* una schermata (ci si arriva da un pulsante, si scorre, si
+     sceglie). Senza questo il tasto Indietro saltava quel livello e usciva
+     direttamente dalle impostazioni: due schermate in una pressione sola. */
+  handleBack() {
+    const el = this.contentEl?.querySelector('#model-catalog');
+    if (!el || el.style.display === 'none') return false;
+    this._toggleModelCatalog();
+    return true;
   }
 
   handleAction(action) {
@@ -106,6 +164,56 @@ export class SettingsController {
     ].join('');
 
     this._wireSections();
+    // L'innerHTML qui sopra ha appena riportato il catalogo chiuso e vuoto e lo
+    // scroll in cima: entrambi vanno rimessi come li aveva lasciati l'utente.
+    this._restoreCatalogState();
+    /* In questo istante catalogo, SSH, snapshot, widget Telegram e card
+       batteria sono ancora segnaposto: la pagina è molto più corta di quando la
+       posizione fu misurata. Si rimette ora *e* la si riapplica quando i pezzi
+       atterrano — v. `_restoreScrollTop()`. */
+    this._restorePending = true;
+    this._restoreScrollTop();
+  }
+
+  /* Rimette la posizione di lettura senza distruggerla. Due insidie, entrambe
+     osservate su Blink:
+     1. scrivere `scrollTop` emette un evento `scroll`, e il listener del
+        costruttore riscriveva `_scrollTop` con quello che l'assegnazione era
+        *diventata* — cioè col clamp a `scrollHeight - clientHeight` di una
+        pagina ancora fatta di segnaposto. La posizione buona non risultava
+        approssimata: risultava persa. Il flag rende cieco quel listener finché
+        l'evento non è smaltito (le scroll steps girano prima dei callback di
+        `requestAnimationFrame`, quindi azzerarlo lì è sicuro).
+     2. una sola assegnazione non basta: i caricatori asincroni allungano la
+        pagina dopo, e ognuno richiama questo metodo quando ha finito; in più
+        subito dopo un `innerHTML` le altezze definitive arrivano un frame dopo,
+        e per quello c'è il secondo colpo nel rAF. Il flag si azzera in un rAF
+        *annidato* perché l'evento della seconda scrittura viene smaltito nelle
+        scroll steps del frame ancora successivo.
+     `_restorePending` è la clausola di rispetto: se nel frattempo l'utente ha
+     scorso di suo, un fetch in ritardo non lo strattona più. */
+  _restoreScrollTop() {
+    if (!this.contentEl || !this._restorePending || !this._scrollTop) return;
+    this._restoringScroll = true;
+    this.contentEl.scrollTop = this._scrollTop;
+    requestAnimationFrame(() => {
+      if (this._restorePending) this.contentEl.scrollTop = this._scrollTop;
+      requestAnimationFrame(() => { this._restoringScroll = false; });
+    });
+  }
+
+  /* Riapre il catalogo modelli e rimette il testo del filtro dopo un
+     `render()`. Non è una comodità: il catalogo si richiude a ogni salvataggio,
+     e provare due modelli di fila significava riaprirlo e rifiltrarlo ogni
+     volta. */
+  _restoreCatalogState() {
+    if (!this._catalogOpen) return;
+    const el = this.contentEl.querySelector('#model-catalog');
+    if (!el) return;
+    el.style.display = '';
+    const search = this.contentEl.querySelector('#model-search');
+    if (search) search.value = this._catalogFilter;
+    this._loadModelCatalog();
   }
 
   /* Avviso di config recuperata all'avvio. Silenzioso nel caso normale: se
@@ -575,17 +683,31 @@ export class SettingsController {
     return `<div id="ssh-block"><div class="settings-empty-state">${i18n.t('settings.loading')}</div></div>`;
   }
 
+  /* Il nodo si cerca **dopo** l'await, non prima: `render()` ricostruisce tutto
+     `contentEl.innerHTML`, quindi un `#ssh-block` catturato prima della fetch è
+     con ogni probabilità già staccato dal documento — ci si scriveva dentro
+     senza che a schermo cambiasse niente, e la sezione SSH restava sul suo
+     "Caricamento…" per sempre. */
   async _loadSsh() {
-    const blockEl = this.contentEl.querySelector('#ssh-block');
-    if (!blockEl) return;
+    const gen = this._gen;
+    if (!this.contentEl.querySelector('#ssh-block')) return;
+    let ssh;
     try {
-      this._ssh = await api.getSsh();
+      ssh = await api.getSsh();
     } catch {
-      blockEl.innerHTML = `<div class="settings-empty-state">${i18n.t('settings.ssh.loadFailed')}</div>`;
+      if (this._stale(gen)) return;
+      const failEl = this.contentEl.querySelector('#ssh-block');
+      if (failEl) failEl.innerHTML = `<div class="settings-empty-state">${i18n.t('settings.ssh.loadFailed')}</div>`;
       return;
     }
+    if (this._stale(gen)) return;
+    const blockEl = this.contentEl.querySelector('#ssh-block');
+    if (!blockEl) return;
+    this._ssh = ssh;
     blockEl.innerHTML = this._renderSshBlock(this._ssh);
     this._wireSshBlock();
+    // Anche questo blocco era un segnaposto quando la posizione è stata rimessa.
+    this._restoreScrollTop();
   }
 
   _renderSshBlock(d) {
@@ -757,14 +879,43 @@ export class SettingsController {
     }
   }
 
+  /* Segno di attesa sul bottone che ha lanciato il probe.
+
+     Il probe apre una connessione di rete e può durare secondi. Prima non
+     lasciava traccia: il bottone restava identico e cliccabile, e passati i 3 s
+     del toast a schermo non c'era più **niente** che dicesse che stava
+     succedendo qualcosa. È da lì che nasce N8 — l'utente conclude che il tap è
+     andato perso, preme Indietro, e la modale dell'impronta gli si apre sopra
+     un'altra sezione. */
+  _setSshVerifyBusy(alias, busy) {
+    const btn = this.contentEl?.querySelector(`.ssh-verify[data-ssh-alias="${CSS.escape(alias)}"]`);
+    if (!btn) return;
+    btn.disabled = busy;
+    btn.textContent = i18n.t(busy ? 'settings.ssh.verifying' : 'settings.ssh.verify');
+  }
+
   /* Legge l'impronta e la mette davanti all'utente. Il probe non accetta
-     niente: fin qui known_hosts non è stato toccato. */
+     niente: fin qui known_hosts non è stato toccato.
+
+     La guardia di generazione non è cosmetica: "Accetta" scrive davvero in
+     known_hosts, e senza di essa la modale poteva comparire sopra la chat o il
+     workspace — cioè chiedere di fidarsi di un host in un contesto che non
+     spiega più di cosa si stia parlando. */
   async _sshVerify(alias) {
+    const gen = this._gen;
+    this._setSshVerifyBusy(alias, true);
     showToast(i18n.t('settings.ssh.verifying'));
     let probe;
     try {
       probe = (await api.probeSshHostKey(alias)).probe;
-    } catch (e) { showToast(e.message, 'error'); return; }
+    } catch (e) {
+      if (this._stale(gen)) return;
+      showToast(e.message, 'error');
+      return;
+    } finally {
+      this._setSshVerifyBusy(alias, false);
+    }
+    if (this._stale(gen)) return;
 
     if (probe.already_accepted) {
       showToast(i18n.t('settings.ssh.alreadyAccepted'));
@@ -774,13 +925,24 @@ export class SettingsController {
     const accepted = probe.changed
       ? await this._confirmChangedHostKey(alias, probe)
       : await this._confirmNewHostKey(alias, probe);
-    if (!accepted) return;
+    if (this._stale(gen)) return;
+    if (!accepted) {
+      // Era l'unica uscita muta della funzione: annullare non dava alcun
+      // riscontro, e il badge "Impronta da verificare" restava lì identico —
+      // indistinguibile da un annullamento non registrato.
+      showToast(i18n.t('settings.ssh.verifyCancelled'), 'info');
+      return;
+    }
 
     try {
       await api.acceptSshHostKey(alias, probe.fingerprint, { replace: probe.changed });
+      if (this._stale(gen)) return;
       showToast(i18n.t('settings.ssh.accepted'));
       this._loadSsh();
-    } catch (e) { showToast(e.message, 'error'); }
+    } catch (e) {
+      if (this._stale(gen)) return;
+      showToast(e.message, 'error');
+    }
   }
 
   /* Con la password il pinning conta di più, non di meno: una chiave la si
@@ -1131,8 +1293,30 @@ export class SettingsController {
       </div>
       <p class="settings-hint" style="margin-top:6px;font-size:12px;color:var(--text-faint)">${i18n.t('settings.advancedModeHint')}</p>
       <div class="settings-divider"></div>
+      ${this._renderRerunOnboarding()}
+      <div class="settings-divider"></div>
       <div class="settings-subheading">${i18n.t('settings.tokenUsage')}</div>
       ${this._renderUsage(d)}`;
+  }
+
+  /* Strada permanente verso il wizard di configurazione. Finora l'onboarding
+     era raggiungibile solo al primo avvio, e solo perché il gateway rispondeva
+     `first_run: true`: chi voleva rifare la configurazione da capo — o chi al
+     boot ha incontrato un errore che ha lasciato indeterminato lo stato del
+     primo avvio — non aveva alcun modo di riaprirlo. La voce sta qui e non
+     accanto ai provider perché non è "cambia il modello": rifà tutto il giro. */
+  _renderRerunOnboarding() {
+    return `
+      <div class="settings-subheading">${i18n.t('settings.rerunOnboarding')}</div>
+      <p class="settings-hint" style="margin:0 0 10px;font-size:12px;color:var(--text-faint)">${i18n.t('settings.rerunOnboardingHint')}</p>
+      <button class="settings-btn-add" id="btn-rerun-onboarding"><i class="ti ti-rocket"></i> ${i18n.t('settings.rerunOnboardingAction')}</button>`;
+  }
+
+  async _rerunOnboarding() {
+    if (!await confirmDialog(i18n.t('settings.rerunOnboardingConfirm'))) return;
+    const app = window.mobileApp;
+    if (!app) return;
+    app.openOnboarding();
   }
 
   _wireBackup() {
@@ -1177,20 +1361,27 @@ export class SettingsController {
     el.value = value;
   }
 
+  /* Stesso motivo di `_loadSsh`: il nodo si cerca dopo l'await. */
   async _loadSnapshotList() {
-    const listEl = this.contentEl.querySelector('#snapshot-list');
-    if (!listEl) return;
+    const gen = this._gen;
+    if (!this.contentEl.querySelector('#snapshot-list')) return;
     let snapshots = [];
     try {
       const history = await api.getSnapshotHistory();
+      if (this._stale(gen)) return;
       snapshots = history.snapshots || [];
       this._syncRetentionSelect(history.retention_max_age_days);
     } catch {
-      listEl.innerHTML = `<div class="settings-empty-state">${i18n.t('backup.snapshotHistoryUnavailable')}</div>`;
+      if (this._stale(gen)) return;
+      const failEl = this.contentEl.querySelector('#snapshot-list');
+      if (failEl) failEl.innerHTML = `<div class="settings-empty-state">${i18n.t('backup.snapshotHistoryUnavailable')}</div>`;
       return;
     }
+    const listEl = this.contentEl.querySelector('#snapshot-list');
+    if (!listEl) return;
     if (!snapshots.length) {
       listEl.innerHTML = `<div class="settings-empty-state">${i18n.t('backup.snapshotHistoryEmpty')}</div>`;
+      this._restoreScrollTop();
       return;
     }
     listEl.innerHTML = snapshots.map(s => {
@@ -1212,6 +1403,8 @@ export class SettingsController {
         if (ok) runSnapshotRestore(btn.dataset.snapshot);
       });
     });
+    // Anche la lista degli snapshot era un segnaposto: v. `_restoreScrollTop()`.
+    this._restoreScrollTop();
   }
 
   _fmtBytes(n) {
@@ -1422,6 +1615,9 @@ export class SettingsController {
     const advToggle = this.contentEl.querySelector('#advanced-mode-toggle');
     if (advToggle) advToggle.addEventListener('change', () => setAdvancedMode(advToggle.checked));
 
+    // Riesegui configurazione: strada permanente verso il wizard.
+    this._wireBtn('btn-rerun-onboarding', () => this._rerunOnboarding());
+
     // Mascotte: toggle visibilità (re-render per accendere/spegnere le
     // opzioni sotto) + scelta della taglia
     const mascotToggle = this.contentEl.querySelector('#mascot-visible-toggle');
@@ -1491,19 +1687,35 @@ export class SettingsController {
 
   /* keepStoredKey: il provider ha già una chiave salvata, quindi un campo
      vuoto significa "lasciala com'è" e non va segnalato come errore. */
-  _saveProvider(name, format, apiKey, apiBase, { keepStoredKey = false } = {}) {
+  async _saveProvider(name, format, apiKey, apiBase, { keepStoredKey = false } = {}) {
     if (!name || (!apiKey && !keepStoredKey)) {
       showToast(i18n.t('settings.nameAndKeyRequired'), 'error');
       return;
     }
 
-    api.updateProvider({ name, format, api_key: apiKey, api_base: apiBase })
-      .then(() => {
-        this._closeProviderDialog();
-        showToast(i18n.t('settings.providerSaved'));
-        this.loadSettings();
-      })
-      .catch(e => showToast(e.message, 'error'));
+    // Finestra di salvataggio in volo: finché la richiesta è in corso il
+    // dialog non deve poter sparire. Un Indietro dispatcha un `cancel` che
+    // nessuno preveniva, il listener `close` faceva remove(), e la chiave API
+    // appena digitata se ne andava col DOM lasciando solo un toast. Il flag
+    // vive sul dataset perché è il `cancel` a doverlo leggere.
+    const dialog = document.getElementById('provider-dialog');
+    const buttons = dialog ? [...dialog.querySelectorAll('.oc-btn')] : [];
+    if (dialog) dialog.dataset.busy = '1';
+    buttons.forEach(b => { b.disabled = true; });
+
+    try {
+      await api.updateProvider({ name, format, api_key: apiKey, api_base: apiBase });
+    } catch (e) {
+      showToast(e.message, 'error');
+      return;
+    } finally {
+      if (dialog) delete dialog.dataset.busy;
+      buttons.forEach(b => { b.disabled = false; });
+    }
+
+    this._closeProviderDialog();
+    showToast(i18n.t('settings.providerSaved'));
+    this.loadSettings();
   }
 
   _editProvider(name) {
@@ -1555,6 +1767,7 @@ export class SettingsController {
     if (!el) return;
     const wasOpen = el.style.display !== 'none';
     el.style.display = wasOpen ? 'none' : '';
+    this._catalogOpen = !wasOpen;
     if (!wasOpen) this._loadModelCatalog();
   }
 
@@ -1604,6 +1817,10 @@ export class SettingsController {
       if (e.key === 'Enter' && custom.value.trim()) this._selectModel(p.name, custom.value.trim());
     });
     this._applyCatalogFilter();
+    // Il gruppo ha appena sostituito un «Caricamento…» con decine di righe: la
+    // pagina è più alta di quando `render()` ha rimesso la posizione, e quella
+    // andava clampata. Si riapplica ora che c'è spazio per contenerla.
+    this._restoreScrollTop();
   }
 
   /* Il punto dell'intero redesign: modello e provider si salvano insieme. */
@@ -1617,7 +1834,11 @@ export class SettingsController {
   }
 
   _applyCatalogFilter() {
-    const q = (this.contentEl.querySelector('#model-search')?.value || '').toLowerCase();
+    // Il testo si memorizza grezzo: è quello che va rimesso nell'input dopo un
+    // re-render, e rimetterlo minuscolo sarebbe una riscrittura di ciò che
+    // l'utente ha battuto.
+    this._catalogFilter = this.contentEl.querySelector('#model-search')?.value || '';
+    const q = this._catalogFilter.toLowerCase();
     this.contentEl.querySelectorAll('#model-catalog-groups [data-model]').forEach(el => {
       el.style.display = el.dataset.model.toLowerCase().includes(q) ? '' : 'none';
     });
@@ -1683,7 +1904,12 @@ export class SettingsController {
       baseInput.placeholder = defaults[formatSelect.value] || '';
     });
 
-    dialog.querySelector('#dlg-provider-cancel').addEventListener('click', () => this._closeProviderDialog());
+    // Anche Annulla passa dal `cancel` annullabile, come Esc e il tasto
+    // Indietro: chiamando close() dritto scavalcava il guard del salvataggio in
+    // volo, e restava l'unica via per perdere la chiave API a metà richiesta.
+    dialog.querySelector('#dlg-provider-cancel').addEventListener('click', () => {
+      if (dialog.dispatchEvent(new Event('cancel', { cancelable: true }))) this._closeProviderDialog();
+    });
     dialog.querySelector('#dlg-provider-save').addEventListener('click', () => {
       const name = dialog.querySelector('#dlg-provider-name').value.trim();
       const format = dialog.querySelector('#dlg-provider-format').value;
@@ -1692,6 +1918,14 @@ export class SettingsController {
       // In modifica il campo vuoto vale sempre "tieni la chiave salvata":
       // il provider esiste già, non serve ridigitarla per cambiare l'URL.
       this._saveProvider(name, format, apiKey, apiBase, { keepStoredKey: isEdit });
+    });
+    // Il congedo (Indietro, Esc, catena della shell) passa da un `cancel`
+    // annullabile: durante un salvataggio in volo lo si rifiuta, altrimenti il
+    // dialog si smonta portandosi via i campi mentre la richiesta è ancora in
+    // corso. Fuori da quella finestra lo scarto dei campi resta la semantica
+    // normale di una modale annullabile e non si tocca.
+    dialog.addEventListener('cancel', (e) => {
+      if (dialog.dataset.busy) e.preventDefault();
     });
     dialog.addEventListener('close', () => dialog.remove());
   }

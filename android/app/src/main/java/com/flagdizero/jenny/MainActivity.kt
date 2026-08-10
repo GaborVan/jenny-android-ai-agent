@@ -20,6 +20,7 @@ import android.provider.MediaStore
 import android.os.Handler
 import android.os.Looper
 import android.os.Process
+import android.os.SystemClock
 import android.util.Log
 import android.view.View
 import android.webkit.JavascriptInterface
@@ -48,7 +49,10 @@ class MainActivity : AppCompatActivity() {
         private const val TAG = "Jenny"
         private const val GATEWAY_HOST = "127.0.0.1"
         private const val GATEWAY_PORT = 18790
-        private const val GATEWAY_URL = "http://${GATEWAY_HOST}:${GATEWAY_PORT}/html-mobile/"
+        // Il path — e SOLO quel path — che serve la SPA. Vedi isInternalGatewayUrl():
+        // il confronto è per uguaglianza, non per prefisso.
+        private const val GATEWAY_PATH = "/html-mobile/"
+        private const val GATEWAY_URL = "http://${GATEWAY_HOST}:${GATEWAY_PORT}${GATEWAY_PATH}"
         private const val RETRY_DELAY_MS = 500L
         private const val MAX_RETRIES = 30
         private const val PREFS_NAME = "jenny"
@@ -61,6 +65,66 @@ class MainActivity : AppCompatActivity() {
         private const val BOOT_POLL_INTERVAL_MS = 250L
         private const val BOOT_POLL_TIMEOUT_MS = 90_000L
 
+        /**
+         * Espressione valutata a ogni pressione del tasto Indietro. Ritorna un
+         * booleano vero: `true` solo se la SPA è viva e ha ricevuto la
+         * pressione. La versione precedente (`if (window.mobileApp) …`) valeva
+         * sempre `"null"` — un `if` non è un'espressione in JS — quindi il
+         * nativo non poteva distinguere "consumata" da "documento sostituito, il
+         * tasto è morto per sempre".
+         *
+         * Un'eccezione dentro handleHardwareBack NON diventa un ricaricamento:
+         * la SPA c'è, la pressione è arrivata. Viene ri-sollevata fuori dallo
+         * stack corrente così window.onerror la vede e la segnala come sempre —
+         * le rotture rumorose devono restare rumorose.
+         */
+        private const val BACK_PRESS_JS = """
+            (function () {
+              var app = window.mobileApp;
+              if (!app || typeof app.handleHardwareBack !== 'function') return false;
+              try { app.handleHardwareBack(); }
+              catch (e) { setTimeout(function () { throw e; }, 0); }
+              return true;
+            })()
+        """
+
+        /**
+         * Action con cui NotifierBridge marca il `contentIntent` di un alert
+         * proattivo. Senza, l'intent era indistinguibile da un rilancio
+         * qualunque dell'activity: `onNewIntent` instrada solo CATEGORY_HOME,
+         * quindi il tap portava l'app in primo piano esattamente dov'era —
+         * dentro una mini-app, in Wiki, ovunque — e non in chat.
+         */
+        const val ACTION_OPEN_CHAT = "com.flagdizero.jenny.action.OPEN_CHAT"
+
+        /**
+         * Porta la WebUI in chat da un tap sull'alert. `goHome()` è l'unico
+         * punto che smonta *tutti* i livelli sopra la vista (mini-app compresa,
+         * col suo cleanup); lo `switchMode` dopo serve perché la vista "home"
+         * è una preferenza e può non essere la chat — qui la chat non è una
+         * preferenza, è dove sta il messaggio che l'utente ha appena toccato.
+         * È no-op se la chat è già davanti.
+         *
+         * Ritorna un booleano vero: `false` se la SPA non c'è, e in quel caso
+         * gli alert NON vengono cancellati — la chat non si è aperta.
+         */
+        // La SPA sa da sé cosa comporta "apri la chat" (smontare gli overlay,
+        // collassare il sotto-stato delle sezioni, ripartire dalla radice):
+        // comporlo qui da goHome + switchMode lasciava la entry di radice a
+        // descrivere la vista home mentre a schermo c'era la chat.
+        private const val OPEN_CHAT_JS = """
+            (function () {
+              var app = window.mobileApp;
+              if (!app || typeof app.openChat !== 'function') return false;
+              return app.openChat() !== false;
+            })()
+        """
+
+        // Finestra minima fra due recuperi della SPA: il ricaricamento non è
+        // istantaneo e senza questo una raffica di pressioni lo farebbe ripartire
+        // da capo ogni volta, senza mai arrivare in fondo.
+        private const val SPA_RECOVERY_MIN_INTERVAL_MS = 3_000L
+
         // Letto da NotifierBridge (thread Python via Chaquopy) per sopprimere
         // gli alert quando l'utente sta già guardando la chat. @Volatile:
         // scritto dal main thread (onResume/onPause), letto da altri thread.
@@ -70,11 +134,21 @@ class MainActivity : AppCompatActivity() {
     }
 
     private var retryCount = 0
+    private var lastSpaRecoveryAt = 0L
     private var loaded = false
     private var mainFrameError = false
     private var loadingView: FrameLayout? = null
     private var errorView: FrameLayout? = null
     private var webView: WebView? = null
+    // Il callback del tasto Indietro. Abilitato solo mentre la SPA è a schermo:
+    // v. onCreate, onPageFinished, showLoading e showError.
+    private var backCallback: OnBackPressedCallback? = null
+    // Il tap su una notifica proattiva chiede la chat. Se l'activity era morta
+    // la richiesta non passa da onNewIntent ma da onCreate, e allora deve
+    // arrivare fino all'URL iniziale: la legge buildGatewayUrl(), che gira sul
+    // thread di polling — scritta in onCreate prima che quel thread parta.
+    @Volatile
+    private var openChatOnLoad = false
     // Resolved once the gateway socket is confirmed listening (config.json,
     // and therefore the bootstrap secret, is guaranteed to already exist by
     // then — ensure_minimal_config() runs before the port is opened). Falls
@@ -102,6 +176,15 @@ class MainActivity : AppCompatActivity() {
             } else {
                 Log.w(TAG, "Notification permission denied; gateway notification stays hidden")
             }
+            // Il secondo permesso parte SOLO da qui, mai in parallelo: Activity
+            // tiene una sola richiesta per volta (mHasCurrentPermissionsRequest)
+            // e scarta la seconda con "Can request only one set of permissions
+            // at a time". Chiedendoli entrambi di fila in onCreate, il dialog
+            // della posizione non compariva mai al primo avvio — e siccome il
+            // codice non distingue "negato" da "mai chiesto", non ricompariva
+            // nemmeno dopo. Vale per entrambi i rami: che le notifiche siano
+            // state concesse o rifiutate, la posizione va comunque chiesta.
+            ensureLocationPermission()
         }
 
     // Posizione: richiesta all'avvio perché il toggle è ON di default. Se
@@ -339,14 +422,41 @@ class MainActivity : AppCompatActivity() {
 
         // Launcher: back is delegated to the SPA. It either consumes it inside
         // an open Jenny App or falls back to natural WebView history.
-        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+        //
+        // Nasce DISABILITATO. Registrarlo abilitato da qui significa intercettare
+        // il tasto Indietro quando la SPA non esiste ancora — per tutta la
+        // ripartenza del gateway, che può durare fino a BOOT_POLL_TIMEOUT_MS —
+        // e per sempre sulla schermata d'errore, dove l'unico comando è il
+        // pulsante Riprova: il tasto non fa niente e non lo fa fare a nessun
+        // altro. Da disabilitato la pressione torna al dispatcher di sistema.
+        // Si riabilita quando la pagina è davvero a schermo (onPageFinished) e
+        // si rispegne ogni volta che la SPA lascia lo schermo (showLoading,
+        // showError).
+        val backCb = object : OnBackPressedCallback(false) {
             override fun handleOnBackPressed() {
-                webView?.evaluateJavascript("if (window.mobileApp) window.mobileApp.handleHardwareBack()") {}
+                webView?.evaluateJavascript(BACK_PRESS_JS) { result ->
+                    // "true" = la SPA c'è e ha ricevuto la pressione. Qualunque
+                    // altra cosa ("false", "null" se il documento non è la SPA)
+                    // significa che il back sparirebbe nel vuoto: si recupera.
+                    if (result?.trim() != "true") recoverLostSpa()
+                }
             }
-        })
+        }
+        onBackPressedDispatcher.addCallback(this, backCb)
+        backCallback = backCb
 
+        // Tap sull'alert con l'activity morta: qui non c'è nessuna SPA da
+        // instradare, la richiesta deve arrivare all'URL iniziale (v.
+        // buildGatewayUrl). La chat si aprirà: gli alert sono consumati.
+        if (intent?.action == ACTION_OPEN_CHAT) {
+            openChatOnLoad = true
+            NotifierBridge.clearAlerts(this)
+        }
+
+        // Catena, non due chiamate: ensureNotificationPermission() invoca
+        // ensureLocationPermission() quando la prima richiesta è conclusa (o
+        // quando non c'era niente da chiedere).
         ensureNotificationPermission()
-        ensureLocationPermission()
         registerPackageChangeReceiver()
         startGatewayAndLoad()
     }
@@ -378,12 +488,24 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Primo anello della catena dei permessi d'avvio. Se non c'è niente da
+     * chiedere (sotto API 33 il permesso non esiste, oppure è già concesso)
+     * passa subito al successivo; altrimenti lancia la richiesta e il seguito
+     * sta nel callback del launcher — le due richieste non possono essere in
+     * volo insieme, v. il commento lì.
+     */
     private fun ensureNotificationPermission() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            ensureLocationPermission()
+            return
+        }
         val granted = ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
             PackageManager.PERMISSION_GRANTED
         if (!granted) {
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            ensureLocationPermission()
         }
     }
 
@@ -398,6 +520,23 @@ class MainActivity : AppCompatActivity() {
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
         setIntent(intent)
+        // Tap su una notifica proattiva: si va in chat, chiudendo prima
+        // qualunque livello sopra (la mini-app aperta per prima). Gli alert
+        // pendenti si cancellano SOLO qui — cioè solo quando la chat viene
+        // davvero aperta. Stavano in onResume, che in un launcher scatta a
+        // ogni ritorno alla home: l'alert veniva cancellato comunque, fosse
+        // stato letto o no, e il messaggio proattivo restava senza alcun
+        // segnale.
+        if (intent?.action == ACTION_OPEN_CHAT) {
+            webView?.evaluateJavascript(OPEN_CHAT_JS) { result ->
+                if (result?.trim() == "true") {
+                    NotifierBridge.clearAlerts(this@MainActivity)
+                } else {
+                    Log.w(TAG, "Alert tap could not reach the SPA; chat not opened")
+                }
+            }
+            return
+        }
         // This app is the device HOME launcher (see AndroidManifest: category
         // HOME + DEFAULT). Pressing the system Home button / doing the home
         // swipe gesture while we are already the foreground task re-delivers the
@@ -426,8 +565,10 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         isInForeground = true
-        // La chat è di nuovo davanti agli occhi: gli alert pendenti sono stantii.
-        NotifierBridge.clearAlerts(this)
+        // Qui NON si cancellano gli alert pendenti: v. il ramo ACTION_OPEN_CHAT
+        // in onNewIntent. Questa è la home del telefono, onResume scatta a ogni
+        // ritorno alla schermata iniziale e su qualunque vista — non è una
+        // prova che il messaggio sia stato letto.
         webView?.onResume()
         // Pacchetti installati/disinstallati mentre eravamo dietro (tipicamente
         // l'uninstaller di sistema): ora la SPA può aggiornare la griglia.
@@ -501,7 +642,10 @@ class MainActivity : AppCompatActivity() {
         val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
         val bootToChat = prefs.getBoolean(PREF_BOOT_TO_CHAT, false)
         if (bootToChat) prefs.edit().putBoolean(PREF_BOOT_TO_CHAT, false).apply()
-        val base = if (bootToChat) "$GATEWAY_URL?mode=chat" else GATEWAY_URL
+        // `openChatOnLoad` è l'altra sorgente: il tap su un alert arrivato con
+        // l'activity morta (v. onCreate). Scritto sul main thread prima che
+        // parta il thread di polling che chiama questo metodo.
+        val base = if (bootToChat || openChatOnLoad) "$GATEWAY_URL?mode=chat" else GATEWAY_URL
         val secret = readBootstrapSecret() ?: return base
         return "$base#bs=${Uri.encode(secret)}"
     }
@@ -542,7 +686,14 @@ class MainActivity : AppCompatActivity() {
         // meta viewport user-scalable=no.
         wv.settings.setSupportZoom(false)
         wv.settings.builtInZoomControls = false
-        wv.settings.textZoom = 100
+        // NON rimettere `wv.settings.textZoom = 100`. Il commento qui sopra
+        // giustifica solo il pinch-zoom: textZoom è un'altra cosa, è la
+        // dimensione carattere di sistema, che la WebView eredita apposta.
+        // Fissarla a 100 la annullava — e con il pinch disattivato e nessun
+        // controllo di dimensione nella WebUI, sul Titan 2 restava zero
+        // accomodazione per chi ha vista ridotta. Perché l'aggiornamento
+        // arrivi senza ricaricare serve `fontScale` nei configChanges
+        // dell'activity (AndroidManifest).
         // La dichiarazione di intenti, per chi legge il codice e per gli strumenti
         // di sistema. Quel che *impedisce* davvero l'autofill sta in
         // NoAutofillWebView, che non consegna nulla da compilare: questo flag da
@@ -591,6 +742,15 @@ class MainActivity : AppCompatActivity() {
                 // chat — viene aperto fuori, altrimenti sostituirebbe la SPA
                 // senza via di ritorno (nessun back in-app → kill dell'app).
                 if (isInternalGatewayUrl(uri)) return false
+                // Stessa origine ma un altro path (`/api/…`, un href relativo
+                // risolto sotto `/html-mobile/`): non è la SPA e non va aperto
+                // né qui né fuori — una Custom Tab sul gateway lo esporrebbe a
+                // un altro processo. Si blocca e basta; il lato JS ha già
+                // annullato il click, questo è la rete di sicurezza.
+                if (isGatewayOrigin(uri)) {
+                    Log.w(TAG, "Blocked main-frame navigation to a non-SPA gateway path")
+                    return true
+                }
                 openExternalUrl(uri)
                 return true
             }
@@ -607,6 +767,8 @@ class MainActivity : AppCompatActivity() {
                 if (loaded) return
                 loaded = true
                 view?.visibility = View.VISIBLE
+                // Da qui in poi c'è una SPA a cui consegnare il tasto Indietro.
+                backCallback?.isEnabled = true
                 hideLoading()
             }
 
@@ -631,10 +793,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * True se l'URI punta al gateway locale fidato (la SPA): host di loopback
-     * sulla porta del gateway. Solo queste navigazioni restano nella WebView.
+     * True se l'URI punta all'origine del gateway locale: host di loopback sulla
+     * porta del gateway. Necessario ma NON sufficiente perché una navigazione
+     * resti nella WebView — quello lo decide isInternalGatewayUrl(), che guarda
+     * anche il path.
      */
-    private fun isInternalGatewayUrl(uri: Uri): Boolean {
+    private fun isGatewayOrigin(uri: Uri): Boolean {
         val scheme = uri.scheme?.lowercase()
         if (scheme != "http" && scheme != "https") return false
         val host = uri.host ?: return false
@@ -642,6 +806,21 @@ class MainActivity : AppCompatActivity() {
         // La porta di default (-1) non è quella del gateway: consideriamo
         // interne solo le navigazioni esplicite verso GATEWAY_PORT.
         return isLoopback && uri.port == GATEWAY_PORT
+    }
+
+    /**
+     * True solo per la pagina della SPA: origine del gateway **e** path esatto.
+     * Il prefisso non basterebbe — un href relativo scritto dal modello come
+     * `[cerca](www.google.com)` risolve in `/html-mobile/www.google.com`, che un
+     * confronto `startsWith` accetterebbe: la WebView ricaricherebbe il documento
+     * senza il fragment `#bs=` (SPA de-autenticata) o, sotto `/api/`, lo
+     * sostituirebbe con un 404 JSON, portandosi via `window.mobileApp` e con lui
+     * il tasto Indietro. Query e fragment restano liberi (`?mode=chat#bs=…`).
+     */
+    private fun isInternalGatewayUrl(uri: Uri): Boolean {
+        if (!isGatewayOrigin(uri)) return false
+        val path = uri.path ?: return false
+        return path == GATEWAY_PATH || path == GATEWAY_PATH.trimEnd('/')
     }
 
     /**
@@ -1151,6 +1330,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showLoading() {
+        // La SPA non è (più) a schermo: il tasto Indietro non ha nessuno a cui
+        // essere consegnato. Non oscilla con onPageFinished: onPageStarted
+        // chiama showLoading() solo `if (!loaded)` e onPageFinished esce subito
+        // `if (loaded)`, quindi i due non si alternano sulla stessa pagina; a
+        // rimettere `loaded = false` è solo il pulsante Riprova, che passa
+        // proprio di qui.
+        backCallback?.isEnabled = false
         errorView?.visibility = View.GONE
         loadingView?.apply {
             alpha = 1f
@@ -1181,6 +1367,32 @@ class MainActivity : AppCompatActivity() {
         fadeOut.start()
     }
 
+    /**
+     * Recupero d'emergenza quando il tasto Indietro non trova la SPA: si
+     * ricarica `resolvedGatewayUrl`, che porta con sé il fragment `#bs=` (il
+     * segreto di bootstrap si legge una volta sola, al caricamento del modulo:
+     * una ricarica senza fragment darebbe una SPA visibile ma de-autenticata).
+     * Vale per qualunque modo di perdere il documento, non solo per il link
+     * relativo che ha motivato il fix.
+     */
+    private fun recoverLostSpa() {
+        val wv = webView ?: return
+        // Solo durante il primo caricamento ci pensa già
+        // startGatewayAndLoad()/scheduleRetry(): qui si ripartirebbe da capo.
+        // Dopo il boot invece nessun altro recupera: onReceivedError chiama
+        // scheduleRetry() soltanto `if (!loaded)`, e mainFrameError torna false
+        // solo in onPageStarted — quindi una navigazione di main frame fallita a
+        // caricamento avvenuto lascerebbe la pagina d'errore della WebView al
+        // posto della SPA per sempre. Il loadUrl qui sotto passa da
+        // onPageStarted e azzera mainFrameError.
+        if (!loaded) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastSpaRecoveryAt < SPA_RECOVERY_MIN_INTERVAL_MS) return
+        lastSpaRecoveryAt = now
+        Log.w(TAG, "Back press found no SPA in the WebView, reloading the gateway URL")
+        wv.loadUrl(resolvedGatewayUrl)
+    }
+
     private fun scheduleRetry() {
         retryCount++
         if (retryCount > MAX_RETRIES) {
@@ -1195,6 +1407,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showError() {
+        // Schermata d'errore: l'unico comando è Riprova. Tenersi il tasto
+        // Indietro qui vuol dire tenerselo e non farne niente, per sempre.
+        backCallback?.isEnabled = false
         loadingView?.visibility = View.GONE
         webView?.visibility = View.GONE
         errorView?.apply {

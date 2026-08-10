@@ -78,12 +78,34 @@
              già il sistema a tenere il task home fuori dai Recenti, mentre chi
              la usa come app normale restava senza la via di rientro standard —
              fuori dai Recenti e senza icona a portata di mano. -->
+        <!-- `configChanges` largo apposta: ogni configurazione NON elencata qui
+             ricrea l'activity, e la ricreazione distrugge la WebView — cioè la
+             SPA, con la vista corrente, lo scroll della chat, la mini-app
+             aperta e la connessione WebSocket. Non c'è `onSaveInstanceState`
+             che la rimetta a posto (`stateNotNeeded` è già dichiarato sopra: lo
+             stato non si salva per scelta).
+
+             Le voci aggiunte sono i cambi che sul Titan 2 capitano davvero a
+             app in primo piano: `uiMode` (tema scuro di sistema, anche quello
+             automatico all'alba/tramonto), `fontScale` (dimensione carattere),
+             `density`+`smallestScreenSize`+`screenLayout` (dimensione display),
+             `locale` (lingua).
+
+             Assorbirli senza ricreare è sicuro **perché nulla di nativo dipende
+             da quelle risorse**: `Theme.Jenny` è `Theme.AppCompat.Light`, non
+             DayNight, quindi `uiMode` non cambia nessun colore; i temi della
+             WebUI sono CSS puro (`data-theme` + `setThemeBars`) e non usano
+             `prefers-color-scheme`; `activity_main.xml` scrive le sue tre
+             stringhe in chiaro e non referenzia nessun `@string`, quindi
+             `locale` non ha niente da ri-risolvere. La WebView, invece, il
+             `fontScale` lo riceve da sola (v. `loadWebView`: `textZoom` non
+             viene più forzato). -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTask"
             android:stateNotNeeded="true"
-            android:configChanges="orientation|screenSize|keyboardHidden">
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|uiMode|fontScale|density|locale">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

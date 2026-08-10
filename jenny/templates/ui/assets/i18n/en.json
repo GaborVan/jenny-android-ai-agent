@@ -116,6 +116,10 @@
     "webSearch": "Web Search",
     "advancedMode": "Developer mode",
     "advancedModeHint": "Also shows what Jenny uses to work: system skills and internal files (memory, configuration) appear in the lists. Only useful for looking under the hood.",
+    "rerunOnboarding": "Re-run setup",
+    "rerunOnboardingHint": "Reopens the initial wizard: format, provider, API key and model. Your current settings stay in place until you save new ones.",
+    "rerunOnboardingAction": "Open the setup wizard",
+    "rerunOnboardingConfirm": "Reopen the setup wizard?",
     "personalization": "Personalization",
     "tools": "Tools",
     "system": "System",
@@ -224,6 +228,7 @@
       "accept": "Accept",
       "accepted": "Fingerprint accepted",
       "alreadyAccepted": "Fingerprint already accepted",
+      "verifyCancelled": "Fingerprint not accepted: the host stays unverified",
       "changedTitle": "The host key changed",
       "changedWarning": "{alias} is presenting a host key different from the one you accepted. It may be a reinstalled server, or someone sitting in the middle. Accept only if you know why it changed.",
       "changedOld": "Previously accepted",
@@ -342,7 +347,8 @@
     "close": "Close",
     "genericError": "An error occurred. Check console.",
     "networkError": "Network error. Retrying...",
-    "failedToLoadMode": "Failed to load {mode}"
+    "failedToLoadMode": "Failed to load {mode}",
+    "linkNotOpenable": "This link can't be opened from here"
   },
   "dialog": {
     "confirm": "Confirm",
@@ -365,6 +371,7 @@
     "newName": "New name:",
     "deleteConfirm": "Delete \"{name}\"?",
     "saveConfirm": "Save changes to {path}?",
+    "discardConfirm": "You have unsaved changes. Close the editor and lose them?",
     "failedToLoad": "Failed to load: ",
     "error": "Error: ",
     "binaryFile": "Binary file — download to view",

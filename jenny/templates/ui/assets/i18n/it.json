@@ -116,6 +116,10 @@
     "webSearch": "Ricerca web",
     "advancedMode": "Modalità sviluppatore",
     "advancedModeHint": "Mostra anche quello che Jenny usa per lavorare: le skill di sistema e i file interni (memoria, configurazione) compaiono nelle liste. Serve solo per guardare sotto il cofano.",
+    "rerunOnboarding": "Riesegui configurazione",
+    "rerunOnboardingHint": "Riapre la procedura guidata iniziale: formato, provider, chiave API e modello. Le impostazioni attuali restano finché non ne salvi di nuove.",
+    "rerunOnboardingAction": "Apri la configurazione guidata",
+    "rerunOnboardingConfirm": "Riaprire la configurazione guidata?",
     "personalization": "Personalizzazione",
     "tools": "Strumenti",
     "system": "Sistema",
@@ -224,6 +228,7 @@
       "accept": "Accetta",
       "accepted": "Impronta accettata",
       "alreadyAccepted": "Impronta già accettata",
+      "verifyCancelled": "Impronta non accettata: l'host resta da verificare",
       "changedTitle": "La host key è cambiata",
       "changedWarning": "{alias} presenta una host key diversa da quella che hai accettato. Può essere un server reinstallato, oppure qualcuno che si è messo in mezzo. Accetta solo se sai perché è cambiata.",
       "changedOld": "Accettata in precedenza",
@@ -342,7 +347,8 @@
     "close": "Chiudi",
     "genericError": "Si è verificato un errore. Controlla la console.",
     "networkError": "Errore di rete. Nuovo tentativo...",
-    "failedToLoadMode": "Caricamento di {mode} fallito"
+    "failedToLoadMode": "Caricamento di {mode} fallito",
+    "linkNotOpenable": "Questo link non si può aprire da qui"
   },
   "dialog": {
     "confirm": "Conferma",
@@ -365,6 +371,7 @@
     "newName": "Nuovo nome:",
     "deleteConfirm": "Eliminare \"{name}\"?",
     "saveConfirm": "Salvare le modifiche a {path}?",
+    "discardConfirm": "Ci sono modifiche non salvate. Chiudere l'editor e perderle?",
     "failedToLoad": "Caricamento fallito: ",
     "error": "Errore: ",
     "binaryFile": "File binario — scarica per visualizzare",

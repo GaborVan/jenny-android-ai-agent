@@ -233,8 +233,41 @@ entirely and start the body directly with `<main id="app">`.
 The SDK (`jenny-sdk.js`, load it in `<head>` before app code) handles everything transport-
 and theme-related: it stamps the theme, exposes `jenny.action(name, params)` (resolves the
 envelope object described above — `.records`/`.record`/`.deleted` for storage, `.data` for
-http — throws `Error` with the structured message on failure), `jenny.discuss(text)`, and
-re-dispatches agent-side data changes as the `jenny:data-changed` window event.
+http — throws `Error` with the structured message on failure), `jenny.discuss(text)`,
+`jenny.navigate(label, state)` / `jenny.back()` (see below), and re-dispatches agent-side
+data changes as the `jenny:data-changed` window event.
+
+### Internal navigation and the Android back button
+
+The app fills the whole screen and the phone's back button is the only way out of it. The
+host SPA has no idea what the app is showing (the iframe has an opaque origin), so it asks:
+**every internal screen change must be declared with `jenny.navigate()`, otherwise Back
+closes the whole app instead of going up one level** — and the user loses the sub-screen,
+the half-filled form, everything.
+
+```js
+function openDetail(id) {
+  jenny.navigate('#detail', { id });   // declare the level BEFORE painting it
+  paintDetail(id);
+}
+
+// Back (hardware button or jenny.back()) replays the previous level here:
+window.addEventListener('popstate', (e) => {
+  if (e.state && e.state.id) paintDetail(e.state.id);
+  else paintList();
+});
+```
+
+- `jenny.navigate(label, state)` pushes one logical level. `label` is only a readable name
+  for the screen — the SDK deliberately never writes the browser history (entries pushed
+  from the iframe end up in the WebView's joint history and survive the app being closed,
+  leaving dead back presses behind). `state` comes back in the `popstate` event.
+- `jenny.back()` pops one level and fires the synthetic `popstate`. Wire the app's own "←"
+  buttons to it so they behave exactly like the hardware key.
+- A `<dialog>` opened inside the app counts as a level automatically — the SDK watches for
+  it and closes the topmost one on the first Back press. Nothing to declare, but do use
+  `<dialog>` (or kit markup) rather than a hand-rolled `<div>` overlay, or Back will skip
+  straight past it and close the app.
 
 ### Sandbox rules (the iframe is sandboxed — these WILL break the app if ignored)
 
@@ -256,6 +289,9 @@ re-dispatches agent-side data changes as the `jenny:data-changed` window event.
 ### Rules
 
 - Mobile-first; the iframe is full-screen on a phone.
+- Every internal screen change goes through `jenny.navigate()`, and the app restores the
+  previous screen on `popstate` — otherwise the back button closes the whole app instead of
+  going up one level.
 - All state changes go through actions — never write files or call external hosts directly
   (CORS and auth are handled by the gateway proxy).
 - No external hosts anywhere (`https://...` in `src`/`href` fails validation); gateway paths

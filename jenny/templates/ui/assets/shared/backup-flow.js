@@ -76,9 +76,23 @@ export function promptPassphrase({ confirm = false } = {}) {
       </div>`;
     document.body.appendChild(dialog);
 
-    const done = (value) => { dialog.close(); dialog.remove(); resolve(value); };
+    let settled = false;
+    const done = (value) => {
+      if (settled) return;
+      settled = true;
+      dialog.close();
+      dialog.remove();
+      resolve(value);
+    };
     dialog.querySelector('#bk-cancel').addEventListener('click', () => done(null));
     dialog.addEventListener('cancel', () => done(null));
+    // Cintura: qualunque chiusura che non passi da `cancel` — un close()
+    // diretto, un form method="dialog", una rimozione dal DOM da parte di
+    // terzi — deve comunque risolvere la Promise. Una Promise che resta
+    // appesa lascia `_busy` a true per tutta la vita della pagina, ed export,
+    // import e restore muoiono in silenzio da lì in avanti. È la stessa
+    // cintura che confirmDialog/detailDialog/promptDialog hanno già.
+    dialog.addEventListener('close', () => done(null));
     dialog.querySelector('#bk-ok').addEventListener('click', () => {
       const pass = dialog.querySelector('#bk-pass').value;
       if (!pass) {
