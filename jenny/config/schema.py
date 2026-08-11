@@ -24,6 +24,7 @@ from jenny.pydantic_compat import (
     Field,
     model_validator,
 )
+from jenny.runtime.update_manifest import DEFAULT_MANIFEST_URL
 from jenny.snapshot.engine import DEFAULT_EXCLUDE_GLOBS
 
 
@@ -416,6 +417,30 @@ class SnapshotConfig(Base):
     )
 
 
+class UpdatesConfig(Base):
+    """Controllo degli aggiornamenti in-app (manifest remoto + notifica in chat).
+
+    ``enabled`` decide se il job periodico ``update_check`` viene registrato
+    all'avvio **e** se ogni sua esecuzione fa qualcosa: il job registrato da un
+    avvio precedente resta nello store del cron, quindi a spegnere davvero la
+    rete è il controllo in ``CronDispatcher._run_update_check``.
+    ``notify_in_chat`` decide invece se una versione nuova apre un messaggio in
+    chat oppure resta solo visibile dove l'utente va a cercarla.
+
+    Le ventiquattro ore di default non sono un compromesso di rete: sono la
+    cadenza con cui ha senso *disturbare*. Il controllo costa una richiesta HTTP
+    da qualche centinaio di byte, ma ogni suo esito positivo è un'interruzione.
+    """
+
+    enabled: bool = True
+    # Unica fonte di verità: la costante di ``runtime/update_manifest.py``, un
+    # modulo senza dipendenze proprio perché questo schema viene caricato da
+    # ``config/bootstrap.py`` prima dell'event loop.
+    manifest_url: str = DEFAULT_MANIFEST_URL
+    check_interval_h: int = Field(default=24, ge=1, le=168)
+    notify_in_chat: bool = True
+
+
 class TelegramConfig(Base):
     """Configurazione del canale Telegram (bot personale).
 
@@ -493,6 +518,7 @@ class Config(BaseSettings):
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
     apps: AppsConfig = Field(default_factory=AppsConfig)
     snapshots: SnapshotConfig = Field(default_factory=SnapshotConfig)
+    updates: UpdatesConfig = Field(default_factory=UpdatesConfig)
     model_presets: dict[str, ModelPresetConfig] = Field(
         default_factory=dict,
         validation_alias=AliasChoices("modelPresets", "model_presets"),

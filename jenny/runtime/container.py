@@ -289,6 +289,30 @@ class GatewayContainer:
                 payload=CronPayload(kind="system_event"),
             ))
 
+        # Register the update-check system job (idempotent on restart). È l'unico
+        # percorso periodico che tocca la rete senza che l'utente abbia chiesto
+        # niente, quindi con la sezione spenta il job non viene registrato — ma
+        # questo da solo non lo spegne: un job già registrato da un avvio
+        # precedente resta nello store del cron, perché ``register_system_job``
+        # non ha una controparte che deregistri e ``remove_job`` protegge i
+        # ``system_event``. A far valere il flag a ogni esecuzione è
+        # ``CronDispatcher._run_update_check``, che esce prima della rete.
+        updates_cfg = config.updates
+        if updates_cfg.enabled:
+            self.cron.register_system_job(CronJob(
+                id="update_check",
+                name="update_check",
+                schedule=CronSchedule(
+                    kind="every",
+                    every_ms=updates_cfg.check_interval_h * 3600 * 1000,
+                    tz=config.agents.defaults.timezone,
+                ),
+                payload=CronPayload(kind="system_event"),
+            ))
+            logger.info("Update check: every {}h", updates_cfg.check_interval_h)
+        else:
+            logger.info("Update check: disabled")
+
 
     def _instantiate_agent(self, config: Config, provider: Any) -> Any:
         """Costruisce e cabla un ``AgentLoop`` (wiring condiviso build/onboarding).

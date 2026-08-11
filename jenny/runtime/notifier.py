@@ -87,6 +87,11 @@ def alert_fields(content: str, metadata: dict[str, Any] | None) -> tuple[str, st
     elif kind == "heartbeat":
         title = "Jenny · monitoraggio"
         tag = "heartbeat"
+    elif kind == "update":
+        # Tag dedicato: l'annuncio in chat e l'alert esplicito di un update
+        # critico partono entrambi da qui e devono coalizzare, non sommarsi.
+        title = "Jenny · aggiornamento"
+        tag = "update"
     else:
         title = "Jenny"
         tag = "message"

@@ -297,13 +297,17 @@ class CronTool(Tool, ContextAware):
     @staticmethod
     def _system_job_purpose(job: CronJob) -> str:
         # Un job di sistema che l'utente vede elencato senza sapere cosa fa e
-        # solo un motivo di sospetto: questi tre girano da soli e spendono
-        # token, quindi devono sapersi presentare. Chi ne aggiunge un quarto lo
+        # solo un motivo di sospetto: questi girano da soli e spendono token (o
+        # rete), quindi devono sapersi presentare. Chi ne aggiunge un altro lo
         # aggiunga anche qui.
         purposes = {
             "dream": "Dream memory consolidation for long-term memory.",
             "atlas": "Atlas wiki directory: rebuilds memory/WIKI.md from your wikis.",
             "heartbeat": "Heartbeat: checks HEARTBEAT.md for tasks you left for Jenny.",
+            "update_check": (
+                "Update check: looks for a newer Jenny app release and tells you "
+                "once per version."
+            ),
         }
         return purposes.get(job.name, "System-managed internal job.")
 

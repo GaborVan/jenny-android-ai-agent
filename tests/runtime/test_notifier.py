@@ -53,6 +53,13 @@ class TestAlertFields:
         assert title == "Jenny · monitoraggio"
         assert tag == "heartbeat"
 
+    def test_update(self):
+        # Tag dedicato: l'annuncio in chat e l'alert esplicito di un update
+        # critico coalizzano invece di suonare due volte.
+        title, _, tag = notifier.alert_fields("nuova versione 0.7.0", _meta("update"))
+        assert title == "Jenny · aggiornamento"
+        assert tag == "update"
+
     def test_plain_message_defaults(self):
         for metadata in (None, {}, {"latency_ms": 3}):
             title, _, tag = notifier.alert_fields("ciao", metadata)

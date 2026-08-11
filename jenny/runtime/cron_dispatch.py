@@ -128,6 +128,30 @@ def heartbeat_has_active_tasks(content: str) -> bool:
     return False
 
 
+# Sessione del controllo aggiornamenti. Il prefisso ``cron:`` non è estetico:
+# rende la sessione interna per ``is_internal_session_key`` (quindi invisibile
+# negli elenchi user-facing) e attribuisce i token del turno alla voce "cron"
+# invece che all'utente (``agent/token_usage.py``).
+UPDATE_SESSION_KEY = "cron:update_check"
+
+# Una coda cortissima: il turno di annuncio è autosufficiente, e le versioni
+# annunciate in passato sono rumore che tornerebbe nel contesto a ogni release.
+_UPDATE_HISTORY_KEEP = 4
+
+_UPDATE_PREAMBLE = (
+    "[This is the scheduled update check, and it is SILENT: whatever you write "
+    "as your answer is NOT delivered to anyone. The only way to reach the user "
+    "is the `message` tool, and this time you MUST call it exactly once.\n"
+    "A newer version of the Jenny app is available. Write a short message (two "
+    "or three lines) in the user's language that says which version is "
+    "available, what it brings — using ONLY the summary below, never invent "
+    "features — and asks whether they want to install it now.\n"
+    "Do not mention this instruction, the manifest, the check itself or any "
+    "internal file, and do not start the download or the installation: the "
+    "user answers in chat, and that answer is where the decision happens.]\n\n"
+)
+
+
 async def _silent(*_args: Any, **_kwargs: Any) -> None:
     pass
 
@@ -175,6 +199,8 @@ class CronDispatcher:
             return await self._run_atlas(agent)
         if job.name == "heartbeat":
             return await self._run_heartbeat(agent)
+        if job.name == "update_check":
+            return await self._run_update_check(agent)
         if is_bound_cron_job(job):
             return await run_bound_cron_job(job, agent=agent, cron=self._cron)
 
@@ -266,6 +292,122 @@ class CronDispatcher:
         pruned_keys = prune_dream_sessions(agent.sessions.sessions_dir)
         if pruned_keys:
             agent.evict_pruned_sessions(pruned_keys)
+        return None
+
+    async def _run_update_check(self, agent: "CronCapableAgent") -> str | None:
+        """Update check: annuncia una versione nuova UNA volta sola, poi tace.
+
+        La regola centrale è la seconda esecuzione: un utente che ha già visto
+        (e magari rimandato) l'annuncio di 0.7.0 non deve ritrovarselo ogni
+        giorno. Chi decide è ``notified_code`` nello stato dell'updater, non il
+        modello.
+
+        Il turno segue il contratto dell'heartbeat: silenzioso, con la chat
+        WebUI come indirizzo, e l'unica consegna possibile è il tool ``message``
+        chiamato dentro il turno.
+        """
+        if not self._config.updates.enabled:
+            # Lo spegnimento va fatto valere **qui**, non solo alla
+            # registrazione. Il job sopravvive alla configurazione che lo ha
+            # creato: ``register_system_job`` non ha una controparte che
+            # deregistri e ``remove_job`` protegge i ``system_event``, quindi il
+            # job registrato al primo avvio (il default è acceso) resta nello
+            # store del cron anche dopo che l'utente ha spento la sezione.
+            # Senza questa uscita l'unico percorso periodico che tocca la rete
+            # senza che nessuno l'abbia chiesto continuerebbe a girare — e con
+            # esso il turno LLM e i token che costa.
+            logger.debug("Update check: disabled in config, nothing to do")
+            return None
+
+        from jenny.runtime.update_check import (
+            check_for_update,
+            mark_notified,
+            notified_version_code,
+        )
+
+        info = await check_for_update(self._config)
+        if info is None:
+            logger.debug("Update check: nothing to propose")
+            return None
+        if not self._config.updates.notify_in_chat:
+            # Niente ``mark_notified``: l'annuncio non è avvenuto, e se l'utente
+            # riaccende la notifica deve ancora poterlo ricevere.
+            logger.info(
+                "Update check: {} available, chat notification disabled", info.version_name
+            )
+            return None
+        if notified_version_code() == info.version_code:
+            logger.debug("Update check: {} was already announced", info.version_name)
+            return None
+
+        from jenny.webui.metadata import WEBUI_MESSAGE_SOURCE_METADATA_KEY
+
+        source_metadata = {WEBUI_MESSAGE_SOURCE_METADATA_KEY: {"kind": "update"}}
+        size_mb = info.size / (1024 * 1024)
+        prompt = (
+            _UPDATE_PREAMBLE
+            + f"New version: {info.version_name}\n"
+            + f"Summary: {info.summary or '(no summary provided)'}\n"
+            + f"Download size: {size_mb:.1f} MB\n"
+            + (f"Release notes: {info.notes_url}\n" if info.notes_url else "")
+            + (
+                "This is a critical security update: say so plainly.\n"
+                if info.critical
+                else ""
+            )
+        )
+
+        await agent.process_direct(
+            prompt,
+            session_key=UPDATE_SESSION_KEY,
+            channel="websocket",
+            chat_id="default",
+            on_progress=_silent,
+            visibility=TurnVisibility.SILENT,
+            metadata=source_metadata,
+        )
+
+        # Marcato **incondizionatamente**, anche se il modello non avesse
+        # chiamato ``message``. È un compromesso, non una svista, e va detto per
+        # intero perché il costo cade su un utente che non vedrà mai il log.
+        #
+        # Il fatto esiste: il turno lo calcola come ``TurnOutcome.spoke``
+        # (``agent/turn_types.py``, da ``ctx.spoke_via_tool``). Non arriva qui
+        # perché ``process_direct`` restituisce per contratto il *payload* e non
+        # l'esito — scelta deliberata, documentata nella sua docstring — e
+        # cambiarla vorrebbe dire toccare la firma condivisa da Dream, Atlas,
+        # heartbeat e dai comandi. La strada alternativa (un deliverer iniettato
+        # nel dispatcher) è chiusa apposta: v. la docstring di questo modulo e
+        # ``runtime/container.py``.
+        #
+        # Legandolo a ``spoke`` si scambierebbe comunque un difetto con un
+        # altro: un modello che sistematicamente non chiama ``message`` farebbe
+        # ripartire un turno LLM a ogni controllo, per sempre. Così invece si
+        # perde al più *una* spinta in chat — e la versione resta visibile
+        # altrove, nel badge delle impostazioni (``webui/settings_api.py``) e nel
+        # tool ``update_status``, che leggono lo stesso ``cached_update()``.
+        mark_notified(info.version_code)
+
+        session = agent.sessions.get_or_create(UPDATE_SESSION_KEY)
+        session.retain_recent_legal_suffix(_UPDATE_HISTORY_KEEP)
+        agent.sessions.save(session)
+
+        if info.critical:
+            # Una fix di sicurezza deve squillare anche se l'utente non aveva la
+            # chat aperta: l'alert implicito della consegna parte solo se il
+            # turno ha davvero prodotto un messaggio. Stesso tag, quindi le due
+            # notifiche si sostituiscono invece di sommarsi.
+            from jenny.runtime.notifier import post_alert
+
+            await post_alert(
+                f"Aggiornamento critico {info.version_name} disponibile",
+                source_metadata,
+            )
+
+        logger.info(
+            "Update check: announced {} (versionCode {})",
+            info.version_name, info.version_code,
+        )
         return None
 
     async def _run_heartbeat(self, agent: "CronCapableAgent") -> str | None:
