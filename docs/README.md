@@ -75,3 +75,4 @@ For readers who want to understand how Jenny works internally or contribute code
 | [Write a mini-app](contribute/write-a-mini-app.md) | Building a Jenny App from scratch: manifest, agent instructions, and storage. |
 | [Add a provider](contribute/add-a-provider.md) | Implementing support for a new LLM provider. |
 | [Code style](contribute/code-style.md) | Style conventions for Python, docstrings, and commit messages. |
+| [Publishing a release](contribute/publish-a-release.md) | Cutting a release with `scripts/release.py`: version bump, signed APK, the `latest.json` update manifest, gradual rollout and the kill switch. |
