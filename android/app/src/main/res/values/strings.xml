@@ -13,4 +13,12 @@
          Python; only the channel is described here). -->
     <string name="alerts_channel_name">Alerts</string>
     <string name="alerts_channel_description">Reminders and messages Jenny sends on her own initiative</string>
+
+    <!-- App update waiting for the user to confirm it in the system installer
+         (UpdateBridge). Its own channel, not the agent's: silencing Jenny's
+         alerts must not hide an update that is stuck waiting for a tap. -->
+    <string name="update_channel_name">App updates</string>
+    <string name="update_channel_description">Shown when a downloaded update needs your confirmation to install</string>
+    <string name="update_notification_title">Update ready to install</string>
+    <string name="update_notification_text">Tap to confirm — Jenny restarts on her own afterwards</string>
 </resources>

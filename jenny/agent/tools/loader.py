@@ -76,6 +76,7 @@ _HARDCODED_TOOL_MODULES = [
     "diagnostics",
     "ui_view",
     "ssh",
+    "app_update",
 ]
 
 

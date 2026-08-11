@@ -6,4 +6,9 @@
 
     <string name="alerts_channel_name">Avvisi</string>
     <string name="alerts_channel_description">Promemoria e messaggi che Jenny manda di sua iniziativa</string>
+
+    <string name="update_channel_name">Aggiornamenti dell\'app</string>
+    <string name="update_channel_description">Mostrata quando un aggiornamento già scaricato aspetta la tua conferma per installarsi</string>
+    <string name="update_notification_title">Aggiornamento pronto da installare</string>
+    <string name="update_notification_text">Tocca per confermare — poi Jenny riparte da sola</string>
 </resources>

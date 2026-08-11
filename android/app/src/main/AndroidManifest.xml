@@ -40,6 +40,31 @@
          prompt e non permette di disinstallare senza la conferma dell'utente,
          che resta nel dialogo di sistema. -->
     <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+    <!-- Aggiornamento dell'APK dall'interno dell'app (UpdateBridge). Servono
+         entrambi perché coprono i due percorsi, e nessuno dei due implica
+         l'altro:
+
+         REQUEST_INSTALL_PACKAGES è il biglietto d'ingresso per installare
+         checchessia. Non basta da solo — resta l'interruttore per app che
+         l'utente concede a mano da "Installa app sconosciute", e
+         `canRequestPackageInstalls()` dice se l'ha fatto — ma senza, il
+         PackageInstaller rifiuta la sessione prima ancora di arrivare a
+         chiederglielo.
+
+         UPDATE_PACKAGES_WITHOUT_USER_ACTION (API 31+) è quello che permette di
+         *chiedere* un update senza conferma. È un permesso normale, concesso
+         all'installazione, e non regala nulla di pericoloso: consente solo di
+         aggiornare pacchetti di cui si è già l'installer — o, come nel nostro
+         caso, sé stessi (uid dell'installer == uid del pacchetto). Chiedere non
+         è ottenere: il sistema può comunque rispondere STATUS_PENDING_USER_ACTION
+         e su Android 14+ l'update ownership ha reso quella risposta la norma.
+         UpdateBridge tratta infatti il prompt come la strada principale.
+
+         NON si dichiara QUERY_ALL_PACKAGES né INSTALL_PACKAGES: il primo non
+         serve (aggiorniamo noi stessi), il secondo è riservato alle app di
+         sistema e verrebbe comunque ignorato. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION" />
 
     <!-- Makes launchable apps (MAIN/LAUNCHER) visible to PackageManager for the
          "App Android" tab, without requiring QUERY_ALL_PACKAGES. -->
