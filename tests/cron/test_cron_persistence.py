@@ -88,7 +88,7 @@ def test_load_jobs_preserves_corrupt_store_and_reports_the_fallback(
 ) -> None:
     """A corrupt ``jobs.json`` must not be silently treated as an empty list.
 
-    Da 0.6.5 il ripiego non è più un ``None``: il loader riparte da una lista
+    Da 0.6.6 il ripiego non è più un ``None``: il loader riparte da una lista
     vuota ma lo *dichiara*, e il file corrotto viene spostato di lato con un
     suffisso ``.corrupt-<ts>`` perché resti recuperabile. Il ``None`` è
     rimasto per il solo caso in cui lo spostamento fallisce
@@ -115,7 +115,7 @@ def test_load_jobs_preserves_corrupt_store_and_reports_the_fallback(
 def test_start_survives_a_corrupt_store_without_overwriting_it(tmp_path: Path) -> None:
     """``start`` parte comunque, ma non scrive mai sopra il file corrotto.
 
-    Il contratto è cambiato in 0.6.5: rifiutare l'avvio lasciava l'utente con
+    Il contratto è cambiato in 0.6.6: rifiutare l'avvio lasciava l'utente con
     un'app che non si apre e nessun modo di ripararla dal telefono. Quello che
     non deve succedere resta identico — ``_save_store`` non deve trasformare il
     file recuperabile in una lista vuota — ed è garantito dallo spostamento di

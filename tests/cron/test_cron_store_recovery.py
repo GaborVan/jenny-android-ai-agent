@@ -1,6 +1,6 @@
 """Uno store cron illeggibile non fa sparire i promemoria in silenzio.
 
-Contratto cambiato in 0.6.5, sulla falsariga di quello di `config.json` in
+Contratto cambiato in 0.6.6, sulla falsariga di quello di `config.json` in
 0.3.2. Prima: il file rotto veniva messo da parte e il gateway ripartiva senza
 job, senza dirlo a nessuno — l'utente scopriva di aver perso i suoi promemoria
 solo quando non suonavano. Ora, nell'ordine: si prova il ``.bak``, poi si

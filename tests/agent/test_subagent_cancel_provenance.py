@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -175,7 +176,18 @@ async def test_a_completed_subagent_carries_no_cancel_reason(tmp_path):
 
 
 def _legacy_line(**overrides) -> str:
-    """Riga JSONL nella forma scritta PRIMA di ``cancel_reason``."""
+    """Riga JSONL nella forma scritta PRIMA di ``cancel_reason``.
+
+    I timestamp sono relativi a ``time.time()``, non date fisse: ``load()`` pota
+    in lettura tutto ciò che è più vecchio di ``RECORD_TTL_S`` (7 giorni), quindi
+    un istante scritto a mano rende il test verde finché non scade e rosso per
+    sempre dopo — con un fallimento che non c'entra niente con ciò che verifica.
+
+    Restano un minuto indietro rispetto a ``time.time()``: ``_prune`` riordina
+    per ``ended_at``, quindi un record "vecchio" deve davvero essere più vecchio
+    di quello corrente con cui viene mescolato.
+    """
+    now = time.time() - 60.0
     payload = {
         "task_id": "aa11bb22",
         "lineage_id": "cc33dd44",
@@ -187,8 +199,8 @@ def _legacy_line(**overrides) -> str:
         "error": None,
         "result_summary": "",
         "iteration": 4,
-        "started_at": 1785841300.0,
-        "ended_at": 1785841304.0,
+        "started_at": now - 4.0,
+        "ended_at": now,
     }
     payload.update(overrides)
     return json.dumps(payload, ensure_ascii=False) + "\n"
@@ -226,7 +238,7 @@ def test_legacy_and_current_records_coexist_in_the_same_file(tmp_path):
         spec=SubagentSpec(task="new job", label="new job"),
         state="cancelled",
         cancel_reason=CANCEL_REASON_USER,
-        ended_at=1785841400.0,
+        ended_at=time.time(),
     )
     path.write_text(
         _legacy_line() + json.dumps(current.to_dict(), ensure_ascii=False) + "\n",

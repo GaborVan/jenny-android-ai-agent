@@ -27,7 +27,9 @@ What none of that fixes, and you should plan around:
 - **Exact alarms can be switched off.** If Android's "Alarms & reminders" permission isn't granted, Jenny falls back to inexact alarms: they still fire in Doze, but they slip. Settings → Background activity tells you which of the two you're getting.
 - **Your phone's own battery manager outranks all of it.** Samsung, Xiaomi/MIUI, Huawei/Honor, Oppo and Vivo kill background apps on their own terms, and no application code can prevent it. What Jenny can now do is *notice*: a stretch of downtime longer than `power.gapWarningMin` (default 60 minutes) is recorded and listed under **Settings → Background activity**, with the manufacturer-specific advice for turning the restriction off.
 
-So: intervals are still a floor, not a promise. The mechanisms above are aimed squarely at the frozen-timer gap, and they are the reason to expect better than 30-to-83; how much better, on a real phone under real Doze, is not something we can honestly claim yet.
+So: intervals are still a floor, not a promise — but the floor moved a long way up. Measured on the development phone (Unihertz Titan 2, Android 16), unplugged and idle for nine hours overnight, with both the battery exemption and the "Alarms & reminders" permission granted: a 30-minute job fired 19 times in a row and **every single interval landed between 30m00s and 30m02s**, including right through an uninterrupted four-hour stretch of deep Doze with no maintenance windows at all. The gateway was never killed and never restarted; the battery went from 80% to 77% over 9.4 hours.
+
+Read that for what it is: one phone, in the configuration where everything is granted. It says nothing about a phone where you grant neither permission, and since nothing killed the gateway during the run, the watchdog's repair path was never actually exercised. Your manufacturer's battery manager remains the variable nobody's code can control.
 
 If reminders matter to you, the practical measures are unchanged:
 
@@ -35,7 +37,7 @@ If reminders matter to you, the practical measures are unchanged:
 - Keep the phone charged and connected when a reminder is close to due.
 - Treat "at" reminders as best-effort, not guaranteed alarms — for anything truly time-critical, use your phone's own alarm clock as a backup.
 
-<!-- TODO: verify on-device (O-5): the anti-doze work of 0.6.6 (wake lock, alarm-driven cron, watchdog, restart nets) has been unit-tested but never run on a phone. Still unmeasured: the real drift of a 30-minute job under Doze with and without the battery exemption, whether the watchdog actually catches a killed gateway on the Titan 2, and how often the recorded-outage panel finds a gap in normal use. -->
+<!-- TODO: verify on-device (O-5): the granted-everything case was measured on the Titan 2 on 2026-08-09 and is written up above. Still unmeasured: the drift of the same job with neither permission granted, whether the watchdog really recovers a gateway that was killed (nothing killed it during the run), and how often the recorded-outage panel finds a gap in normal use. -->
 
 ## Reminders (the `cron` tool)
 
@@ -107,7 +109,7 @@ When you ask Jenny to list reminders, you'll also see three jobs you didn't crea
 
 Your reminders live in one file, `cron/jobs.json` inside the workspace, and a phone can leave a file unreadable — storage trouble, or the system killing the process mid-write.
 
-Since 0.6.5 that file is handled the same way as `config.json`. Jenny keeps the previous good copy as `cron/jobs.json.bak` and refreshes it before every save. If the live file can't be read at startup, the backup is used and promoted; if there's no usable backup either, the unreadable file is set aside as `cron/jobs.json.corrupt-<timestamp>` and Jenny starts with **no reminders at all**. Either way the app comes online, and Settings shows a notice saying which of the two happened and where the broken file went.
+Since 0.6.6 that file is handled the same way as `config.json`. Jenny keeps the previous good copy as `cron/jobs.json.bak` and refreshes it before every save. If the live file can't be read at startup, the backup is used and promoted; if there's no usable backup either, the unreadable file is set aside as `cron/jobs.json.corrupt-<timestamp>` and Jenny starts with **no reminders at all**. Either way the app comes online, and Settings shows a notice saying which of the two happened and where the broken file went.
 
 That notice matters more here than it does for settings. A reminder that has stopped existing looks exactly like a reminder that hasn't come due yet, so without being told, you'd find out when it didn't go off. If you see the "started with none" version, your own reminders need recreating — the system jobs above come back on their own.
 

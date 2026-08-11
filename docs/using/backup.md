@@ -70,7 +70,7 @@ What that means depends on where you restore:
 - **Same device, app still installed** (a restore to undo a bad state): the key directory was never removed, so SSH keeps working. Nothing to do.
 - **New phone, or after an uninstall/reinstall** (the case backups exist for): the key directory is empty. Settings shows the full host list, but every SSH call fails.
 
-Since 0.6.5 **Settings → SSH** says so instead of leaving you to work it out: any host whose fingerprint is recorded in `config.json` but no longer pinned in `known_hosts` is named in a notice explaining that keys and fingerprints are not in the backup by design. That combination only happens to a host you had already verified, so a host you simply never finished setting up is not flagged. Export and import themselves still say nothing.
+Since 0.6.6 **Settings → SSH** says so instead of leaving you to work it out: any host whose fingerprint is recorded in `config.json` but no longer pinned in `known_hosts` is named in a notice explaining that keys and fingerprints are not in the backup by design. That combination only happens to a host you had already verified, so a host you simply never finished setting up is not flagged. Export and import themselves still say nothing.
 
 The fix is manual and per host: open **Settings → SSH**, tap **Generate key** on each host, copy the new public line into that server's `~/.ssh/authorized_keys`, and then **Verify fingerprint** again to re-pin the host key. Password hosts are the exception — the password is stored in `config.json`, so it comes back with the workspace and only the fingerprint needs re-accepting.
 

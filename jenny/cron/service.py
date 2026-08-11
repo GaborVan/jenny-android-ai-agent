@@ -583,7 +583,7 @@ class CronService:
     def _corrupt_store_error(self) -> RuntimeError:
         """Store illeggibile **e** non spostabile: l'unico caso che rifiuta.
 
-        Da 0.6.5 un file rotto non impedisce più l'avvio: ``_load_jobs`` prova
+        Da 0.6.6 un file rotto non impedisce più l'avvio: ``_load_jobs`` prova
         il ``.bak``, altrimenti mette il file da parte come ``.corrupt-<ts>`` e
         riparte senza job, registrandolo perché la WebUI lo dica. Quella scelta
         regge su una condizione precisa — che la copia forense esista davvero.
