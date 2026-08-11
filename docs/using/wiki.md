@@ -45,6 +45,18 @@ The graph view renders pages as nodes and links between them as edges, laid out 
 
 The top-level graph overview (all your wikis at once) does not use this legend — there, each wiki gets its own color just to tell them apart, not a semantic one.
 
+### Searching a wiki
+
+A wiki's scoped graph has a search box above it. It searches **page contents**, not just titles: as you type, nodes that match stay lit and get an accent ring, everything else dims, and a counter shows how many pages matched. The last word you type matches by prefix, so results narrow letter by letter without waiting for you to finish the word.
+
+- Accents are optional — typing `citta` finds "Città".
+- Several words are an **and**: `doze batteria` keeps only pages containing both.
+- Page titles, file paths, headings, and frontmatter tags all count, and a hit in a title ranks above one buried in a paragraph.
+- Very common words are ignored rather than treated as a failed search, so a query like `il sonno` behaves like `sonno`.
+- Tapping a result focuses it as usual, lighting its neighbors even if they didn't match; the matched pages stay ringed so you can still tell them apart. Back steps out of the focus first, then clears the search.
+
+The search box does not appear on the top-level overview, where the nodes are whole wikis rather than pages. Search runs entirely on-device: the index is built alongside the graph and rebuilt only when a page actually changes, so typing never waits on anything.
+
 Mermaid diagrams are the one place in Jenny's UI where they actually render as diagrams: if a wiki page contains a fenced ` ```mermaid ` block, it's drawn as a real diagram here. Chat replies do not render Mermaid at all, even though they render most other markdown — see [Chat basics](chat.md).
 
 ### Empty or broken states

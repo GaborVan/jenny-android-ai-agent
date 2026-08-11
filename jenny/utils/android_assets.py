@@ -150,6 +150,7 @@ _UI_MANIFEST = [
     "assets/shared/theme.js",
     "assets/shared/tree-renderer.js",
     "assets/shared/utils.js",
+    "assets/shared/wiki-search.js",
     "assets/shared/ws-manager.js",
     "assets/vendor/@tabler/icons-webfont@3.19.0/LICENSE",
     "assets/vendor/@tabler/icons-webfont@3.19.0/dist/fonts/tabler-icons.ttf",

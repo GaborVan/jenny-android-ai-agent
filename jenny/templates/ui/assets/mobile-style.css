@@ -2768,10 +2768,15 @@ body {
 .app-frame-overlay iframe { flex: 1; width: 100%; border: 0; background: transparent; }
 
 /* ── Graph ── */
+/* Colonna, non blocco: breadcrumb e barra di ricerca sono righe ad altezza
+   propria e la tela prende quel che resta. Da blocco l'SVG chiedeva `height:
+   100%` dell'intero wrap *sotto* i breadcrumb, e `overflow: hidden` gli
+   tagliava in silenzio dal fondo tanti pixel quanti ne occupavano loro. */
 .graph-wrap {
   flex: 1; overflow: hidden; position: relative;
+  display: flex; flex-direction: column;
 }
-.graph-wrap svg { width: 100%; height: 100%; }
+.graph-wrap svg { width: 100%; flex: 1; min-height: 0; }
 
 /* Graph legend */
 .graph-legend {
@@ -2826,6 +2831,60 @@ body {
 .graph-wrap .node.dim { opacity: 0.12; }
 .graph-wrap .link.dim { opacity: 0.08; }
 .graph-wrap .node.highlight .node-main { filter: brightness(1.3); }
+
+/* Risultato di ricerca. Marcatore *indipendente* da dim/highlight: quelli
+   dicono "il focus sta guardando qui", questo dice "la query ti riguarda", e
+   le due cose devono poter convivere — entrando nel focus di un risultato i
+   vicini si accendono ma restano distinguibili da chi la query aveva trovato.
+
+   L'anello è nel colore del **fondo** e cade dentro al disco. Non è una scelta
+   estetica: i riempimenti dei nodi sono --accent, --error, --ok e --text-faint,
+   e non esiste un altro token in contrasto con tutti e quattro in tutti i temi
+   — in due dei sette --accent *è* --text, quindi un anello accento (o testo)
+   sparirebbe proprio sui nodi concept, che sono la maggioranza. --bg invece è
+   in contrasto con ogni riempimento per costruzione, altrimenti i nodi non si
+   vedrebbero sullo sfondo; è la stessa ragione per cui l'alone di .node-main
+   funziona ovunque. Marcatore di forma, non di tinta: regge anche i temi
+   monocromatici, dove per definizione nessun colore può distinguere niente. */
+.graph-wrap .node .node-ring {
+  fill: none; stroke: var(--bg); stroke-width: 2; opacity: 0;
+  transition: opacity 0.2s ease;
+}
+.graph-wrap .node.match .node-ring { opacity: 1; }
+.graph-wrap .node-label.match { fill: var(--accent); }
+
+/* ── Ricerca nel grafo ── */
+.graph-search {
+  flex-shrink: 0;
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 16px;
+  background: var(--surface);
+  border-bottom: 0.5px solid var(--border);
+}
+.graph-search[hidden] { display: none; }
+.graph-search-icon { color: var(--text-faint); font-size: 15px; flex-shrink: 0; }
+.graph-search input {
+  flex: 1; min-width: 0;
+  background: none; border: 0; outline: none; padding: 0;
+  color: var(--text); font-size: 13px; font-family: inherit;
+}
+.graph-search input::placeholder { color: var(--text-faint); }
+/* La X nativa di input[type=search] duplicherebbe il nostro pulsante. */
+.graph-search input::-webkit-search-cancel-button { display: none; }
+.graph-search-count {
+  flex-shrink: 0;
+  font-size: 11px; color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+.graph-search-count.empty { color: var(--error); }
+.graph-search-count[hidden] { display: none; }
+.graph-search-clear {
+  flex-shrink: 0;
+  background: none; border: 0; padding: 2px;
+  color: var(--text-faint); font-size: 15px; cursor: pointer;
+  display: flex; align-items: center;
+}
+.graph-search-clear[hidden] { display: none; }
 
 /* ══ Responsive / Touch ══ */
 

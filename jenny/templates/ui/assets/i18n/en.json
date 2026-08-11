@@ -460,7 +460,9 @@
     "wikis": "Wikis",
     "concepts": "Concepts",
     "entities": "Entities",
-    "other": "Other"
+    "other": "Other",
+    "searchPlaceholder": "Search page contents…",
+    "searchClear": "Clear search"
   },
   "header": {
     "back": "Back",

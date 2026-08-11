@@ -1,6 +1,7 @@
 import { api } from './shared/api-client.js';
 import { escapeHtml, hashString } from './shared/utils.js';
 import { i18n } from './shared/i18n.js';
+import { WikiSearchIndex } from './shared/wiki-search.js';
 
 export class GraphController {
   constructor() {
@@ -11,6 +12,15 @@ export class GraphController {
     this.teardown = null;
     // Azzeratore del focus sul nodo, installato da renderWikiGraph (v. lì).
     this._clearFocus = null;
+    // Indice full-text della wiki corrente, montato dalla stessa risposta che
+    // porta il grafo (v. loadGraph). Null nella vista home: lì i nodi sono le
+    // wiki, non le pagine, e non c'è testo su cui cercare.
+    this._searchIndex = null;
+    // Applicatore della maschera di ricerca, installato da renderWikiGraph
+    // insieme a `_clearFocus`: vive nel grafo disegnato, non nel controller.
+    this._applySearch = null;
+    this._zoomToMatches = null;
+    this._searchRaf = 0;
     // Token di caricamento (monotono): solo l'ultimo loadGraph disegna.
     this._loadToken = 0;
     // Contatore di generazione: incrementato in deactivate(), permette a una
@@ -26,6 +36,80 @@ export class GraphController {
         this.loadGraph(this.currentWiki, false);
       }
     });
+    this._initSearchUI();
+  }
+
+  /* ── Ricerca ──────────────────────────────────────────────────────────────
+     La barra vive nel DOM statico, non nel grafo: sopravvive a un reload della
+     tela, così ricaricare la vista (cambio lingua, refresh) non svuota ciò che
+     l'utente stava scrivendo. Il ponte fra le due vite è `_applySearch`, che
+     renderWikiGraph reinstalla a ogni disegno e `_cleanup()` stacca. */
+  _initSearchUI() {
+    this.searchEl = document.getElementById('graph-search');
+    this.searchInput = document.getElementById('graph-search-input');
+    this.searchCountEl = document.getElementById('graph-search-count');
+    this.searchClearBtn = document.getElementById('graph-search-clear');
+
+    this.searchInput?.addEventListener('input', () => this._scheduleSearch());
+    this.searchInput?.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      // Invio = "ho finito di scrivere": si chiude la tastiera e si inquadra
+      // ciò che si è trovato. Inquadrare a ogni tasto darebbe la nausea.
+      this.searchInput.blur();
+      this._runSearch();
+      this._zoomToMatches?.();
+    });
+    this.searchClearBtn?.addEventListener('click', () => this._setQuery(''));
+  }
+
+  /** Ricalcolo coalescato su rAF: al massimo una volta per fotogramma
+   *  disegnato, e senza il ritardo artificiale di un debounce — con l'indice
+   *  già in memoria una query costa meno di un fotogramma, quindi aspettare
+   *  sarebbe latenza regalata. */
+  _scheduleSearch() {
+    if (this._searchRaf) return;
+    this._searchRaf = requestAnimationFrame(() => {
+      this._searchRaf = 0;
+      this._runSearch();
+    });
+  }
+
+  /** Imposta la query e applica *subito*: chi la chiama (pulsante Cancella,
+   *  tasto Indietro) si aspetta un cambiamento visibile in quella pressione,
+   *  non al fotogramma dopo. */
+  _setQuery(text) {
+    if (this.searchInput) this.searchInput.value = text;
+    if (this._searchRaf) {
+      cancelAnimationFrame(this._searchRaf);
+      this._searchRaf = 0;
+    }
+    this._runSearch();
+  }
+
+  _runSearch() {
+    const query = this.searchInput?.value || '';
+    const hasText = query.trim().length > 0;
+    if (this.searchClearBtn) this.searchClearBtn.hidden = !hasText;
+
+    // `query()` ritorna null quando la ricerca non impone alcun vincolo (testo
+    // vuoto, o solo parole presenti ovunque): è diverso da "zero risultati", e
+    // deve lasciare il grafo intero acceso invece di spegnerlo tutto.
+    const result = (hasText && this._searchIndex) ? this._searchIndex.query(query) : null;
+    this._applySearch?.(result ? result.mask : null);
+
+    if (this.searchCountEl) {
+      this.searchCountEl.hidden = !result;
+      if (result) this.searchCountEl.textContent = String(result.count);
+      this.searchCountEl.classList.toggle('empty', !!result && result.count === 0);
+    }
+  }
+
+  /** Mostra la barra solo dove ha senso, e riapplica la query al nuovo grafo. */
+  _syncSearchUI() {
+    if (this.searchEl) this.searchEl.hidden = !this._searchIndex;
+    if (!this._searchIndex && this.searchInput) this.searchInput.value = '';
+    this._runSearch();
   }
 
   showLoading() {
@@ -54,6 +138,12 @@ export class GraphController {
     // monotono solo rispetto ad altri caricamenti *del grafo*.
     this._gen++;
     this._cleanup();
+    // Un ricalcolo già in coda troverebbe `_applySearch` staccato: innocuo, ma
+    // è un fotogramma di lavoro su una vista che non è più a schermo.
+    if (this._searchRaf) {
+      cancelAnimationFrame(this._searchRaf);
+      this._searchRaf = 0;
+    }
     this.hideLoading();
   }
 
@@ -66,8 +156,11 @@ export class GraphController {
   _cleanup() {
     // Il focus vive nel grafo che sta per essere smontato: tenerne
     // l'azzeratore significherebbe far consumare una pressione di Indietro a
-    // una closure che opera su nodi non più a schermo.
+    // una closure che opera su nodi non più a schermo. Stesso discorso per la
+    // maschera di ricerca, che indicizza i nodi *di quel* disegno.
     this._clearFocus = null;
+    this._applySearch = null;
+    this._zoomToMatches = null;
     if (this.teardown) {
       this.teardown();
       this.teardown = null;
@@ -88,11 +181,17 @@ export class GraphController {
     try {
       const data = await api.getGraph(wiki);
       if (this._stale(token, gen)) return;
+      // Indice e grafo arrivano insieme apposta: le postings dell'indice sono
+      // *indici* in `data.nodes`, quindi montarlo qui — e non con una fetch a
+      // parte — è ciò che garantisce che accendano i nodi che stiamo per
+      // disegnare, e non quelli di un'istantanea diversa della wiki.
+      this._searchIndex = WikiSearchIndex.from(data.search);
       if (wiki) {
         this.renderWikiGraph(data, wiki);
       } else {
         this.renderHomeGraph(data);
       }
+      this._syncSearchUI();
 
       if (pushHistory) {
         window.mobileApp.pushNav({ mode: 'graph', wiki });
@@ -103,6 +202,8 @@ export class GraphController {
     } catch (err) {
       if (this._stale(token, gen)) return;
       console.error('Failed to load graph:', err);
+      this._searchIndex = null;
+      this._syncSearchUI();
       this.svgEl.innerHTML = `<text x="50%" y="50%" text-anchor="middle" fill="#666" font-size="12">${i18n.t('graph.failedToLoad')}</text>`;
     } finally {
       // Chi è stato superato non spegne lo spinner di chi lo ha superato.
@@ -316,7 +417,11 @@ export class GraphController {
 
     const EXCLUDE_ID = 'wiki/index.md';
 
-    const allNodes = data.nodes.map(n => ({ ...n }));
+    // `_i` è la posizione del nodo **nell'array servito dal server**, non in
+    // quello disegnato: è la chiave con cui l'indice full-text ha scritto le
+    // sue postings. Va catturata prima del filtro che toglie la index.md,
+    // altrimenti dopo lo scarto ogni maschera punterebbe al nodo sbagliato.
+    const allNodes = data.nodes.map((n, i) => ({ ...n, _i: i }));
     const allLinks = data.edges.map(e => ({ ...e }));
 
     const adjacency = new Map();
@@ -400,6 +505,11 @@ export class GraphController {
       .attr('transform', d => `translate(${d.x},${d.y})`);
 
     nodeSel.append('circle').attr('class', 'node-main').attr('r', d => radius(d));
+    // Anello del risultato di ricerca, disegnato *dentro* il disco (v. il CSS
+    // per il perché del colore). Esiste sempre e resta invisibile finché il
+    // nodo non è un match: crearlo al bisogno vorrebbe dire ricostruire nodi
+    // durante la digitazione, che è esattamente ciò che questa ricerca evita.
+    nodeSel.append('circle').attr('class', 'node-ring').attr('r', d => ringRadius(radius(d)));
     nodeSel.append('title').text(d => nodeLabelText(d));  // tooltip: titolo completo
 
     // Ogni nodo ha la sua etichetta: è declutterLabels() a spegnere solo quelle
@@ -414,8 +524,17 @@ export class GraphController {
 
     declutterLabels(labelSel);
 
+    // Maschera di ricerca: 1 byte per nodo, indicizzata per `_i`. Null = nessuna
+    // ricerca in corso. Vive qui e non nel controller perché ha senso solo
+    // rispetto a *questo* disegno.
+    let searchMask = null;
+    let matchedIds = null;
+    const isMatch = (d) => !!searchMask && searchMask[d._i] === 1;
+
     // Durante il drag i nodi si spostano: il declutter va rifatto, ma throttlato
-    // (è O(n²) sul numero di etichette) e ripetuto a simulazione ferma.
+    // (è O(n²) sul numero di etichette) e ripetuto a simulazione ferma. Con una
+    // ricerca attiva non va rifatto affatto: le etichette dei match sono accese
+    // d'ufficio (v. _refreshLabels) e il declutter le rispegnerebbe.
     let lastDeclutter = 0;
     sim.on('tick', () => {
       linkSel
@@ -425,13 +544,14 @@ export class GraphController {
         .attr('y2', d => d.target.y);
       nodeSel.attr('transform', d => `translate(${d.x},${d.y})`);
       labelSel.attr('x', d => d.x).attr('y', d => d.y);
+      if (searchMask) return;
       const now = performance.now();
       if (now - lastDeclutter > 150) {
         lastDeclutter = now;
         declutterLabels(labelSel);
       }
     });
-    sim.on('end', () => declutterLabels(labelSel));
+    sim.on('end', () => { if (!searchMask) declutterLabels(labelSel); });
 
     const dragBehavior = d3.drag()
       .on('start', (event, d) => {
@@ -460,8 +580,25 @@ export class GraphController {
     let focusNodeId = null;
     let hoverNodeId = null;
 
+    // Costruito una volta sola: era ricalcolato a ogni updateVisualState, cioè
+    // — ora che anche la ricerca lo chiama — a ogni carattere digitato.
+    const allNodeIds = new Set(nodes.map(n => n.id));
+
     function getNeighbors(id) {
       return adjacency.get(id) || new Set();
+    }
+
+    /* Insieme di partenza dei nodi "vivi", prima che hover e focus decidano
+       chi accendere fra loro. La ricerca è una *terza lente*, non un terzo
+       ramo: restringe la base, e da lì in poi tutta la logica esistente di
+       dim/highlight vale identica. Il focus ha la precedenza perché esplorare
+       i collegamenti di un nodo vuole vederli tutti, anche quelli che la query
+       non tocca: i match restano comunque riconoscibili dalla classe `.match`,
+       che è indipendente da dim/highlight. */
+    function baseActiveIds() {
+      if (focusNodeId) return new Set([focusNodeId, ...getNeighbors(focusNodeId)]);
+      if (matchedIds) return matchedIds;
+      return allNodeIds;
     }
 
     function computeExtent(targetNodes) {
@@ -488,13 +625,17 @@ export class GraphController {
       );
     }
 
-    function updateVisualState() {
-      let activeNodeIds = new Set(nodes.map(n => n.id));
-      if (focusNodeId) {
-        const focusNeighbors = getNeighbors(focusNodeId);
-        activeNodeIds = new Set([focusNodeId, ...focusNeighbors]);
-      }
+    /* Raggio dei due cerchi di ogni nodo in un punto solo. Erano due `attr('r')`
+       separati a rischio di deriva: l'anello del match deve stare dentro al
+       disco *anche* mentre hover e focus lo ingrandiscono, altrimenti a nodo
+       cresciuto sborda e diventa un contorno esterno che sparisce sul fondo. */
+    function applyRadii(scaleOf) {
+      nodeSel.selectAll('.node-main').attr('r', n => radius(n) * scaleOf(n));
+      nodeSel.selectAll('.node-ring').attr('r', n => ringRadius(radius(n) * scaleOf(n)));
+    }
 
+    function updateVisualState() {
+      const activeNodeIds = baseActiveIds();
       const highlightedNode = hoverNodeId || focusNodeId;
 
       if (highlightedNode && activeNodeIds.has(highlightedNode)) {
@@ -503,13 +644,12 @@ export class GraphController {
 
         nodeSel
           .classed('dim', n => !litNodes.has(n.id))
-          .classed('highlight', n => litNodes.has(n.id))
-          .selectAll('.node-main')
-          .attr('r', n => {
-            if (n.id === highlightedNode) return radius(n) * 1.4;
-            if (litNodes.has(n.id)) return radius(n) * 1.15;
-            return radius(n);
-          });
+          .classed('highlight', n => litNodes.has(n.id));
+        applyRadii(n => {
+          if (n.id === highlightedNode) return 1.4;
+          if (litNodes.has(n.id)) return 1.15;
+          return 1;
+        });
 
         labelSel
           .classed('dim', n => !litNodes.has(n.id))
@@ -525,9 +665,8 @@ export class GraphController {
       } else {
         nodeSel
           .classed('dim', n => !activeNodeIds.has(n.id))
-          .classed('highlight', false)
-          .selectAll('.node-main')
-          .attr('r', d => radius(d));
+          .classed('highlight', false);
+        applyRadii(() => 1);
 
         labelSel
           .classed('dim', n => !activeNodeIds.has(n.id))
@@ -541,12 +680,19 @@ export class GraphController {
       }
     }
 
+    /* Etichette. Con una ricerca attiva sono accese esattamente sui match: il
+       declutter è O(n²) e rieseguirlo a ogni carattere sarebbe il costo
+       dominante della digitazione — mentre i match sono pochi e mostrarli
+       tutti è anche il risultato visivamente giusto. Uscendo dalla ricerca il
+       declutter torna a decidere lui, una volta sola. */
+    function refreshLabels() {
+      if (searchMask) labelSel.classed('big', isMatch);
+      else declutterLabels(labelSel);
+    }
+
     nodeSel
       .on('mouseenter', (event, d) => {
-        let activeNodeIds = focusNodeId
-          ? new Set([focusNodeId, ...getNeighbors(focusNodeId)])
-          : new Set(nodes.map(n => n.id));
-        if (!activeNodeIds.has(d.id)) return;
+        if (!baseActiveIds().has(d.id)) return;
         hoverNodeId = d.id;
         updateVisualState();
       })
@@ -556,10 +702,9 @@ export class GraphController {
       })
       .on('click', (event, d) => {
         event.stopPropagation();
-        let activeNodeIds = focusNodeId
-          ? new Set([focusNodeId, ...getNeighbors(focusNodeId)])
-          : new Set(nodes.map(n => n.id));
-        if (!activeNodeIds.has(d.id)) return;
+        // Un nodo spento — dal focus o dalla ricerca — non si tocca: a 0.12 di
+        // opacità un tap è un incidente, non un'intenzione.
+        if (!baseActiveIds().has(d.id)) return;
         if (focusNodeId === d.id) return;
         focusNodeId = d.id;
         hoverNodeId = null;
@@ -569,6 +714,7 @@ export class GraphController {
       })
       .on('dblclick', (event, d) => {
         event.stopPropagation();
+        if (!baseActiveIds().has(d.id)) return;
         const pagePath = d.path;
         if (!pagePath) return;
         window.mobileApp.switchMode('wiki', false);
@@ -584,8 +730,49 @@ export class GraphController {
       focusNodeId = null;
       hoverNodeId = null;
       updateVisualState();
-      zoomToExtent(nodes);
+      // Tornando dal focus si reinquadra ciò che la ricerca aveva selezionato,
+      // non tutta la wiki: la query è ancora nella barra, e ritrovarsi il grafo
+      // intero sarebbe come averla persa.
+      zoomToExtent(matchedNodes() || nodes);
       return true;
+    };
+
+    /** I nodi disegnati che soddisfano la query, o null se non c'è ricerca. */
+    function matchedNodes() {
+      if (!searchMask) return null;
+      const hits = nodes.filter(isMatch);
+      return hits.length ? hits : null;
+    }
+
+    /* Ponte fra la barra di ricerca (che vive nel DOM statico) e questo
+       disegno. Accetta la maschera grezza del motore — un byte per nodo — e la
+       traduce una volta sola nelle due forme che servono: la classe `.match`,
+       marcatore stilistico indipendente da dim/highlight, e l'insieme di id che
+       fa da base a tutto il resto della logica visiva.
+
+       La conversione in Set si paga qui, a ogni cambio di query, e non dentro
+       updateVisualState — che gira anche a ogni hover. */
+    this._applySearch = (mask) => {
+      // Nessuna ricerca prima, nessuna dopo: uscire subito evita che il
+      // riallineamento a fine caricamento rifaccia un declutter O(n²) appena
+      // fatto dal disegno. Non si può confrontare l'identità delle maschere:
+      // il motore riusa sempre lo stesso buffer, query dopo query.
+      if (!mask && !searchMask) return;
+      searchMask = mask || null;
+      matchedIds = null;
+      if (searchMask) {
+        matchedIds = new Set();
+        for (const n of nodes) if (isMatch(n)) matchedIds.add(n.id);
+      }
+      nodeSel.classed('match', isMatch);
+      labelSel.classed('match', isMatch);
+      updateVisualState();
+      refreshLabels();
+    };
+
+    this._zoomToMatches = () => {
+      const hits = matchedNodes();
+      if (hits) zoomToExtent(hits);
     };
 
     /* Il listener è attaccato al nodo `#graph-svg`, che è statico: sopravvive sia
@@ -603,11 +790,17 @@ export class GraphController {
     };
   }
 
-  /* Sotto-stato della sezione: il focus su un nodo è una schermata a sé (il
-     grafo è zoomato sul nodo e sui suoi vicini, il resto è spento). Uscirne
-     viene prima di uscire dalla sezione. */
+  /* Sotto-stati della sezione, dal più interno al più esterno: il focus su un
+     nodo (grafo zoomato sul nodo e sui suoi vicini) sta *dentro* una ricerca,
+     perché ci si arriva toccando un risultato. Il tasto Indietro li smonta in
+     quest'ordine, uno per pressione — una pressione, un cambiamento visibile. */
   handleBack() {
-    return this._clearFocus ? this._clearFocus() : false;
+    if (this._clearFocus?.()) return true;
+    if (this.searchInput?.value) {
+      this._setQuery('');
+      return true;
+    }
+    return false;
   }
 
   handleAction(action) {
@@ -620,6 +813,14 @@ export class GraphController {
 function sanitizeGroup(g) {
   if (['concepts', 'entities', 'summaries', 'home', 'wiki'].includes(g)) return g;
   return 'other';
+}
+
+// Raggio dell'anello di risultato per un nodo di raggio *r*. Rientra di poco più
+// del suo spessore (2px, centrato sul tracciato) così resta interamente dentro
+// il disco; il minimo evita che sui nodi più piccoli — quelli senza
+// collegamenti, r=6 — collassi in un punto o esca dal riempimento.
+function ringRadius(r) {
+  return Math.max(2.5, r - 3.5);
 }
 
 // Testo dell'etichetta: precedenza uniforme title → label → id.
