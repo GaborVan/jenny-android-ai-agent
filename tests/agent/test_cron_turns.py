@@ -13,6 +13,7 @@ import asyncio
 import pytest
 
 from jenny.agent.cron_turns import CronTurnCoordinator
+from jenny.agent.turn_types import TurnOutcome
 from jenny.bus.events import InboundMessage, OutboundMessage
 from jenny.cron.session_turns import CRON_DEFER_UNTIL_IDLE_META, CRON_TRIGGER_META
 
@@ -83,9 +84,9 @@ class TestSubmit:
         assert published == [msg]
         assert dispatched == []
         response = OutboundMessage(channel="internal", chat_id="chat-1", content="done")
-        coordinator.complete(msg, response=response)
+        coordinator.complete(msg, outcome=TurnOutcome.delivered(response))
         result = await task
-        assert result is response
+        assert result.message is response
 
     async def test_submit_while_idle_dispatches_directly(self):
         coordinator, published, dispatched = _coordinator(is_running=False)
@@ -94,9 +95,9 @@ class TestSubmit:
         await asyncio.sleep(0)
         assert dispatched == [msg]
         assert published == []
-        coordinator.complete(msg, response=None)
+        coordinator.complete(msg, outcome=TurnOutcome.silent())
         result = await task
-        assert result is None
+        assert result.message is None
 
     async def test_submit_duplicate_run_id_while_pending_raises_runtime_error(self):
         coordinator, _, _ = _coordinator(is_running=True)
@@ -106,7 +107,7 @@ class TestSubmit:
         with pytest.raises(RuntimeError, match="dup"):
             await coordinator.submit(_cron_msg(run_id="dup"))
         # Pulizia: completa il primo per non lasciare task pendenti.
-        coordinator.complete(msg, response=None)
+        coordinator.complete(msg, outcome=TurnOutcome.silent())
         await task
 
     async def test_submit_error_propagates_as_exception(self):
@@ -124,7 +125,7 @@ class TestSubmit:
         task = asyncio.create_task(coordinator.submit(msg))
         await asyncio.sleep(0)
         assert "cleanup" in coordinator._waiters
-        coordinator.complete(msg, response=None)
+        coordinator.complete(msg, outcome=TurnOutcome.silent())
         await task
         assert "cleanup" not in coordinator._waiters
         assert "cleanup" not in coordinator._pending_messages_by_run_id
@@ -136,12 +137,12 @@ class TestComplete:
     def test_complete_unknown_run_id_is_noop(self):
         coordinator, _, _ = _coordinator()
         msg = _cron_msg(run_id="ghost")
-        coordinator.complete(msg, response=None)  # non deve sollevare
+        coordinator.complete(msg, outcome=TurnOutcome.silent())  # non deve sollevare
 
     def test_complete_missing_run_id_is_noop(self):
         coordinator, _, _ = _coordinator()
         msg = _cron_msg(run_id=None)
-        coordinator.complete(msg, response=None)  # non deve sollevare
+        coordinator.complete(msg, outcome=TurnOutcome.silent())  # non deve sollevare
 
     async def test_complete_twice_second_call_is_noop(self):
         coordinator, _, _ = _coordinator(is_running=True)
@@ -149,13 +150,13 @@ class TestComplete:
         task = asyncio.create_task(coordinator.submit(msg))
         await asyncio.sleep(0)
         response = OutboundMessage(channel="internal", chat_id="chat-1", content="first")
-        coordinator.complete(msg, response=response)
+        coordinator.complete(msg, outcome=TurnOutcome.delivered(response))
         # La seconda complete (stesso run_id, future già done) non deve alzare eccezioni.
-        coordinator.complete(msg, response=OutboundMessage(
+        coordinator.complete(msg, outcome=TurnOutcome.delivered(OutboundMessage(
             channel="internal", chat_id="chat-1", content="second"
-        ))
+        )))
         result = await task
-        assert result is response
+        assert result.message is response
 
 
 class TestShouldDeferAndDeferIfActive:
@@ -239,7 +240,7 @@ class TestPendingJobIdsForSession:
         task = asyncio.create_task(coordinator.submit(msg))
         await asyncio.sleep(0)
         assert coordinator.pending_job_ids_for_session("s3") == {"job-c"}
-        coordinator.complete(msg, response=None)
+        coordinator.complete(msg, outcome=TurnOutcome.silent())
         await task
         # Dopo il completamento, il job non è più "in volo".
         assert coordinator.pending_job_ids_for_session("s3") == set()

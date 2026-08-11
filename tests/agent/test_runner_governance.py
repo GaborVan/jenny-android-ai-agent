@@ -325,8 +325,8 @@ async def test_backfill_repairs_model_context_without_shifting_save_turn_boundar
         InboundMessage(channel="internal", sender_id="user", chat_id="test", content="new prompt")
     )
 
-    assert result is not None
-    assert result.content == "new answer"
+    assert result.message is not None
+    assert result.text == "new answer"
 
     request_messages = provider.chat_with_retry.await_args.kwargs["messages"]
     synthetic = [

@@ -42,8 +42,6 @@ def _dispatcher(agent) -> CronDispatcher:
         get_agent=lambda: agent,
         config=Config(),
         cron=MagicMock(),
-        get_message_tool=lambda: None,
-        deliver_to_channel=MagicMock(),
         heartbeat_cfg=SimpleNamespace(),
     )
 

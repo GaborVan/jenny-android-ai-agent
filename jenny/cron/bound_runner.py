@@ -9,18 +9,19 @@ import uuid
 from typing import Any, Protocol
 
 from jenny.agent.tools.cron import CronTool
-from jenny.bus.events import InboundMessage, OutboundMessage
+from jenny.agent.turn_types import TurnOutcome
+from jenny.bus.events import InboundMessage
 from jenny.cron.session_delivery import origin_delivery_context
 from jenny.cron.session_turns import (
     CRON_DEFER_UNTIL_IDLE_META,
     CRON_MONITOR_META,
     CRON_TRIGGER_META,
-    cron_monitor_spoke,
     monitor_session_key,
 )
 from jenny.cron.types import CronJob, CronJobSilencedError
 from jenny.cron.webui_metadata import cron_proactive_delivery_metadata
 from jenny.runtime.power import keep_awake
+from jenny.session.turn_visibility import mark_silent_turn
 from jenny.utils.prompt_templates import render_template
 
 # Coda di storico tenuta nella sessione isolata di un monitor. Stesso valore del
@@ -41,7 +42,7 @@ class BoundCronAgent(Protocol):
     tools: Any
     sessions: Any
 
-    async def submit_cron_turn(self, msg: InboundMessage) -> OutboundMessage | None:
+    async def submit_cron_turn(self, msg: InboundMessage) -> TurnOutcome:
         ...
 
 
@@ -68,11 +69,16 @@ def _bound_session_delivery_context(
     channel, chat_id, metadata = origin_delivery_context(job)
 
     if monitor:
+        # Un monitor è lavoro interno: dichiararlo esplicitamente qui è ciò che
+        # rende muto tutto il turno (risposta finale, progress, reasoning,
+        # spinner, marcatore di fine turno) — vedi
+        # :mod:`jenny.session.turn_visibility`.
+        mark_silent_turn(metadata)
         # ``origin_metadata`` è stato catturato quando l'utente ha creato il job,
-        # quindi può contenere ``_wants_stream`` della sua sessione WebUI. Un
-        # monitor ha l'outbound finale soppresso: lasciando il flag, il gate di
-        # ``jenny/agent/loop.py`` streammerebbe comunque testo in chat per poi
-        # non consegnare nulla — cioè proprio il silenzio che il monitor promette.
+        # quindi può contenere ``_wants_stream`` della sua sessione WebUI. Il gate
+        # di ``AgentLoop._dispatch`` non streamma comunque un turno silenzioso;
+        # il flag va rimosso perché portarselo dietro sarebbe uno stato ereditato
+        # e falso, non perché serva come difesa.
         metadata.pop("_wants_stream", None)
 
     if channel == "websocket":
@@ -179,15 +185,12 @@ async def _run_bound_cron_job(
     if isinstance(cron_tool, CronTool):
         cron_token = cron_tool.set_cron_context(True)
     try:
-        resp = await agent.submit_cron_turn(
+        outcome = await agent.submit_cron_turn(
             InboundMessage(
                 channel=channel,
                 sender_id="cron",
                 chat_id=chat_id,
                 content=prompt,
-                # Stesso oggetto dict, non una copia: per un monitor la FSM ci
-                # scrive dentro ``CRON_SPOKE_META`` ed è l'unico segnale che
-                # dice se il turno ha parlato (l'outbound finale è sempre None).
                 metadata=metadata,
                 session_key_override=turn_session_key,
             )
@@ -207,11 +210,14 @@ async def _run_bound_cron_job(
         if isinstance(cron_tool, CronTool) and cron_token is not None:
             cron_tool.reset_cron_context(cron_token)
 
-    response = resp.content if resp else ""
+    response = outcome.text
 
     if monitor:
         _prune_monitor_session(agent, turn_session_key)
-        if not cron_monitor_spoke(metadata):
+        # L'esito lo dice da sé: per un monitor l'outbound finale è sempre None,
+        # e ``spoke`` distingue "ho parlato col tool ``message``" da "non avevo
+        # nulla da riferire" — che è un successo, non un fallimento.
+        if not outcome.spoke:
             cron.write_run_record(
                 run_id,
                 {

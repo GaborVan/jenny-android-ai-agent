@@ -46,7 +46,7 @@ class TestMessageToolSuppressLogic:
         result = await loop._process_message(msg)
 
         assert len(sent) == 1
-        assert result is None  # suppressed
+        assert result.message is None  # suppressed
 
     @pytest.mark.asyncio
     async def test_not_suppress_when_sent_to_different_target(self, tmp_path: Path) -> None:
@@ -78,8 +78,8 @@ class TestMessageToolSuppressLogic:
 
         assert len(sent) == 1
         assert sent[0].channel == "other-channel"
-        assert result is not None  # not suppressed
-        assert result.channel == "websocket"
+        assert result.message is not None  # not suppressed
+        assert result.message.channel == "websocket"
 
     @pytest.mark.asyncio
     async def test_not_suppress_when_no_message_tool_used(self, tmp_path: Path) -> None:
@@ -90,8 +90,8 @@ class TestMessageToolSuppressLogic:
         msg = InboundMessage(channel="websocket", sender_id="user1", chat_id="chat123", content="Hi")
         result = await loop._process_message(msg)
 
-        assert result is not None
-        assert "Hello" in result.content
+        assert result.message is not None
+        assert "Hello" in result.text
 
     @pytest.mark.asyncio
     async def test_injected_followup_with_message_tool_does_not_emit_empty_fallback(
@@ -127,7 +127,7 @@ class TestMessageToolSuppressLogic:
 
         assert len(sent) == 1
         assert sent[0].content == "Tool reply"
-        assert result is None
+        assert result.message is None
 
     async def test_progress_hides_internal_reasoning(self, tmp_path: Path) -> None:
         loop = _make_loop(tmp_path)

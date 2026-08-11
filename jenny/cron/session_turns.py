@@ -9,12 +9,12 @@ from jenny.cron.types import CronJob
 CRON_TRIGGER_META = "_cron_trigger"
 CRON_DEFER_UNTIL_IDLE_META = "_cron_defer_until_session_idle"
 CRON_HISTORY_META = "_cron_turn"
-# Ingresso: marca il turno come "monitor" (gira in silenzio, l'outbound finale
-# è soppresso a monte). Lo scrive chi lancia il job.
+# Marca il turno come "monitor": lavoro schedulato che gira in silenzio. La
+# soppressione dell'output è governata dalla visibilità del turno
+# (:mod:`jenny.session.turn_visibility`); questo flag resta il fatto di dominio
+# "questo job è un monitor", che decide prompt, sessione isolata, semantica della
+# run record e fan-out proattivo del tool ``message``.
 CRON_MONITOR_META = "_cron_monitor"
-# Uscita: il turno ha effettivamente parlato (tool ``message``). Lo scrive la
-# FSM *dentro* il dict metadata del turno, che il chiamante rilegge dopo l'await.
-CRON_SPOKE_META = "_cron_monitor_spoke"
 
 
 def cron_trigger(metadata: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -40,11 +40,6 @@ def is_monitor_cron_turn(metadata: Mapping[str, Any] | None) -> bool:
         is_cron_turn(metadata)
         and (metadata or {}).get(CRON_MONITOR_META) is True
     )
-
-
-def cron_monitor_spoke(metadata: Mapping[str, Any] | None) -> bool:
-    """True se il turno monitor ha parlato, cioè ha usato il tool ``message``."""
-    return (metadata or {}).get(CRON_SPOKE_META) is True
 
 
 def monitor_session_key(job_id: str) -> str:

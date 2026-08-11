@@ -18,6 +18,7 @@ import pytest
 
 from jenny.agent.tools.cron import CronTool
 from jenny.agent.tools.registry import ToolRegistry
+from jenny.agent.turn_types import TurnOutcome
 from jenny.bus.events import InboundMessage, OutboundMessage
 from jenny.cron.bound_runner import (
     CRON_WAKELOCK_TIMEOUT_S,
@@ -27,14 +28,13 @@ from jenny.cron.bound_runner import (
 from jenny.cron.session_turns import (
     CRON_DEFER_UNTIL_IDLE_META,
     CRON_MONITOR_META,
-    CRON_SPOKE_META,
     CRON_TRIGGER_META,
-    cron_monitor_spoke,
     is_bound_cron_job,
     is_monitor_cron_turn,
     monitor_session_key,
 )
 from jenny.cron.types import CronJob, CronJobSilencedError, CronPayload
+from jenny.session.turn_visibility import is_silent_turn
 from jenny.utils.prompt_templates import render_template
 from jenny.webui.metadata import WEBUI_MESSAGE_SOURCE_METADATA_KEY, WEBUI_TURN_METADATA_KEY
 
@@ -110,19 +110,19 @@ class _FakeAgent:
         self.events = events if events is not None else []
         self.received: list[InboundMessage] = []
 
-    async def submit_cron_turn(self, msg: InboundMessage) -> OutboundMessage | None:
+    async def submit_cron_turn(self, msg: InboundMessage) -> TurnOutcome:
         self.events.append("submit_cron_turn")
         self.received.append(msg)
-        if self._spoke is not None:
-            # Ciò che fa la FSM in ``_state_respond`` per i turni monitor: scrive
-            # l'esito *dentro* il dict metadata del chiamante, perché l'outbound
-            # finale è sempre None e non può portare l'informazione.
-            msg.metadata[CRON_SPOKE_META] = self._spoke
         if self._error is not None:
             raise self._error
-        if self._response is None:
-            return None
-        return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=self._response)
+        if not self._response:
+            # Ciò che fa la FSM per un turno silenzioso: nessun outbound (né
+            # contenuto né placeholder), e l'esito dice da sé se il modello ha
+            # parlato col tool ``message``.
+            return TurnOutcome.spoke_via_tool() if self._spoke else TurnOutcome.silent()
+        return TurnOutcome.delivered(
+            OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=self._response)
+        )
 
 
 class _FakeCronRecorder:
@@ -187,15 +187,6 @@ class TestMonitorMetadataHelpers:
 
     def test_absent_metadata_is_not_a_monitor_turn(self) -> None:
         assert is_monitor_cron_turn(None) is False
-
-    def test_only_a_literal_true_counts_as_having_spoken(self) -> None:
-        assert cron_monitor_spoke({CRON_SPOKE_META: True}) is True
-        assert cron_monitor_spoke({CRON_SPOKE_META: False}) is False
-        # Un valore verosimile ma non booleano non deve valere per consegna:
-        # nel dubbio si tace, invece di dichiarare un avviso mai partito.
-        assert cron_monitor_spoke({CRON_SPOKE_META: "yes"}) is False
-        assert cron_monitor_spoke({}) is False
-        assert cron_monitor_spoke(None) is False
 
     def test_each_monitor_gets_its_own_session_namespaced_by_job_id(self) -> None:
         assert monitor_session_key("job-m") == "cron:job-m"
@@ -475,20 +466,41 @@ class TestMonitorModeStaysQuiet:
         # una consegna che non è mai avvenuta.
         assert "ok" not in [record["status"] for _run_id, record in cron.records]
 
-    async def test_a_missing_spoke_flag_counts_as_silence(self) -> None:
-        """Se la FSM non ha scritto nulla (turno interrotto), si assume silenzio.
-
-        Il ripiego sicuro è tacere: inventare una consegna che non c'è stata
-        sarebbe peggio di perdere un avviso.
+    async def test_an_outcome_with_no_delivery_counts_as_silence(self) -> None:
+        """Il ripiego sicuro è tacere: inventare una consegna che non c'è stata
+        sarebbe peggio di perdere un avviso. Ora non c'è più uno stato ambiguo da
+        interpretare — l'esito è uno dei tre valori di ``TurnDisposition``.
         """
         job = _bound_job(job_id="job-m", mode="monitor")
-        agent = _FakeAgent(response="testo mai consegnato", spoke=None)
+        agent = _FakeAgent(response=None, spoke=None)
         cron = _FakeCronRecorder()
 
         with pytest.raises(CronJobSilencedError):
             await run_bound_cron_job(job, agent=agent, cron=cron)
 
-        assert CRON_SPOKE_META not in agent.received[0].metadata
+    async def test_a_monitor_turn_is_marked_silent_at_its_own_boundary(self) -> None:
+        """Il marchio di visibilità è ciò che rende muto TUTTO il turno.
+
+        Non solo la risposta finale: anche progress, reasoning, spinner e
+        marcatore di fine turno leggono questo fatto dai metadata.
+        """
+        job = _bound_job(job_id="job-m", mode="monitor")
+        agent = _FakeAgent(response=None, spoke=False)
+        cron = _FakeCronRecorder()
+
+        with pytest.raises(CronJobSilencedError):
+            await run_bound_cron_job(job, agent=agent, cron=cron)
+
+        assert is_silent_turn(agent.received[0].metadata) is True
+
+    async def test_a_reminder_turn_is_not_marked_silent(self) -> None:
+        job = _bound_job(mode="reminder")
+        agent = _FakeAgent()
+        cron = _FakeCronRecorder()
+
+        await run_bound_cron_job(job, agent=agent, cron=cron)
+
+        assert is_silent_turn(agent.received[0].metadata) is False
 
     async def test_a_monitor_turn_runs_in_its_own_session_not_the_users(self) -> None:
         """La sessione isolata è ciò che tiene i controlli fuori dalla chat."""

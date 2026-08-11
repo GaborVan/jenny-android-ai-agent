@@ -9,19 +9,41 @@ UNIFIED_SESSION_KEY = "unified:default"
 # nessun elenco user-facing ne essere leggibili dalle route HTTP della WebUI.
 SUBAGENT_SESSION_PREFIX = "subagent:"
 
+# Sessione dell'heartbeat: chiave *nuda*, senza suffisso, perche ce n'e una sola
+# (``cron_dispatch._run_heartbeat``). Sta qui e non inline nel dispatcher perche
+# e' anche il discriminante di :func:`is_internal_session_key`.
+HEARTBEAT_SESSION_KEY = "heartbeat"
+
 # Prefissi delle sessioni interne (lavoro del sistema, non conversazione con
 # l'utente). Elencare le sessioni e per definizione un'operazione user-facing:
 # chi lo fa deve filtrare con :func:`is_internal_session_key`.
-_INTERNAL_SESSION_PREFIXES = (SUBAGENT_SESSION_PREFIX, "cron:", "dream:", "heartbeat:")
+#
+# Ogni run coniato con un suffisso compare qui col separatore (``dream:<data>``,
+# ``atlas:<data>``, ``cron:<job_id>``, ``subagent:<lineage>``, ``internal:direct``).
+_INTERNAL_SESSION_PREFIXES = (
+    SUBAGENT_SESSION_PREFIX,
+    "cron:",
+    "dream:",
+    "atlas:",
+    "internal:",
+)
+
+# Chiavi interne senza suffisso: vanno confrontate per uguaglianza, non per
+# prefisso, altrimenti non matchano (era il caso di ``heartbeat``, che il
+# prefisso ``"heartbeat:"`` non ha mai intercettato).
+_INTERNAL_SESSION_KEYS = frozenset({HEARTBEAT_SESSION_KEY})
 
 
 def is_internal_session_key(key: str) -> bool:
     """True se la session key appartiene a lavoro interno, non all'utente.
 
-    Usata come filtro unico per gli elenchi di sessioni: il confine sta qui e
-    non replicato in ogni chiamante, cosi aggiungere un prefisso interno non
-    richiede di ricordarsi di aggiornare N punti.
+    Usata come filtro unico per gli elenchi di sessioni e come default della
+    visibilita di un turno (:mod:`jenny.session.turn_visibility`): il confine
+    sta qui e non replicato in ogni chiamante, cosi aggiungere una sessione
+    interna non richiede di ricordarsi di aggiornare N punti.
     """
+    if key in _INTERNAL_SESSION_KEYS:
+        return True
     return any(key.startswith(prefix) for prefix in _INTERNAL_SESSION_PREFIXES)
 
 

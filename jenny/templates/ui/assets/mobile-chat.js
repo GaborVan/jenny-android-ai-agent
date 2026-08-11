@@ -2611,11 +2611,22 @@ export class ChatController {
     // ("subagent done: <label>"), che il server pubblica per lo stesso evento —
     // così il blocco sta sotto il messaggio del subagent e non in fondo alla
     // chat. Senza quella riga (stato annullato, o turno già chiuso) il blocco
-    // finisce nella meta-row del turno corrente, o in coda alla chat.
+    // finisce nella meta-row del turno corrente.
+    //
+    // Il digest è metadata DI UN TURNO e ha una casa sola: una `.chat-turn-meta`,
+    // esattamente come `_renderTraceRow` e `_renderToolEvents`. Se non c'è una
+    // bolla corrente la si crea, invece di appendere in coda a `.chat-area`:
+    // `.sa-digest` è `display: contents`, quindi lì il corpo diventerebbe un
+    // flex item della colonna che scorre e — essendo esso stesso uno scroll
+    // container, quindi con min-height automatica 0 — si schiaccerebbe sul
+    // proprio padding assorbendo la compressione della colonna, mostrando la
+    // punta dei glifi e nient'altro.
     const anchor = this._findSubagentTraceRow(label);
     if (anchor) anchor.insertAdjacentElement('afterend', block);
-    else if (this._currentMsg) this._ensureMetaRow(this._currentMsg).appendChild(block);
-    else this.chatArea.appendChild(block);
+    else {
+      this._ensureAiMessage();
+      this._ensureMetaRow(this._currentMsg).appendChild(block);
+    }
     this.scrollToBottom();
   }
 

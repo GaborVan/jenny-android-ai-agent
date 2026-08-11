@@ -43,6 +43,7 @@ from jenny.agent.turn_types import (
 )
 from jenny.agent.turn_types import (
     TurnContext,
+    TurnOutcome,
     TurnState,
 )
 from jenny.bus.events import INTERNAL_CHANNEL, InboundMessage, OutboundMessage
@@ -56,7 +57,6 @@ from jenny.command import CommandContext, CommandRouter, register_builtin_comman
 from jenny.config.schema import AgentDefaults
 from jenny.cron.session_turns import (
     cron_history_overrides,
-    is_monitor_cron_turn,
 )
 from jenny.providers.base import LLMProvider
 from jenny.runtime.context import get_android_context
@@ -76,6 +76,11 @@ from jenny.session.goal_state import (
 )
 from jenny.session.keys import UNIFIED_SESSION_KEY, session_key_for_channel
 from jenny.session.manager import Session, SessionManager
+from jenny.session.turn_visibility import (
+    TurnVisibility,
+    mark_silent_turn,
+    resolve_turn_visibility,
+)
 from jenny.utils.helpers import CONTEXT_BUDGET_SAFETY_BUFFER, reserved_output_tokens
 from jenny.utils.llm_runtime import LLMRuntime
 
@@ -481,6 +486,17 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
         """Return the chat id shown in runtime metadata for the model."""
         return str(msg.metadata.get("context_chat_id") or msg.chat_id)
 
+    @staticmethod
+    def _is_silent_turn(msg: InboundMessage, session_key: str) -> bool:
+        """True se questo turno non deve raggiungere l'utente da se'.
+
+        Wrapper sul resolver unico (:mod:`jenny.session.turn_visibility`) per i
+        punti del dispatch che hanno il messaggio e la session key sotto mano.
+        """
+        return resolve_turn_visibility(
+            msg.metadata, channel=msg.channel, session_key=session_key
+        ).silent
+
     async def _build_bus_progress_callback(
         self, msg: InboundMessage
     ) -> Callable[..., Awaitable[None]]:
@@ -510,7 +526,7 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
         # Costruito esplicitamente in __init__ (self.runtime_event_publisher).
         return self.runtime_event_publisher
 
-    async def submit_cron_turn(self, msg: InboundMessage) -> OutboundMessage | None:
+    async def submit_cron_turn(self, msg: InboundMessage) -> TurnOutcome:
         return await self._cron_turns.submit(msg)
 
     def pending_cron_job_ids_for_session(self, session_key: str) -> set[str]:
@@ -1035,7 +1051,14 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
                     self._pending_queues[session_key] = pending
                 try:
                     on_stream = on_stream_end = None
-                    if msg.metadata.get("_wants_stream"):
+                    # Un turno silenzioso non streamma: i delta sono pubblicati
+                    # sul canale d'origine e comparirebbero in chat per un turno
+                    # che poi non consegna nulla — il silenzio promesso, rotto a
+                    # metà. Il gate sta qui, all'unico posto che costruisce i
+                    # callback di stream, e non nei call site che li ereditano.
+                    if msg.metadata.get("_wants_stream") and not self._is_silent_turn(
+                        msg, session_key
+                    ):
                         # Split one answer into distinct stream segments.
                         stream_base_id = f"{msg.session_key}:{time.time_ns()}"
                         stream_segment = 0
@@ -1069,17 +1092,22 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
                             ))
                             stream_segment += 1
 
-                    response = await self._process_message(
+                    outcome = await self._process_message(
                         msg, on_stream=on_stream, on_stream_end=on_stream_end,
                         pending_queue=pending, turn_token=turn_token,
                     )
                     if self._turn_epochs.is_current(turn_token):
                         completed_channel = msg.channel
                         completed_chat_id = msg.chat_id
-                        if response is not None:
-                            await self.bus.publish_outbound(response)
-                            completed_channel = response.channel
-                            completed_chat_id = response.chat_id
+                        # UNICO punto di consegna implicita di un turno. La
+                        # decisione e' una funzione dell'ESITO, non della
+                        # provenienza del messaggio: un turno silenzioso non
+                        # produce ``DELIVERED``, quindi qui non c'e' nulla da
+                        # pubblicare e non serve un secondo controllo.
+                        if outcome.message is not None:
+                            await self.bus.publish_outbound(outcome.message)
+                            completed_channel = outcome.message.channel
+                            completed_chat_id = outcome.message.chat_id
                         elif msg.channel == INTERNAL_CHANNEL:
                             await self.bus.publish_outbound(OutboundMessage(
                                 channel=msg.channel, chat_id=msg.chat_id,
@@ -1093,7 +1121,7 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
                                 session_key=session_key,
                                 metadata=msg.metadata,
                             )
-                    self._cron_turns.complete(msg, response=response)
+                    self._cron_turns.complete(msg, outcome=outcome)
                 except asyncio.CancelledError:
                     self._cron_turns.complete(
                         msg,
@@ -1132,10 +1160,16 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
                 except Exception as exc:
                     logger.exception("Error processing message for session {}", session_key)
                     if self._turn_epochs.is_current(turn_token):
-                        await self.bus.publish_outbound(OutboundMessage(
-                            channel=msg.channel, chat_id=msg.chat_id,
-                            content="Sorry, I encountered an error.",
-                        ))
+                        # Un turno silenzioso non consegna nemmeno i propri
+                        # errori: l'utente non ha chiesto questo lavoro e una
+                        # bolla "Sorry, I encountered an error." in chat sarebbe
+                        # rumore per un fallimento che appartiene alla run record
+                        # del job. L'eccezione risale comunque al chiamante.
+                        if not self._is_silent_turn(msg, session_key):
+                            await self.bus.publish_outbound(OutboundMessage(
+                                channel=msg.channel, chat_id=msg.chat_id,
+                                content="Sorry, I encountered an error.",
+                            ))
                         if not turn_continuation.internal_continuation_pending(msg.metadata):
                             await self._runtime_events().turn_completed(
                                 channel=msg.channel,
@@ -1196,13 +1230,22 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
         msg: InboundMessage,
         pending_queue: asyncio.Queue | None = None,
         turn_token: TurnToken | None = None,
-    ) -> OutboundMessage | None:
+    ) -> TurnOutcome:
         """Process a system inbound message (e.g. subagent announce)."""
         channel, chat_id = (
             msg.chat_id.split(":", 1) if ":" in msg.chat_id else (INTERNAL_CHANNEL, msg.chat_id)
         )
         logger.info("Processing system message from {}", msg.sender_id)
         key = msg.session_key_override or f"{channel}:{chat_id}"
+        # Il turno di annuncio EREDITA la visibilita dell'origine. E' il punto in
+        # cui il difetto si manifestava: un subagent lanciato dentro l'heartbeat
+        # termina molto dopo la fine del turno che lo ha lanciato, e il suo
+        # annuncio apriva un turno nuovo che consegnava in chat senza passare da
+        # nessun gate. Qui la ``session_key`` d'origine e' quella interna, quindi
+        # il resolver dice SILENT senza bisogno di un caso speciale.
+        silent = self._is_silent_turn(msg, key)
+        if silent:
+            mark_silent_turn(msg.metadata)
         session = self.sessions.get_or_create(key)
         if self._restore_runtime_checkpoint(session):
             self.sessions.save(session)
@@ -1286,18 +1329,31 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             ephemeral=False,
             clear_pending=False,
         )
+        message_tool = self.tools.get("message")
+        spoke_via_tool = bool(
+            isinstance(message_tool, MessageTool) and message_tool._sent_in_turn
+        )
+        if silent:
+            # Un turno di sistema silenzioso non ha un outbound: ne il contenuto
+            # ne il fallback. Il vecchio contratto ("restituisce SEMPRE una
+            # risposta") e' esattamente cio che consegnava all'utente il
+            # riempitivo di un lavoro che non aveva chiesto; l'unico modo di
+            # parlare resta il tool ``message``.
+            return TurnOutcome.spoke_via_tool() if spoke_via_tool else TurnOutcome.silent()
         # Differenza deliberata dal path utente: nessuna soppressione MessageTool
-        # (_assemble_outbound). Un turno di sistema ha un contratto di outbound
-        # proprio e restituisce sempre una risposta (contenuto o fallback).
+        # (_assemble_outbound). Un turno di sistema VISIBILE ha un contratto di
+        # outbound proprio e restituisce sempre una risposta (contenuto o fallback).
         content = final_content or "Background task completed."
         outbound_metadata: dict[str, Any] = {}
         if origin_message_id := msg.metadata.get("origin_message_id"):
             outbound_metadata["origin_message_id"] = origin_message_id
-        return OutboundMessage(
-            channel=channel,
-            chat_id=chat_id,
-            content=content,
-            metadata=outbound_metadata,
+        return TurnOutcome.delivered(
+            OutboundMessage(
+                channel=channel,
+                chat_id=chat_id,
+                content=content,
+                metadata=outbound_metadata,
+            )
         )
 
     async def _process_message(
@@ -1311,8 +1367,8 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
         ephemeral: bool = False,
         tools: ToolRegistry | None = None,
         turn_token: TurnToken | None = None,
-    ) -> OutboundMessage | None:
-        """Process a single inbound message and return the response."""
+    ) -> TurnOutcome:
+        """Process a single inbound message and return its outcome."""
         if msg.channel == "system":
             return await self._process_system_message(
                 msg,
@@ -1322,6 +1378,17 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
 
         key = session_key or msg.session_key
         t0 = time.time()
+        # Visibilita risolta QUI, una volta, al confine del turno; se e' SILENT
+        # il fatto viene marchiato nei metadata cosi i consumatori a valle che
+        # hanno solo il messaggio (tool ``message``, ramo d'errore, annuncio di
+        # un subagent) non devono ridedurlo dalla session key. Marchio solo il
+        # caso SILENT: i metadata inbound finiscono nell'outbound, e un turno
+        # visibile non deve trascinare un flag fino al client.
+        silent = resolve_turn_visibility(
+            msg.metadata, channel=msg.channel, session_key=key
+        ).silent
+        if silent:
+            mark_silent_turn(msg.metadata)
         ctx = TurnContext(
             msg=msg,
             session=None,
@@ -1341,13 +1408,15 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             on_stream_end=on_stream_end,
             pending_queue=pending_queue,
             ephemeral=ephemeral,
-            # Un cron in modalita monitor gira in silenzio: l'outbound finale e
-            # soppresso SEMPRE, e l'unico modo che il modello ha di parlare e
-            # chiamare il tool ``message`` durante il turno. Non c'e un token
-            # sentinella da parsare ne una chiamata LLM in piu: riusiamo lo
-            # stesso ``suppress_response`` gia usato dalle goal continuation,
-            # cablandolo qui a monte invece che a meta turno.
-            suppress_response=is_monitor_cron_turn(msg.metadata),
+            # Un turno silenzioso (cron monitor, heartbeat, annuncio nato da
+            # lavoro interno) ha l'outbound finale soppresso SEMPRE, e l'unico
+            # modo che il modello ha di parlare e chiamare il tool ``message``
+            # durante il turno. Non c'e un token sentinella da parsare ne una
+            # chiamata LLM in piu. ``silent`` e ``suppress_response`` partono
+            # uguali e poi divergono: una goal continuation accende il secondo a
+            # meta turno restando comunque un turno visibile.
+            silent=silent,
+            suppress_response=silent,
             # Risolto QUI, una volta, non piu in basso: il registry di questo
             # turno decide due cose che devono coincidere — cosa il modello puo
             # chiamare e cosa il prompt gli dichiara di avere. Finche la
@@ -1415,7 +1484,7 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             ctx.turn_id,
             len(ctx.trace),
         )
-        return ctx.outbound
+        return TurnOutcome.of(ctx.outbound, spoke_via_tool=ctx.spoke_via_tool)
 
     def _assemble_outbound(
         self,
@@ -1464,11 +1533,26 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
         ephemeral: bool = False,
         tools: ToolRegistry | None = None,
         persist_user_message: bool = True,
+        visibility: TurnVisibility | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> OutboundMessage | None:
-        """Process a message directly and return the outbound payload."""
-        metadata: dict[str, Any] = {}
+        """Process a message directly and return the outbound payload.
+
+        Il valore di ritorno resta il *payload*, non il ``TurnOutcome``: qui
+        dentro passano Dream e Atlas, che leggono l'outbound come risultato
+        interno del proprio run e non come consegna all'utente. Il tipo di esito
+        vive dove si prende la decisione di consegna, cioe' in ``_dispatch``.
+
+        ``visibility`` dichiara esplicitamente se il turno puo' raggiungere
+        l'utente: serve a chi gira lavoro interno su un canale *utente* (e' il
+        caso dell'heartbeat, che tiene ``websocket:default`` come target cosi il
+        tool ``message`` ha dove consegnare quando la condizione scatta).
+        """
+        metadata = dict(metadata or {})
         if not persist_user_message:
             metadata[turn_continuation.SKIP_USER_PERSIST_META] = True
+        if visibility is TurnVisibility.SILENT:
+            mark_silent_turn(metadata)
         msg = InboundMessage(
             channel=channel, sender_id="user", chat_id=chat_id,
             content=content, media=media or [], metadata=metadata,
@@ -1491,10 +1575,11 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
                 }
                 if tools is not None:
                     kwargs["tools"] = tools
-                return await self._process_message(
+                outcome = await self._process_message(
                     msg,
                     **kwargs,
                 )
+                return outcome.message
         finally:
             reset_turn_id(turn_id_token)
             await self._runtime_events().run_status_changed(msg, session_key, "idle")

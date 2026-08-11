@@ -20,6 +20,71 @@ if TYPE_CHECKING:
     from jenny.session.manager import Session
 
 
+class TurnDisposition(Enum):
+    """Come si e' concluso un turno, dal punto di vista di chi lo ha chiesto.
+
+    Prima esisteva solo ``OutboundMessage | None``, e quel ``None`` confondeva
+    almeno cinque casi distinti: monitor rimasto in silenzio, monitor che ha
+    parlato col tool ``message``, goal continuation soppressa, turno annullato,
+    turno di sistema. Distinguerli richiedeva di contrabbandare l'esito fuori dal
+    turno mutando il dict ``metadata`` del chiamante; con un tipo di esito il
+    valore di ritorno dice da se' cosa e' successo.
+
+    Gli errori NON sono un caso qui: restano eccezioni, che il chiamante cron
+    registra nella propria run record. Aggiungere una variante che nessuno
+    costruisce sarebbe codice morto.
+    """
+
+    DELIVERED = auto()
+    """C'e' un messaggio da pubblicare: la risposta finale del turno."""
+
+    SPOKE_VIA_TOOL = auto()
+    """Niente risposta finale, ma l'agente ha parlato chiamando ``message``."""
+
+    SILENT = auto()
+    """Turno riuscito che non ha nulla da dire. Esito legittimo, non un errore."""
+
+
+@dataclass(frozen=True)
+class TurnOutcome:
+    """Esito di un turno: disposizione + eventuale messaggio da consegnare."""
+
+    disposition: TurnDisposition
+    message: OutboundMessage | None = None
+
+    @classmethod
+    def delivered(cls, message: OutboundMessage) -> "TurnOutcome":
+        return cls(TurnDisposition.DELIVERED, message)
+
+    @classmethod
+    def spoke_via_tool(cls) -> "TurnOutcome":
+        return cls(TurnDisposition.SPOKE_VIA_TOOL)
+
+    @classmethod
+    def silent(cls) -> "TurnOutcome":
+        return cls(TurnDisposition.SILENT)
+
+    @classmethod
+    def of(cls, message: OutboundMessage | None, *, spoke_via_tool: bool) -> "TurnOutcome":
+        """Costruisce l'esito dai due soli fatti che il turno conosce."""
+        if message is not None:
+            return cls.delivered(message)
+        return cls.spoke_via_tool() if spoke_via_tool else cls.silent()
+
+    @property
+    def spoke(self) -> bool:
+        """True se l'utente ha ricevuto qualcosa da questo turno."""
+        return self.disposition in (
+            TurnDisposition.DELIVERED,
+            TurnDisposition.SPOKE_VIA_TOOL,
+        )
+
+    @property
+    def text(self) -> str:
+        """Testo della risposta finale, o stringa vuota se non c'e'."""
+        return self.message.content if self.message is not None else ""
+
+
 class TurnState(Enum):
     RESTORE = auto()
     COMPACT = auto()
@@ -61,7 +126,18 @@ class TurnContext:
     save_skip: int = 0
 
     outbound: OutboundMessage | None = None
+    # Il turno non raggiunge l'utente da se': ne risposta finale, ne progress,
+    # ne reasoning, ne marcatori di turno. Risolto una volta al confine del
+    # turno (:mod:`jenny.session.turn_visibility`) e mai piu' rimesso in
+    # discussione. Distinto da ``suppress_response``, che una goal continuation
+    # accende a meta' turno pur restando un turno visibile.
+    silent: bool = False
     suppress_response: bool = False
+    # Il turno ha parlato chiamando il tool ``message``. Scritto da RESPOND e
+    # letto una volta sola, da ``_process_message``, per costruire il
+    # ``TurnOutcome``: e' il segnale che prima viaggiava contrabbandato dentro il
+    # dict ``metadata`` del chiamante, perche' l'outbound non poteva portarlo.
+    spoke_via_tool: bool = False
 
     on_progress: Callable[..., Awaitable[None]] | None = None
     on_stream: Callable[[str], Awaitable[None]] | None = None

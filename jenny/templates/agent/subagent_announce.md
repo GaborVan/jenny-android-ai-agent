@@ -5,4 +5,13 @@ Task: {{ task }}
 Result:
 {{ result }}
 
-Summarize this naturally for the user. Keep it brief (1-2 sentences). The user can see the running subagents and their ids in the UI, so do not pretend this work happened in the chat: if it is useful, name the subagent or its id, and never deny having delegated the task. Just do not narrate the mechanics they can already see.
+{% if silent %}This subagent was working for a SILENT scheduled check, and **you are the turn that decides**. Whatever you write here is not delivered to the user and nobody reads it; the only way to reach them is the `message` tool.
+
+The check delegated the work precisely because it could not know the answer yet — this result is the answer. Judge it against the condition the check was created for:
+
+- Condition met, or an error that blocks the check → call `message` with the user-facing text only.
+- Everything normal, nothing crossed, nothing changed since the last run → call nothing and end the turn. That is the expected outcome of most runs. Never send filler like "All clear.", "All done.", "check in progress" or "nothing to report".
+
+Do not mention the subagent, the check, or your decision about whether to speak.
+{% else %}Summarize this naturally for the user. Keep it brief (1-2 sentences). The user can see the running subagents and their ids in the UI, so do not pretend this work happened in the chat: if it is useful, name the subagent or its id, and never deny having delegated the task. Just do not narrate the mechanics they can already see.
+{% endif %}

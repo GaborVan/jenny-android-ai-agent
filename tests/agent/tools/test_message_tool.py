@@ -434,3 +434,111 @@ async def test_proactive_fanout_for_cross_channel_send() -> None:
     )
     await tool.execute(content="promemoria", channel="telegram", chat_id="99")
     assert sent[0].metadata.get("_proactive_fanout") is True
+
+
+# --- un solo avviso per ciclo silenzioso ---------------------------------------
+
+
+def _silent_tool(sent: list[OutboundMessage]) -> MessageTool:
+    from jenny.agent.tools.context import RequestContext
+    from jenny.session.turn_visibility import silent_turn_metadata
+
+    async def _send(msg: OutboundMessage) -> None:
+        sent.append(msg)
+
+    tool = MessageTool(send_callback=_send)
+    tool.set_context(
+        RequestContext(
+            channel="websocket",
+            chat_id="default",
+            session_key="heartbeat",
+            metadata=silent_turn_metadata(),
+        )
+    )
+    tool.start_turn()
+    return tool
+
+
+def _visible_tool(sent: list[OutboundMessage]) -> MessageTool:
+    from jenny.agent.tools.context import RequestContext
+
+    async def _send(msg: OutboundMessage) -> None:
+        sent.append(msg)
+
+    tool = MessageTool(send_callback=_send)
+    tool.set_context(
+        RequestContext(
+            channel="websocket",
+            chat_id="default",
+            session_key="unified:default",
+            metadata={},
+        )
+    )
+    tool.start_turn()
+    return tool
+
+
+@pytest.mark.asyncio
+async def test_a_silent_turn_delivers_its_first_alert() -> None:
+    sent: list[OutboundMessage] = []
+    tool = _silent_tool(sent)
+
+    result = await tool.execute(content="umidità al 9%, sotto soglia")
+
+    assert "Message sent" in result
+    assert [m.content for m in sent] == ["umidità al 9%, sotto soglia"]
+
+
+@pytest.mark.asyncio
+async def test_a_silent_turn_refuses_the_second_one() -> None:
+    """Misurato sul dispositivo: un ciclo heartbeat ha consegnato cinque
+    messaggi di fila ("sto aspettando", "ok basta, mi zitto", "🙄"). Un avviso
+    è uno; il prompt lo vieta, questo lo rende impossibile."""
+    sent: list[OutboundMessage] = []
+    tool = _silent_tool(sent)
+
+    await tool.execute(content="primo avviso")
+    result = await tool.execute(content="🙄")
+
+    assert result.startswith("Error: you already sent the one alert")
+    assert [m.content for m in sent] == ["primo avviso"]
+
+
+@pytest.mark.asyncio
+async def test_the_refusal_tells_the_model_what_to_do_instead() -> None:
+    sent: list[OutboundMessage] = []
+    tool = _silent_tool(sent)
+    await tool.execute(content="primo")
+
+    result = await tool.execute(content="secondo")
+
+    assert "at most one message per run" in result
+    assert "Do not try again" in result
+
+
+@pytest.mark.asyncio
+async def test_the_next_run_gets_a_fresh_budget() -> None:
+    """Il tetto è per turno, non per sessione: ``start_turn`` lo riazzera."""
+    sent: list[OutboundMessage] = []
+    tool = _silent_tool(sent)
+    await tool.execute(content="ciclo 1")
+
+    tool.start_turn()
+    result = await tool.execute(content="ciclo 2")
+
+    assert "Message sent" in result
+    assert [m.content for m in sent] == ["ciclo 1", "ciclo 2"]
+
+
+@pytest.mark.asyncio
+async def test_a_visible_turn_is_not_capped() -> None:
+    """Una conversazione vera può mandare più messaggi proattivi: il tetto è una
+    proprietà del contratto silenzioso, non del tool."""
+    sent: list[OutboundMessage] = []
+    tool = _visible_tool(sent)
+
+    await tool.execute(content="primo")
+    result = await tool.execute(content="secondo")
+
+    assert "Message sent" in result
+    assert len(sent) == 2

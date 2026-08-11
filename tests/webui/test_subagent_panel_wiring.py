@@ -464,6 +464,53 @@ def test_the_digest_takes_the_whole_row_when_open() -> None:
     )
 
 
+def test_the_digest_has_exactly_one_home() -> None:
+    """Il digest è metadata di un turno: vive in una ``.chat-turn-meta``, sempre.
+
+    Il vecchio ripiego lo appendeva in coda a ``.chat-area`` quando non c'era una
+    bolla corrente — cioè in tutti i turni che non streammano, che è esattamente
+    il caso dell'annuncio di un subagent nato da lavoro interno. Lì il corpo
+    diventa un flex item della colonna che scorre e si schiaccia (misurato: 12px
+    di padding contro 36px di contenuto).
+    """
+    body = re.search(r"_appendSubagentDigest\(entry\)\s*\{(.*?)\n  \}", _chat(), re.S)
+    assert body, "_appendSubagentDigest non trovato"
+    source = body.group(1)
+    assert "chatArea.appendChild(block)" not in source, (
+        "il digest non deve poter finire come figlio diretto della colonna della chat"
+    )
+    assert "_ensureAiMessage()" in source, (
+        "senza bolla corrente va creata, non aggirata"
+    )
+    assert "_ensureMetaRow(" in source
+
+
+def test_nothing_stacked_in_the_scrolling_column_can_shrink() -> None:
+    """La difesa strutturale contro l'intera categoria di bug.
+
+    Una colonna flex che scorre ha spazio libero NEGATIVO appena il contenuto
+    supera lo schermo, e un flex item che è a sua volta uno scroll container ha
+    min-height automatica ZERO: assorbe tutta la compressione e si riduce al
+    proprio padding. Serve la regola su ENTRAMBI i lati, perché
+    ``display: contents`` solleva i figli nel layout ma il selettore ``>``
+    continua a vedere il DOM: da solo colpirebbe il wrapper, che non genera box.
+    """
+    css = CSS.read_text(encoding="utf-8")
+    column = re.search(r"\n\.chat-area > \*\s*\{(.*?)\}", css, re.S)
+    assert column, ".chat-area > * non trovato"
+    assert "flex-shrink: 0" in column.group(1)
+    # E la stessa proprietà nella regola di ogni corpo che scorre, perché lì la
+    # regola sulla colonna non arriva.
+    for selector in (r"\.sa-digest-body", r"\.chat-thinking-body"):
+        rule = re.search(rf"\n{selector}\s*\{{(.*?)\}}", css, re.S)
+        assert rule, selector
+        body = rule.group(1)
+        assert "overflow-y: auto" in body, (
+            f"{selector} non è più uno scroll container: la guardia mentirebbe"
+        )
+        assert "flex-shrink: 0" in body, selector
+
+
 def test_carousel_only_from_two_cards_up() -> None:
     render = re.search(r"_renderSubagents\(snapshot\)\s*\{(.*?)\n  \}", _chat(), re.S)
     assert render

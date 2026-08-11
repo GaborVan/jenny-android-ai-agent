@@ -519,8 +519,8 @@ class TestAutoCompactIdleDetection:
         msg = InboundMessage(channel="internal", sender_id="user", chat_id="test", content="/new")
         response = await loop._process_message(msg)
 
-        assert response is not None
-        assert "new session started" in response.content.lower()
+        assert response.message is not None
+        assert "new session started" in response.text.lower()
 
         session_after = loop.sessions.get_or_create("internal:test")
         # Session is empty (auto-new archived and cleared, /new cleared again)
@@ -535,7 +535,7 @@ class TestAutoCompactIdleDetection:
         msg = InboundMessage(channel="internal", sender_id="user", chat_id="test", content="/help")
         response = await loop._process_message(msg)
 
-        assert response is not None
+        assert response.message is not None
         session_after = loop.sessions.get_or_create("internal:test")
         assert len(session_after.messages) == 2
         assert session_after.messages[0]["role"] == "user"
@@ -734,7 +734,7 @@ class TestAutoCompactIntegration:
         assert "internal:test" not in loop.auto_compact._summaries
 
         # The new message should be processed (response exists)
-        assert response is not None
+        assert response.message is not None
 
         await loop.close_background_tasks()
 

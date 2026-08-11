@@ -6,7 +6,8 @@ import asyncio
 import dataclasses
 from collections.abc import Awaitable, Callable, Iterable
 
-from jenny.bus.events import InboundMessage, OutboundMessage
+from jenny.agent.turn_types import TurnOutcome
+from jenny.bus.events import InboundMessage
 from jenny.cron.session_turns import (
     cron_run_id,
     cron_trigger,
@@ -28,11 +29,17 @@ class CronTurnCoordinator:
         self._dispatch = dispatch
         self._is_running = is_running
         self.deferred_queues: dict[str, list[InboundMessage]] = {}
-        self._waiters: dict[str, asyncio.Future[OutboundMessage | None]] = {}
+        self._waiters: dict[str, asyncio.Future[TurnOutcome]] = {}
         self._pending_messages_by_run_id: dict[str, InboundMessage] = {}
 
-    async def submit(self, msg: InboundMessage) -> OutboundMessage | None:
-        """Submit a scheduled cron turn and wait for its session response."""
+    async def submit(self, msg: InboundMessage) -> TurnOutcome:
+        """Submit a scheduled cron turn and wait for its outcome.
+
+        Il futuro porta il ``TurnOutcome``, non il solo payload: per un monitor
+        l'outbound e' sempre ``None`` e senza l'esito il chiamante non potrebbe
+        distinguere "non ho nulla da dire" da "ho parlato col tool ``message``".
+        Era la ragione per cui quel segnale viaggiava dentro il dict metadata.
+        """
         run_id = cron_run_id(msg.metadata)
         if not run_id:
             raise ValueError("cron turn metadata must include a run_id")
@@ -40,7 +47,7 @@ class CronTurnCoordinator:
             raise RuntimeError(f"cron run {run_id!r} is already pending")
 
         loop = asyncio.get_running_loop()
-        future: asyncio.Future[OutboundMessage | None] = loop.create_future()
+        future: asyncio.Future[TurnOutcome] = loop.create_future()
         self._waiters[run_id] = future
         self._pending_messages_by_run_id[run_id] = msg
         try:
@@ -92,7 +99,7 @@ class CronTurnCoordinator:
         self,
         msg: InboundMessage,
         *,
-        response: OutboundMessage | None = None,
+        outcome: TurnOutcome | None = None,
         error: BaseException | None = None,
     ) -> None:
         run_id = cron_run_id(msg.metadata)
@@ -104,7 +111,7 @@ class CronTurnCoordinator:
         if error is not None:
             future.set_exception(error)
         else:
-            future.set_result(response)
+            future.set_result(outcome if outcome is not None else TurnOutcome.silent())
 
     def defer(self, session_key: str, msg: InboundMessage) -> None:
         self.deferred_queues.setdefault(session_key, []).append(msg)

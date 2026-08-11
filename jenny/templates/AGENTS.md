@@ -24,6 +24,12 @@ Use this file for project-specific preferences, recurring workflow conventions, 
 - Use `edit_file` only for small exact replacements copied from the current `HEARTBEAT.md`.
 - Use `write_file` for first creation or intentional full-file rewrites.
 
+A heartbeat run is **silent** by the same contract as a `cron` monitor: its answer
+is not delivered anywhere, and the only way to reach the user is the `message`
+tool. So a conditional check written as a heartbeat line must state the condition
+("…and warn me only if humidity is below 15%"), and an uneventful run must produce
+no message at all — never "All clear." or "nothing to report".
+
 Choosing where a recurring request belongs:
 
 - Ambient task on the shared list, fine on the standard heartbeat beat → add a line to `HEARTBEAT.md` (not a one-time reminder, and not a duplicate heartbeat job).

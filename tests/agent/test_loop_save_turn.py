@@ -581,8 +581,8 @@ async def test_process_message_does_not_duplicate_early_persisted_user_message(t
         InboundMessage(channel="websocket", sender_id="u1", chat_id="c2", content="hello")
     )
 
-    assert result is not None
-    assert result.content == "done"
+    assert result.message is not None
+    assert result.text == "done"
     session = loop.sessions.get_or_create("websocket:c2")
     assert [
         {k: v for k, v in m.items() if k in {"role", "content"}}
@@ -640,7 +640,7 @@ async def test_internal_continuation_queues_turn_without_fake_user_history(
         pending_queue=pending,
     )
 
-    assert first is None
+    assert first.message is None
     queued = pending.get_nowait()
     assert queued.sender_id == "system:continuation"
     assert queued.metadata[INTERNAL_CONTINUATION_META] is True
@@ -654,8 +654,8 @@ async def test_internal_continuation_queues_turn_without_fake_user_history(
 
     second = await loop._process_message(queued, pending_queue=asyncio.Queue())
 
-    assert second is not None
-    assert second.content == "done"
+    assert second.message is not None
+    assert second.text == "done"
     session = loop.sessions.get_or_create("websocket:c-auto")
     assert [
         {k: v for k, v in m.items() if k in {"role", "content"}}
@@ -861,8 +861,8 @@ async def test_process_message_uses_context_chat_id_for_runtime_prompt(tmp_path:
         )
     )
 
-    assert result is not None
-    assert result.chat_id == "thread-777"
+    assert result.message is not None
+    assert result.message.chat_id == "thread-777"
     assert loop.context.build_messages.call_args.kwargs["chat_id"] == "parent-456"
     assert loop._run_agent_loop.call_args.kwargs["chat_id"] == "thread-777"
 
@@ -911,8 +911,8 @@ async def test_process_message_uses_explicit_session_metadata_for_goal_context(
         session_key="system",
     )
 
-    assert result is not None
-    assert result.content == "ok"
+    assert result.message is not None
+    assert result.text == "ok"
     kwargs = loop.context.build_messages.call_args.kwargs
     assert kwargs["chat_id"] == "chat-with-goal"
     assert kwargs["session_metadata"] is system_session.metadata
@@ -1072,8 +1072,8 @@ async def test_next_turn_after_crash_closes_pending_user_turn_before_new_input(t
         InboundMessage(channel="websocket", sender_id="u1", chat_id="c3", content="new question")
     )
 
-    assert result is not None
-    assert result.content == "new answer"
+    assert result.message is not None
+    assert result.text == "new answer"
     session = loop.sessions.get_or_create("websocket:c3")
     assert [
         {k: v for k, v in m.items() if k in {"role", "content"}}
@@ -1178,8 +1178,8 @@ async def test_stop_preserves_runtime_checkpoint_for_next_turn(tmp_path: Path) -
         InboundMessage(channel="websocket", sender_id="u1", chat_id="c4", content="continue here")
     )
 
-    assert result is not None
-    assert result.content == "next answer"
+    assert result.message is not None
+    assert result.text == "next answer"
 
     session = loop.sessions.get_or_create("websocket:c4")
     assert [
@@ -1455,10 +1455,10 @@ async def test_system_subagent_followup_uses_thread_session_and_metadata(tmp_pat
         )
     )
 
-    assert outbound is not None
-    assert outbound.channel == "websocket"
-    assert outbound.chat_id == "C123"
-    assert outbound.metadata == {
+    assert outbound.message is not None
+    assert outbound.message.channel == "websocket"
+    assert outbound.message.chat_id == "C123"
+    assert outbound.message.metadata == {
         "origin_message_id": "msg-123",
     }
     assert "thread question" in seen["initial_messages"][1]["content"]
@@ -1508,7 +1508,7 @@ async def test_turn_after_unanswered_user_keeps_tool_call_pairing(tmp_path: Path
         )
     )
 
-    assert result is not None
+    assert result.message is not None
     loop.sessions.invalidate("websocket:c-merge")
     persisted = loop.sessions.get_or_create("websocket:c-merge")
 

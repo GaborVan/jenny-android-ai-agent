@@ -223,8 +223,12 @@ class TestDispatch:
 
         loop, bus = _make_loop()
         msg = InboundMessage(channel="test", sender_id="u1", chat_id="c1", content="hello")
+        from jenny.agent.turn_types import TurnOutcome
+
         loop._process_message = AsyncMock(
-            return_value=OutboundMessage(channel="test", chat_id="c1", content="hi")
+            return_value=TurnOutcome.delivered(
+                OutboundMessage(channel="test", chat_id="c1", content="hi")
+            )
         )
         await loop._dispatch(msg)
         out = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)

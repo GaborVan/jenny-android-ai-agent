@@ -530,8 +530,8 @@ class TestNewCommandArchival:
         new_msg = InboundMessage(channel="internal", sender_id="user", chat_id="test", content="/new")
         response = await loop._process_message(new_msg)
 
-        assert response is not None
-        assert "new session started" in response.content.lower()
+        assert response.message is not None
+        assert "new session started" in response.text.lower()
 
         session_after = loop.sessions.get_or_create("internal:test")
         assert len(session_after.messages) == 0
@@ -565,8 +565,8 @@ class TestNewCommandArchival:
         new_msg = InboundMessage(channel="internal", sender_id="user", chat_id="test", content="/new")
         response = await loop._process_message(new_msg)
 
-        assert response is not None
-        assert "new session started" in response.content.lower()
+        assert response.message is not None
+        assert "new session started" in response.text.lower()
 
         await loop.close_background_tasks()
         assert archived_count == 3
@@ -592,8 +592,8 @@ class TestNewCommandArchival:
         new_msg = InboundMessage(channel="internal", sender_id="user", chat_id="test", content="/new")
         response = await loop._process_message(new_msg)
 
-        assert response is not None
-        assert "new session started" in response.content.lower()
+        assert response.message is not None
+        assert "new session started" in response.text.lower()
         assert loop.sessions.get_or_create("internal:test").messages == []
 
     @pytest.mark.asyncio

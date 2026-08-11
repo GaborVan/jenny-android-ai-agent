@@ -58,8 +58,6 @@ def _make_dispatcher(agent, snapshot_cb) -> CronDispatcher:
         get_agent=lambda: agent,
         config=Config(),
         cron=MagicMock(),
-        get_message_tool=lambda: None,
-        deliver_to_channel=MagicMock(),
         heartbeat_cfg=SimpleNamespace(),
         snapshot_before_dream=snapshot_cb,
     )

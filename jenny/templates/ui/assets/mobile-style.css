@@ -1293,6 +1293,23 @@ body {
   padding: 14px 16px;
   display: flex; flex-direction: column; gap: 12px;
 }
+/* Niente di impilato in una colonna che scorre può restringersi. La colonna ha
+   spazio libero NEGATIVO appena il contenuto supera lo schermo, e i flex item la
+   assorbono in proporzione al proprio minimo: per un item che è a sua volta uno
+   scroll container (`overflow-y: auto`) quel minimo automatico è ZERO, non
+   l'altezza del contenuto, quindi si schiaccia sul padding mentre il testo dentro
+   occupa ancora una riga intera. Le bolle `.chat-msg` non sono scroll container e
+   si difendono da sole.
+   Un `min-height` fisso coprirebbe una scatola lasciando in piedi l'elasticità,
+   che è l'affermazione sbagliata.
+
+   Questa regola non basta da sola: `display: contents` (`.sa-digest`) solleva i
+   figli nel layout della colonna, ma il selettore `>` continua a vedere il DOM,
+   quindi colpisce il wrapper — che non genera box — e non l'elemento che si
+   schiaccia (misurato: 12px di padding contro 36px di contenuto). Perciò ogni
+   corpo che scorre dichiara `flex-shrink: 0` nella propria regola, dove la
+   proprietà appartiene: vale in qualunque punto finisca. */
+.chat-area > * { flex-shrink: 0; }
 
 /* Ancora per il FAB "vai in fondo" */
 #view-chat { position: relative; }
@@ -1474,6 +1491,10 @@ body {
   color: var(--text-muted);
   max-height: 300px;
   overflow-y: auto;
+  /* Uno scroll container ha min-height automatica ZERO: come flex item di una
+     colonna che scorre si schiaccerebbe sul padding (vedi `.chat-area > *`).
+     Oggi è salvo solo perché vive in una meta-row, che è un flex a RIGA. */
+  flex-shrink: 0;
   /* Il corpo è un contenitore di scroll suo: uno swipe che arriva in fondo non
      deve proseguire trascinando la chat sotto (stessa regola di
      `.sa-stream-list` e `.sa-digest-body`). */
@@ -3665,6 +3686,13 @@ body {
   max-height: 40vh;
   overflow-y: auto;
   overscroll-behavior: contain;
+  /* …e proprio per questo non deve poter essere ristretto: uno scroll container
+     ha min-height automatica ZERO, quindi come flex item di una colonna che
+     scorre assorbe tutta la compressione e si riduce al proprio padding — 12px
+     contro 36px di contenuto, cioè la punta dei glifi e nient'altro. Vedi
+     `.chat-area > *`: quella regola non arriva qui, perché `display: contents`
+     sul wrapper solleva questo box oltre il selettore `>`. */
+  flex-shrink: 0;
 }
 .sa-digest.is-error .sa-digest-body { border-left-color: var(--error); }
 .sa-digest-msg {

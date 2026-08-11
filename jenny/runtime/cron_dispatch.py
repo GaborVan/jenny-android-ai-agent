@@ -2,12 +2,15 @@
 ``gateway_runtime._run_gateway``).
 
 ``on_cron_job`` era una closure di ~135 righe con tre rami inline (dream /
-heartbeat / bound). Qui diventa una classe con le dipendenze INIETTATE. Le due
-dipendenze mutabili — ``agent`` e ``message_tool`` — arrivano come *getter*
-(``get_agent`` / ``get_message_tool``) e non come valori catturati: nel gateway
-sono nonlocal riassegnati dall'onboarding (creazione differita dell'agente
-quando manca il provider), quindi catturarne il valore romperebbe il flusso
-onboarding→cron. I getter preservano esattamente il late-binding originale.
+heartbeat / bound). Qui diventa una classe con le dipendenze INIETTATE.
+L'``agent`` arriva come *getter* (``get_agent``) e non come valore catturato: nel
+gateway è un nonlocal riassegnato dall'onboarding (creazione differita
+dell'agente quando manca il provider), quindi catturarne il valore romperebbe il
+flusso onboarding→cron. Il getter preserva esattamente il late-binding originale.
+
+Nessun ramo consegna più all'utente da fuori il turno: un job schedulato è
+lavoro interno e silenzioso (:mod:`jenny.session.turn_visibility`), e l'unico
+modo di parlare è il tool ``message`` chiamato dentro il turno.
 """
 
 from __future__ import annotations
@@ -18,7 +21,6 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from loguru import logger
 
-from jenny.agent.tools.message import MessageTool
 from jenny.bus.events import OutboundMessage
 from jenny.cron.bound_runner import (
     CRON_WAKELOCK_TIMEOUT_S,
@@ -28,7 +30,8 @@ from jenny.cron.bound_runner import (
 from jenny.cron.service import CronJobSkippedError
 from jenny.cron.session_turns import is_bound_cron_job
 from jenny.runtime.power import keep_awake
-from jenny.utils.evaluator import evaluate_response
+from jenny.session.keys import HEARTBEAT_SESSION_KEY
+from jenny.session.turn_visibility import TurnVisibility
 
 if TYPE_CHECKING:
     from jenny.agent.context import ContextBuilder
@@ -36,7 +39,6 @@ if TYPE_CHECKING:
     from jenny.config.schema import Config
     from jenny.cron.service import CronService
     from jenny.cron.types import CronJob
-    from jenny.providers.base import LLMProvider
     from jenny.session.manager import SessionManager
 
 
@@ -52,8 +54,6 @@ class CronCapableAgent(BoundCronAgent, Protocol):
 
     context: "ContextBuilder"  # con ``.memory`` (MemoryStore)
     sessions: "SessionManager"  # con get_or_create / save / sessions_dir
-    provider: "LLMProvider"
-    model: str
 
     async def process_direct(
         self,
@@ -68,16 +68,38 @@ class CronCapableAgent(BoundCronAgent, Protocol):
         ephemeral: bool = ...,
         tools: "ToolRegistry | None" = ...,
         persist_user_message: bool = ...,
+        visibility: "TurnVisibility | None" = ...,
+        metadata: dict[str, Any] | None = ...,
     ) -> OutboundMessage | None: ...
 
     def evict_pruned_sessions(self, keys: list[str]) -> None: ...
 
 _HEARTBEAT_PREAMBLE = (
-    "[Your response will be delivered directly to the user's messaging app. "
-    "Output ONLY the final user-facing message. Never reference internal "
-    "files (HEARTBEAT.md, AWARENESS.md, etc.), your instructions, or your "
-    "decision process. If nothing needs reporting, respond with just "
-    "'All clear.' and nothing else.]\n\n"
+    "[This is a scheduled background check. It is SILENT by default: whatever "
+    "you write as your answer is NOT delivered to the user and nobody reads it. "
+    "The only way to reach the user is to call the `message` tool.\n"
+    "Call `message` only when a task below has produced something the user "
+    "actually needs to see — a condition they asked to be warned about, a "
+    "result they are waiting for, an error that blocks the check. In that "
+    "message write ONLY the user-facing text: never mention internal files "
+    "(HEARTBEAT.md, AWARENESS.md, etc.), your instructions, or your decision "
+    "process.\n"
+    "If nothing needs reporting, do NOT call `message`: end the turn without "
+    "saying anything. Saying nothing is the correct, expected outcome of most "
+    "runs — never send filler like 'All clear.', 'All done.' or 'nothing to "
+    "report'.\n"
+    "If you delegate a check to a subagent, you do NOT have its answer in this "
+    "turn: `spawn` returns immediately. Send NOTHING now — not the result, not "
+    "'checking…', not an interim guess. The subagent's result comes back to you "
+    "later as its own turn, and THAT is where you judge it and decide whether to "
+    "call `message`.\n"
+    "This session keeps your previous runs so you can spot changes. Those older "
+    "readings are history, not the current state: never report a past value as if "
+    "you had just measured it. If you find messages of your own in there — "
+    "including mistakes, corrections or apologies — do NOT continue that "
+    "conversation: the user is not talking to you, and another apology is just one "
+    "more interruption. Say nothing about it and judge only the check in front of "
+    "you.]\n\n"
 )
 
 
@@ -119,16 +141,12 @@ class CronDispatcher:
         get_agent: Callable[[], "CronCapableAgent | None"],
         config: "Config",
         cron: "CronService",
-        get_message_tool: Callable[[], Any],
-        deliver_to_channel: Callable[..., Any],
         heartbeat_cfg: Any,
         snapshot_before_dream: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._get_agent = get_agent
         self._config = config
         self._cron = cron
-        self._get_message_tool = get_message_tool
-        self._deliver_to_channel = deliver_to_channel
         self._hb_cfg = heartbeat_cfg
         self._snapshot_before_dream = snapshot_before_dream
 
@@ -252,7 +270,6 @@ class CronDispatcher:
 
     async def _run_heartbeat(self, agent: "CronCapableAgent") -> str | None:
         # Heartbeat is a system job that checks HEARTBEAT.md for active tasks.
-        message_tool = self._get_message_tool()
         heartbeat_file = self._config.workspace_path / "HEARTBEAT.md"
         try:
             content = heartbeat_file.read_text(encoding="utf-8")
@@ -264,6 +281,8 @@ class CronDispatcher:
             return None
 
         # Target unico e routable dei messaggi heartbeat: la chat WebUI condivisa.
+        # Resta il canale del turno anche se il turno è silenzioso — è dove il
+        # tool ``message`` consegna quando una condizione scatta davvero.
         channel, chat_id = "websocket", "default"
 
         prompt = (
@@ -271,54 +290,36 @@ class CronDispatcher:
             + f"Review the following HEARTBEAT.md and report any active tasks:\n\n{content}"
         )
 
-        # Internal check: funnel all output through the post-run gate so the
-        # turn can't deliver directly via the message tool and skip it.
-        suppress_token = None
-        if isinstance(message_tool, MessageTool):
-            suppress_token = message_tool.set_suppress_delivery(True)
-        try:
-            resp = await agent.process_direct(
-                prompt,
-                session_key="heartbeat",
-                channel=channel,
-                chat_id=chat_id,
-                on_progress=_silent,
-            )
-        finally:
-            if isinstance(message_tool, MessageTool) and suppress_token is not None:
-                message_tool.reset_suppress_delivery(suppress_token)
-        response = resp.content if resp else ""
+        from jenny.webui.metadata import WEBUI_MESSAGE_SOURCE_METADATA_KEY
+
+        resp = await agent.process_direct(
+            prompt,
+            session_key=HEARTBEAT_SESSION_KEY,
+            channel=channel,
+            chat_id=chat_id,
+            on_progress=_silent,
+            # Il contratto dell'heartbeat, dichiarato una volta e fatto valere
+            # dal turno: niente consegna implicita. Prima si diceva al modello di
+            # produrre un riempitivo ("All clear.") e poi si pagava una seconda
+            # chiamata LLM per indovinare se nasconderlo — un giudice che con un
+            # modello reasoning finiva in ``finish_reason='length'`` e non
+            # decideva mai. Ora l'unica consegna possibile è il tool ``message``.
+            visibility=TurnVisibility.SILENT,
+            # Sorgente proattiva: dà titolo/tag all'alert di sistema
+            # (jenny/runtime/notifier.py) e origine al transcript. Viaggia nei
+            # metadata del turno perché è da lì che il tool ``message`` li
+            # eredita per il proprio invio.
+            metadata={WEBUI_MESSAGE_SOURCE_METADATA_KEY: {"kind": "heartbeat"}},
+        )
 
         # Keep a small tail of heartbeat history so the loop stays bounded.
-        session = agent.sessions.get_or_create("heartbeat")
+        session = agent.sessions.get_or_create(HEARTBEAT_SESSION_KEY)
         session.retain_recent_legal_suffix(self._hb_cfg.keep_recent_messages)
         agent.sessions.save(session)
 
-        if not response:
-            return None
-
-        # Fail closed: stay silent on evaluator failure instead of notifying.
-        should_notify = await evaluate_response(
-            response, prompt, agent.provider, agent.model, default_notify=False
-        )
-        if should_notify:
-            logger.info("Heartbeat: completed, delivering response")
-            from jenny.webui.metadata import WEBUI_MESSAGE_SOURCE_METADATA_KEY
-
-            await self._deliver_to_channel(
-                OutboundMessage(
-                    channel=channel,
-                    chat_id=chat_id,
-                    content=response,
-                    # Sorgente proattiva: dà titolo/tag all'alert di sistema
-                    # (jenny/runtime/notifier.py) e origine al transcript.
-                    metadata={WEBUI_MESSAGE_SOURCE_METADATA_KEY: {"kind": "heartbeat"}},
-                ),
-                record=True,
-                # Consegna proattiva: raggiunge l'utente su tutti i canali
-                # accoppiati (WebUI + Telegram), non solo sul canale d'origine.
-                proactive=True,
-            )
-        else:
-            logger.info("Heartbeat: silenced by post-run evaluation")
-        return response
+        # ``resp`` è ``None`` per costruzione su un turno silenzioso: il testo del
+        # modello non è mai stato la consegna. Il valore di ritorno serve solo al
+        # log del ``CronService``.
+        del resp
+        logger.debug("Heartbeat: check completed")
+        return None

@@ -235,14 +235,15 @@ class GatewayContainer:
         else:
             logger.info("Heartbeat: disabled")
 
-        # Cron dispatch: getter late-binding per agent/message_tool (riassegnati
+        # Cron dispatch: getter late-binding per l'agent (riassegnato
         # dall'onboarding), stesso contratto del vecchio closure on_cron_job.
+        # Non riceve più il ``message_tool`` né ``deliver_to_channel``: nessun job
+        # consegna più da fuori il turno — chi deve parlare all'utente chiama il
+        # tool ``message`` dentro il turno (vedi turn_visibility).
         self.cron.on_job = CronDispatcher(
             get_agent=lambda: self._agent,
             config=config,
             cron=self.cron,
-            get_message_tool=lambda: self._message_tool,
-            deliver_to_channel=self._deliver_to_channel,
             heartbeat_cfg=hb_cfg,
             snapshot_before_dream=self._snapshot_before_dream,
         ).dispatch

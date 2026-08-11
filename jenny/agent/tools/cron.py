@@ -48,6 +48,9 @@ _CRON_PARAMETERS = tool_parameters_schema(
     mode=StringSchema(
         "Optional for action='add'. 'reminder' (default) always messages the user when it fires; "
         "'monitor' runs silently and speaks only when the check finds something worth reporting. "
+        "Use 'monitor' whenever the request is CONDITIONAL — 'only tell me if...', 'warn me when...', "
+        "'let me know if it drops below...': staying silent is then the expected outcome of most runs, "
+        "and a 'reminder' would post filler like 'All clear.' every single time. "
         "'monitor' requires every_seconds or cron_expr; it cannot be used with at.",
         enum=["reminder", "monitor"],
     ),
