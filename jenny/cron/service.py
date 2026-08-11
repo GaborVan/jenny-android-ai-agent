@@ -8,7 +8,7 @@ from contextlib import suppress
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Coroutine, Literal
+from typing import Any, Callable, Coroutine, Literal, NamedTuple
 
 from filelock import SoftFileLock
 from loguru import logger
@@ -16,15 +16,37 @@ from loguru import logger
 from jenny.cron.session_turns import is_bound_cron_job
 from jenny.cron.types import (
     CronJob,
+    CronJobSilencedError,
     CronJobState,
     CronPayload,
     CronRunRecord,
     CronSchedule,
     CronStore,
 )
+
+# Modulo, non simboli: i test sostituiscono ``power.schedule_wake`` &co. per
+# osservare le sveglie senza un device, e con ``from … import`` la sostituzione
+# non arriverebbe qui.
+from jenny.runtime import power
 from jenny.utils.path import atomic_write
 
 _LockClass = SoftFileLock
+
+
+class _LoadedStore(NamedTuple):
+    """Esito di una lettura dello store, ripiego incluso.
+
+    ``recovered_from`` (``"backup"`` | ``"empty"`` | ``None``) viaggia insieme
+    ai job invece di essere registrato subito sul ``RuntimeContext``: chi legge
+    il file non sa se in memoria c'è già uno snapshot più fresco, e avvisare
+    l'utente di una perdita che non c'è stata è un modo lento di far ignorare
+    gli avvisi.
+    """
+
+    jobs: list[CronJob]
+    version: int
+    recovered_from: str | None
+    quarantined: Path | None
 
 
 class CronJobSkippedError(Exception):
@@ -33,6 +55,46 @@ class CronJobSkippedError(Exception):
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+_CRON_MODES: tuple[str, ...] = ("reminder", "monitor")
+
+
+def _parse_mode(raw: Any) -> Literal["reminder", "monitor"]:
+    """Legge ``payload.mode`` **da disco** tollerando qualunque valore.
+
+    Assente (store scritto prima che il campo esistesse) o sconosciuto (store
+    scritto da una versione più recente, o modificato a mano): in entrambi i
+    casi si ricade su ``"reminder"``. Un modo che non sappiamo eseguire non
+    deve impedire l'avvio, e parlare sempre è il ripiego che non perde nulla —
+    un job che non dice niente perché non sapevamo interpretarlo sarebbe
+    indistinguibile da un job rotto.
+
+    Volutamente **diversa** da ``_validate_mode_for_add``, che invece solleva:
+    vedi la spiegazione dell'asimmetria lì sotto.
+    """
+    return "monitor" if raw == "monitor" else "reminder"
+
+
+def _validate_mode_for_add(raw: Any) -> Literal["reminder", "monitor"]:
+    """Valida il ``mode`` che arriva da un **chiamante vivo**: solleva se ignoto.
+
+    L'asimmetria con ``_parse_mode`` è deliberata, non una svista. Dal disco
+    accettiamo tutto perché il file può venire da una versione futura e non
+    deve impedire l'avvio; da un chiamante, invece, un modo che non conosciamo
+    è un bug del chiamante, e ingoiarlo produce il guasto peggiore che questa
+    funzione possa causare: un monitor che diventa reminder in silenzio e
+    torna a parlare a ogni ciclo, senza che niente — né stato, né log, né
+    store — dica perché. Meglio rumoroso adesso che inspiegabile fra settimane.
+
+    Raises:
+        ValueError: se ``raw`` non è uno dei modi ammessi.
+    """
+    if raw not in _CRON_MODES:
+        raise ValueError(
+            f"unknown cron mode {raw!r}; expected one of: {', '.join(_CRON_MODES)}"
+        )
+    return "monitor" if raw == "monitor" else "reminder"
 
 
 def _compute_next_run(schedule: CronSchedule, now_ms: int) -> int | None:
@@ -63,6 +125,34 @@ def _compute_next_run(schedule: CronSchedule, now_ms: int) -> int | None:
             return None
 
     return None
+
+
+def _next_run_with_catch_up(schedule: CronSchedule, now_ms: int) -> int | None:
+    """``_compute_next_run``, ma un one-shot già scaduto non si perde.
+
+    ``_compute_next_run`` torna ``None`` per un ``at`` con scadenza passata, ed
+    è la risposta giusta a "qual è la PROSSIMA esecuzione" — dopo che il job è
+    scattato non ce n'è una. Ma scriverla nello stato di un job ancora abilitato
+    produce l'unico stato che nessun altro percorso sa creare: ``enabled`` a
+    True con ``next_run_at_ms`` a None. All'occhio è identico a un one-shot già
+    eseguito (vedi il blocco one-shot in ``_execute_job``), e significa
+    l'opposto — ma nessuno lo ripulisce: ``_get_next_wake_ms`` lo salta, il
+    filtro dei job dovuti lo salta, e il promemoria resta lì per sempre senza
+    partire né dare errore.
+
+    Tenendo la scadenza passata, ``_arm_timer`` calcola delay 0 e il primo tick
+    lo esegue; poi il blocco one-shot di ``_execute_job`` lo disabilita o lo
+    cancella come qualunque altro ``at``. È lo stesso "meglio in ritardo che
+    mai" già promesso in ``docs/using/scheduling.md`` e già valido per
+    ``every``.
+
+    NON va usata dopo l'esecuzione: lì ``None`` è la risposta corretta e
+    ``_execute_job`` chiama apposta ``_compute_next_run``.
+    """
+    computed = _compute_next_run(schedule, now_ms)
+    if computed is None and schedule.kind == "at" and schedule.at_ms:
+        return schedule.at_ms
+    return computed
 
 
 def _validate_schedule_for_add(schedule: CronSchedule) -> None:
@@ -103,6 +193,19 @@ class CronService:
         self._running = False
         self._timer_active = False
         self.max_sleep_ms = max_sleep_ms
+        # ── sveglia di sistema (anti-doze) ──
+        # Evento acceso da ``power.on_wake_tick`` quando l'alarm dell'OS ci
+        # risveglia; ``None`` quando le sveglie non sono in gioco (desktop/CI o
+        # ``alarm_driven_cron`` spento), e allora il timer resta il solo padrone.
+        self._wake_event: asyncio.Event | None = None
+        # Ultima scadenza *dichiarata* e ultima *applicata* al bridge. Sono due
+        # perché il bridge è async e i chiamanti no: fra la dichiarazione e
+        # l'applicazione passa un giro di loop, e nel mezzo la scadenza può
+        # cambiare di nuovo.
+        self._alarm_target_ms: int | None = None
+        self._alarm_armed_ms: int | None = None
+        self._alarm_lock = asyncio.Lock()
+        self._alarm_tasks: set[asyncio.Task] = set()
 
     def _is_unbound_agent_job(self, job: CronJob) -> bool:
         return job.payload.kind == "agent_turn" and not is_bound_cron_job(job)
@@ -140,83 +243,171 @@ class CronService:
             changed = self._enforce_agent_binding(job) or changed
         return changed
 
-    def _load_jobs(self) -> tuple[list[CronJob], int] | None:
-        """Load jobs from disk.
+    @property
+    def _backup_path(self) -> Path:
+        return self.store_path.with_name(self.store_path.name + ".bak")
+
+    def _rotate_backup(self) -> None:
+        """Conserva l'ultimo contenuto *valido* come ``jobs.json.bak``.
+
+        Solo se quello attuale si rilegge come JSON: un salvataggio partito da
+        uno store già rotto distruggerebbe l'ultimo backup buono, che è
+        esattamente quello che serve un istante dopo.
+        """
+        if not self.store_path.exists():
+            return
+        try:
+            content = self.store_path.read_text(encoding="utf-8")
+            json.loads(content)
+        except (OSError, json.JSONDecodeError):
+            return
+        try:
+            atomic_write(self._backup_path, content, fsync_dir=False)
+        except OSError as e:
+            # Rete di sicurezza, non requisito: il salvataggio vero procede.
+            logger.warning("Could not refresh the cron store backup: {}", e)
+
+    def _parse_jobs(self, path: Path) -> tuple[list[CronJob], int]:
+        """Parse *path* into ``(jobs, version)``. Solleva se il file non è usabile."""
+        data = json.loads(path.read_text(encoding="utf-8"))
+        jobs: list[CronJob] = []
+        version = data.get("version", 1)
+        for j in data.get("jobs", []):
+            job = CronJob(
+                id=j["id"],
+                name=j["name"],
+                enabled=j.get("enabled", True),
+                schedule=CronSchedule(
+                    kind=j["schedule"]["kind"],
+                    at_ms=j["schedule"].get("atMs"),
+                    every_ms=j["schedule"].get("everyMs"),
+                    expr=j["schedule"].get("expr"),
+                    tz=j["schedule"].get("tz"),
+                ),
+                payload=CronPayload(
+                    kind=j["payload"].get("kind", "agent_turn"),
+                    mode=_parse_mode(j["payload"].get("mode")),
+                    message=j["payload"].get("message", ""),
+                    session_key=j["payload"].get("sessionKey"),
+                    origin_channel=j["payload"].get("originChannel"),
+                    origin_chat_id=j["payload"].get("originChatId"),
+                    origin_metadata=j["payload"].get("originMetadata") or {},
+                ),
+                state=CronJobState(
+                    next_run_at_ms=j.get("state", {}).get("nextRunAtMs"),
+                    last_run_at_ms=j.get("state", {}).get("lastRunAtMs"),
+                    last_status=j.get("state", {}).get("lastStatus"),
+                    last_error=j.get("state", {}).get("lastError"),
+                    run_history=[
+                        CronRunRecord(
+                            run_at_ms=r["runAtMs"],
+                            status=r["status"],
+                            duration_ms=r.get("durationMs", 0),
+                            error=r.get("error"),
+                        )
+                        for r in j.get("state", {}).get("runHistory", [])
+                    ],
+                ),
+                created_at_ms=j.get("createdAtMs", 0),
+                updated_at_ms=j.get("updatedAtMs", 0),
+                delete_after_run=j.get("deleteAfterRun", False),
+            )
+            jobs.append(job)
+        return jobs, version
+
+    def _quarantine_store(self) -> Path | None:
+        """Sposta di lato lo store illeggibile. ``None`` se non ci è riuscita.
+
+        La distinzione è tutto: finché il file rotto è ancora al suo posto, il
+        primo ``_save_store`` lo sovrascrive e i job dell'utente non esistono
+        più da nessuna parte. Una volta spostato, invece, ripartire da una
+        lista vuota è recuperabile — ed è la scelta che facciamo.
+        """
+        stamp = int(time.time())
+        target = self.store_path.with_suffix(self.store_path.suffix + f".corrupt-{stamp}")
+        # Due corruzioni nello stesso secondo non devono sovrascriversi a
+        # vicenda: ``rename`` non chiede il permesso, e la seconda cancellerebbe
+        # in silenzio la prova della prima.
+        suffix = 0
+        while target.exists():
+            suffix += 1
+            target = self.store_path.with_suffix(
+                self.store_path.suffix + f".corrupt-{stamp}_{suffix}"
+            )
+        try:
+            self.store_path.rename(target)
+        except OSError as e:
+            logger.error("Could not set aside the broken cron store at {}: {}", self.store_path, e)
+            return None
+        return target
+
+    def _load_jobs(self) -> _LoadedStore | None:
+        """Load jobs from disk, recovering from ``jobs.json.bak`` when needed.
+
+        Stessa politica di ``config.json`` (vedi ``config/loader.py``): un file
+        illeggibile non deve impedire l'avvio, ma non deve nemmeno sparire in
+        silenzio. Nell'ordine: il file vivo, poi il backup dell'ultimo
+        salvataggio buono, poi una lista vuota.
+
+        Il ripiego lo *riporta* soltanto: decidere se accettarlo — e quindi se
+        avvisare l'utente — tocca a ``_load_store``, che è l'unico a sapere se
+        esiste già uno snapshot in memoria più fresco del file su disco.
 
         Returns:
-            ``(jobs, version)`` tuple on success or when no store file exists
-            (in which case an empty list and version 1 are returned).
-            ``None`` when the store file exists but cannot be parsed; the
-            corrupt file is preserved with a ``.corrupt-<ts>`` suffix so the
-            caller can decide whether to overwrite or bail out.  Returning a
-            sentinel here is important: silently treating a parse error as an
-            empty job list would cause the next ``_save_store`` to wipe every
-            job from disk.
+            ``None`` solo quando il file rotto **non** si è potuto spostare di
+            lato, perché salvarci sopra distruggerebbe l'unica copia rimasta.
         """
-        jobs: list[CronJob] = []
-        version = 1
-        if self.store_path.exists():
+        if not self.store_path.exists():
+            return _LoadedStore([], 1, None, None)
+
+        try:
+            jobs, version = self._parse_jobs(self.store_path)
+        except Exception:
+            logger.exception("Failed to load cron store at {}", self.store_path)
+        else:
+            return _LoadedStore(jobs, version, None, None)
+
+        backup = self._backup_path
+        if backup.exists():
             try:
-                data = json.loads(self.store_path.read_text(encoding="utf-8"))
-                jobs = []
-                version = data.get("version", 1)
-                for j in data.get("jobs", []):
-                    job = CronJob(
-                        id=j["id"],
-                        name=j["name"],
-                        enabled=j.get("enabled", True),
-                        schedule=CronSchedule(
-                            kind=j["schedule"]["kind"],
-                            at_ms=j["schedule"].get("atMs"),
-                            every_ms=j["schedule"].get("everyMs"),
-                            expr=j["schedule"].get("expr"),
-                            tz=j["schedule"].get("tz"),
-                        ),
-                        payload=CronPayload(
-                            kind=j["payload"].get("kind", "agent_turn"),
-                            message=j["payload"].get("message", ""),
-                            session_key=j["payload"].get("sessionKey"),
-                            origin_channel=j["payload"].get("originChannel"),
-                            origin_chat_id=j["payload"].get("originChatId"),
-                            origin_metadata=j["payload"].get("originMetadata") or {},
-                        ),
-                        state=CronJobState(
-                            next_run_at_ms=j.get("state", {}).get("nextRunAtMs"),
-                            last_run_at_ms=j.get("state", {}).get("lastRunAtMs"),
-                            last_status=j.get("state", {}).get("lastStatus"),
-                            last_error=j.get("state", {}).get("lastError"),
-                            run_history=[
-                                CronRunRecord(
-                                    run_at_ms=r["runAtMs"],
-                                    status=r["status"],
-                                    duration_ms=r.get("durationMs", 0),
-                                    error=r.get("error"),
-                                )
-                                for r in j.get("state", {}).get("runHistory", [])
-                            ],
-                        ),
-                        created_at_ms=j.get("createdAtMs", 0),
-                        updated_at_ms=j.get("updatedAtMs", 0),
-                        delete_after_run=j.get("deleteAfterRun", False),
-                    )
-                    jobs.append(job)
+                jobs, version = self._parse_jobs(backup)
             except Exception:
-                # Preserve the corrupt file for forensic recovery instead of
-                # letting the next save overwrite it with an empty job list.
-                backup = self.store_path.with_suffix(
-                    self.store_path.suffix + f".corrupt-{int(time.time())}"
-                )
+                logger.exception("Cron store backup at {} is unusable too", backup)
+            else:
+                quarantined = self._quarantine_store()
+                if quarantined is None:
+                    return None
+                # Il backup diventa il file vivo, altrimenti ogni avvio
+                # rifarebbe il recupero e il primo salvataggio ripartirebbe da
+                # un grezzo rotto.
                 with suppress(OSError):
-                    self.store_path.rename(backup)
-                logger.exception(
-                    "Failed to load cron store at {}. "
-                    "Corrupt file preserved at {}. "
-                    "Refusing to overwrite to avoid data loss.",
-                    self.store_path,
-                    backup,
+                    atomic_write(self.store_path, backup.read_text(encoding="utf-8"))
+                logger.warning(
+                    "Cron store recovered from {}; broken file kept at {}", backup, quarantined
                 )
-                return None
-        return jobs, version
+                return _LoadedStore(jobs, version, "backup", quarantined)
+
+        quarantined = self._quarantine_store()
+        if quarantined is None:
+            return None
+        logger.warning(
+            "Cron store could not be recovered; starting with no jobs. Broken file kept at {}",
+            quarantined,
+        )
+        return _LoadedStore([], 1, "empty", quarantined)
+
+    @staticmethod
+    def _record_recovery(kind: str, quarantined: Path) -> None:
+        """Segna sul ``RuntimeContext`` che lo store cron è stato recuperato.
+
+        Import locale come in ``config/loader.py``: ``cron.service`` non deve
+        dipendere dal runtime per caricare dei job.
+        """
+        from jenny.runtime.context import get_runtime_context
+
+        ctx = get_runtime_context()
+        ctx.cron_recovered_from = kind
+        ctx.cron_quarantine_path = quarantined
 
     def _merge_action(self):
         if not self._action_path.exists():
@@ -225,6 +416,11 @@ class CronService:
         jobs_map = {j.id: j for j in self._store.jobs}
         def _update(params: dict):
             j = CronJob.from_dict(params)
+            # Stessa tolleranza che ``_parse_jobs`` applica a jobs.json: il
+            # journal è l'altra porta d'ingresso dallo storage, e senza questa
+            # riga un ``mode`` ignoto entrerebbe verbatim nel modello, violando
+            # il Literal dichiarato in ``CronPayload.mode``.
+            j.payload.mode = _parse_mode(j.payload.mode)
             jobs_map[j.id] = j
 
         def _del(params: dict):
@@ -277,8 +473,17 @@ class CronService:
             if self._store is not None:
                 return self._store
             return None
-        jobs, version = loaded
-        self._store = CronStore(version=version, jobs=jobs)
+        if loaded.recovered_from is not None and self._store is not None:
+            # Corruzione arrivata *dopo* un avvio riuscito (su Android: una
+            # lettura parziale, un processo ucciso a metà). Lo snapshot in
+            # memoria è almeno fresco quanto il ``.bak`` e più fresco di una
+            # lista vuota: si tiene quello, e il prossimo salvataggio lo
+            # riscrive su disco. Nessun avviso all'utente, perché qui non ha
+            # perso niente — è il caso in cui il ripiego non serve.
+            return self._store
+        if loaded.recovered_from is not None and loaded.quarantined is not None:
+            self._record_recovery(loaded.recovered_from, loaded.quarantined)
+        self._store = CronStore(version=loaded.version, jobs=loaded.jobs)
         self._merge_action()
         if self._enforce_store_agent_bindings() and self._running:
             self._save_store()
@@ -308,6 +513,7 @@ class CronService:
                     },
                     "payload": {
                         "kind": j.payload.kind,
+                        "mode": j.payload.mode,
                         "message": j.payload.message,
                         "sessionKey": j.payload.session_key,
                         "originChannel": j.payload.origin_channel,
@@ -337,6 +543,7 @@ class CronService:
             ]
         }
 
+        self._rotate_backup()
         atomic_write(self.store_path, json.dumps(data, indent=2, ensure_ascii=False))
 
     @staticmethod
@@ -359,6 +566,11 @@ class CronService:
     async def start(self) -> None:
         """Start the cron service."""
         self._running = True
+        # Prima di qualunque cosa possa armare un timer: da qui in poi una
+        # sveglia dell'OS che scatta trova un destinatario. L'aggancio va fatto
+        # sul loop del gateway, e ``start`` è l'unico punto di questa classe che
+        # gira sicuramente là dentro (vedi ``power.bind_wake_loop``).
+        self._wake_event = power.bind_wake_loop() if power.alarm_driven_cron_enabled() else None
         loaded = self._load_store()
         if loaded is None:
             self._running = False
@@ -369,23 +581,26 @@ class CronService:
         logger.info("Cron service started with {} jobs", len(self._store.jobs if self._store else []))
 
     def _corrupt_store_error(self) -> RuntimeError:
-        """Store corrotto su disco: rifiuta invece di ripartire da zero.
+        """Store illeggibile **e** non spostabile: l'unico caso che rifiuta.
 
-        Ripartire con una lista vuota chiamerebbe ``_save_store`` e
-        sovrascriverebbe con ``[]`` i dati che ``_load_jobs`` ha appena messo
-        da parte come ``.corrupt-<ts>`` — recuperabili fino a quel momento.
+        Da 0.6.6 un file rotto non impedisce più l'avvio: ``_load_jobs`` prova
+        il ``.bak``, altrimenti mette il file da parte come ``.corrupt-<ts>`` e
+        riparte senza job, registrandolo perché la WebUI lo dica. Quella scelta
+        regge su una condizione precisa — che la copia forense esista davvero.
+
+        Se il rename fallisce, il file rotto è ancora al suo posto e il primo
+        ``_save_store`` ci scriverebbe sopra: i job dell'utente non esisterebbero
+        più da nessuna parte. Lì, e solo lì, non partire è la risposta giusta.
 
         Vive qui, e non inline in ``start``, perché il primo caricamento non
         avviene in ``start``: ``GatewayContainer.build`` registra i job di
         sistema prima, quindi è ``register_system_job`` a vedere per primo il
-        ``None``. Con la guardia solo dentro ``start`` questo caso finiva in un
-        ``AttributeError`` su ``store.jobs``, e il messaggio scritto apposta
-        per l'utente non veniva mai stampato.
+        ``None``.
         """
         return RuntimeError(
-            f"cron store at {self.store_path} is corrupt and was preserved; "
-            "refusing to start with an empty job list. "
-            "Inspect the .corrupt-<ts> backup and restore manually."
+            f"cron store at {self.store_path} is corrupt and could not be set aside; "
+            "refusing to start, because saving would overwrite the only copy left. "
+            "Move the file out of the way manually and start again."
         )
 
     def stop(self) -> None:
@@ -394,6 +609,12 @@ class CronService:
         if self._timer_task:
             self._timer_task.cancel()
             self._timer_task = None
+        # In lockstep con il timer: la sveglia vive nell'AlarmManager di
+        # sistema, non nel nostro processo, quindi sopravvive allo spegnimento
+        # del servizio e — peggio — farebbe ripartire il gateway per una
+        # scadenza che nessuno sta più ascoltando.
+        self._set_wake_alarm(None)
+        self._wake_event = None
 
     def _recompute_next_runs(self) -> None:
         """Recompute next run times for all enabled jobs."""
@@ -413,8 +634,22 @@ class CronService:
             # arrivava mai. Conservare quella salvata fa sì che il conto non
             # arretri mai e che una scadenza mancata a app spenta venga
             # recuperata al primo tick.
-            # ``at`` e ``cron`` restano ricalcolati: sono già ancorati
-            # all'orologio, non derivano dal momento dell'avvio.
+            # ``cron`` resta ricalcolato: è già ancorato all'orologio, non
+            # deriva dal momento dell'avvio (l'occorrenza mancata a app spenta
+            # si perde, ma la successiva arriva da sé).
+            #
+            # ``at`` invece si recupera — vedi ``_next_run_with_catch_up``. È il
+            # caso "il telefono era spento alle 15", cioè proprio quello per cui
+            # un promemoria esiste. Il WARNING sta qui e non nell'helper: questo
+            # è l'unico punto in cui il ritardo racconta qualcosa (l'app è stata
+            # giù), mentre negli altri chiamanti sarebbe solo rumore.
+            if computed is None and job.schedule.kind == "at" and job.schedule.at_ms:
+                logger.warning(
+                    "Cron: one-shot job '{}' ({}) is {}s overdue, running it late",
+                    job.name, job.id, (now - job.schedule.at_ms) // 1000,
+                )
+                job.state.next_run_at_ms = job.schedule.at_ms
+                continue
             if job.schedule.kind == "every" and job.state.next_run_at_ms is not None:
                 # Il tetto copre un orologio che è saltato in avanti e un
                 # intervallo accorciato a mano: senza, una scadenza assurda
@@ -450,6 +685,12 @@ class CronService:
         ``due_jobs`` loop completes; by then ``self._store`` already reflects
         whatever change triggered this call, so deferring to that later call
         is safe and loses no scheduling update.
+
+        Il no-op vale **anche per la sveglia di sistema**, e per lo stesso
+        motivo: disarmarla qui significherebbe togliere al job in corso la
+        sveglia che copre la sua prossima scadenza, per poi riprogrammarla
+        subito dopo dal ``_arm_timer`` finale di ``_on_timer``. Nel mezzo,
+        però, il device potrebbe sospendersi — e resterebbe sospeso.
         """
         if self._timer_active:
             return
@@ -458,6 +699,7 @@ class CronService:
             self._timer_task.cancel()
 
         if not self._running:
+            self._set_wake_alarm(None)
             return
 
         next_wake = self._get_next_wake_ms()
@@ -467,12 +709,113 @@ class CronService:
             delay_ms = min(self.max_sleep_ms, max(0, next_wake - _now_ms()))
         delay_s = delay_ms / 1000
 
+        # La sveglia punta alla scadenza VERA, non al risveglio accorciato da
+        # ``max_sleep_ms``: quel tetto esiste per rileggere lo store e
+        # raccogliere le modifiche fatte da altre istanze mentre il device è
+        # sveglio, non per svegliare il telefono ogni cinque minuti a vuoto —
+        # che è esattamente il comportamento che i gestori energetici OEM
+        # marcano come "l'app sveglia il sistema troppo spesso". Senza scadenze
+        # in agenda (``None``) non si arma proprio niente.
+        self._set_wake_alarm(next_wake)
+
+        # Catturato adesso: se il servizio viene fermato e riavviato mentre
+        # questo tick dorme, l'evento nuovo appartiene a un altro giro e questo
+        # task è già stato cancellato.
+        wake_event = self._wake_event
+
         async def tick():
-            await asyncio.sleep(delay_s)
+            if wake_event is None:
+                # Nessuna sveglia in gioco: percorso storico, invariato.
+                await asyncio.sleep(delay_s)
+            else:
+                await self._sleep_or_wake(delay_s, wake_event)
             if self._running:
                 await self._on_timer()
 
         self._timer_task = asyncio.create_task(tick())
+
+    async def _sleep_or_wake(self, delay_s: float, wake_event: asyncio.Event) -> None:
+        """Attende il timer asyncio **o** un tick di sveglia: il primo che arriva.
+
+        Perché non basta ``asyncio.sleep``: dorme su un orologio monotono che
+        **non avanza mentre il SoC è sospeso**. A schermo spento un job da 30
+        minuti scattava dopo 83 (misurato): il timer non era in ritardo, era
+        semplicemente fermo. La sveglia RTC dell'OS arriva anche da sospeso ed è
+        l'unica che rispetti l'orario vero. Il timer resta perché copre l'altro
+        caso — modifiche allo store fatte da fuori a device sveglio — che la
+        sveglia non vede.
+
+        Che scattino entrambi non è un problema: ``asyncio.wait`` ritorna e si
+        chiama ``_on_timer`` **una volta sola**, e ``_on_timer`` rifiltra
+        comunque i job per ``next_run_at_ms``, che ``_execute_job`` ha già
+        spostato avanti.
+        """
+        waiters = [
+            asyncio.create_task(asyncio.sleep(delay_s)),
+            asyncio.create_task(wake_event.wait()),
+        ]
+        try:
+            await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            # ``asyncio.wait`` non cancella i task rimasti — nemmeno quando è il
+            # chiamante a essere cancellato, che qui succede a ogni
+            # riprogrammazione (``_arm_timer`` cancella ``self._timer_task``).
+            # Senza questo giro resterebbe appeso un task per ogni tick.
+            for waiter in waiters:
+                waiter.cancel()
+        if wake_event.is_set():
+            # Azzerato PRIMA di eseguire i job, non dopo: un tick che arrivasse
+            # mentre ``_on_timer`` gira deve lasciare l'evento acceso e
+            # provocare un altro giro (a vuoto, ma non perso). Azzerarlo dopo lo
+            # mangerebbe.
+            wake_event.clear()
+            # La sveglia dell'OS è one-shot: quella appena scattata non esiste
+            # più. Senza questo azzeramento un riarmo alla stessa scadenza
+            # verrebbe scambiato per "già armata" e non riprogrammerebbe nulla.
+            self._alarm_armed_ms = None
+
+    def _set_wake_alarm(self, at_ms: int | None) -> None:
+        """Dichiara quando il sistema deve svegliarci (``None`` = mai).
+
+        Sincrona perché i chiamanti lo sono (``_arm_timer``, ``stop``), mentre il
+        bridge verso Kotlin è async: qui si registra solo l'obiettivo e si
+        delega a un task l'applicazione. L'obiettivo è quindi sempre aggiornato
+        all'istante, anche quando l'effetto arriva un giro di loop più tardi.
+        """
+        if not power.alarm_driven_cron_enabled():
+            return
+        self._alarm_target_ms = at_ms
+        try:
+            task = asyncio.create_task(self._apply_wake_alarm())
+        except RuntimeError:
+            # Nessun loop in esecuzione (spegnimento fuori dal gateway): non
+            # c'è nulla da applicare e non è un errore.
+            return
+        # Riferimento forte finché il task non finisce: asyncio tiene solo un
+        # riferimento debole, e un task raccolto dal GC a metà lascerebbe la
+        # sveglia non programmata senza dire niente.
+        self._alarm_tasks.add(task)
+        task.add_done_callback(self._alarm_tasks.discard)
+
+    async def _apply_wake_alarm(self) -> None:
+        """Allinea la sveglia di sistema all'ultimo obiettivo dichiarato.
+
+        L'obiettivo si rilegge **dentro** il lock. Due ``_arm_timer`` ravvicinati
+        creano due task, e asyncio non garantisce in che ordine finiranno: senza
+        la rilettura, a decidere quale scadenza resta programmata sarebbe
+        l'ordine di risveglio, con la concreta possibilità che vinca la più
+        vecchia. Rileggendo, vince sempre l'ultimo che ha scritto e il task
+        rimasto indietro trova l'obiettivo già applicato e non fa nulla.
+        """
+        async with self._alarm_lock:
+            target = self._alarm_target_ms
+            if target == self._alarm_armed_ms:
+                return
+            if target is None:
+                await power.cancel_wake(power.WAKE_REQUEST_CODE_CRON)
+            else:
+                await power.schedule_wake(target, power.WAKE_REQUEST_CODE_CRON)
+            self._alarm_armed_ms = target
 
     async def _on_timer(self) -> None:
         """Handle timer tick - run due jobs."""
@@ -513,6 +856,14 @@ class CronService:
             job.state.last_error = None
             logger.info("Cron: job '{}' completed", job.name)
 
+        except CronJobSilencedError:
+            # Esito riuscito, non mancato: il job monitor ha girato fino in
+            # fondo e ha deciso che non c'era niente da dire. Nessun
+            # ``last_error`` — un errore residuo del giro precedente qui
+            # resterebbe appeso e farebbe sembrare guasto un job sano.
+            job.state.last_status = "silenced"
+            job.state.last_error = None
+            logger.info("Cron: job '{}' completed silently", job.name)
         except CronJobSkippedError as e:
             job.state.last_status = "skipped"
             job.state.last_error = str(e) or None
@@ -579,9 +930,21 @@ class CronService:
         origin_channel: str | None = None,
         origin_chat_id: str | None = None,
         origin_metadata: dict | None = None,
+        *,
+        mode: Literal["reminder", "monitor"] = "reminder",
     ) -> CronJob:
-        """Add a new job."""
+        """Add a new job.
+
+        La firma dichiara i due literal, ma a runtime nessuno li impone: il
+        controllo vero è ``_validate_mode_for_add``, che **solleva** invece di
+        ripiegare, perché qui il valore sporco viene da chi chiama e non da un
+        file scritto da un'altra versione.
+
+        Raises:
+            ValueError: schedule non valido, o ``mode`` non riconosciuto.
+        """
         _validate_schedule_for_add(schedule)
+        mode = _validate_mode_for_add(mode)
         now = _now_ms()
 
         job = CronJob(
@@ -591,13 +954,14 @@ class CronService:
             schedule=schedule,
             payload=CronPayload(
                 kind="agent_turn",
+                mode=mode,
                 message=message,
                 session_key=session_key,
                 origin_channel=origin_channel,
                 origin_chat_id=origin_chat_id,
                 origin_metadata=origin_metadata or {},
             ),
-            state=CronJobState(next_run_at_ms=_compute_next_run(schedule, now)),
+            state=CronJobState(next_run_at_ms=_next_run_with_catch_up(schedule, now)),
             created_at_ms=now,
             updated_at_ms=now,
             delete_after_run=delete_after_run,
@@ -640,7 +1004,10 @@ class CronService:
             job.state = previous.state
             job.created_at_ms = previous.created_at_ms
         else:
-            job.state = CronJobState(next_run_at_ms=_compute_next_run(job.schedule, now))
+            # No-op per i job di sistema, che sono tutti ``every``: sta qui solo
+            # perché OGNI punto che programma usi la stessa funzione, e nessuno
+            # reintroduca l'orfano scegliendo quella sbagliata.
+            job.state = CronJobState(next_run_at_ms=_next_run_with_catch_up(job.schedule, now))
             job.created_at_ms = now
         job.updated_at_ms = now
         store.jobs = [j for j in store.jobs if j.id != job.id]
@@ -684,7 +1051,7 @@ class CronService:
                 job.updated_at_ms = _now_ms()
                 self._enforce_agent_binding(job)
                 if job.enabled:
-                    job.state.next_run_at_ms = _compute_next_run(job.schedule, _now_ms())
+                    job.state.next_run_at_ms = _next_run_with_catch_up(job.schedule, _now_ms())
                 else:
                     job.state.next_run_at_ms = None
                 if self._running:
@@ -725,7 +1092,7 @@ class CronService:
 
         job.updated_at_ms = _now_ms()
         if job.enabled:
-            job.state.next_run_at_ms = _compute_next_run(job.schedule, _now_ms())
+            job.state.next_run_at_ms = _next_run_with_catch_up(job.schedule, _now_ms())
         else:
             job.state.next_run_at_ms = None
 

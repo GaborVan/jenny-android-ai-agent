@@ -8,8 +8,19 @@ Every inbound message — from the WebUI, from Telegram, from a cron job, from a
 
 1. **Bus.** The channel (`jenny/channels/websocket.py`, `telegram.py`) publishes an `InboundMessage` to the async `MessageBus` (`jenny/bus/queue.py`). This decouples "a message arrived" from "the agent is ready to process it."
 2. **`AgentLoop.run()`** (`jenny/agent/loop.py`) consumes the bus in a loop, resolves the session key for the message, and dispatches it as an `asyncio.Task` — one task per session at a time; other sessions run concurrently. Priority commands (`/stop`) and non-priority commands (`/new`, `/status`, …) for a session that already has a turn in flight are special-cased: they run inline instead of queuing behind the active turn. Ordinary follow-up messages sent while a turn is running are not dropped and not raced against it — they go into a per-session pending queue and are drained as mid-turn injections by the runner (see below).
-3. **`_process_message`** drives a small state machine (below) that builds context, calls **`AgentRunner`** (`jenny/agent/runner.py`) to talk to the provider and execute tools, persists the turn, and assembles the outbound reply.
-4. The reply is published as an `OutboundMessage` back onto the bus; the dispatcher (`jenny/channels/dispatcher.py`) delivers it to whichever channel(s) should see it.
+3. **`_process_message`** drives a small state machine (below) that builds context, calls **`AgentRunner`** (`jenny/agent/runner.py`) to talk to the provider and execute tools, persists the turn, and assembles the outbound reply. It returns a `TurnOutcome` (`jenny/agent/turn_types.py`): either `DELIVERED` with a message, `SPOKE_VIA_TOOL` (the agent called `message` itself), or `SILENT` — a successful turn with nothing to say, which is a first-class outcome and not a failure.
+4. If the outcome carries a message it is published as an `OutboundMessage` back onto the bus; the dispatcher (`jenny/channels/dispatcher.py`) delivers it to whichever channel(s) should see it. This is the single point of implicit delivery in the system.
+
+### Turn visibility
+
+Delivery is not a property of the channel a turn happens to run on. It is a property of the turn, resolved once at its boundary by `jenny/session/turn_visibility.py`:
+
+- A **visible** turn delivers its final answer implicitly. This is the ordinary conversation.
+- A **silent** turn reaches the user through nothing at all — no answer, no progress rows, no reasoning deltas, no "running" spinner, no `turn_end` marker, not even its own error message — unless the agent explicitly calls the `message` tool during the turn.
+
+The default comes from provenance: internal work running on a user channel is silent. That covers Heartbeat (which keeps `websocket:default` as its target precisely so the `message` tool has somewhere to deliver when a condition fires), cron monitors, and — the case that motivated the rule — the turn that a *subagent announcement* opens. A subagent spawned inside an internal turn finishes long after that turn ended, and its announcement inherits visibility through the origin session key rather than opening a fresh, unaccountable conversation.
+
+A turn on the internal channel stays visible: there is no user to reach, and its outbound is the return value Dream and Atlas read to learn how their own run went.
 
 ## The turn state machine
 
@@ -25,7 +36,7 @@ Every inbound message — from the WebUI, from Telegram, from a cron job, from a
 | `SAVE` | Persist the new messages to the session, enforce the file-attachment cap, schedule background token-based consolidation, clear the mid-turn checkpoint. |
 | `RESPOND` | Assemble the `OutboundMessage`, or suppress it entirely if the agent already delivered its reply via the `message` tool during the turn. |
 
-A background/system turn (a subagent announcing its result, a cron job) does not go through this exact FSM — `_process_system_message` mirrors the same steps (restore checkpoint, compaction, tool sync, history, build, run, save) but never emits the `running` event and always returns some outbound content, even a generic fallback.
+A background/system turn (a subagent announcing its result) does not go through this exact FSM — `_process_system_message` mirrors the same steps (restore checkpoint, compaction, tool sync, history, build, run, save) but never emits the `running` event. A **visible** system turn always returns some outbound content, even a generic fallback; a **silent** one returns no outbound at all, because that fallback is exactly the filler a user never asked to see.
 
 ### Interrupted turns
 

@@ -82,7 +82,11 @@ class ApiClient {
     if (this._bootstrapSecret && typeof location !== 'undefined') {
       const params = new URLSearchParams(location.hash.slice(1));
       params.set('bs', this._bootstrapSecret);
-      location.hash = params.toString();
+      // replaceState e non `location.hash = ...`: assegnare il fragment è a
+      // tutti gli effetti una navigazione e lascerebbe nello stack una entry
+      // fantasma per ogni reload, che poi si mangia una pressione di Indietro.
+      // Lo stato va azzerato: dopo il reload la SPA riscrive la propria radice.
+      history.replaceState(null, '', `${location.pathname}${location.search}#${params}`);
     }
     location.reload();
   }
@@ -373,6 +377,18 @@ class ApiClient {
   async updateLocation(params) {
     const res = await this._postWithQuery('/api/settings/location/update', params);
     if (!res.ok) throw new Error(`Location update failed: ${res.status}`);
+    return res.json();
+  }
+
+  async updatePower(params) {
+    const res = await this._postWithQuery('/api/settings/power/update', params);
+    if (!res.ok) throw new Error(`Power update failed: ${res.status}`);
+    return res.json();
+  }
+
+  async getPowerDiagnostics() {
+    const res = await this._fetch('/api/settings/power/diagnostics');
+    if (!res.ok) throw new Error(`Power diagnostics failed: ${res.status}`);
     return res.json();
   }
 

@@ -63,8 +63,6 @@ def _dispatch(
         get_agent=lambda: _FakeAgent(tmp_path, memory, stop_reason),
         config=Config(),
         cron=MagicMock(),
-        get_message_tool=lambda: None,
-        deliver_to_channel=MagicMock(),
         heartbeat_cfg=SimpleNamespace(),
     )
     return memory, dispatcher

@@ -7,16 +7,26 @@ import { AppState } from './shared/state.js';
 import { confirmDialog, detailDialog } from './shared/dialog.js';
 import { THEMES, DEFAULT_THEME, setTheme } from './shared/theme.js';
 import { advancedMode, setAdvancedMode } from './shared/advanced-mode.js';
-import { mascotVisible, setMascotVisible, mascotSide, setMascotSide,
+import { mascotVisible, setMascotVisible,
   mascotColor, setMascotColor, mascotSize, setMascotSize,
   MASCOT_SIZES } from './shared/mascot.js';
 import { homeView, setHomeView, HOME_VIEW_CHOICES } from './shared/home-view.js';
 import { TelegramPairingWidget } from './shared/telegram-pairing.js';
 import {
+  BatteryExemptionCard,
+  batteryExemptionSupported,
+  batteryExemptionNeeded,
+} from './shared/battery-exemption.js';
+import {
   runExportFlow,
   runImportFlow,
   runSnapshotRestore,
 } from './shared/backup-flow.js';
+
+// Ripiego per `power.modes` quando il payload arriva da un gateway più vecchio
+// del client: stesso ordine di `KEEP_AWAKE_MODES` in config/schema.py, dal più
+// parsimonioso al più affamato.
+const KEEP_AWAKE_CHOICES = ['off', 'turns', 'always'];
 
 export class SettingsController {
   constructor() {
@@ -27,35 +37,105 @@ export class SettingsController {
     // Sezioni aperte, per id: sopravvive ai re-render (che ricostruiscono
     // tutto l'HTML), non alla navigazione — niente localStorage di proposito.
     this._openSections = new Set();
-    this.loadSettings();
+    // Contatore di generazione: incrementato in deactivate(). Ogni
+    // continuazione lo cattura prima del primo await ed esce se è cambiato —
+    // altrimenti scrive nel DOM (o apre modali) di una sezione già lasciata.
+    this._gen = 0;
+    /* Posizione di lettura e stato del catalogo modelli. Come `_openSections`
+       vivono nel controller: il contenitore che scorre è lo stesso che
+       `render()` riscrive per intero, quindi qualunque salvataggio — e
+       scegliere un modello *è* un salvataggio — riportava in cima una pagina
+       lunga, col catalogo richiuso e il filtro perso. */
+    this._scrollTop = 0;
+    this._catalogOpen = false;
+    this._catalogFilter = '';
+    /* Vero mentre *noi* stiamo scrivendo `scrollTop`, e vero finché il
+       contenuto asincrono di un `render()` non è ancora atterrato. Vedi
+       `_restoreScrollTop()`. */
+    this._restoringScroll = false;
+    this._restorePending = false;
+    /* La posizione va letta *mentre* la vista è visibile: `switchMode` mette il
+       display:none sulla view prima di chiamare `deactivate()`, e un
+       contenitore senza box legge scrollTop 0 — salvare lì avrebbe riportato in
+       cima a ogni rientro invece di evitarlo. */
+    this.contentEl?.addEventListener('scroll', () => {
+      // Un ripristino non è una lettura: la sua assegnazione torna clampata
+      // dalla pagina ancora corta e qui riscriverebbe `_scrollTop` col valore
+      // sbagliato, distruggendo proprio ciò che stava ripristinando.
+      if (this._restoringScroll) return;
+      // Ha scorso l'utente: da qui in poi nessun contenuto in ritardo ha più il
+      // diritto di riportarlo dov'era prima del re-render.
+      this._restorePending = false;
+      if (this.contentEl.clientHeight) this._scrollTop = this.contentEl.scrollTop;
+    }, { passive: true });
+    /* Niente `loadSettings()` qui. Il costruttore gira dentro `switchMode`,
+       che subito dopo chiama `activate()` — e `activate()` carica. Risultato:
+       due GET /api/settings e due render completi alla prima apertura, con il
+       secondo che butta via tutto il DOM del primo (widget Telegram e card
+       batteria compresi, ricreati da capo). `this.ready = this.loadSettings()`
+       non risolverebbe: `switchMode` chiama `activate()` comunque. */
   }
 
   showLoading() { this.loadingEl?.classList.add('active'); }
   hideLoading() { this.loadingEl?.classList.remove('active'); }
 
+  /** true se nel frattempo si è usciti dalla sezione. */
+  _stale(gen) { return gen !== this._gen; }
+
   async loadSettings() {
+    const gen = this._gen;
     this.showLoading();
     try {
       const settings = await api.getSettings();
+      if (this._stale(gen)) return;
       this.data = settings;
       this.render();
     } catch (err) {
+      if (this._stale(gen)) return;
       this.contentEl.innerHTML = `
         <div class="settings-error">
           <i class="ti ti-cloud-off" style="font-size:32px;color:var(--text-faint)"></i>
            <p>${i18n.t('settings.failedToLoad')}</p>
           <p style="font-size:11px;color:var(--text-faint)">${escapeHtml(err.message)}</p>
         </div>`;
+    } finally {
+      if (!this._stale(gen)) this.hideLoading();
     }
-    this.hideLoading();
   }
 
   activate() { this.loadSettings(); }
   deactivate() {
+    // Da qui in poi nessuna continuazione in volo tocca più niente: né il DOM
+    // di questa sezione, né — soprattutto — una modale sopra un'altra.
+    this._gen++;
+    this.hideLoading();
     if (this._tgWidget) {
       this._tgWidget.destroy();
       this._tgWidget = null;
     }
+    // La card batteria resta in ascolto di visibilitychange finché non la si
+    // chiude: senza questo, ogni ritorno nelle impostazioni ne lascia una viva.
+    if (this._batteryCard) {
+      this._batteryCard.destroy();
+      this._batteryCard = null;
+    }
+    // Stesso motivo per il listener della diagnostica: senza, ogni ritorno
+    // nelle impostazioni ne lascia uno vivo che ricarica l'endpoint.
+    if (this._onPowerVisible) {
+      document.removeEventListener('visibilitychange', this._onPowerVisible);
+      this._onPowerVisible = null;
+    }
+  }
+
+  /* Sotto-stato della sezione: il catalogo modelli aperto occupa la vista e per
+     l'utente *è* una schermata (ci si arriva da un pulsante, si scorre, si
+     sceglie). Senza questo il tasto Indietro saltava quel livello e usciva
+     direttamente dalle impostazioni: due schermate in una pressione sola. */
+  handleBack() {
+    const el = this.contentEl?.querySelector('#model-catalog');
+    if (!el || el.style.display === 'none') return false;
+    this._toggleModelCatalog();
+    return true;
   }
 
   handleAction(action) {
@@ -72,9 +152,11 @@ export class SettingsController {
     // motore LLM, capacità dell'agente, canali, dati, diagnostica.
     this.contentEl.innerHTML = [
       this._renderConfigRecovery(d),
+      this._renderCronRecovery(d),
       this._section('personalization', 'ti-palette', i18n.t('settings.personalization'), this._renderPersonalization(d)),
       this._section('models', 'ti-cpu', i18n.t('settings.model'), this._renderModelSettings(d)),
       this._section('tools', 'ti-tool', i18n.t('settings.tools'), this._renderTools(d)),
+      this._renderBatterySection(d),
       this._section('ssh', 'ti-terminal-2', i18n.t('settings.ssh.title'), this._renderSsh()),
       this._section('telegram', 'ti-brand-telegram', i18n.t('settings.telegram.title'), this._renderTelegram()),
       this._section('backup', 'ti-database-export', i18n.t('backup.sectionTitle'), this._renderBackup()),
@@ -82,6 +164,56 @@ export class SettingsController {
     ].join('');
 
     this._wireSections();
+    // L'innerHTML qui sopra ha appena riportato il catalogo chiuso e vuoto e lo
+    // scroll in cima: entrambi vanno rimessi come li aveva lasciati l'utente.
+    this._restoreCatalogState();
+    /* In questo istante catalogo, SSH, snapshot, widget Telegram e card
+       batteria sono ancora segnaposto: la pagina è molto più corta di quando la
+       posizione fu misurata. Si rimette ora *e* la si riapplica quando i pezzi
+       atterrano — v. `_restoreScrollTop()`. */
+    this._restorePending = true;
+    this._restoreScrollTop();
+  }
+
+  /* Rimette la posizione di lettura senza distruggerla. Due insidie, entrambe
+     osservate su Blink:
+     1. scrivere `scrollTop` emette un evento `scroll`, e il listener del
+        costruttore riscriveva `_scrollTop` con quello che l'assegnazione era
+        *diventata* — cioè col clamp a `scrollHeight - clientHeight` di una
+        pagina ancora fatta di segnaposto. La posizione buona non risultava
+        approssimata: risultava persa. Il flag rende cieco quel listener finché
+        l'evento non è smaltito (le scroll steps girano prima dei callback di
+        `requestAnimationFrame`, quindi azzerarlo lì è sicuro).
+     2. una sola assegnazione non basta: i caricatori asincroni allungano la
+        pagina dopo, e ognuno richiama questo metodo quando ha finito; in più
+        subito dopo un `innerHTML` le altezze definitive arrivano un frame dopo,
+        e per quello c'è il secondo colpo nel rAF. Il flag si azzera in un rAF
+        *annidato* perché l'evento della seconda scrittura viene smaltito nelle
+        scroll steps del frame ancora successivo.
+     `_restorePending` è la clausola di rispetto: se nel frattempo l'utente ha
+     scorso di suo, un fetch in ritardo non lo strattona più. */
+  _restoreScrollTop() {
+    if (!this.contentEl || !this._restorePending || !this._scrollTop) return;
+    this._restoringScroll = true;
+    this.contentEl.scrollTop = this._scrollTop;
+    requestAnimationFrame(() => {
+      if (this._restorePending) this.contentEl.scrollTop = this._scrollTop;
+      requestAnimationFrame(() => { this._restoringScroll = false; });
+    });
+  }
+
+  /* Riapre il catalogo modelli e rimette il testo del filtro dopo un
+     `render()`. Non è una comodità: il catalogo si richiude a ogni salvataggio,
+     e provare due modelli di fila significava riaprirlo e rifiltrarlo ogni
+     volta. */
+  _restoreCatalogState() {
+    if (!this._catalogOpen) return;
+    const el = this.contentEl.querySelector('#model-catalog');
+    if (!el) return;
+    el.style.display = '';
+    const search = this.contentEl.querySelector('#model-search');
+    if (search) search.value = this._catalogFilter;
+    this._loadModelCatalog();
   }
 
   /* Avviso di config recuperata all'avvio. Silenzioso nel caso normale: se
@@ -92,13 +224,33 @@ export class SettingsController {
     const info = d.config_recovery;
     if (!info) return '';
     const fromDefaults = info.restored_from === 'defaults';
-    const text = fromDefaults
-      ? i18n.t('settings.configRecoveredDefaults')
-      : i18n.t('settings.configRecoveredBackup');
-    const where = info.broken_file
-      ? `<div class="settings-notice-path">${escapeHtml(info.broken_file)}</div>`
+    return this._recoveryNotice(
+      i18n.t(fromDefaults ? 'settings.configRecoveredDefaults' : 'settings.configRecoveredBackup'),
+      info.broken_file,
+      fromDefaults,
+    );
+  }
+
+  /* Stesso avviso per lo store dei job cron. Merita una riga sua e non una
+     variante di quella sopra: qui, con restored_from = "empty", a mancare sono
+     i promemoria che l'utente aveva creato — e quelli non si notano assenti,
+     si notano solo quando non suonano. */
+  _renderCronRecovery(d) {
+    const info = d.cron_recovery;
+    if (!info) return '';
+    const empty = info.restored_from === 'empty';
+    return this._recoveryNotice(
+      i18n.t(empty ? 'settings.cronRecoveredEmpty' : 'settings.cronRecoveredBackup'),
+      info.broken_file,
+      empty,
+    );
+  }
+
+  _recoveryNotice(text, brokenFile, strong) {
+    const where = brokenFile
+      ? `<div class="settings-notice-path">${escapeHtml(brokenFile)}</div>`
       : '';
-    return `<div class="settings-notice${fromDefaults ? ' settings-notice-strong' : ''}">
+    return `<div class="settings-notice${strong ? ' settings-notice-strong' : ''}">
       <i class="ti ti-alert-triangle"></i>
       <div>
         <div>${text}</div>
@@ -134,6 +286,280 @@ export class SettingsController {
       </div>
       <div class="theme-strip-eyebrow">${i18n.t('settings.language')}</div>
       ${this._renderLanguage()}`;
+  }
+
+  // ── Attività in background (doze) ──────────────────────────────────
+
+  /* Sezione a sé, non annidata sotto Telegram: il doze differisce cron, Dream,
+     Atlas, promemoria e heartbeat esattamente come rallenta il long-poll, ma
+     finché la richiesta viveva solo nella card di pairing chi Telegram non lo
+     usa non se la vedeva chiedere mai.
+
+     Due impostazioni, una storia sola: l'esenzione dice ad Android di non
+     strozzare Jenny, keepAwake decide se Jenny tiene sveglia la CPU da sé.
+     Fuori dalla WebView Android il bridge nativo non c'è e la card sparisce,
+     ma keepAwake vive nel config del gateway ed è modificabile da qualunque
+     browser: la sezione resta, con il solo controllo che ha ancora senso. */
+  _renderBatterySection(d) {
+    // Aperta d'ufficio quando l'esenzione manca: un accordion chiuso è
+    // esattamente il posto in cui il problema è rimasto invisibile finora.
+    if (batteryExemptionSupported() && batteryExemptionNeeded()) {
+      this._openSections.add('battery');
+    }
+    const card = batteryExemptionSupported()
+      ? `<div id="settings-battery-card"></div><div class="settings-divider"></div>`
+      : '';
+    return this._section(
+      'battery', 'ti-battery-charging', i18n.t('settings.battery.title'),
+      `${card}${this._renderKeepAwake(d)}<div id="settings-power-diagnostics"></div>`,
+    );
+  }
+
+  /* Wakelock anti-doze. Il costo della scelta ("i lavori slittano", "consuma
+     batteria") è l'unica cosa che qui conta — il nome da solo ("Sempre") non
+     dice cosa l'utente sta accettando — ma dentro una <option> non ci stava:
+     il testo di un'opzione nativa non va a capo, e su un telefono da 1440px la
+     frase veniva tagliata esattamente sulla clausola del costo. Quindi nella
+     select resta il nome breve e il costo vive sotto, su una riga che segue la
+     selezione (v. `_wireSections`) e che può occupare le righe che le servono.
+
+     La riga sul riavvio non è un dettaglio da nota a piè di pagina: il lock di
+     servizio si prende una volta all'avvio del gateway, quindi chi passa a
+     "Sempre" e resta a guardare non vedrebbe cambiare niente e penserebbe che
+     l'impostazione sia rotta. */
+  _renderKeepAwake(d) {
+    const power = (d && d.power) || {};
+    const current = power.keep_awake || 'turns';
+    const modes = power.modes || KEEP_AWAKE_CHOICES;
+    const options = modes.map(id =>
+      `<option value="${escapeHtml(id)}"${id === current ? ' selected' : ''}>${escapeHtml(i18n.t(`settings.battery.keepAwake.${id}`))}</option>`
+    ).join('');
+    return `
+      <div class="settings-subheading">${i18n.t('settings.battery.keepAwakeTitle')}</div>
+      <div class="settings-field">
+        <select class="settings-select" id="keep-awake-select">${options}</select>
+        <p class="settings-choice-cost" id="keep-awake-cost">${escapeHtml(this._keepAwakeCost(current))}</p>
+        <p class="settings-hint" style="margin:6px 0 0;font-size:12px;color:var(--text-faint)">${i18n.t('settings.battery.keepAwakeHint')}</p>
+        <p class="settings-hint" style="margin:6px 0 0;font-size:12px;color:var(--text-faint)"><i class="ti ti-refresh"></i> ${i18n.t('settings.battery.keepAwakeRestart')}</p>
+      </div>`;
+  }
+
+  /** Il costo della modalità, o stringa vuota se non lo conosciamo.
+   *
+   *  I modi arrivano dal gateway (`power.modes`), la copy dai file i18n: un
+   *  gateway più nuovo del client può mandarne uno che qui non ha frase, e
+   *  `i18n.t` in quel caso ritorna la chiave — stampata sotto la select
+   *  sembrerebbe un guasto. Meglio nessuna riga che "settings.battery...". */
+  _keepAwakeCost(mode) {
+    const key = `settings.battery.keepAwakeCost.${mode}`;
+    const text = i18n.t(key);
+    return text === key ? '' : text;
+  }
+
+  // ── Diagnostica energetica ─────────────────────────────────────────
+
+  /* Chiamata a parte e non dentro il payload delle impostazioni: interroga il
+     bridge Android (tre chiamate JNI) e va riletta al ritorno da un dialogo di
+     sistema, quando il resto delle impostazioni non è cambiato.
+
+     Il pannello risponde alla domanda che finora non aveva risposta: "sta
+     girando o no?". Un gateway ucciso dal gestore energetico dell'OEM non
+     lascia niente dietro di sé — nessun errore, nessuna notifica, solo
+     promemoria che smettono di arrivare — e l'utente se ne accorge giorni
+     dopo, se se ne accorge. */
+  async _loadPowerDiagnostics() {
+    const el = this.contentEl.querySelector('#settings-power-diagnostics');
+    if (!el) return;
+    let diag = null;
+    try {
+      diag = await api.getPowerDiagnostics();
+    } catch (_) {
+      // Endpoint muto (gateway vecchio, richiesta fallita): una riga sobria,
+      // non un errore rosso — qui non si è rotto niente di quello che l'utente
+      // stava facendo.
+      if (el.isConnected) {
+        el.innerHTML = `<div class="settings-divider"></div>
+          <div class="settings-empty-state">${i18n.t('settings.battery.diagUnavailable')}</div>`;
+      }
+      return;
+    }
+    // Un re-render nel frattempo ha staccato questo nodo: la risposta appartiene
+    // a un pannello che non è più nel documento, e il nuovo si ricarica da sé.
+    if (!el.isConnected) return;
+    // Fuori da Android i tre booleani non significano niente e i buchi non si
+    // misurano: meglio niente pannello che un pannello di "no".
+    if (!diag || !diag.android) { el.innerHTML = ''; return; }
+    el.innerHTML = this._renderPowerDiagnostics(diag);
+    this._wirePowerDiagnostics(el);
+  }
+
+  _renderPowerDiagnostics(diag) {
+    const rows = [
+      ['diagExempt', diag.battery_exempt],
+      ['diagExactAlarms', diag.exact_alarms],
+      ['diagWakelock', diag.wakelock_held],
+    ].map(([key, ok]) => `
+      <div class="settings-field-row">
+        <span class="settings-field-label">${i18n.t(`settings.battery.${key}`)}</span>
+        <span class="settings-field-value"><i class="ti ti-${ok ? 'check' : 'x'}"></i> ${i18n.t(ok ? 'settings.battery.diagYes' : 'settings.battery.diagNo')}</span>
+      </div>`).join('');
+    const gaps = Array.isArray(diag.gaps) ? diag.gaps : [];
+    const gapRows = gaps.length
+      ? gaps.map(g => `
+          <div class="settings-field-row">
+            <span class="settings-field-label">${escapeHtml(this._formatGapDuration(g.duration_ms))}</span>
+            <span class="settings-field-value">${escapeHtml(this._formatGapWhen(g.start_ms))}</span>
+          </div>`).join('')
+      : `<div class="settings-empty-state">${i18n.t('settings.battery.gapsEmpty')}</div>`;
+    return `
+      <div class="settings-divider"></div>
+      <div class="settings-subheading">${i18n.t('settings.battery.diagTitle')}</div>
+      ${rows}
+      ${this._renderExactAlarmRequest(diag)}
+      <div class="settings-subheading">${i18n.t('settings.battery.gapsTitle')}</div>
+      ${gapRows}
+      <p class="settings-hint" style="margin:6px 0 0;font-size:12px;color:var(--text-faint)">${i18n.t('settings.battery.gapsHint', { minutes: diag.gap_warning_min })}</p>
+      ${gaps.length ? this._renderOemGuidance() : ''}`;
+  }
+
+  /* Il permesso da cui dipende tutto il resto, e l'unico modo di concederlo.
+     Un'app che punta ad API 33 o più si ritrova SCHEDULE_EXACT_ALARM negato
+     alla prima installazione: dichiararlo nel manifest non basta, e finché
+     manca ogni sveglia degrada a inesatta — misurato su un telefono nuovo,
+     cron e watchdog partivano con dieci minuti di ritardo e il controllo di
+     rete con un'ora. La riga sopra lo diceva già, ma dirlo e basta lasciava
+     l'utente senza niente da fare.
+
+     Attaccata alla riga "Sveglie precise" e solo quando è "no": a permesso
+     concesso sarebbe un avviso che si impara a ignorare, come per la card
+     dell'esenzione. `!== false` e non `!diag.exact_alarms`: da un gateway che
+     il campo non lo manda non si deduce che il permesso manchi. */
+  _renderExactAlarmRequest(diag) {
+    if (diag.exact_alarms !== false) return '';
+    // Bridge più vecchio della UI: nessun bottone da offrire, il permesso si
+    // concede solo dalla schermata di sistema che sa aprire lui.
+    const native = window.JennyNative;
+    if (!native || typeof native.requestExactAlarmPermission !== 'function') return '';
+    return `
+      <div class="settings-notice settings-notice-strong">
+        <i class="ti ti-alarm"></i>
+        <div>
+          <div>${i18n.t('settings.battery.exactAlarmsHint')}</div>
+          <div style="margin-top:6px"><i class="ti ti-refresh"></i> ${i18n.t('settings.battery.exactAlarmsRestart')}</div>
+        </div>
+      </div>
+      <div class="onboarding-nav">
+        <button class="onboarding-btn onboarding-btn-secondary" id="btn-exact-alarms">
+          ${i18n.t('settings.battery.exactAlarmsButton')}
+        </button>
+      </div>`;
+  }
+
+  /* La carta che dice l'unica cosa che solo l'utente può fare. Compare solo
+     quando un buco è stato davvero registrato: senza prove sarebbe l'ennesimo
+     avviso preventivo che si impara a ignorare. */
+  _renderOemGuidance() {
+    const native = window.JennyNative;
+    let brandRaw = '';
+    try {
+      if (native && typeof native.deviceManufacturer === 'function') {
+        brandRaw = String(native.deviceManufacturer() || '');
+      }
+    } catch (_) { /* bridge che solleva: si resta sul link generico */ }
+    // Slug di dontkillmyapp.com: minuscolo e ridotto ad ASCII sicuro, perché
+    // Build.MANUFACTURER è testo libero deciso dall'OEM ("TCL Communication").
+    const slug = brandRaw.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    const url = slug
+      ? `https://dontkillmyapp.com/${encodeURIComponent(slug)}`
+      : 'https://dontkillmyapp.com/';
+    const brand = brandRaw || i18n.t('settings.battery.oemUnknownBrand');
+    // Il link resta un <a> normale: la WebView devia le navigazioni fuori dal
+    // gateway locale su una Chrome Custom Tab (MainActivity#openExternalUrl),
+    // mentre aprirlo dentro la SPA la sostituirebbe senza via di ritorno.
+    const link = `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">${escapeHtml(i18n.t('settings.battery.oemLink', { brand }))}</a>`;
+    const canOpen = !!(native && typeof native.openBatterySettings === 'function');
+    const button = canOpen
+      ? `<div class="onboarding-nav">
+           <button class="onboarding-btn onboarding-btn-secondary" id="btn-oem-battery">
+             ${i18n.t('settings.battery.oemButton')}
+           </button>
+         </div>`
+      : '';
+    return `
+      <div class="settings-notice settings-notice-strong">
+        <i class="ti ti-alert-triangle"></i>
+        <div>
+          <div>${i18n.t('settings.battery.oemHint')}</div>
+          <div style="margin-top:6px">${link}</div>
+        </div>
+      </div>
+      ${button}`;
+  }
+
+  _wirePowerDiagnostics(root) {
+    // Sveglie precise: al ritorno dalla schermata di sistema il pannello si
+    // ricarica da sé (il visibilitychange di `_wireSections`), quindi la riga
+    // passa a "Sì" e la richiesta sparisce senza fare niente qui.
+    const exactBtn = root.querySelector('#btn-exact-alarms');
+    if (exactBtn) {
+      exactBtn.addEventListener('click', () => {
+        const native = window.JennyNative;
+        if (!native || typeof native.requestExactAlarmPermission !== 'function') return;
+        let opened = false;
+        try {
+          opened = !!native.requestExactAlarmPermission();
+        } catch (_) { opened = false; }
+        // Sotto Android 12 il permesso non esiste e la schermata nemmeno:
+        // dirlo, invece di lasciare il tap senza conseguenze visibili.
+        if (!opened) showToast(i18n.t('settings.battery.exactAlarmsFailed'), 'error');
+      });
+    }
+    const btn = root.querySelector('#btn-oem-battery');
+    if (!btn) return;
+    btn.addEventListener('click', () => {
+      const native = window.JennyNative;
+      if (!native || typeof native.openBatterySettings !== 'function') return;
+      let opened = false;
+      try {
+        opened = !!native.openBatterySettings();
+      } catch (_) { opened = false; }
+      // Nessuna schermata raggiungibile: dirlo, invece di lasciare il tap
+      // senza conseguenze visibili. Restano le istruzioni del link.
+      if (!opened) showToast(i18n.t('settings.battery.oemOpenFailed'), 'error');
+    });
+  }
+
+  /** Durata di un buco, nella lingua dell'utente ("4h 12m"). */
+  _formatGapDuration(ms) {
+    // Arrotondato al minuto e mai a zero: un buco registrato è sopra soglia,
+    // e "0m" lo farebbe sembrare un errore di misura.
+    const totalMin = Math.max(1, Math.round((Number(ms) || 0) / 60000));
+    const days = Math.floor(totalMin / 1440);
+    const hours = Math.floor((totalMin % 1440) / 60);
+    const minutes = totalMin % 60;
+    if (days) return i18n.t('settings.battery.gapDays', { days, hours });
+    if (hours) return i18n.t('settings.battery.gapHours', { hours, minutes });
+    return i18n.t('settings.battery.gapMinutes', { minutes });
+  }
+
+  /** Quando il buco è cominciato ("ieri alle 23:40").
+   *
+   *  L'inizio e non la fine: l'ora in cui Jenny è stata uccisa è quella che si
+   *  riconosce ("ah, quando metto il telefono in carica la notte"). */
+  _formatGapWhen(startMs) {
+    const at = new Date(Number(startMs) || 0);
+    const time = at.toLocaleTimeString(i18n.locale, { hour: '2-digit', minute: '2-digit' });
+    const midnight = new Date();
+    midnight.setHours(0, 0, 0, 0);
+    const dayMs = 86400000;
+    if (at.getTime() >= midnight.getTime()) {
+      return i18n.t('settings.battery.gapToday', { time });
+    }
+    if (at.getTime() >= midnight.getTime() - dayMs) {
+      return i18n.t('settings.battery.gapYesterday', { time });
+    }
+    const date = at.toLocaleDateString(i18n.locale, { day: 'numeric', month: 'short' });
+    return i18n.t('settings.battery.gapOn', { date, time });
   }
 
   // ── Telegram ───────────────────────────────────────────────────────
@@ -257,17 +683,31 @@ export class SettingsController {
     return `<div id="ssh-block"><div class="settings-empty-state">${i18n.t('settings.loading')}</div></div>`;
   }
 
+  /* Il nodo si cerca **dopo** l'await, non prima: `render()` ricostruisce tutto
+     `contentEl.innerHTML`, quindi un `#ssh-block` catturato prima della fetch è
+     con ogni probabilità già staccato dal documento — ci si scriveva dentro
+     senza che a schermo cambiasse niente, e la sezione SSH restava sul suo
+     "Caricamento…" per sempre. */
   async _loadSsh() {
-    const blockEl = this.contentEl.querySelector('#ssh-block');
-    if (!blockEl) return;
+    const gen = this._gen;
+    if (!this.contentEl.querySelector('#ssh-block')) return;
+    let ssh;
     try {
-      this._ssh = await api.getSsh();
+      ssh = await api.getSsh();
     } catch {
-      blockEl.innerHTML = `<div class="settings-empty-state">${i18n.t('settings.ssh.loadFailed')}</div>`;
+      if (this._stale(gen)) return;
+      const failEl = this.contentEl.querySelector('#ssh-block');
+      if (failEl) failEl.innerHTML = `<div class="settings-empty-state">${i18n.t('settings.ssh.loadFailed')}</div>`;
       return;
     }
+    if (this._stale(gen)) return;
+    const blockEl = this.contentEl.querySelector('#ssh-block');
+    if (!blockEl) return;
+    this._ssh = ssh;
     blockEl.innerHTML = this._renderSshBlock(this._ssh);
     this._wireSshBlock();
+    // Anche questo blocco era un segnaposto quando la posizione è stata rimessa.
+    this._restoreScrollTop();
   }
 
   _renderSshBlock(d) {
@@ -284,8 +724,24 @@ export class SettingsController {
         </label>
       </div>
       <p class="settings-hint" style="margin:6px 0 10px;font-size:12px;color:var(--text-faint)">${i18n.t('settings.ssh.hint')}</p>
+      ${this._renderSshCredentialsLost(d)}
       ${list}
       <button class="settings-btn-add" id="btn-ssh-add"><i class="ti ti-plus"></i> ${i18n.t('settings.ssh.addHost')}</button>`;
+  }
+
+  /* Credenziali sparite da host che erano già stati verificati: quasi sempre
+     un workspace ripristinato da backup. Chiave privata e known_hosts vivono
+     fuori dal workspace apposta, quindi nel backup non ci sono e il ripristino
+     non può riportarli. Senza questa riga l'utente vede solo dei badge "non
+     verificato" e un tool SSH che fallisce, e sembra un guasto. */
+  _renderSshCredentialsLost(d) {
+    const aliases = d.credentials_lost || [];
+    if (!aliases.length) return '';
+    const text = i18n.t('settings.ssh.credentialsLost', { aliases: aliases.join(', ') });
+    return `<div class="settings-notice settings-notice-strong">
+      <i class="ti ti-alert-triangle"></i>
+      <div>${escapeHtml(text)}</div>
+    </div>`;
   }
 
   /* Una card per host. I due stati che decidono se l'host è usabile —
@@ -423,14 +879,43 @@ export class SettingsController {
     }
   }
 
+  /* Segno di attesa sul bottone che ha lanciato il probe.
+
+     Il probe apre una connessione di rete e può durare secondi. Prima non
+     lasciava traccia: il bottone restava identico e cliccabile, e passati i 3 s
+     del toast a schermo non c'era più **niente** che dicesse che stava
+     succedendo qualcosa. È da lì che nasce N8 — l'utente conclude che il tap è
+     andato perso, preme Indietro, e la modale dell'impronta gli si apre sopra
+     un'altra sezione. */
+  _setSshVerifyBusy(alias, busy) {
+    const btn = this.contentEl?.querySelector(`.ssh-verify[data-ssh-alias="${CSS.escape(alias)}"]`);
+    if (!btn) return;
+    btn.disabled = busy;
+    btn.textContent = i18n.t(busy ? 'settings.ssh.verifying' : 'settings.ssh.verify');
+  }
+
   /* Legge l'impronta e la mette davanti all'utente. Il probe non accetta
-     niente: fin qui known_hosts non è stato toccato. */
+     niente: fin qui known_hosts non è stato toccato.
+
+     La guardia di generazione non è cosmetica: "Accetta" scrive davvero in
+     known_hosts, e senza di essa la modale poteva comparire sopra la chat o il
+     workspace — cioè chiedere di fidarsi di un host in un contesto che non
+     spiega più di cosa si stia parlando. */
   async _sshVerify(alias) {
+    const gen = this._gen;
+    this._setSshVerifyBusy(alias, true);
     showToast(i18n.t('settings.ssh.verifying'));
     let probe;
     try {
       probe = (await api.probeSshHostKey(alias)).probe;
-    } catch (e) { showToast(e.message, 'error'); return; }
+    } catch (e) {
+      if (this._stale(gen)) return;
+      showToast(e.message, 'error');
+      return;
+    } finally {
+      this._setSshVerifyBusy(alias, false);
+    }
+    if (this._stale(gen)) return;
 
     if (probe.already_accepted) {
       showToast(i18n.t('settings.ssh.alreadyAccepted'));
@@ -440,13 +925,24 @@ export class SettingsController {
     const accepted = probe.changed
       ? await this._confirmChangedHostKey(alias, probe)
       : await this._confirmNewHostKey(alias, probe);
-    if (!accepted) return;
+    if (this._stale(gen)) return;
+    if (!accepted) {
+      // Era l'unica uscita muta della funzione: annullare non dava alcun
+      // riscontro, e il badge "Impronta da verificare" restava lì identico —
+      // indistinguibile da un annullamento non registrato.
+      showToast(i18n.t('settings.ssh.verifyCancelled'), 'info');
+      return;
+    }
 
     try {
       await api.acceptSshHostKey(alias, probe.fingerprint, { replace: probe.changed });
+      if (this._stale(gen)) return;
       showToast(i18n.t('settings.ssh.accepted'));
       this._loadSsh();
-    } catch (e) { showToast(e.message, 'error'); }
+    } catch (e) {
+      if (this._stale(gen)) return;
+      showToast(e.message, 'error');
+    }
   }
 
   /* Con la password il pinning conta di più, non di meno: una chiave la si
@@ -663,15 +1159,16 @@ export class SettingsController {
   // ── Mascotte ───────────────────────────────────────────────────────
 
   /* Blocco della sezione "Personalizzazione", sotto la passerella dei temi:
-     mini-label, toggle di visibilità, taglia, lato e variante colore.
+     mini-label, toggle di visibilità, taglia e variante colore.
      Le opzioni restano SEMPRE a schermo: nasconderle a mascotte spenta faceva
      sembrare che l'unica scelta fosse tenerla o buttarla via — chi la spegneva
      subito non scopriva mai che era personalizzabile. Da spenta si vedono
      inerti (attributo `disabled`), come promessa di cosa si ottiene
-     riaccendendola. */
+     riaccendendola.
+     Il lato NON si sceglie qui: lo decide il lancio (v. mobile-jenny.js), e
+     un'impostazione che cambia da sola al primo lancio sarebbe una bugia. */
   _renderMascot() {
     const visible = mascotVisible();
-    const side = mascotSide();
     const color = mascotColor();
     const size = mascotSize();
     const off = visible ? '' : ' disabled';
@@ -698,19 +1195,6 @@ export class SettingsController {
       <div class="settings-field"${visible ? '' : ' data-settings-off'}>
         <label class="settings-label">${i18n.t('settings.mascotSize')}</label>
         <div class="settings-seg">${sizeButtons}</div>
-      </div>
-      <div class="settings-field"${visible ? '' : ' data-settings-off'}>
-        <label class="settings-label">${i18n.t('settings.mascotSide')}</label>
-        <div class="settings-seg">
-          <button class="settings-seg-btn${side === 'left' ? ' active' : ''}" data-mascot-side="left"${off}>
-            ${i18n.t('settings.mascotSideLeft')}
-            ${side === 'left' ? '<i class="ti ti-check"></i>' : ''}
-          </button>
-          <button class="settings-seg-btn${side === 'right' ? ' active' : ''}" data-mascot-side="right"${off}>
-            ${i18n.t('settings.mascotSideRight')}
-            ${side === 'right' ? '<i class="ti ti-check"></i>' : ''}
-          </button>
-        </div>
       </div>
       <div class="settings-field settings-toggle-row"${visible ? '' : ' data-settings-off'}>
         <label class="settings-label">${i18n.t('settings.mascotColor')}</label>
@@ -809,8 +1293,30 @@ export class SettingsController {
       </div>
       <p class="settings-hint" style="margin-top:6px;font-size:12px;color:var(--text-faint)">${i18n.t('settings.advancedModeHint')}</p>
       <div class="settings-divider"></div>
+      ${this._renderRerunOnboarding()}
+      <div class="settings-divider"></div>
       <div class="settings-subheading">${i18n.t('settings.tokenUsage')}</div>
       ${this._renderUsage(d)}`;
+  }
+
+  /* Strada permanente verso il wizard di configurazione. Finora l'onboarding
+     era raggiungibile solo al primo avvio, e solo perché il gateway rispondeva
+     `first_run: true`: chi voleva rifare la configurazione da capo — o chi al
+     boot ha incontrato un errore che ha lasciato indeterminato lo stato del
+     primo avvio — non aveva alcun modo di riaprirlo. La voce sta qui e non
+     accanto ai provider perché non è "cambia il modello": rifà tutto il giro. */
+  _renderRerunOnboarding() {
+    return `
+      <div class="settings-subheading">${i18n.t('settings.rerunOnboarding')}</div>
+      <p class="settings-hint" style="margin:0 0 10px;font-size:12px;color:var(--text-faint)">${i18n.t('settings.rerunOnboardingHint')}</p>
+      <button class="settings-btn-add" id="btn-rerun-onboarding"><i class="ti ti-rocket"></i> ${i18n.t('settings.rerunOnboardingAction')}</button>`;
+  }
+
+  async _rerunOnboarding() {
+    if (!await confirmDialog(i18n.t('settings.rerunOnboardingConfirm'))) return;
+    const app = window.mobileApp;
+    if (!app) return;
+    app.openOnboarding();
   }
 
   _wireBackup() {
@@ -855,20 +1361,27 @@ export class SettingsController {
     el.value = value;
   }
 
+  /* Stesso motivo di `_loadSsh`: il nodo si cerca dopo l'await. */
   async _loadSnapshotList() {
-    const listEl = this.contentEl.querySelector('#snapshot-list');
-    if (!listEl) return;
+    const gen = this._gen;
+    if (!this.contentEl.querySelector('#snapshot-list')) return;
     let snapshots = [];
     try {
       const history = await api.getSnapshotHistory();
+      if (this._stale(gen)) return;
       snapshots = history.snapshots || [];
       this._syncRetentionSelect(history.retention_max_age_days);
     } catch {
-      listEl.innerHTML = `<div class="settings-empty-state">${i18n.t('backup.snapshotHistoryUnavailable')}</div>`;
+      if (this._stale(gen)) return;
+      const failEl = this.contentEl.querySelector('#snapshot-list');
+      if (failEl) failEl.innerHTML = `<div class="settings-empty-state">${i18n.t('backup.snapshotHistoryUnavailable')}</div>`;
       return;
     }
+    const listEl = this.contentEl.querySelector('#snapshot-list');
+    if (!listEl) return;
     if (!snapshots.length) {
       listEl.innerHTML = `<div class="settings-empty-state">${i18n.t('backup.snapshotHistoryEmpty')}</div>`;
+      this._restoreScrollTop();
       return;
     }
     listEl.innerHTML = snapshots.map(s => {
@@ -890,6 +1403,8 @@ export class SettingsController {
         if (ok) runSnapshotRestore(btn.dataset.snapshot);
       });
     });
+    // Anche la lista degli snapshot era un segnaposto: v. `_restoreScrollTop()`.
+    this._restoreScrollTop();
   }
 
   _fmtBytes(n) {
@@ -986,6 +1501,31 @@ export class SettingsController {
       this._tgWidget.refresh();
     }
 
+    // Attività in background: stessa card condivisa con onboarding e Telegram.
+    // Qui `grantedKey` è d'obbligo — è l'unica superficie che l'utente apre
+    // apposta per controllare, e "nessun messaggio" non è una risposta.
+    const batteryContainer = this.contentEl.querySelector('#settings-battery-card');
+    if (batteryContainer) {
+      if (this._batteryCard) this._batteryCard.destroy();
+      this._batteryCard = new BatteryExemptionCard(batteryContainer, {
+        tone: 'notice',
+        grantedKey: 'settings.battery.granted',
+      });
+      this._batteryCard.render();
+    }
+
+    // Diagnostica energetica: si popola da sola (chiamata a parte) e si
+    // rilegge al rientro nell'app — il permesso si concede in un dialogo di
+    // sistema, e al ritorno la pagina non ha ricevuto nessun evento.
+    if (this._onPowerVisible) {
+      document.removeEventListener('visibilitychange', this._onPowerVisible);
+    }
+    this._onPowerVisible = () => {
+      if (document.visibilityState === 'visible') this._loadPowerDiagnostics();
+    };
+    document.addEventListener('visibilitychange', this._onPowerVisible);
+    this._loadPowerDiagnostics();
+
     // Catalogo modelli unificato
     this._wireBtn('btn-change-model', () => this._toggleModelCatalog());
     const modelSearch = this.contentEl.querySelector('#model-search');
@@ -1029,6 +1569,39 @@ export class SettingsController {
       });
     }
 
+    // Wakelock anti-doze: si salva al cambio, e il toast ripete che vale dal
+    // prossimo riavvio — chi lo cambia dalla select non rilegge la riga sotto.
+    const keepAwakeSelect = this.contentEl.querySelector('#keep-awake-select');
+    if (keepAwakeSelect) {
+      // `previous` segue l'ultimo valore accettato dal server, non quello del
+      // primo render: due cambi di fila con il secondo fallito riporterebbero
+      // altrimenti la select su un modo che non è più quello salvato.
+      let previous = keepAwakeSelect.value;
+      // Il costo della scelta sta fuori dalla select (una <option> non va a
+      // capo) e segue la selezione subito, prima ancora del salvataggio: è
+      // quello che l'utente sta valutando, non la conferma di quello che ha
+      // già scelto. `textContent`: la frase viene da i18n, non da HTML.
+      const costEl = this.contentEl.querySelector('#keep-awake-cost');
+      const showCost = (mode) => {
+        if (costEl) costEl.textContent = this._keepAwakeCost(mode);
+      };
+      keepAwakeSelect.addEventListener('change', () => {
+        const mode = keepAwakeSelect.value;
+        showCost(mode);
+        api.updatePower({ keep_awake: mode })
+          .then(() => {
+            previous = mode;
+            if (this.data) this.data.power = { ...(this.data.power || {}), keep_awake: mode };
+            showToast(i18n.t('settings.battery.keepAwakeSaved'));
+          })
+          .catch(() => {
+            keepAwakeSelect.value = previous;  // rollback sull'errore
+            showCost(previous);
+            showToast(i18n.t('settings.saveError'));
+          });
+      });
+    }
+
     // Add provider
     this._wireBtn('btn-add-provider', () => this._showAddProviderDialog());
 
@@ -1042,8 +1615,11 @@ export class SettingsController {
     const advToggle = this.contentEl.querySelector('#advanced-mode-toggle');
     if (advToggle) advToggle.addEventListener('change', () => setAdvancedMode(advToggle.checked));
 
-    // Mascotte: toggle visibilità (re-render per mostrare/nascondere il
-    // blocco scelta lato) + scelta del lato
+    // Riesegui configurazione: strada permanente verso il wizard.
+    this._wireBtn('btn-rerun-onboarding', () => this._rerunOnboarding());
+
+    // Mascotte: toggle visibilità (re-render per accendere/spegnere le
+    // opzioni sotto) + scelta della taglia
     const mascotToggle = this.contentEl.querySelector('#mascot-visible-toggle');
     if (mascotToggle) {
       mascotToggle.addEventListener('change', () => {
@@ -1051,12 +1627,6 @@ export class SettingsController {
         this.render();
       });
     }
-    this.contentEl.querySelectorAll('[data-mascot-side]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        setMascotSide(btn.dataset.mascotSide);
-        this.render();
-      });
-    });
     this.contentEl.querySelectorAll('[data-mascot-size]').forEach(btn => {
       btn.addEventListener('click', () => {
         setMascotSize(btn.dataset.mascotSize);
@@ -1085,8 +1655,8 @@ export class SettingsController {
       });
     });
 
-    // Language selector — solo i bottoni seg con data-locale (quelli del
-    // lato mascotte condividono la classe ma hanno data-mascot-side).
+    // Language selector — solo i bottoni seg con data-locale (quelli della
+    // taglia mascotte condividono la classe ma hanno data-mascot-size).
     this.contentEl.querySelectorAll('.settings-seg-btn[data-locale]').forEach(btn => {
       btn.addEventListener('click', () => {
         const locale = btn.dataset.locale;
@@ -1117,19 +1687,35 @@ export class SettingsController {
 
   /* keepStoredKey: il provider ha già una chiave salvata, quindi un campo
      vuoto significa "lasciala com'è" e non va segnalato come errore. */
-  _saveProvider(name, format, apiKey, apiBase, { keepStoredKey = false } = {}) {
+  async _saveProvider(name, format, apiKey, apiBase, { keepStoredKey = false } = {}) {
     if (!name || (!apiKey && !keepStoredKey)) {
       showToast(i18n.t('settings.nameAndKeyRequired'), 'error');
       return;
     }
 
-    api.updateProvider({ name, format, api_key: apiKey, api_base: apiBase })
-      .then(() => {
-        this._closeProviderDialog();
-        showToast(i18n.t('settings.providerSaved'));
-        this.loadSettings();
-      })
-      .catch(e => showToast(e.message, 'error'));
+    // Finestra di salvataggio in volo: finché la richiesta è in corso il
+    // dialog non deve poter sparire. Un Indietro dispatcha un `cancel` che
+    // nessuno preveniva, il listener `close` faceva remove(), e la chiave API
+    // appena digitata se ne andava col DOM lasciando solo un toast. Il flag
+    // vive sul dataset perché è il `cancel` a doverlo leggere.
+    const dialog = document.getElementById('provider-dialog');
+    const buttons = dialog ? [...dialog.querySelectorAll('.oc-btn')] : [];
+    if (dialog) dialog.dataset.busy = '1';
+    buttons.forEach(b => { b.disabled = true; });
+
+    try {
+      await api.updateProvider({ name, format, api_key: apiKey, api_base: apiBase });
+    } catch (e) {
+      showToast(e.message, 'error');
+      return;
+    } finally {
+      if (dialog) delete dialog.dataset.busy;
+      buttons.forEach(b => { b.disabled = false; });
+    }
+
+    this._closeProviderDialog();
+    showToast(i18n.t('settings.providerSaved'));
+    this.loadSettings();
   }
 
   _editProvider(name) {
@@ -1181,6 +1767,7 @@ export class SettingsController {
     if (!el) return;
     const wasOpen = el.style.display !== 'none';
     el.style.display = wasOpen ? 'none' : '';
+    this._catalogOpen = !wasOpen;
     if (!wasOpen) this._loadModelCatalog();
   }
 
@@ -1230,6 +1817,10 @@ export class SettingsController {
       if (e.key === 'Enter' && custom.value.trim()) this._selectModel(p.name, custom.value.trim());
     });
     this._applyCatalogFilter();
+    // Il gruppo ha appena sostituito un «Caricamento…» con decine di righe: la
+    // pagina è più alta di quando `render()` ha rimesso la posizione, e quella
+    // andava clampata. Si riapplica ora che c'è spazio per contenerla.
+    this._restoreScrollTop();
   }
 
   /* Il punto dell'intero redesign: modello e provider si salvano insieme. */
@@ -1243,7 +1834,11 @@ export class SettingsController {
   }
 
   _applyCatalogFilter() {
-    const q = (this.contentEl.querySelector('#model-search')?.value || '').toLowerCase();
+    // Il testo si memorizza grezzo: è quello che va rimesso nell'input dopo un
+    // re-render, e rimetterlo minuscolo sarebbe una riscrittura di ciò che
+    // l'utente ha battuto.
+    this._catalogFilter = this.contentEl.querySelector('#model-search')?.value || '';
+    const q = this._catalogFilter.toLowerCase();
     this.contentEl.querySelectorAll('#model-catalog-groups [data-model]').forEach(el => {
       el.style.display = el.dataset.model.toLowerCase().includes(q) ? '' : 'none';
     });
@@ -1309,7 +1904,12 @@ export class SettingsController {
       baseInput.placeholder = defaults[formatSelect.value] || '';
     });
 
-    dialog.querySelector('#dlg-provider-cancel').addEventListener('click', () => this._closeProviderDialog());
+    // Anche Annulla passa dal `cancel` annullabile, come Esc e il tasto
+    // Indietro: chiamando close() dritto scavalcava il guard del salvataggio in
+    // volo, e restava l'unica via per perdere la chiave API a metà richiesta.
+    dialog.querySelector('#dlg-provider-cancel').addEventListener('click', () => {
+      if (dialog.dispatchEvent(new Event('cancel', { cancelable: true }))) this._closeProviderDialog();
+    });
     dialog.querySelector('#dlg-provider-save').addEventListener('click', () => {
       const name = dialog.querySelector('#dlg-provider-name').value.trim();
       const format = dialog.querySelector('#dlg-provider-format').value;
@@ -1318,6 +1918,14 @@ export class SettingsController {
       // In modifica il campo vuoto vale sempre "tieni la chiave salvata":
       // il provider esiste già, non serve ridigitarla per cambiare l'URL.
       this._saveProvider(name, format, apiKey, apiBase, { keepStoredKey: isEdit });
+    });
+    // Il congedo (Indietro, Esc, catena della shell) passa da un `cancel`
+    // annullabile: durante un salvataggio in volo lo si rifiuta, altrimenti il
+    // dialog si smonta portandosi via i campi mentre la richiesta è ancora in
+    // corso. Fuori da quella finestra lo scarto dei campi resta la semantica
+    // normale di una modale annullabile e non si tocca.
+    dialog.addEventListener('cancel', (e) => {
+      if (dialog.dataset.busy) e.preventDefault();
     });
     dialog.addEventListener('close', () => dialog.remove());
   }

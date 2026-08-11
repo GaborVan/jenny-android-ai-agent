@@ -14,6 +14,7 @@ from jenny.bus.events import OutboundMessage
 from jenny.config.paths import get_workspace_path
 from jenny.security.workspace_access import current_tool_workspace
 from jenny.security.workspace_policy import _safe_expanduser
+from jenny.session.turn_visibility import is_silent_turn
 
 # Sentinel di default per i flag per-turno: condiviso, mai mutato. Un turno vero
 # riceve il suo dict fresco da ``start_turn()``.
@@ -239,6 +240,23 @@ class MessageTool(Tool, ContextAware):
         if not channel or not chat_id:
             return "Error: No target channel/chat specified"
 
+        # Un ciclo silenzioso manda AL MASSIMO un avviso. Non e' una quota
+        # arbitraria: un turno silenzioso non e' una conversazione, e' un avviso —
+        # e un avviso e' uno. Misurato sul dispositivo: senza questo tetto un
+        # singolo ciclo heartbeat ha consegnato cinque messaggi di fila
+        # ("sto aspettando", "ok basta, mi zitto", "🙄"), perche' il modello
+        # trattava la chat come un canale di pensiero. Il prompt lo vieta, ma il
+        # prompt non garantisce: qui il secondo tentativo non parte, e la stringa
+        # di ritorno dice al modello cosa fare invece (accorpare).
+        if self._sent_in_turn and is_silent_turn(self._default_metadata.get()):
+            logger.info("MessageTool: second send suppressed on a silent turn")
+            return (
+                "Error: you already sent the one alert this scheduled run is allowed. "
+                "A silent check delivers at most one message per run. Do not try again: "
+                "if something is missing, it belongs in that single message — say it in "
+                "the next run instead."
+            )
+
         if not self._send_callback:
             return "Error: Message sending not configured"
 
@@ -258,7 +276,15 @@ class MessageTool(Tool, ContextAware):
         # resta sul canale d'origine e non viene diffuso agli altri canali
         # accoppiati (es. Telegram): il ChannelDeliverer diffonde solo con
         # questo flag (o con ``proactive=True`` dai chiamanti cron/heartbeat).
-        if not same_target:
+        # Eccezione: un turno SILENZIOSO (cron monitor, heartbeat, lavoro interno
+        # in genere). Li ``same_target`` e vero (canale/chat d'origine) ma
+        # l'utente NON e in conversazione: sta arrivando un avviso, non una
+        # risposta, e deve raggiungere anche i canali accoppiati (WebUI +
+        # Telegram). E' la stessa consegna proattiva che prima faceva a mano il
+        # cron dispatcher per l'heartbeat. La condizione si legge dai metadata del
+        # turno gia propagati in ``set_context``: nessuno stato nuovo sul tool e
+        # nessun call site in piu da tenere allineato.
+        if not same_target or is_silent_turn(self._default_metadata.get()):
             metadata["_proactive_fanout"] = True
 
         msg = OutboundMessage(

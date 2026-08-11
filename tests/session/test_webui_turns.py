@@ -24,7 +24,9 @@ from jenny.bus.runtime_events import (
 from jenny.cron.session_turns import CRON_HISTORY_META
 from jenny.providers.base import LLMResponse
 from jenny.session import webui_turns as wt
+from jenny.session.keys import HEARTBEAT_SESSION_KEY
 from jenny.session.manager import Session, SessionManager
+from jenny.session.turn_visibility import silent_turn_metadata
 from jenny.utils.llm_runtime import LLMRuntime
 
 # --- mark_webui_session --------------------------------------------------------
@@ -528,6 +530,49 @@ def test_webui_view_target_routing():
         channel="telegram", chat_id="42", session_key="cron:job1"
     )
     assert wt.webui_view_target(non_unified) is None
+
+
+def test_a_silent_turn_has_no_webui_projection():
+    """Il canale d'origine non basta a decidere.
+
+    Un heartbeat o un cron monitor gira *su* ``websocket:default`` — è il target a
+    cui consegnerà se una condizione scatta — ma spinner e ``_turn_end``
+    appartengono alla conversazione dell'utente, non a un controllo che non ha
+    chiesto. Senza questo gate ogni ciclo lasciava i propri marcatori in chat.
+    """
+    heartbeat = RuntimeEventContext(
+        channel="websocket", chat_id="default", session_key=HEARTBEAT_SESSION_KEY
+    )
+    assert wt.webui_view_target(heartbeat) is None
+
+    monitor = RuntimeEventContext(
+        channel="websocket", chat_id="chat-1", session_key="cron:job-m"
+    )
+    assert wt.webui_view_target(monitor) is None
+
+    marked = RuntimeEventContext(
+        channel="websocket",
+        chat_id="c1",
+        session_key="unified:default",
+        metadata=silent_turn_metadata(),
+    )
+    assert wt.webui_view_target(marked) is None
+
+
+async def test_a_silent_turn_publishes_no_run_status(tmp_path):
+    coordinator, bus, _scheduled = _coordinator(tmp_path)
+    ctx = RuntimeEventContext(
+        channel="websocket", chat_id="default", session_key=HEARTBEAT_SESSION_KEY
+    )
+
+    await coordinator._handle_run_status_changed(
+        TurnRunStatusChanged(context=ctx, status="running", started_at=10.0),
+    )
+    await coordinator._handle_turn_completed_event(
+        TurnCompleted(context=ctx, latency_ms=12, runtime=None),
+    )
+
+    bus.publish_outbound.assert_not_awaited()
 
 
 async def test_external_turn_start_publishes_user_echo(tmp_path):

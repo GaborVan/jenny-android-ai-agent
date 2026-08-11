@@ -52,6 +52,7 @@ from jenny.agent.tools.file_state import FileStates
 from jenny.agent.tools.loader import ToolLoader, ToolLoadError, declared_tool_name
 from jenny.agent.tools.registry import ToolRegistry
 from jenny.bus.events import (
+    INTERNAL_CHANNEL,
     OUTBOUND_META_SUBAGENT_STATUS,
     InboundMessage,
     OutboundMessage,
@@ -65,6 +66,7 @@ from jenny.security.workspace_access import (
     enter_workspace_scope,
     workspace_sandbox_status,
 )
+from jenny.session.turn_visibility import resolve_turn_visibility
 from jenny.utils.helpers import truncate_text
 from jenny.utils.prompt_templates import render_template
 
@@ -1470,20 +1472,40 @@ class SubagentManager:
             "cancelled": "was stopped by the user",
         }.get(status, "failed")
 
+        # Inject as system message to trigger main agent.
+        # Use session_key_override to align with the main agent's effective
+        # session key (which accounts for unified sessions) so the result is
+        # routed to the correct pending queue (mid-turn injection) instead of
+        # being dispatched as a competing independent task.
+        #
+        # Questo override porta anche la VISIBILITA del turno d'annuncio: la
+        # session key d'origine e' cio da cui
+        # ``jenny.session.turn_visibility.resolve_turn_visibility`` deduce se il
+        # turno appartiene a lavoro interno. Un subagent lanciato dentro
+        # l'heartbeat (sessione ``heartbeat``) o dentro un cron monitor
+        # (``cron:<job_id>``) termina molto dopo la fine del turno che lo ha
+        # lanciato, e prima il suo annuncio apriva un turno nuovo che consegnava
+        # in chat senza passare da alcun gate. Cambiare questo override in un
+        # ``f"{channel}:{chat_id}"` "piu semplice" rimetterebbe quel messaggio in
+        # chat: la provenienza si perderebbe.
+        override = origin.get("session_key") or f"{origin['channel']}:{origin['chat_id']}"
+        # Il prompt d'annuncio dipende dalla visibilita del turno che sta per
+        # aprirsi, e va deciso QUI perche' e' qui che si conosce l'origine. Su un
+        # turno silenzioso il vecchio testo unico ("Summarize this naturally for
+        # the user") e' un'istruzione a parlare rivolta a un turno che non puo'
+        # consegnare: produceva testo che non arrivava a nessuno mentre il dato
+        # vero — quello che il subagent e' andato a prendere — restava inedito.
+        silent = resolve_turn_visibility(
+            None, channel=origin.get("channel") or INTERNAL_CHANNEL, session_key=override
+        ).silent
         announce_content = render_template(
             "agent/subagent_announce.md",
             label=label,
             status_text=status_text,
             task=task,
             result=result,
+            silent=silent,
         )
-
-        # Inject as system message to trigger main agent.
-        # Use session_key_override to align with the main agent's effective
-        # session key (which accounts for unified sessions) so the result is
-        # routed to the correct pending queue (mid-turn injection) instead of
-        # being dispatched as a competing independent task.
-        override = origin.get("session_key") or f"{origin['channel']}:{origin['chat_id']}"
         live = self._task_statuses.get(task_id)
         metadata: dict[str, Any] = {
             "injected_event": "subagent_result",
@@ -1763,13 +1785,34 @@ class SubagentManager:
             for e in recent[-_SNAPSHOT_TOOL_EVENTS_LIMIT:]
         ]
 
+    def _origin_is_silent(self, spec: SubagentSpec) -> bool:
+        """True se questo subagent lavora per un turno che non parla all'utente.
+
+        Un subagent lanciato da un heartbeat o da un cron monitor e' lavoro
+        interno tanto quanto il turno che lo ha lanciato: il pannello e il digest
+        in chat lo annuncerebbero all'utente, che non ha chiesto quel controllo.
+        La provenienza si legge dalla session key d'origine, la stessa da cui
+        l'annuncio del risultato eredita la propria visibilita.
+        """
+        return resolve_turn_visibility(
+            None,
+            channel=spec.origin_channel or INTERNAL_CHANNEL,
+            session_key=spec.session_key,
+        ).silent
+
     def _publish_status_snapshot(self, spec: SubagentSpec) -> None:
         """Pubblica lo snapshot sul canale d'origine a ogni transizione.
 
         Best-effort (``try_publish_outbound``): e uno stato ricalcolabile, e
         bloccare una transizione di stato su una coda outbound piena sarebbe un
         prezzo peggiore di uno snapshot perso — il successivo lo rimpiazza.
+
+        Silenzioso per un'origine silenziosa: lo snapshot e' cio che alimenta il
+        pannello e il blocco "cosa ha fatto davvero" in chat, quindi cade sotto
+        la stessa regola della risposta finale.
         """
+        if self._origin_is_silent(spec):
+            return
         try:
             payload = self.status_snapshot(spec.session_key)
             self.bus.try_publish_outbound(OutboundMessage(
@@ -1784,7 +1827,7 @@ class SubagentManager:
     def _publish_transition(self, spec: SubagentSpec, state: str, label: str) -> None:
         """Riga di progress + snapshot per una transizione di stato."""
         hint = _TRANSITION_HINTS.get(state)
-        if hint:
+        if hint and not self._origin_is_silent(spec):
             try:
                 self.bus.try_publish_outbound(OutboundMessage(
                     channel=spec.origin_channel,

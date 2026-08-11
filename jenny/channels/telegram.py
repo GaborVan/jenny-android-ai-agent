@@ -28,12 +28,26 @@ from jenny.bus.queue import MessageBus
 from jenny.channels.telegram_api import TelegramAPI, TelegramAPIError
 from jenny.channels.telegram_format import markdown_to_telegram_html, split_message
 from jenny.config.schema import TelegramConfig
+from jenny.runtime.power import keep_awake
 from jenny.webui.metadata import WEBUI_TURN_METADATA_KEY
 
 # Limite prudente sul testo grezzo: la conversione HTML può allungare il chunk.
 _RAW_CHUNK_LIMIT = 3500
 _POLL_BACKOFF_MAX_S = 60.0
 _CHUNK_RETRY_DELAYS = (1, 2, 4)
+
+# Scadenza del wakelock che copre la lavorazione di un update ricevuto.
+# Generosa rispetto al lavoro che c'è dentro (pairing, reverse-geocoding di una
+# posizione, una risposta di servizio con i suoi retry), ma finita: qui non gira
+# mai un turno LLM: quello parte dal bus e si prende il proprio lock "turn".
+#
+# Il long-poll di ``getUpdates`` NON è coperto, ed è una scelta: l'attesa è
+# inattiva per costruzione e dura fino a ``poll_timeout_s`` (50s di default),
+# quindi un lock che la copra sarebbe tenuto ~sempre — cioè la modalità
+# "always" travestita da "turns". Il costo è che a schermo spento un messaggio
+# Telegram può restare in coda finché il device non si sveglia da solo; il
+# rimedio è il risveglio programmato, non il wakelock.
+_TELEGRAM_WAKELOCK_TIMEOUT_S = 180.0
 
 # Estensioni inviabili come foto (anteprima nativa Telegram); tutto il resto
 # (SVG, PDF, ecc.) va come documento. Cap prudente sotto il limite Bot API.
@@ -173,7 +187,12 @@ class TelegramChannel:
                     if isinstance(update_id, int):
                         self._offset = update_id + 1
                     try:
-                        await self._handle_update(update)
+                        # Il lock si prende qui, per-update, e non attorno a
+                        # ``get_updates``: vedi _TELEGRAM_WAKELOCK_TIMEOUT_S.
+                        async with keep_awake(
+                            "telegram", timeout_s=_TELEGRAM_WAKELOCK_TIMEOUT_S
+                        ):
+                            await self._handle_update(update)
                     except Exception:
                         logger.exception("Telegram: error handling update")
             except asyncio.CancelledError:

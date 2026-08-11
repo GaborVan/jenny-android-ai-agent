@@ -24,6 +24,7 @@ from jenny.cron.session_turns import CRON_HISTORY_META
 from jenny.providers.base import LLMProvider
 from jenny.session.keys import UNIFIED_SESSION_KEY
 from jenny.session.manager import Session, SessionManager
+from jenny.session.turn_visibility import resolve_turn_visibility
 from jenny.utils.helpers import strip_think, truncate_text
 from jenny.utils.llm_runtime import LLMRuntime
 from jenny.webui.metadata import WEBUI_DEFAULT_CHAT_ID
@@ -57,6 +58,15 @@ def webui_view_target(ctx: RuntimeEventContext) -> tuple[str, str] | None:
     interni (cron, dream, heartbeat) e le sessioni non unificate non hanno
     proiezione.
     """
+    # Il canale d'origine non basta a decidere: un heartbeat o un cron monitor
+    # gira *su* ``websocket:default`` — è il target a cui potrà consegnare se la
+    # condizione scatta — ma nessuno dei suoi marcatori di turno (spinner,
+    # ``_turn_end``) appartiene alla conversazione dell'utente. Il discrimine è
+    # la visibilità del turno, non il canale.
+    if resolve_turn_visibility(
+        ctx.metadata, channel=ctx.channel, session_key=ctx.session_key
+    ).silent:
+        return None
     if ctx.channel == "websocket":
         return (ctx.channel, ctx.chat_id)
     if ctx.channel == INTERNAL_CHANNEL or ctx.session_key != UNIFIED_SESSION_KEY:

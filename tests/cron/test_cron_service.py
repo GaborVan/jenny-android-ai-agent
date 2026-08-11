@@ -5,7 +5,7 @@ import time
 import pytest
 
 from jenny.cron.service import CronJobSkippedError, CronService
-from jenny.cron.types import CronJob, CronPayload, CronSchedule
+from jenny.cron.types import CronJob, CronJobSilencedError, CronPayload, CronSchedule
 
 
 async def _wait_until(predicate, *, timeout: float = 1.0, interval: float = 0.01) -> None:
@@ -277,6 +277,134 @@ async def test_run_history_records_skipped_jobs(tmp_path) -> None:
     assert len(loaded.state.run_history) == 1
     assert loaded.state.run_history[0].status == "skipped"
     assert loaded.state.run_history[0].error == "missing session binding"
+
+
+@pytest.mark.asyncio
+async def test_a_monitor_that_stayed_quiet_is_recorded_as_silenced_not_failed(tmp_path) -> None:
+    """Un monitor che tace è un esito riuscito: ``silenced``, senza ``last_error``."""
+    store_path = tmp_path / "cron" / "jobs.json"
+
+    async def silent(_):
+        raise CronJobSilencedError("nothing to report")
+
+    service = CronService(store_path, on_job=silent)
+    job = service.add_job(
+        name="monitor",
+        schedule=CronSchedule(kind="every", every_ms=60_000),
+        message="check the inbox",
+        mode="monitor",
+        **_bound_chat(),
+    )
+    await service.run_job(job.id)
+
+    loaded = service.get_job(job.id)
+    assert loaded is not None
+    assert loaded.state.last_status == "silenced"
+    assert loaded.state.last_error is None
+    assert len(loaded.state.run_history) == 1
+    assert loaded.state.run_history[0].status == "silenced"
+    assert loaded.state.run_history[0].error is None
+    # Il job resta armato: tacere non è un motivo per smettere di controllare.
+    assert loaded.enabled is True
+    assert loaded.state.next_run_at_ms is not None
+
+
+@pytest.mark.asyncio
+async def test_silence_clears_the_error_left_by_the_previous_failed_run(tmp_path) -> None:
+    """Il giro silenzioso deve azzerare ``last_error``, non ereditarlo dal giro rotto.
+
+    Senza la pulizia, un monitor sano continuerebbe a mostrare per sempre
+    l'errore di un ciclo precedente e sembrerebbe guasto.
+    """
+    store_path = tmp_path / "cron" / "jobs.json"
+    outcomes: list[Exception | None] = [RuntimeError("provider down"), CronJobSilencedError()]
+
+    async def flaky(_):
+        outcome = outcomes.pop(0)
+        if outcome is not None:
+            raise outcome
+
+    service = CronService(store_path, on_job=flaky)
+    job = service.add_job(
+        name="monitor",
+        schedule=CronSchedule(kind="every", every_ms=60_000),
+        message="check the inbox",
+        mode="monitor",
+        **_bound_chat(),
+    )
+
+    await service.run_job(job.id)
+    failed = service.get_job(job.id)
+    assert failed is not None and failed.state.last_error == "provider down"
+
+    await service.run_job(job.id)
+    quiet = service.get_job(job.id)
+    assert quiet is not None
+    assert quiet.state.last_status == "silenced"
+    assert quiet.state.last_error is None
+    assert [r.status for r in quiet.state.run_history] == ["error", "silenced"]
+
+
+def test_add_job_refuses_a_mode_it_cannot_execute(tmp_path) -> None:
+    """Un modo ignoto da un chiamante vivo è un bug del chiamante: si solleva."""
+    service = CronService(tmp_path / "cron" / "jobs.json")
+
+    with pytest.raises(ValueError, match="unknown cron mode 'telepathy'"):
+        service.add_job(
+            name="weird",
+            schedule=CronSchedule(kind="every", every_ms=60_000),
+            message="hello",
+            mode="telepathy",  # type: ignore[arg-type]
+            **_bound_chat(),
+        )
+
+    assert service.list_jobs(include_disabled=True) == []
+
+
+def test_omitting_the_mode_creates_a_reminder_without_complaining(tmp_path) -> None:
+    """Il default omesso non deve mai sollevare: è il caso del 99% dei chiamanti."""
+    service = CronService(tmp_path / "cron" / "jobs.json")
+
+    job = service.add_job(
+        name="plain",
+        schedule=CronSchedule(kind="every", every_ms=60_000),
+        message="hello",
+        **_bound_chat(),
+    )
+
+    assert job.payload.mode == "reminder"
+
+
+def test_add_job_accepts_monitor_mode(tmp_path) -> None:
+    service = CronService(tmp_path / "cron" / "jobs.json")
+
+    job = service.add_job(
+        name="watcher",
+        schedule=CronSchedule(kind="every", every_ms=60_000),
+        message="check the inbox",
+        mode="monitor",
+        **_bound_chat(),
+    )
+
+    assert job.payload.mode == "monitor"
+
+
+def test_mode_must_be_passed_by_keyword(tmp_path) -> None:
+    """``mode`` è keyword-only: un positional in più non deve finirci dentro."""
+    service = CronService(tmp_path / "cron" / "jobs.json")
+
+    with pytest.raises(TypeError):
+        service.add_job(
+            "positional",
+            CronSchedule(kind="every", every_ms=60_000),
+            "hello",
+            False,
+            "websocket:chat-1",
+            "websocket",
+            "chat-1",
+            {},
+            "monitor",  # type: ignore[misc]
+        )
 
 
 @pytest.mark.asyncio

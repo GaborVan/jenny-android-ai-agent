@@ -17,6 +17,22 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- CPU accesa durante un turno dell'agente. Il foreground service NON tiene
+         un wakelock: garantisce che il processo non venga ucciso, non che la CPU
+         resti alimentata. A schermo spento il kernel va in suspend e un turno a
+         metà (richiesta al provider, tool in corso, scrittura di memoria) resta
+         congelato lì. PowerBridge prende un PARTIAL_WAKE_LOCK, sempre con
+         timeout, per il tempo del turno. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Sveglie esatte che perforano il Doze (PowerBridge.scheduleWake): sono la
+         rete di sicurezza che rimette in piedi il gateway quando il processo è
+         stato ucciso a schermo spento. Permesso "normale" fino ad Android 11 e
+         concedibile — revocabile — dall'utente da Android 12: quando manca,
+         scheduleWake ricade su una sveglia inesatta, che slitta ma scatta
+         comunque. NON si dichiara USE_EXACT_ALARM: è riservato a sveglie e
+         timer visibili all'utente, non è revocabile e farebbe rifiutare l'app
+         in review su Play. -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <!-- Disinstallazione dalla griglia App (InstalledAppsBridge.uninstallApp →
          ACTION_DELETE): da API 26 l'UninstallerActivity di sistema controlla
          questo permesso sul chiamante e, se manca, si chiude subito senza
@@ -40,7 +56,16 @@
         </intent>
     </queries>
 
+    <!-- `android:name` NON è opzionale qui: senza questa riga il sistema
+         istanzia la `Application` di default e `JennyApplication` non viene mai
+         creata — i suoi trigger opportunistici (ritorno della rete, app in
+         primo piano) e la messa in coda del lavoro periodico di WorkManager
+         diventerebbero codice morto che *sembra* una rete di sicurezza. È
+         l'unico punto d'ingresso che gira a OGNI creazione del processo,
+         comprese quelle in cui il sistema ci ha svegliati solo per consegnare
+         una broadcast. -->
     <application
+        android:name=".JennyApplication"
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
@@ -53,12 +78,34 @@
              già il sistema a tenere il task home fuori dai Recenti, mentre chi
              la usa come app normale restava senza la via di rientro standard —
              fuori dai Recenti e senza icona a portata di mano. -->
+        <!-- `configChanges` largo apposta: ogni configurazione NON elencata qui
+             ricrea l'activity, e la ricreazione distrugge la WebView — cioè la
+             SPA, con la vista corrente, lo scroll della chat, la mini-app
+             aperta e la connessione WebSocket. Non c'è `onSaveInstanceState`
+             che la rimetta a posto (`stateNotNeeded` è già dichiarato sopra: lo
+             stato non si salva per scelta).
+
+             Le voci aggiunte sono i cambi che sul Titan 2 capitano davvero a
+             app in primo piano: `uiMode` (tema scuro di sistema, anche quello
+             automatico all'alba/tramonto), `fontScale` (dimensione carattere),
+             `density`+`smallestScreenSize`+`screenLayout` (dimensione display),
+             `locale` (lingua).
+
+             Assorbirli senza ricreare è sicuro **perché nulla di nativo dipende
+             da quelle risorse**: `Theme.Jenny` è `Theme.AppCompat.Light`, non
+             DayNight, quindi `uiMode` non cambia nessun colore; i temi della
+             WebUI sono CSS puro (`data-theme` + `setThemeBars`) e non usano
+             `prefers-color-scheme`; `activity_main.xml` scrive le sue tre
+             stringhe in chiaro e non referenzia nessun `@string`, quindi
+             `locale` non ha niente da ri-risolvere. La WebView, invece, il
+             `fontScale` lo riceve da sola (v. `loadWebView`: `textZoom` non
+             viene più forzato). -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTask"
             android:stateNotNeeded="true"
-            android:configChanges="orientation|screenSize|keyboardHidden">
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|uiMode|fontScale|density|locale">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -89,12 +136,52 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
-        <!-- Riavvio del gateway dopo reboot/blackout: uso da "server nel cassetto". -->
+        <!-- Riavvio del gateway dopo reboot/blackout/aggiornamento dell'APK:
+             uso da "server nel cassetto". Le azioni QUICKBOOT sono per le ROM
+             che al fast boot non emettono mai BOOT_COMPLETED; MY_PACKAGE_REPLACED
+             copre il caso in cui il gateway restava giù dopo un update finché
+             l'utente non riapriva l'app a mano. Vedi BootReceiver.kt. -->
         <receiver
             android:name=".BootReceiver"
             android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Destinatario delle sveglie di PowerBridge.scheduleWake. Non esportato:
+             l'unico a poterlo svegliare è l'AlarmManager con un PendingIntent
+             creato da noi, nessuna app di terze parti può farci ripartire.
+
+             L'intent-filter serve a una cosa sola: sapere quando l'utente
+             riconcede il permesso sulle sveglie esatte (API 31+). Alla revoca
+             l'AlarmManager scarta le sveglie esatte in coda SENZA alcuna
+             callback, quindi ogni catena (watchdog, cron) muore in silenzio; al
+             ri-consenso nulla riparte da solo.
+
+             Il filtro resta, ma NON è la rete: sul Titan 2 (Android 16) la
+             concessione del permesso non ha prodotto alcuna consegna, e la
+             cura vera è il ricontrollo di WakeReceiver.syncExactAlarmState, che
+             non dipende da nessuna broadcast. Qui si tiene perché costa una
+             riga e sulle ROM dove la broadcast arriva fa risparmiare l'attesa
+             del prossimo foreground.
+
+             `exported="false"` NON è la causa di quella mancata consegna, ed è
+             la prima cosa che verrebbe voglia di cambiare: BootReceiver, non
+             esportato allo stesso modo, riceve regolarmente BOOT_COMPLETED dal
+             sistema su questo stesso telefono. Esportarlo, invece, avrebbe un
+             costo reale: WakeReceiver smista sull'extra EXTRA_REQUEST_CODE, e
+             un'app qualunque potrebbe fabbricarne uno per far scattare il ramo
+             che preferisce — ri-armare catene, prendere il wakelock di handoff,
+             far ripartire il gateway a comando. Resta false. -->
+        <receiver
+            android:name=".WakeReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED" />
             </intent-filter>
         </receiver>
 

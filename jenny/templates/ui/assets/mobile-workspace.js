@@ -7,6 +7,7 @@ import { i18n } from './shared/i18n.js';
 import { currentTheme } from './shared/theme.js';
 import { advancedMode } from './shared/advanced-mode.js';
 import { openImageLightbox } from './shared/image-lightbox.js';
+import { setupLongPress } from './shared/longpress.js';
 
 const CM_THEMES = { dark: 'darcula', light: 'eclipse' };
 
@@ -158,9 +159,19 @@ export class WorkspaceController {
     // Object URL delle thumbnail correnti, revocati a ogni re-render della
     // griglia per non accumulare blob in memoria.
     this._thumbUrls = [];
+    // Buffer dell'editor modificato e non salvato. Il segnale esisteva già
+    // (la classe `dirty` sul pulsante Salva) ma viveva solo nel DOM: nessun
+    // percorso di uscita lo leggeva, e il testo modificato finiva in un viewer
+    // nascosto irraggiungibile, sovrascritto alla riapertura del file.
+    this._dirty = false;
 
     this.ready = this.init();
-    window.addEventListener('advancedmodechange', () => this.navigateTo(this.currentDir));
+    // Solo il contenuto della griglia dipende dalla modalità avanzata: qui ci
+    // va un ridisegno, non una navigazione. navigateTo forza
+    // viewMode = 'explorer' e smonterebbe un editor aperto scavalcando il
+    // guard sul buffer sporco. (Il gemello in mobile-apps.js aggancia lo
+    // stesso evento a render(), che è davvero solo un ridisegno.)
+    window.addEventListener('advancedmodechange', () => this.refreshGrid());
   }
 
   showLoading() {
@@ -187,8 +198,115 @@ export class WorkspaceController {
     this._syncHeaderBack();
   }
 
+  /* Tasto Home: collassa alla radice anche *dentro* la sezione. Senza questo
+     l'editor resta montato — `activate()` lo ripropone fedelmente al rientro —
+     e la griglia riapre l'ultima sottocartella invece della radice: Home
+     smontava gli overlay e lasciava intatto il sotto-stato di sezione.
+
+     L'eccezione è il buffer sporco. Home non è una richiesta di buttare via il
+     lavoro, e una conferma che spunta *sopra* la schermata home chiederebbe di
+     un file che non è più a schermo: l'editor resta dov'è, con dentro quello
+     che c'era. Il guard di `_closeEditor` copre comunque tutte le uscite vere. */
+  collapseToRoot() {
+    if (this.viewMode === 'editor') {
+      if (this._dirty) return;
+      // La sezione d'origine non c'entra più: si va a casa, non si torna
+      // indietro. Azzerarlo prima evita che _closeEditor navighi nella history.
+      this._returnMode = null;
+      this._closeEditor({ dir: '' });
+      return;
+    }
+    if (this.currentDir) this.navigateTo('');
+  }
+
   deactivate() {
-    // Cleanup
+    /* `_returnMode` descrive *da dove* si è entrati nell'editor, e vale solo
+       finché quel percorso è ancora nello stack. Uscendo dalla sezione con
+       l'editor aperto il flag restava valorizzato: al rientro la prima
+       pressione di Indietro chiudeva l'editor *e* portava fuori dalla sezione
+       — due cambiamenti visibili per una pressione, con la sezione d'origine
+       nel frattempo cambiata sotto. La sua entry non è più dove il flag
+       promette che sia: si azzera qui. */
+    this._returnMode = null;
+  }
+
+  /* Tasto Indietro hardware, invocato dalla shell prima di toccare la history.
+     Ritorna true se la pressione è stata consumata qui dentro. */
+  handleBack() {
+    if (this.viewMode === 'editor') {
+      return this._closeEditor({ hardwareBack: true });
+    }
+    if (this.currentDir) {
+      this.navigateTo(parentPath(this.currentDir));
+      return true;
+    }
+    return false;
+  }
+
+  /** Unico punto di smontaggio dell'editor: ci passano il back hardware, la
+   *  freccia ← dell'header, i crumb del breadcrumb e qualunque reset esterno
+   *  (Home). È unico apposta: il guard sul buffer sporco vale solo se non
+   *  esiste una seconda strada — e prima ce n'erano due che non lo guardavano
+   *  affatto.
+   *
+   *  `dir` è la cartella su cui atterrare (i crumb ne scelgono una precisa);
+   *  null lascia decidere l'origine dell'editor.
+   *
+   *  Ritorna true se la pressione è stata consumata qui dentro:
+   *   - buffer sporco → la conferma è a schermo, l'editor resta aperto e la
+   *     pressione è comunque consumata (il cambiamento visibile è il dialog);
+   *   - editor aperto dall'explorer → chiuso, pressione consumata;
+   *   - editor aperto da un'altra sezione (Apps → modifica skill) con
+   *     `hardwareBack` → false: la entry di quella sezione è già nello stack e
+   *     il back ci torna da sé, mentre uno switchMode impilerebbe una entry
+   *     *in avanti* mentre si sta andando indietro. Senza `hardwareBack`
+   *     (freccia dell'header) nessuno naviga al posto nostro: si torna là a
+   *     mano. */
+  _closeEditor({ hardwareBack = false, dir = null } = {}) {
+    if (this.viewMode !== 'editor') return false;
+
+    if (this._dirty) {
+      this._confirmDiscard({ dir });
+      return true;
+    }
+
+    const ret = this._returnMode;
+    this._returnMode = null;
+    this._resetToExplorerAt(dir !== null ? dir : (ret ? '' : this.currentDir));
+    if (!ret) return true;
+    if (hardwareBack) return false;
+    // Si *torna* alla sezione d'origine, non ci si va: la sua entry è già nello
+    // stack, sotto quella dell'editor. `switchMode(ret)` (push di default) ne
+    // impilava una in avanti mentre si va indietro — l'opposto del back
+    // hardware, che qui ritorna false apposta per non impilare — e lasciava
+    // dietro una pressione di Indietro che non cambia niente a schermo.
+    window.mobileApp?.navigateBack(ret);
+    return true;
+  }
+
+  /** Conferma di scarto delle modifiche non salvate; alla risposta affermativa
+   *  ripassa dallo stesso teardown, stavolta con il buffer pulito.
+   *
+   *  La chiusura differita non è mai `hardwareBack`: la pressione che l'ha
+   *  aperta è stata consumata dal dialog e nessuno naviga più al posto nostro,
+   *  quindi tornare alla sezione d'origine tocca a noi. */
+  async _confirmDiscard({ dir = null } = {}) {
+    /* La tastiera software va fatta scendere *prima* della modale. Un <dialog>
+       chiuso ripristina il fuoco all'elemento che ce l'aveva prima — qui
+       l'input di CodeMirror — e con quello risale l'IME: la pressione di
+       Indietro successiva se la mangia la tastiera per richiudersi, e a schermo
+       non cambia niente. Una pressione a vuoto in mezzo alla sequenza, cioè
+       proprio ciò che la catena esiste per evitare.
+
+       Trovato solo sul dispositivo (Titan 2): nel log di ImeTracker si vede
+       `onShown` scattare subito dopo la chiusura del dialog. Nessun test sul
+       sorgente poteva vederlo. */
+    this.editor?.getInputField?.()?.blur();
+    const confirmed = await confirmDialog(i18n.t('workspace.discardConfirm'));
+    if (!confirmed) return;
+    if (this.viewMode !== 'editor') return;  // uscito da un altro percorso nel frattempo
+    this._dirty = false;
+    this._closeEditor({ dir });
   }
 
   // ── Navigation ──
@@ -212,6 +330,27 @@ export class WorkspaceController {
       const sub = this.emptyEl.querySelector('.ws-empty-sub');
       if (sub) sub.textContent = i18n.t('workspace.failedToLoad') + err.message;
       this.emptyEl.style.display = '';
+    }
+  }
+
+  /** Ridisegno del contenuto della cartella corrente e basta: nessun cambio di
+   *  viewMode, nessun breadcrumb riscritto. Serve a chi vuole solo rileggere
+   *  la cartella (cambio di modalità avanzata) senza smontare ciò che c'è
+   *  sopra. Condivide `_navToken` con navigateTo: vince sempre l'ultima
+   *  richiesta partita, come per le navigazioni. */
+  async refreshGrid() {
+    const token = ++this._navToken;
+    try {
+      const data = await api.listWorkspace(this.currentDir);
+      if (token !== this._navToken) return;
+      this.renderGrid(data.items || []);
+    } catch (err) {
+      if (token !== this._navToken) return;
+      /* Non c'è stata navigazione, quindi la griglia resta com'è — ma il
+         fallimento va detto lo stesso: `navigateTo`, il percorso che questo
+         rimpiazza, lo mostrava, e un aggiornamento che non aggiorna niente in
+         silenzio è indistinguibile da uno riuscito. */
+      showToast(i18n.t('workspace.failedToLoad') + err.message, 'error');
     }
   }
 
@@ -328,16 +467,24 @@ export class WorkspaceController {
       `<div class="ws-item-name">${escapeHtml(item.name)}</div>`;
 
     el.addEventListener('click', (e) => {
+      // Il tap sintetico che segue il long-press non deve navigare nella
+      // cartella *sotto* lo sheet appena aperto: il flag lo posa
+      // setupLongPress, qui lo si consuma.
+      if (el.dataset.longpress) { delete el.dataset.longpress; return; }
       if (e.target.closest('.ws-item-menu')) return;
       this.navigateTo(itemPath);
     });
 
-    this._setupLongPress(el, () => {
+    setupLongPress(el, () => {
       this.showContextSheet({ path: itemPath, kind: 'dir', name: item.name });
     });
 
     el.querySelector('.ws-item-menu').addEventListener('click', (e) => {
       e.stopPropagation();
+      // Il click sul menu non arriva al listener della cella (stopPropagation):
+      // il flag di un long-press iniziato qui sopra va consumato lo stesso, o
+      // ingoierebbe il tap successivo.
+      delete el.dataset.longpress;
       this.showContextSheet({ path: itemPath, kind: 'dir', name: item.name });
     });
 
@@ -361,16 +508,20 @@ export class WorkspaceController {
       `<div class="ws-item-name">${escapeHtml(item.name)}</div>`;
 
     el.addEventListener('click', (e) => {
+      // Come per le cartelle: il tap sintetico del long-press aprirebbe il file
+      // sotto lo sheet appena comparso.
+      if (el.dataset.longpress) { delete el.dataset.longpress; return; }
       if (e.target.closest('.ws-item-menu')) return;
       this.openFile(itemPath, ext);
     });
 
-    this._setupLongPress(el, () => {
+    setupLongPress(el, () => {
       this.showContextSheet({ path: itemPath, kind: 'file', name: item.name });
     });
 
     el.querySelector('.ws-item-menu').addEventListener('click', (e) => {
       e.stopPropagation();
+      delete el.dataset.longpress;
       this.showContextSheet({ path: itemPath, kind: 'file', name: item.name });
     });
 
@@ -399,31 +550,6 @@ export class WorkspaceController {
       });
       img.src = url;
     }).catch(() => { /* icona generica invariata */ });
-  }
-
-  _setupLongPress(el, callback) {
-    let timer = null;
-
-    const start = (e) => {
-      if (e.button !== undefined && e.button !== 0 && e.type !== 'touchstart') return;
-      timer = setTimeout(() => {
-        el.dataset.longpress = 'true';
-        callback(e);
-      }, 600);
-    };
-
-    const cancel = () => {
-      if (timer) {
-        clearTimeout(timer);
-        timer = null;
-      }
-    };
-
-    el.addEventListener('pointerdown', start);
-    el.addEventListener('pointerup', cancel);
-    el.addEventListener('pointermove', cancel);
-    el.addEventListener('pointerleave', cancel);
-    el.addEventListener('pointercancel', cancel);
   }
 
   // ── Context menu ──
@@ -466,9 +592,14 @@ export class WorkspaceController {
     });
 
     cancelBtn.onclick = closeSheet;
-    sheet.addEventListener('close', () => { cancelBtn.onclick = null; }, { once: true });
-    sheet.addEventListener('click', (e) => {
-      if (e.target === sheet) sheet.close();
+    // Ignora per un attimo il tap sintetico che segue il long-press, così non
+    // richiude subito dal backdrop lo sheet appena aperto (stessa finestra di
+    // grazia della sezione App).
+    const openedAt = Date.now();
+    sheet.onclick = (e) => { if (e.target === sheet && Date.now() - openedAt > 400) closeSheet(); };
+    sheet.addEventListener('close', () => {
+      cancelBtn.onclick = null;
+      sheet.onclick = null;
     }, { once: true });
 
     sheet.showModal();
@@ -529,6 +660,10 @@ export class WorkspaceController {
         try {
           await api.deleteWorkspace(path);
           if (this.currentPath === path || this.currentPath.startsWith(path + '/')) {
+            // Il file aperto è stato appena eliminato su richiesta esplicita:
+            // non c'è più niente da salvare, quindi niente conferma di scarto
+            // (il buffer si azzera qui, non si scavalca il teardown).
+            this._dirty = false;
             this.currentPath = '';
             this.backToExplorer();
             return;
@@ -584,6 +719,7 @@ export class WorkspaceController {
     // cross-view origin; callers that want "back" to leave the workspace
     // set _returnMode after awaiting this.
     this._returnMode = null;
+    this._dirty = false;
     this.currentPath = fullPath;
     this.viewMode = 'editor';
     this.renderBreadcrumb(this.currentDir, name);
@@ -666,9 +802,24 @@ export class WorkspaceController {
     this.backToExplorerAt(this.currentDir);
   }
 
+  /** Ingresso pubblico "torna all'explorer in questa cartella". Con un editor
+   *  aperto è un'uscita dall'editor come tutte le altre, quindi passa dal
+   *  teardown unico: i crumb del breadcrumb restano visibili durante la
+   *  modifica di un file, e prima portavano via il buffer sporco in silenzio. */
   backToExplorerAt(dirPath) {
+    if (this.viewMode === 'editor') {
+      this._closeEditor({ dir: dirPath });
+      return;
+    }
+    this._resetToExplorerAt(dirPath);
+  }
+
+  /** Smontaggio meccanico dell'editor, senza alcun guard: lo chiama solo
+   *  `_closeEditor`, che il guard l'ha già applicato. */
+  _resetToExplorerAt(dirPath) {
     this.currentPath = '';
     this.viewMode = 'explorer';
+    this._dirty = false;
     if (this.editor) {
       this.editor.toTextArea();
       this.editor = null;
@@ -687,6 +838,7 @@ export class WorkspaceController {
       const btn = document.querySelector('.ws-save-btn');
       if (btn) btn.disabled = true;
       await api.writeWorkspaceFile(this.currentPath, content);
+      this._dirty = false;
       if (btn) { btn.textContent = i18n.t('workspace.saved'); btn.classList.remove('dirty'); }
       setTimeout(() => { if (btn) btn.textContent = i18n.t('workspace.save'); }, 2000);
     } catch (err) {
@@ -730,6 +882,7 @@ export class WorkspaceController {
       'Cmd-S': () => this.saveFile(),
     });
     this.editor.on('change', () => {
+      this._dirty = true;
       const btn = document.querySelector('.ws-save-btn');
       if (btn) { btn.textContent = i18n.t('workspace.save'); btn.disabled = false; btn.classList.add('dirty'); }
     });
@@ -762,14 +915,9 @@ export class WorkspaceController {
         break;
       case 'ws-back':
         if (this.viewMode === 'editor') {
-          if (this._returnMode) {
-            const ret = this._returnMode;
-            this._returnMode = null;
-            this.backToExplorerAt('');  // reset editor state (root explorer)
-            window.mobileApp?.switchMode(ret);
-          } else {
-            this.backToExplorer();
-          }
+          // Stesso teardown del back hardware: il guard sul buffer sporco è
+          // uno solo, e da qui nessuno naviga al posto nostro.
+          this._closeEditor();
         } else if (this.currentDir) {
           this.navigateTo(parentPath(this.currentDir));
         }
@@ -806,9 +954,13 @@ export class WorkspaceController {
     });
 
     cancelBtn.onclick = closeSheet;
-    sheet.addEventListener('close', () => { cancelBtn.onclick = null; }, { once: true });
-    sheet.addEventListener('click', (e) => {
-      if (e.target === sheet) sheet.close();
+    // Stessa finestra di grazia dello sheet contestuale: il menu "Nuovo" non
+    // nasce da un long-press, ma condivide il <dialog> e quindi il percorso.
+    const openedAt = Date.now();
+    sheet.onclick = (e) => { if (e.target === sheet && Date.now() - openedAt > 400) closeSheet(); };
+    sheet.addEventListener('close', () => {
+      cancelBtn.onclick = null;
+      sheet.onclick = null;
     }, { once: true });
 
     sheet.showModal();

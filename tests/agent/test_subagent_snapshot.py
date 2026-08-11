@@ -420,3 +420,71 @@ async def test_publishing_failure_never_kills_the_subagent(tmp_path: Path) -> No
     assert "started" in result
     await asyncio.gather(*mgr._running_tasks.values(), return_exceptions=True)
     mgr._announce_result.assert_awaited_once()
+
+
+# --- proiezione in chat: solo per un'origine visibile -------------------------
+#
+# Uno snapshot pushato è ciò che alimenta il pannello e il blocco "cosa ha fatto
+# davvero" nella chat. Un subagent lanciato da un heartbeat o da un cron monitor
+# è lavoro interno tanto quanto il turno che lo ha lanciato: annunciarlo in chat
+# è la stessa violazione della risposta finale, vista da un'altra uscita.
+# Misurato sul dispositivo: un ciclo heartbeat silenzioso lasciava comunque il
+# chip "What it actually did waterbot-umidita-check" nella conversazione.
+
+
+def _spec_for(session_key: str, *, channel: str = "websocket") -> SubagentSpec:
+    return SubagentSpec(
+        task="controlla l'umidità",
+        label="waterbot-umidita-check",
+        agent_type="sysadmin",
+        origin_channel=channel,
+        origin_chat_id="default",
+        session_key=session_key,
+    )
+
+
+def test_a_visible_origin_still_gets_its_status_pushed(tmp_path: Path) -> None:
+    mgr = _manager(tmp_path)
+
+    mgr._publish_status_snapshot(_spec_for("unified:default"))
+
+    frames = _drain(mgr.bus)
+    assert len(frames) == 1
+    assert OUTBOUND_META_SUBAGENT_STATUS in frames[0].metadata
+
+
+def test_an_internal_origin_pushes_nothing(tmp_path: Path) -> None:
+    mgr = _manager(tmp_path)
+
+    mgr._publish_status_snapshot(_spec_for("heartbeat"))
+
+    assert _drain(mgr.bus) == []
+
+
+def test_a_monitor_origin_pushes_nothing(tmp_path: Path) -> None:
+    mgr = _manager(tmp_path)
+
+    mgr._publish_status_snapshot(_spec_for("cron:job-m"))
+
+    assert _drain(mgr.bus) == []
+
+
+def test_an_internal_origin_publishes_no_transition_hint(tmp_path: Path) -> None:
+    """La riga "subagent done: <label>" è progress, e il progress di un turno
+    silenzioso non appartiene alla conversazione."""
+    mgr = _manager(tmp_path)
+
+    mgr._publish_transition(_spec_for("heartbeat"), "done", "waterbot-umidita-check")
+
+    assert _drain(mgr.bus) == []
+
+
+def test_a_visible_origin_keeps_its_transition_hint(tmp_path: Path) -> None:
+    mgr = _manager(tmp_path)
+
+    mgr._publish_transition(_spec_for("unified:default"), "done", "job")
+
+    frames = _drain(mgr.bus)
+    hints = [f for f in frames if f.metadata.get("_tool_hint") is True]
+    assert len(hints) == 1
+    assert "job" in hints[0].content

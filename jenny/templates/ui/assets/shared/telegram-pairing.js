@@ -9,6 +9,7 @@
 import { api } from './api-client.js';
 import { escapeHtml, showToast } from './utils.js';
 import { i18n } from './i18n.js';
+import { batteryExemptionHtml, wireBatteryExemption } from './battery-exemption.js';
 
 const POLL_MS = 2500;
 
@@ -24,23 +25,38 @@ export class TelegramPairingWidget {
     this.status = null;
     this._pollTimer = null;
     this._busy = false;
+    /* Lapide del widget. `destroy()` fermava solo il timer *già acceso*: se il
+       widget veniva congedato mentre `refresh()` era sospeso sulla sua fetch,
+       la continuazione ripartiva dopo, chiamava `render()` e accendeva il
+       polling **dopo** che il proprietario aveva lasciato cadere il
+       riferimento. Da lì in poi l'oggetto viveva solo per la closure
+       dell'intervallo — irraggiungibile, non più fermabile — e interrogava il
+       gateway ogni 2,5 s per sempre, uno per ogni giro di andata e ritorno
+       nelle impostazioni. */
+    this._destroyed = false;
   }
 
   destroy() {
+    this._destroyed = true;
     this._stopPolling();
   }
 
   async refresh() {
+    let status;
     try {
-      this.status = await api.getTelegramStatus();
+      status = await api.getTelegramStatus();
     } catch (e) {
+      if (this._destroyed) return;
       this.el.innerHTML = `<div class="onboarding-hint">${escapeHtml(e.message || 'error')}</div>`;
       return;
     }
+    if (this._destroyed) return;
+    this.status = status;
     this.render();
   }
 
   render() {
+    if (this._destroyed) return;
     this._stopPolling();
     const s = this.status;
     if (!s) return;
@@ -128,9 +144,15 @@ export class TelegramPairingWidget {
   }
 
   _startPolling() {
+    // Ultimo cancello prima di accendere un timer che nessuno potrebbe più
+    // spegnere: `render()` può arrivare da una continuazione nata prima del
+    // congedo.
+    if (this._destroyed) return;
     this._pollTimer = setInterval(async () => {
+      if (this._destroyed) { this._stopPolling(); return; }
       try {
         const s = await api.getTelegramStatus();
+        if (this._destroyed) { this._stopPolling(); return; }
         if (s.paired) {
           this.status = s;
           this._stopPolling();
@@ -174,29 +196,17 @@ export class TelegramPairingWidget {
     if (unpairBtn) unpairBtn.addEventListener('click', () => this._unpair());
     const disableBtn = this.el.querySelector('#tg-disable');
     if (disableBtn) disableBtn.addEventListener('click', () => this._disable());
-    const batteryBtn = this.el.querySelector('#tg-battery');
-    if (batteryBtn) {
-      batteryBtn.addEventListener('click', () => {
-        window.JennyNative.requestBatteryExemption();
-      });
-    }
+    wireBatteryExemption(this.el);
   }
 
-  /* Solo nella WebView Android e solo se l'esenzione manca: senza, a telefono
-     scollegato dalla corrente il doze rallenta il long-poll Telegram. */
+  /* Stessa card condivisa delle impostazioni e dell'onboarding, ma con il
+     copy specifico del canale: qui il doze si vede come risposta che tarda,
+     non come cron che slitta. Tono `hint` = la riga piccola di prima. */
   _batteryHtml() {
-    const native = window.JennyNative;
-    if (!native || typeof native.isBatteryExempt !== 'function') return '';
-    try {
-      if (native.isBatteryExempt()) return '';
-    } catch (_) { return ''; }
-    return `
-      <p class="onboarding-hint">${i18n.t('settings.telegram.batteryHint')}</p>
-      <div class="onboarding-nav">
-        <button class="onboarding-btn onboarding-btn-secondary" id="tg-battery">
-          ${i18n.t('settings.telegram.batteryButton')}
-        </button>
-      </div>`;
+    return batteryExemptionHtml({
+      hintKey: 'settings.telegram.batteryHint',
+      buttonKey: 'settings.telegram.batteryButton',
+    });
   }
 
   async _unpair() {

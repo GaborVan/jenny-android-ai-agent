@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from jenny.agent.turn_types import TurnOutcome
 from jenny.config.schema import AgentDefaults
 from jenny.providers.base import LLMResponse, ToolCallRequest
 
@@ -756,9 +757,9 @@ async def test_submitted_cron_turn_reports_pending_until_completed(tmp_path):
         chat_id="chat-1",
         content="done",
     )
-    loop._cron_turns.complete(msg, response=response)
+    loop._cron_turns.complete(msg, outcome=TurnOutcome.delivered(response))
 
-    assert await asyncio.wait_for(submit_task, timeout=0.5) is response
+    assert (await asyncio.wait_for(submit_task, timeout=0.5)).message is response
     assert loop.pending_cron_job_ids_for_session(session_key) == set()
 
 

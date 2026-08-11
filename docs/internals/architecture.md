@@ -156,7 +156,7 @@ Defaults (all relative to the workspace root unless noted):
 | Workspace | `<filesDir>/workspace` (Android) |
 | Sessions | `<workspace>/sessions/*.jsonl` |
 | Memory | `<workspace>/memory/` (`MEMORY.md`, `history.jsonl`) |
-| Cron store | `<workspace>/cron/jobs.json` |
+| Cron store | `<workspace>/cron/jobs.json`, with `jobs.json.bak` refreshed before every save. An unreadable store falls back to the backup, then to an empty list, recording which on `RuntimeContext` so Settings can say so; it only refuses to start when the broken file cannot be moved aside |
 | Uploads (chat attachments) | `<workspace>/uploads/` |
 | Runtime data (media, WebUI display threads) | `<workspace>/.jenny/` (`media/`, `webui/`) — migrated automatically from the legacy `.minijenny/`/`.nanobot/` names if found. Runtime logs are **not** written here; they only live in the in-memory ring buffer the `get_recent_logs` tool reads (see Tools below) |
 | Snapshots (workspace version history) | Sibling of the workspace directory, so a restore's atomic swap doesn't take snapshot history with it |

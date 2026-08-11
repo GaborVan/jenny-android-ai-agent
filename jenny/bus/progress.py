@@ -14,6 +14,22 @@ from jenny.bus.events import InboundMessage, OutboundMessage
 from jenny.bus.queue import MessageBus
 
 
+def build_silent_progress_callback() -> Callable[..., Awaitable[None]]:
+    """Callback di progress che non pubblica niente.
+
+    Serve ai turni silenziosi (:mod:`jenny.session.turn_visibility`): il progress
+    e' indirizzato alla chat d'origine e viene *persistito* nel transcript, quindi
+    un turno che promette silenzio non puo' installare quello del bus. Non basta
+    sopprimere l'outbound finale — le righe di attivita e i delta di reasoning
+    comparirebbero comunque in chat.
+    """
+
+    async def _drop(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    return _drop
+
+
 def build_bus_progress_callback(
     bus: MessageBus,
     msg: InboundMessage,

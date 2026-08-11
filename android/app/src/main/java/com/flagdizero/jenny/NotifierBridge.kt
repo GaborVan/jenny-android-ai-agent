@@ -32,9 +32,13 @@ class NotifierBridge(context: Context) {
         // (niente pila infinita per la stessa sorgente), tag diversi convivono.
         private const val ALERT_ID = 2
 
-        /** Cancella gli alert pendenti del canale (chiamato da MainActivity.onResume:
-         *  una volta aperta la chat gli alert sono ormai stantii). Non tocca la
-         *  notifica persistente del gateway, che vive su un altro canale. */
+        /** Cancella gli alert pendenti del canale. Lo chiama MainActivity dal
+         *  solo percorso in cui la chat viene davvero aperta (tap sull'alert,
+         *  ACTION_OPEN_CHAT), non da onResume: questa app è la home del
+         *  telefono e onResume scatta a ogni ritorno alla schermata iniziale,
+         *  su qualunque vista — cancellare lì voleva dire cancellare sempre.
+         *  Non tocca la notifica persistente del gateway, che vive su un altro
+         *  canale. */
         fun clearAlerts(context: Context) {
             val manager = context.getSystemService(NotificationManager::class.java) ?: return
             manager.activeNotifications
@@ -72,7 +76,13 @@ class NotifierBridge(context: Context) {
             return false
         }
         return try {
+            // L'action non è decorativa: è l'unica cosa che distingue questo
+            // intent da un rilancio qualunque dell'activity. Senza,
+            // MainActivity.onNewIntent — che instrada solo CATEGORY_HOME — non
+            // aveva niente da riconoscere e il tap riportava l'app dov'era,
+            // mini-app aperta compresa, invece che in chat.
             val intent = Intent(appContext, MainActivity::class.java)
+                .setAction(MainActivity.ACTION_OPEN_CHAT)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             val pending = PendingIntent.getActivity(
                 appContext,

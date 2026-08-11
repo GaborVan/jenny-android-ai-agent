@@ -8,10 +8,13 @@ import asyncio
 import os
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from websockets.http11 import Request as WsRequest
 from websockets.http11 import Response
+
+if TYPE_CHECKING:
+    from jenny.webui.wiki_search import WikiSearchService
 
 from jenny.channels.http_utils import (
     case_insensitive_header,
@@ -64,12 +67,27 @@ class WikiRoutes:
         check_api_token: Callable[[WsRequest], bool],
         get_workspace_root: Callable[[], Path],
         json_safe: Callable[[Any], Any],
+        search_service: "WikiSearchService | None" = None,
     ) -> None:
         self._check_api_token = check_api_token
         self._get_workspace_root = get_workspace_root
         self._json_safe = json_safe
+        # Collaboratore privato con stato: la cache grafo+indice vive quanto il
+        # gateway. Iniettabile perché i test devono poterla azzerare o
+        # sostituire senza passare dal composition root; costruito pigramente
+        # perché ``wiki_search`` tira dentro ``wiki`` e quindi ``markdown``, e
+        # questo ``__init__`` gira all'avvio del gateway — come tutti gli altri
+        # import di questo modulo, sta fuori dal cammino di boot.
+        self._search_service = search_service
 
     # -- helpers --
+
+    def _get_search_service(self) -> "WikiSearchService":
+        if self._search_service is None:
+            from jenny.webui.wiki_search import WikiSearchService
+
+            self._search_service = WikiSearchService()
+        return self._search_service
 
     def _get_wikis_dir(self) -> Path:
         from jenny.config.loader import load_config
@@ -148,22 +166,30 @@ class WikiRoutes:
         err = self._check_wiki_enabled()
         if err:
             return err
-        from jenny.webui.wiki import build_graph, build_home_graph, discover_wikis
+        from jenny.webui.wiki import build_home_graph, discover_wikis
 
         query = parse_query(request.path)
         wiki_name = query_first(query, "wiki") or ""
         wikis_dir = self._get_wikis_dir()
+        loop = asyncio.get_running_loop()
 
+        # Grafo e indice full-text viaggiano nella *stessa* risposta perché le
+        # postings dell'indice sono indici nell'array ``nodes`` qui sotto.
+        # Servirli da due endpoint aprirebbe la finestra in cui la wiki cambia
+        # fra le due chiamate: il client accenderebbe i nodi sbagliati.
         if wiki_name:
             wikis = discover_wikis(wikis_dir)
             if wiki_name not in wikis:
                 return http_error(404, "wiki not found")
-            wiki_root = wikis[wiki_name].parent
-            loop = asyncio.get_running_loop()
-            graph = await loop.run_in_executor(None, build_graph, wiki_root)
+            bundle = await loop.run_in_executor(
+                None, self._get_search_service().bundle, wikis[wiki_name]
+            )
+            graph = bundle.graph
+            search = bundle.search
         else:
-            loop = asyncio.get_running_loop()
+            # Vista home: nodi = wiki, non pagine. Non c'è testo da cercare.
             graph = await loop.run_in_executor(None, build_home_graph, wikis_dir)
+            search = None
 
         return http_json_response(
             {
@@ -179,6 +205,7 @@ class WikiRoutes:
                     for n in graph.nodes
                 ],
                 "edges": [{"source": e.source, "target": e.target} for e in graph.edges],
+                "search": search,
             }
         )
 

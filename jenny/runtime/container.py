@@ -235,14 +235,15 @@ class GatewayContainer:
         else:
             logger.info("Heartbeat: disabled")
 
-        # Cron dispatch: getter late-binding per agent/message_tool (riassegnati
+        # Cron dispatch: getter late-binding per l'agent (riassegnato
         # dall'onboarding), stesso contratto del vecchio closure on_cron_job.
+        # Non riceve più il ``message_tool`` né ``deliver_to_channel``: nessun job
+        # consegna più da fuori il turno — chi deve parlare all'utente chiama il
+        # tool ``message`` dentro il turno (vedi turn_visibility).
         self.cron.on_job = CronDispatcher(
             get_agent=lambda: self._agent,
             config=config,
             cron=self.cron,
-            get_message_tool=lambda: self._message_tool,
-            deliver_to_channel=self._deliver_to_channel,
             heartbeat_cfg=hb_cfg,
             snapshot_before_dream=self._snapshot_before_dream,
         ).dispatch
@@ -364,6 +365,32 @@ class GatewayContainer:
                 # migrazione in memoria è già applicata, si riproverà al
                 # prossimo boot.
                 logger.opt(exception=True).warning("Could not persist config schema version")
+            # Wakelock di servizio (solo con power.keepAwake = "always"): va
+            # chiesto qui, a config caricato e prima che cron/heartbeat comincino
+            # a contare sui propri timer. Fuori da Android è un no-op silenzioso.
+            from jenny.runtime.power import (
+                apply_alarm_clock_config,
+                apply_service_lock,
+                apply_watchdog_config,
+            )
+            await apply_service_lock()
+            # Watchdog: stessa logica e stesso momento del wakelock di servizio
+            # (config già caricato, timer non ancora armati). Va spinto anche
+            # quando è disattivato, per smontare una catena rimasta armata da un
+            # avvio precedente — vedi apply_watchdog_config.
+            await apply_watchdog_config()
+            # Ultima rete sotto il watchdog (sveglia da 8 ore a priorità
+            # massima). Anche questa va spinta a flag spento: solo un False
+            # esplicito cancella una sveglia già in coda, che altrimenti
+            # continuerebbe a mostrare l'icona nella barra di stato — vedi
+            # apply_alarm_clock_config.
+            await apply_alarm_clock_config()
+            # Buco di attività attraversato prima di questo avvio. Va misurato
+            # adesso e non più tardi: la fotografia lasciata da MainActivity è
+            # l'unico posto in cui il "prima" sopravvive alla morte del
+            # processo, e nessun altro la consuma.
+            from jenny.runtime.gap_history import record_startup_gap
+            await record_startup_gap()
             await self.cron.start()
             await self.snapshot.start()
             tasks = [self.channels.start()]

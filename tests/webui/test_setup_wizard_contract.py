@@ -1,0 +1,250 @@
+"""La configurazione guidata: quello che si digita non si perde, e da lì si esce.
+
+Quattro difetti con la stessa radice — il wizard tratta il proprio stato come
+se il tempo non passasse fra un render e l'altro:
+
+* ``_goToStep0`` cambiava step senza catturare i campi, quindi il pulsante
+  "Indietro" (e il tasto hardware, che ci finisce sopra) **cancellava nome
+  provider, chiave API e base URL appena digitati**. Il gemello
+  ``_goBackToStep1`` la cattura la faceva già: erano due funzioni sorelle con
+  due comportamenti diversi;
+* ``handleBack`` non guardava ``saving``: una pressione durante il salvataggio
+  rimetteva a schermo un form che non ha più effetto, e la continuazione di
+  ``_save()`` gli scriveva sopra lo step 3 un istante dopo;
+* ``_loadModels`` non aveva token: la risposta in ritardo scriveva nel DOM
+  dello step nuovo, o dal ramo d'errore riapriva il campo "modello
+  personalizzato" su un form che non ce l'ha;
+* il blocco del dock del primo avvio era **a senso unico**: ``grep -rn
+  nav-disabled`` dava due righe, una che aggiungeva la classe e una che la
+  leggeva, e nessuna che la togliesse — né toglieva ``pointer-events``,
+  l'opacità o la voce onboarding dal dock.
+
+In più il wizard non era riapribile: unica strada il ``first_run`` del gateway,
+e se quella lettura falliva il boot trattava l'ignoto come "onboarding già
+fatto" — cioè consumava il marcatore locale e portava in chat senza più alcun
+modo di tornare al wizard.
+
+Asserzioni sul sorgente, nello stile di ``test_back_navigation_contract.py``: la
+WebUI non ha un runner JS con DOM.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+ASSETS = ROOT / "jenny" / "templates" / "ui" / "assets"
+ONBOARDING_JS = ASSETS / "mobile-onboarding.js"
+APP_JS = ASSETS / "mobile-app.js"
+SETTINGS_JS = ASSETS / "mobile-settings.js"
+I18N = ASSETS / "i18n"
+
+
+def _method(source: str, name: str) -> str:
+    body = re.search(rf"\n  (?:async )?{name}\([^)]*\)\s*\{{(.*?)\n  \}}", source, re.S)
+    assert body, f"{name} non trovato"
+    return body.group(1)
+
+
+def _onboarding() -> str:
+    return ONBOARDING_JS.read_text(encoding="utf-8")
+
+
+def _app() -> str:
+    return APP_JS.read_text(encoding="utf-8")
+
+
+# ── #11 · i campi si catturano prima di cambiare step ────────────────────────
+
+
+def test_going_back_to_step_zero_keeps_what_was_typed() -> None:
+    """``_renderStep1`` ridisegna i campi *dallo stato*: ciò che non viene
+    travasato prima del cambio step non esiste più. Su una tastiera fisica una
+    chiave API è la cosa più scomoda da riscrivere, ed era la cosa che si
+    perdeva più spesso — il tasto Indietro dell'onboarding porta proprio lì."""
+    source = _onboarding()
+    step0 = _method(source, "_goToStep0")
+    assert "this._captureStep1()" in step0, (
+        "il back allo step 0 cancellava nome provider, chiave API e base URL"
+    )
+
+    capture = _method(source, "_captureStep1")
+    for field in ("#provider-name", "#api-key", "#api-base"):
+        assert field in capture, f"campo non catturato: {field}"
+    for target in ("this.providerName =", "this.apiKey =", "this.apiBase ="):
+        assert target in capture
+
+    # Avanti e indietro devono passare dallo stesso travaso: due copie
+    # divergerebbero come è già successo fra _goToStep0 e _goBackToStep1.
+    assert "this._captureStep1()" in _method(source, "_goToStep2")
+    for path in ("_goToStep0", "_goToStep2"):
+        assert "#api-key" not in _method(source, path), (
+            f"{path} rilegge i campi per conto suo: è così che nasce il ramo che se ne dimentica uno"
+        )
+
+
+# ── #16 · nessun cambio di step mentre la config sta partendo ────────────────
+
+
+def test_the_back_is_inert_while_the_configuration_is_being_saved() -> None:
+    """Durante ``_save()`` c'è l'overlay di caricamento a schermo e lo step
+    successivo è già deciso. La pressione si consuma senza fare niente: è
+    l'unico caso in cui "una pressione, nessun cambiamento" va bene, perché il
+    cambiamento è già in corso e visibile."""
+    back = _method(_onboarding(), "handleBack")
+    assert "if (this.saving) return true;" in back
+    assert back.index("if (this.saving) return true;") < back.index("this.step === 1"), (
+        "il guard deve stare in cima, prima di qualunque ramo che cambi step"
+    )
+
+
+# ── #23 · la fetch dei modelli sa di essere stata superata ───────────────────
+
+
+def test_a_late_model_list_does_not_write_into_the_next_step() -> None:
+    """Il token va controllato **in entrambi i rami**: il ramo d'errore non si
+    limita a scrivere una riga, chiama ``_showCustomModelField()``, che accende
+    uno stato del controller (``_showCustomModel``) e cerca un nodo che nello
+    step nuovo non c'è."""
+    source = _onboarding()
+    body = _method(source, "_loadModels")
+    assert "const token = ++this._modelsToken;" in body
+    guards = body.count("if (token !== this._modelsToken) return;")
+    assert guards == 2, f"il token è controllato {guards} volte invece di 2 (try e catch)"
+
+    try_part, catch_part = body.split("} catch", 1)
+    assert "if (token !== this._modelsToken) return;" in try_part
+    assert "if (token !== this._modelsToken) return;" in catch_part
+
+    # Chi esce dallo step 2 invalida la richiesta in volo, altrimenti il token
+    # resta valido e la risposta arriva comunque a destinazione.
+    for leaving in ("_goBackToStep1", "_goToStep0", "deactivate"):
+        assert "this._modelsToken++" in _method(source, leaving), (
+            f"{leaving} non invalida la fetch modelli in volo"
+        )
+
+
+# ── #17 / N17 · il blocco del dock si toglie con lo stesso interruttore ──────
+
+
+def test_the_first_run_lock_is_a_single_two_way_switch() -> None:
+    """Il blocco toccava quattro cose (classe, ``pointer-events``, opacità,
+    voce onboarding) e nessuna aveva un ramo che la rimettesse a posto. Un
+    blocco che non si sa togliere non è un blocco: è un danno che scade solo
+    per fortuna (il reload che seguiva l'onboarding)."""
+    source = _app()
+    setter = _method(source, "_setFirstRunLock")
+    assert "this._firstRun = !!on;" in setter, (
+        "il flag e l'aspetto del dock devono muoversi insieme: erano due verità separate"
+    )
+    assert "classList.toggle('nav-disabled', !!on)" in setter
+    assert "item.style.pointerEvents = on ? 'none' : '';" in setter
+    assert "item.style.opacity = on ? '0.4' : '';" in setter
+    assert "navOnb.style.display = on ? '' : 'none';" in setter
+
+    # Nessun altro punto può alzare o abbassare il blocco a mano: una sola
+    # scrittura (qui) e una sola lettura (_visibleModes, che salta le voci
+    # spente quando calcola i vicini per lo swipe fra tab).
+    assert source.count("'nav-disabled'") == 2, (
+        "'nav-disabled' è scritto fuori dal setter: torna il blocco a senso unico"
+    )
+    assert "classList.add('nav-disabled')" not in source
+    assert "contains('nav-disabled')" in _method(source, "_visibleModes")
+
+
+def test_every_completion_of_the_onboarding_releases_the_lock() -> None:
+    """Due percorsi mettono ``onboarding-complete`` mentre la pagina è viva: il
+    "Fatto" del wizard e il **ripristino da backup**. Il secondo può concludersi
+    senza ricaricare — il dialog di riavvio resta a schermo e si può rifiutare —
+    e lì il dock restava spento con l'onboarding dato per concluso da tutto il
+    resto."""
+    source = _onboarding()
+    for setter_call in re.finditer(r"localStorage\.setItem\('onboarding-complete'", source):
+        window = source[setter_call.start(): setter_call.start() + 600]
+        assert "_setFirstRunLock(false)" in window, (
+            "un percorso completa l'onboarding senza togliere il blocco del dock"
+        )
+
+
+# ── N25 · una strada permanente verso il wizard ──────────────────────────────
+
+
+def test_the_wizard_is_reachable_from_the_settings() -> None:
+    """Finora l'unica strada era il ``first_run`` del gateway al boot: una porta
+    che si apre da sé una volta sola e poi non c'è più."""
+    settings = SETTINGS_JS.read_text(encoding="utf-8")
+    assert "btn-rerun-onboarding" in settings
+    assert "this._wireBtn('btn-rerun-onboarding'" in settings, "il pulsante non è cablato"
+    rerun = _method(settings, "_rerunOnboarding")
+    assert "confirmDialog(i18n.t('settings.rerunOnboardingConfirm'))" in rerun, (
+        "rifare la configurazione non è un tap da subire per sbaglio"
+    )
+    assert "app.openOnboarding()" in rerun, (
+        "la sezione si apre dall'ingresso della shell, che mostra anche la voce del dock"
+    )
+
+    entry = _method(_app(), "openOnboarding")
+    assert "navOnb.style.display = '';" in entry, (
+        "senza la voce del dock la sezione resta a schermo senza un'ancora attiva"
+    )
+    assert "this.switchMode('onboarding')" in entry
+    assert "markRerun()" in entry
+
+
+def test_the_reopened_wizard_can_be_left_with_the_back() -> None:
+    """Al primo avvio dall'onboarding non si esce, ed è giusto: non c'è niente
+    sotto. Riaperto da Impostazioni invece c'è, ed è da lì che si è arrivati —
+    inchiodare l'utente nel wizard sarebbe un vicolo cieco creato da noi."""
+    source = _onboarding()
+    back = _method(source, "handleBack")
+    assert "this.step === 0 && this._rerun" in back
+    assert "return false;" in back, "senza il false la catena non prosegue e non si esce"
+    assert "return true;" in back, "al primo avvio (senza _rerun) la pressione si consuma sempre"
+    assert "markRerun()" in source
+
+    # E uscendone la voce del dock, mostrata solo per arrivarci, se ne va con lei.
+    deactivate = _method(source, "deactivate")
+    assert "if (this._rerun) {" in deactivate
+    assert "navOnb.style.display = 'none';" in deactivate
+
+
+def test_an_unreadable_settings_call_is_not_read_as_configured() -> None:
+    """Il ``catch`` del boot ingoiava tutto e proseguiva come se ``first_run``
+    fosse ``false``. Ma "non lo so" non è "onboarding già fatto": il ramo
+    successivo *consuma* il marcatore ``onboarding-complete``, quindi un errore
+    transitorio (gateway a metà avvio, token non ancora valido) lasciava una
+    Jenny senza provider e senza più alcuna strada verso il wizard."""
+    body = re.search(r"\n  async init\(\)\s*\{(.*?)\n  \}", _app(), re.S)
+    assert body, "init() non trovato"
+    init = body.group(1)
+
+    assert "let firstRunKnown = false;" in init
+    assert "firstRunKnown = true;" in init
+    assert re.search(r"if \(firstRunKnown && !this\._firstRun && localStorage\.getItem", init), (
+        "il ramo 'onboarding appena concluso' gira anche quando lo stato è ignoto"
+    )
+    # rsplit: il primo `catch (err)` di init() è quello di api.bootstrap(),
+    # l'ultimo è quello delle impostazioni — che è il ramo in discussione.
+    catch = init.rsplit("} catch (err) {", 1)
+    assert len(catch) == 2, "il catch del boot non distingue più il caso d'errore"
+    assert "firstRunKnown = true;" not in catch[1], (
+        "il catch non deve dichiarare noto ciò che non ha potuto leggere"
+    )
+    assert "api.clientLog(" in catch[1], (
+        "la console del WebView si legge solo via adb: un boot degradato deve lasciare traccia"
+    )
+
+
+def test_the_new_strings_exist_in_both_locales() -> None:
+    keys = [
+        "rerunOnboarding",
+        "rerunOnboardingHint",
+        "rerunOnboardingAction",
+        "rerunOnboardingConfirm",
+    ]
+    for locale in ("it", "en"):
+        data = json.loads((I18N / f"{locale}.json").read_text(encoding="utf-8"))
+        for key in keys:
+            assert key in data["settings"], f"settings.{key} manca in {locale}.json"

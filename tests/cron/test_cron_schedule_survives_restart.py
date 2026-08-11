@@ -119,22 +119,23 @@ async def test_user_recurring_job_also_keeps_its_deadline(tmp_path) -> None:
         second.stop()
 
 
-def test_corrupt_store_is_reported_not_crashed(tmp_path) -> None:
-    """Store corrotto: il messaggio per l'utente, non un ``AttributeError``.
+def test_corrupt_store_is_handled_where_it_is_first_seen(tmp_path) -> None:
+    """``register_system_job`` è il primo a incontrare lo store corrotto.
 
     ``GatewayContainer.build`` registra i job di sistema **prima** di
-    ``start``, quindi è qui che il primo caricamento incontra lo store
-    corrotto. Con la guardia solo dentro ``start`` il gateway moriva su
-    ``store.jobs`` di ``None`` e la spiegazione non veniva mai stampata.
+    ``start``, quindi la gestione non può stare solo dentro ``start``: lì il
+    gateway moriva su ``store.jobs`` di ``None``. Cosa succeda poi — recupero
+    dal ``.bak``, ripartenza vuota o rifiuto — lo copre
+    ``test_cron_store_recovery.py``; qui conta solo che non esploda.
     """
     path = tmp_path / "cron" / "jobs.json"
     path.parent.mkdir(parents=True)
     path.write_text("{ questo non e' JSON ", encoding="utf-8")
 
     service = CronService(path)
+    service.register_system_job(_atlas_job())
 
-    with pytest.raises(RuntimeError, match="corrupt and was preserved"):
-        service.register_system_job(_atlas_job())
+    assert [j.id for j in service.list_jobs()] == ["atlas"]
 
 
 @pytest.mark.asyncio

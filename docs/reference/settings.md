@@ -2,7 +2,7 @@
 
 Every control in the Settings screen, what it does, and its default value.
 
-Settings is a single accordion of 7 sections — Personalization, Model, Tools, SSH, Telegram, Backup & restore, System — all collapsed the first time you open the screen. There is no global Save button: almost every field saves itself, with a "Saved!" toast confirming the write. A few controls (theme, mascot, Home button, language, Developer mode) live entirely on the device and never touch `config.json` at all — those are called out explicitly below.
+Settings is a single accordion of 8 sections — Personalization, Model, Tools, Background activity, SSH, Telegram, Backup & restore, System — all collapsed the first time you open the screen (Background activity opens itself when the battery-optimization exemption is missing). There is no global Save button: almost every field saves itself, with a "Saved!" toast confirming the write. A few controls (theme, mascot, Home button, language, Developer mode) live entirely on the device and never touch `config.json` at all — those are called out explicitly below.
 
 ## How saving works
 
@@ -106,9 +106,22 @@ This toggle is a software gate only — it does **not** request or manage the An
 
 Two related values exist only in `config.json`, with no UI control: `tools.location.telegram_ttl_s` (default 3600 — how long a location shared from Telegram stays valid) and `tools.location.fresh_timeout_s` (default 15 — how long Jenny waits for a fresh GPS fix). See [Location](../using/location.md).
 
+## Background activity
+
+Everything about Jenny surviving a screen that's been off for hours. It sits between Tools and SSH, and it opens by itself when the battery-optimization exemption is missing — that being the one thing here worth interrupting you for.
+
+| Control | Effect | Default |
+|---|---|---|
+| **Exempt from battery** | Opens Android's own "ignore battery optimizations" prompt. Once granted, the button is replaced by a confirmation line rather than disappearing, so the section doesn't look broken. The same request appears during first-run setup and in the Telegram card, and is re-offered when a system update has silently reset it. | Not exempt |
+| **Keep the CPU awake** | The `power.keepAwake` mode: *Never* (best battery, scheduled work can slip by hours), *Only while working* (recommended — awake for a turn, a cron job or an SSH command, then released), *Always* (nothing slips, drains battery constantly, for a phone on charge). **Takes effect at the next Jenny restart**, which the UI says under the control: the service-lifetime lock is taken once, at startup. | Only while working |
+| **Current state** | Three read-only yes/no lines — battery exemption, exact alarms permitted, CPU kept awake right now. Refreshed when you come back from a system dialog. Diagnostics only: exact alarms are granted from Android's settings, not from here. | — |
+| **Recorded outages** | The last few stretches of at least `power.gapWarningMin` (default 60) minutes when Jenny was not running, with date and duration. Empty is the healthy state. When the list isn't empty, a card appears explaining that the phone's battery manager is the cause, with a link to dontkillmyapp.com for your brand and, where the phone allows it, a button that opens the manufacturer's battery screen. | Empty |
+
+Only the wake-lock mode is editable here; the rest of the `power.*` family (wake-lock rotation, the restart watchdog, alarm-driven cron, the alarm-clock fallback, the outage threshold) is `config.json`-only — see [Configuration](./configuration.md#power). Outside the Android app the whole section is hidden: there is no bridge to ask, and nothing it says would be true.
+
 ## SSH
 
-Its own section between Tools and Telegram, holding the two decisions that cannot be delegated to the agent: **which machines exist**, and **which host key is the right one**.
+Its own section between Background activity and Telegram, holding the two decisions that cannot be delegated to the agent: **which machines exist**, and **which host key is the right one**.
 
 | Control | Effect | Default |
 |---|---|---|
@@ -191,6 +204,7 @@ Settings intentionally does not expose everything the backend supports. The foll
 - `tools.location.telegram_ttl_s`, `tools.location.fresh_timeout_s` — see Location above
 - `tools.ssh.*` beyond the on/off switch and the host list — timeouts, output and transfer caps, keepalive, and the per-host `job_log_dir`; the SSH section covers hosts, keys and fingerprints and nothing else
 - `security.restrict_to_workspace`, `security.ssrf_whitelist` — sandboxing and network policy
+- `power.*` except `power.keep_awake` — wake-lock rotation, the restart watchdog, alarm-driven cron, the alarm-clock fallback and the outage threshold; the Background activity section exposes the wake-lock mode and nothing else
 
 ## Cross-references
 

@@ -26,6 +26,18 @@ export class WikiController {
     // Monotonic load token: guards against stale-response races when the user
     // navigates rapidly (only the latest load* call writes the content area).
     this._loadToken = 0;
+    // Contatore di generazione: incrementato in deactivate(). Il token è
+    // monotono solo rispetto ad altre navigazioni *della wiki*, ed è cieco
+    // all'abbandono della sezione: una continuazione che riprende dopo il
+    // cambio vista scriverebbe titolo, drawer e history di un'altra schermata.
+    this._gen = 0;
+    // Prima vista della sezione: init() carica solo la configurazione, e la
+    // navigazione iniziale la decide il chiamante — o activate(), se nessuno
+    // lo ha fatto. `_settled` = c'è una vista disegnata; `_inFlightGen` = la
+    // generazione del caricamento in volo, che dopo un deactivate è ormai
+    // condannata (v. _loadInitialView).
+    this._settled = false;
+    this._inFlightGen = -1;
     AppState.wiki = AppState.wiki || {};
     // Re-render al cambio lingua: se la wiki è la vista attiva ri-traduce
     // subito (breadcrumb "Home", toggle/etichette audit, titolo header, stati
@@ -53,6 +65,14 @@ export class WikiController {
     return `<pre class="wiki-raw-fallback">${escapeHtml(raw || '')}</pre>`;
   }
 
+  /** Carica **solo** la configurazione. La prima navigazione non sta qui.
+   *
+   *  Prima init() ri-derivava la vista dalla query string dopo l'await e
+   *  chiamava load*, bruciando `_loadToken`: chi ci aveva appena portati in
+   *  wiki (`switchMode('wiki', false)` seguito da `loadHome(true)`) veniva
+   *  invalidato **prima** della sua `pushNav`. Risultato: la schermata giusta a
+   *  video e nessuna entry di history dietro, cioè un Indietro che salta via
+   *  dalla sezione. */
   async init() {
     this.showLoading();
     try {
@@ -61,19 +81,32 @@ export class WikiController {
       AppState.wiki.author = cfg.author || 'me';
       AppState.wiki.wikis = cfg.wikis || [];
     } catch {}
-    const params = new URLSearchParams(window.location.search);
-    const wiki = params.get('wiki');
-    const page = params.get('page');
-    if (wiki) {
-      await this.loadWikiPage(wiki, page || 'index.md', false);
-    } else {
-      await this.loadHome(false);
-    }
     this.hideLoading();
     this.initWikiFeedback();
   }
 
+  /** Prima vista della sezione, quando nessun chiamante l'ha già scelta.
+   *
+   *  `switchMode` invoca questo activate in un microtask (`ready.then(...)`),
+   *  quindi un `loadHome(true)`/`loadWikiPage(...)` lanciato sincronamente
+   *  subito dopo lo switch ha già marcato il proprio caricamento come in volo:
+   *  la sua navigazione — con la sua pushNav — resta l'unica.
+   *
+   *  Il caricamento in volo trattiene questo activate solo finché è **ancora
+   *  valido**. Dopo un `deactivate()` la generazione è cambiata e quel
+   *  caricamento non disegnerà mai: senza il confronto, uscire dalla wiki
+   *  mentre la prima pagina è in arrivo la lasciava sul suo "Caricamento…" per
+   *  il resto della sessione. */
+  _loadInitialView() {
+    if (this._settled || this._inFlightGen === this._gen) return;
+    const params = new URLSearchParams(window.location.search);
+    const wiki = params.get('wiki');
+    if (wiki) this.loadWikiPage(wiki, params.get('page') || 'index.md', false);
+    else this.loadHome(false);
+  }
+
   activate() {
+    this._loadInitialView();
     if (this._localeDirty) {
       this._localeDirty = false;
       this._rerenderForLocale();
@@ -103,6 +136,9 @@ export class WikiController {
   }
 
   deactivate() {
+    // Ogni continuazione in volo (pagina, albero, audit) deve poter scoprire
+    // che la sezione è stata lasciata: da qui in poi non scrive più niente.
+    this._gen++;
     this._popover?.classList.add('hidden');
     this._pending = null;
     if (this._selectionHandler) {
@@ -131,8 +167,17 @@ export class WikiController {
     }
   }
 
+  /** true se questo caricamento è stato superato da uno più recente (`token`)
+   *  oppure se nel frattempo si è usciti dalla sezione (`gen`). Le due domande
+   *  sono diverse e servono entrambe: il token non sa niente dell'abbandono. */
+  _stale(token, gen) {
+    return token !== this._loadToken || gen !== this._gen;
+  }
+
   async loadHome(pushHistory = true) {
     const token = ++this._loadToken;
+    const gen = this._gen;
+    this._inFlightGen = gen;
     this.isHome = true;
     this.currentWiki = null;
     this.currentPath = '_index.md';
@@ -141,19 +186,26 @@ export class WikiController {
     this.contentEl.innerHTML = `<p class="wiki-blockq">${i18n.t('wiki.loading')}</p>`;
     try {
       const data = await api.getPage({});
-      if (token !== this._loadToken) return;  // superseded by a newer load
+      if (this._stale(token, gen)) return;  // superseded, or section left
+      this._settled = true;
       this.rawMarkdown = data.raw;
       this.currentTitle = null;
       this.contentEl.innerHTML = this._safeHtml(data.html, data.raw);
-      window.mobileApp.header.setTitle(i18n.t('wiki.home'));
+      window.mobileApp.header.setTitle(i18n.t('wiki.home'), 'wiki');
       this._renderBreadcrumbs();
       this._wireWikiLinks();
-      await this.loadTree();
-      await this.loadAudits(null);
+      // Albero e audit hanno una fetch propria: senza passare loro il token
+      // riempivano i drawer con l'albero e gli audit della pagina *vecchia*,
+      // sopra quelli della pagina nuova.
+      await this.loadTree(undefined, token, gen);
+      if (this._stale(token, gen)) return;
+      await this.loadAudits(null, token, gen);
+      if (this._stale(token, gen)) return;
       this._renderLatex();
-      if (pushHistory) history.pushState({ mode: 'wiki' }, '', '/?mode=wiki');
+      if (pushHistory) window.mobileApp.pushNav({ mode: 'wiki' });
     } catch (err) {
-      if (token !== this._loadToken) return;  // don't surface errors of stale loads
+      if (this._stale(token, gen)) return;  // don't surface errors of stale loads
+      this._settled = true;  // anche una pagina d'errore è una vista disegnata
       const msg = err.message || '';
       if (msg.includes('404') || msg.includes('not found') || msg.includes('Page not found') || msg.includes('file not found')) {
         let isEmpty = true;
@@ -163,17 +215,17 @@ export class WikiController {
         } catch {
           isEmpty = true;
         }
-        if (token !== this._loadToken) return;  // a newer load started during getTree
+        if (this._stale(token, gen)) return;  // a newer load started during getTree
         if (isEmpty) {
           this.contentEl.innerHTML = `<p class="wiki-blockq">${i18n.t('wiki.empty')}</p>`;
         } else {
           this.contentEl.innerHTML = `<p class="wiki-blockq" style="color: var(--error)">${i18n.t('wiki.homeMissing')}</p>`;
         }
-        window.mobileApp.header.setTitle(i18n.t('wiki.home'));
+        window.mobileApp.header.setTitle(i18n.t('wiki.home'), 'wiki');
         this._renderBreadcrumbs();
-        this.loadTree();
-        this.loadAudits(null);
-        if (pushHistory) history.pushState({ mode: 'wiki' }, '', '/?mode=wiki');
+        this.loadTree(undefined, token, gen);
+        this.loadAudits(null, token, gen);
+        if (pushHistory) window.mobileApp.pushNav({ mode: 'wiki' });
       } else {
         this.contentEl.innerHTML = `<p class="wiki-blockq" style="color: var(--error)">${i18n.t('common.error')}: ${escapeHtml(msg)}</p>`;
       }
@@ -189,6 +241,8 @@ export class WikiController {
 
   async loadWikiPage(wiki, page, pushHistory = true) {
     const token = ++this._loadToken;
+    const gen = this._gen;
+    this._inFlightGen = gen;
     this.isHome = false;
     this.currentWiki = wiki;
     this.currentPath = page;
@@ -197,26 +251,31 @@ export class WikiController {
     this.contentEl.innerHTML = `<p class="wiki-blockq">${i18n.t('wiki.loading')}</p>`;
     try {
       const data = await api.getPage({ wiki, page });
-      if (token !== this._loadToken) return;  // superseded by a newer load
+      if (this._stale(token, gen)) return;  // superseded, or section left
+      this._settled = true;
       this.currentPath = data.page || page;
       this.currentWiki = data.wiki || wiki;
       this.currentTitle = data.title || null;
       this.rawMarkdown = data.raw;
       this.contentEl.innerHTML = this._safeHtml(data.html, data.raw);
-      window.mobileApp.header.setTitle(data.title || page);
+      window.mobileApp.header.setTitle(data.title || page, 'wiki');
       this._renderBreadcrumbs();
       this._wireWikiLinks();
-      await this.loadTree(this.currentWiki);
-      await this.loadAudits(this.currentPath);
+      // v. loadHome: senza token, albero e audit della pagina vecchia
+      // arrivavano sopra quelli della pagina nuova.
+      await this.loadTree(this.currentWiki, token, gen);
+      if (this._stale(token, gen)) return;
+      await this.loadAudits(this.currentPath, token, gen);
+      if (this._stale(token, gen)) return;
       this._renderLatex();
-      this._renderMermaid();
+      this._renderMermaid(token, gen);
       if (pushHistory) {
-        const qs = new URLSearchParams({ wiki: this.currentWiki, page: this.currentPath });
-        history.pushState({ mode: 'wiki', wikiPage: true, wiki: this.currentWiki, page: this.currentPath }, '', `/?${qs}`);
+        window.mobileApp.pushNav({ mode: 'wiki', wikiPage: true, wiki: this.currentWiki, page: this.currentPath });
       }
       this.lastWikiPage[this.currentWiki] = this.currentPath;
     } catch (err) {
-      if (token !== this._loadToken) return;  // don't surface errors of stale loads
+      if (this._stale(token, gen)) return;  // don't surface errors of stale loads
+      this._settled = true;  // anche una pagina d'errore è una vista disegnata
       this.contentEl.innerHTML = `<p class="wiki-blockq" style="color: var(--error)">${i18n.t('common.error')}: ${escapeHtml(err.message)}</p>`;
     }
   }
@@ -270,17 +329,49 @@ export class WikiController {
     });
   }
 
+  /** Cabla TUTTI gli `a[href]` della pagina, non solo `a.wikilink`.
+      `wiki.py` emette la classe `wikilink` soltanto per `[[Target]]`: un
+      `[testo](altra.md)`, un `[TOC]` o un `[x](www.google.com)` scritti a mano
+      restavano link veri, cioè navigazioni di main frame verso l'origine del
+      gateway. Esito: la SPA ricaricata senza il fragment `#bs=` (de-autenticata)
+      o sostituita da un 404 sotto `/api/`, con `window.mobileApp` — e quindi il
+      tasto Indietro — spariti. Le ancore interne, che prima impilavano una entry
+      di history con `state: null`, diventano uno scroll. Da qui non si naviga
+      mai: si carica una pagina wiki, si scrolla, si esce dalla WebView, o niente. */
   _wireWikiLinks() {
-    this.contentEl.querySelectorAll('a.wikilink').forEach(a => {
+    this.contentEl.querySelectorAll('a[href]').forEach(a => {
+      // I breadcrumb hanno già il loro listener da _renderBreadcrumbs (che gira
+      // prima di qui): un secondo handler li farebbe caricare E avvisare.
+      if (a.hasAttribute('data-home') || a.hasAttribute('data-wiki')) return;
       a.addEventListener('click', (e) => {
+        e.preventDefault();
         const href = a.getAttribute('href') || '';
-        if (href.startsWith('#') || href.startsWith('http://') || href.startsWith('https://') || href.startsWith('mailto:')) return;
-        if (href.includes('..')) {
-          console.warn('Dead or invalid wikilink:', href);
+        if (href.startsWith('#')) { this._scrollToHash(href); return; }
+        let url = null;
+        try { url = new URL(href, window.location.href); } catch (_) { url = null; }
+        const scheme = url?.protocol || '';
+        const isWeb = scheme === 'http:' || scheme === 'https:';
+        if ((isWeb && url.origin !== window.location.origin) || scheme === 'mailto:' || scheme === 'tel:') {
+          this._openOutsideWebView(url.href);
           return;
         }
-        e.preventDefault();
-        const url = new URL(href, window.location.href);
+        // Link markdown relativo a un'altra pagina della stessa wiki:
+        // `[nota](note.md)`, `[api](ref/api.md)`. Non ha la classe wikilink —
+        // il renderer la mette solo per `[[Target]]` — quindi finiva nel ramo
+        // "non apribile" e restava inerte, pur essendo il modo più naturale di
+        // scrivere un link a mano. Si risolve contro la cartella della pagina
+        // corrente e diventa una navigazione wiki vera.
+        const relPage = this._resolveRelativePage(href);
+        if (relPage) {
+          this.loadWikiPage(this.currentWiki, relPage);
+          if (url?.hash) this._scrollToHash(url.hash);
+          return;
+        }
+        if (!url || !isWeb || !a.classList.contains('wikilink') || href.includes('..')) {
+          if (href.includes('..')) console.warn('Dead or invalid wikilink:', href);
+          showToast(i18n.t('common.linkNotOpenable'), 'info');
+          return;
+        }
         const wiki = url.searchParams.get('wiki') || this.currentWiki;
         const page = url.searchParams.get('page');
         const hash = url.hash;
@@ -292,18 +383,57 @@ export class WikiController {
     });
   }
 
+  /** Apre un URL fuori dalla WebView: gemello di `_openOutsideWebView` in
+      mobile-chat.js. `window.open` non apre una finestra (la WebView non
+      supporta le finestre multiple): la richiesta ricade su
+      `shouldOverrideUrlLoading`, che per un'origine non-gateway apre una Chrome
+      Custom Tab e lascia la SPA dov'è. */
+  _openOutsideWebView(href) {
+    try {
+      window.open(href, '_blank', 'noopener');
+    } catch (err) {
+      console.warn('Could not open external link:', err);
+      showToast(i18n.t('common.linkNotOpenable'), 'error');
+    }
+  }
+
+  /* Path della pagina wiki per un href markdown relativo, o null se l'href non
+     è di quella forma. Volutamente conservativo: niente schemi, niente path
+     assoluti, niente `..` (risalire vorrebbe dire inventare una semantica di
+     traversata che il resto della wiki non ha), solo `.md` e solo dentro la
+     wiki corrente. Tutto il resto resta al ramo che avvisa e non naviga. */
+  _resolveRelativePage(href) {
+    if (!this.currentWiki || this.isHome) return null;
+    const clean = href.split('#')[0].split('?')[0];
+    if (!clean || !/\.md$/i.test(clean)) return null;
+    if (clean.startsWith('/') || clean.includes('..') || /^[a-z][a-z0-9+.-]*:/i.test(clean)) return null;
+    const dir = (this.currentPath || '').replace(/\\/g, '/').split('/').slice(0, -1);
+    const rel = clean.replace(/^\.\//, '');
+    return [...dir, ...rel.split('/')].filter(Boolean).join('/');
+  }
+
+  /* L'ancora si cerca *dentro il contenuto della pagina*, non nel documento:
+     con getElementById un `[x](#dock)` scritto in una wiki portava lo scroll su
+     un elemento di chrome della SPA. Stessa disciplina del gemello in chat. */
   _scrollToHash(hash) {
     const id = hash.slice(1);
     if (!id) return;
     setTimeout(() => {
-      const el = document.getElementById(id) || document.querySelector(`a[name="${CSS.escape(id)}"]`);
-      el?.scrollIntoView({ behavior: 'smooth' });
+      let el = null;
+      try {
+        el = this.contentEl?.querySelector(`#${CSS.escape(id)}, a[name="${CSS.escape(id)}"]`);
+      } catch (_) { el = null; }
+      if (el) el.scrollIntoView({ behavior: 'smooth' });
+      else showToast(i18n.t('common.linkNotOpenable'), 'info');
     }, 200);
   }
 
-  async loadTree(wiki) {
+  /** I default riprendono il caricamento corrente: chi chiama dall'esterno
+   *  (toggle, resolve) non deve conoscere il protocollo del token. */
+  async loadTree(wiki, token = this._loadToken, gen = this._gen) {
     try {
       const data = await api.getTree(wiki);
+      if (this._stale(token, gen)) return;
       this.filesDrawerBody.innerHTML = '';
       const nav = document.createElement('nav');
       nav.className = 'wiki-tree';
@@ -311,6 +441,7 @@ export class WikiController {
       this.filesDrawerBody.appendChild(nav);
       this.wireTreeLinks(wiki);
     } catch (err) {
+      if (this._stale(token, gen)) return;
       this.filesDrawerBody.innerHTML = `<div class="ftree-path">${i18n.t('wiki.failedToLoadFiles')}</div>`;
     }
   }
@@ -338,17 +469,20 @@ export class WikiController {
     });
   }
 
-  async _renderMermaid() {
+  async _renderMermaid(token = this._loadToken, gen = this._gen) {
     // Carica mermaid solo se in pagina c'è davvero un diagramma: aprire la
     // wiki su una nota di testo non deve costare 3,2 MB di JS.
     if (!this.contentEl.querySelector('pre.mermaid-block')) return;
     if (typeof mermaid === 'undefined') {
       try {
+        // 3,2 MB su rete mobile: qui dentro ci sta comodamente una
+        // navigazione, e al ritorno la pagina a schermo può essere un'altra.
         await ensureVendor('/html-mobile/assets/vendor/mermaid@10/dist/mermaid.min.js');
       } catch (err) {
         console.error('Mermaid load failed:', err);
         return;
       }
+      if (this._stale(token, gen)) return;
     }
     // Senza initialize, mermaid usa la palette chiara di default: riquadri
     // lavanda su fondo scuro. Dei sette temi quattro sono scuri (chanel,
@@ -368,6 +502,7 @@ export class WikiController {
       if (!code) return;
       try {
         mermaid.render(`mermaid-${Date.now()}-${i}`, code.textContent).then(({ svg }) => {
+          if (this._stale(token, gen)) return;  // `block` è già staccato: non riscriverlo
           block.innerHTML = svg;
         });
       } catch (err) { console.error('Mermaid render failed:', err); }
@@ -398,10 +533,12 @@ export class WikiController {
     });
   }
 
-  async loadAudits(path) {
+  /** v. loadTree per i default. */
+  async loadAudits(path, token = this._loadToken, gen = this._gen) {
     const toggle = this._renderAuditToggle();
     try {
       const data = await api.getAudits({ wiki: this.currentWiki, targetPath: path, mode: this._auditMode });
+      if (this._stale(token, gen)) return;
       if (!data.entries?.length) {
         const emptyMsg = this._auditMode === 'resolved'
           ? i18n.t('wiki.noResolvedAudits') : i18n.t('wiki.noOpenAudits');
@@ -441,6 +578,7 @@ export class WikiController {
         });
       });
     } catch (err) {
+      if (this._stale(token, gen)) return;
       this.auditDrawerBody.innerHTML = `${toggle}<div class="audit-item"><div class="ai-title">${i18n.t('wiki.failedToLoadAudits')}</div></div>`;
       this._wireAuditToggle();
     }

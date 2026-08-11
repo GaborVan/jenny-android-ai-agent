@@ -18,6 +18,7 @@ from loguru import logger
 
 from jenny.agent.tools.message import MessageTool
 from jenny.agent.turn_types import TurnState
+from jenny.bus.progress import build_silent_progress_callback
 from jenny.command import CommandContext
 from jenny.session import turn_continuation
 from jenny.session.goal_state import note_goal_turn
@@ -322,6 +323,17 @@ class StateHandlersMixin:
             ctx.msg, ctx.session
         )
 
+        # Un turno silenzioso non installa i callback che pubblicano sul bus:
+        # progress e retry-wait sono indirizzati alla chat d'origine e vengono
+        # persistiti nel transcript, quindi da soli basterebbero a riempire la
+        # conversazione di righe di un lavoro che l'utente non ha chiesto.
+        if ctx.silent:
+            if ctx.on_progress is None:
+                ctx.on_progress = build_silent_progress_callback()
+            if ctx.on_retry_wait is None:
+                ctx.on_retry_wait = build_silent_progress_callback()
+            return "ok"
+
         if ctx.on_progress is None:
             ctx.on_progress = await self._build_bus_progress_callback(ctx.msg)
         if ctx.on_retry_wait is None:
@@ -394,6 +406,18 @@ class StateHandlersMixin:
         return "ok"
 
     async def _state_respond(self, ctx: TurnContext) -> str:
+        # "Ha parlato" si legge dal MessageTool: una consegna verso il target
+        # d'origine in questo turno. Il registry del turno viene prima di quello
+        # di default — il flag ``_sent_in_turn`` sta in una ContextVar *per
+        # istanza*, quindi con un registry sostituito (l'idioma di Dream/Atlas)
+        # leggere l'istanza di default darebbe sempre ``False`` e un turno
+        # silenzioso che ha parlato risulterebbe muto. Calcolato sempre, non solo
+        # per i monitor: e' cio da cui ``_process_message`` costruisce il
+        # ``TurnOutcome``, e prima viaggiava contrabbandato nei metadata inbound.
+        message_tool = (ctx.tools or self.tools).get("message")
+        ctx.spoke_via_tool = bool(
+            isinstance(message_tool, MessageTool) and message_tool._sent_in_turn
+        )
         if ctx.suppress_response:
             ctx.outbound = None
             return "ok"

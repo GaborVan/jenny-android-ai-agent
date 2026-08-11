@@ -1,10 +1,12 @@
 """Registro dei comandi remoti lunghi, staccati dalla connessione SSH.
 
-Perché esiste, e perché non basta alzare il timeout: il gateway è un foreground
-service **senza WakeLock**. A schermo spento la CPU può sospendersi, e un
-comando che stiamo aspettando resta appeso; un passaggio wifi→dati uccide il TCP
-e con esso la sessione. Un ``apt upgrade`` atteso su un canale SSH aperto non
-fallisce in modo pulito — fallisce a metà, e nessuno sa a che punto era.
+Perché esiste, e perché non basta alzare il timeout: il wakelock
+(``jenny/runtime/power.py``) tiene la CPU accesa durante il comando, ma non fa
+niente per la rete. Un passaggio wifi→dati mobili cambia indirizzo e uccide il
+TCP, e con esso la sessione SSH; il gateway può anche essere ucciso o riavviato
+nel frattempo. Un ``apt upgrade`` atteso su un canale SSH aperto non fallisce in
+modo pulito — fallisce a metà, e nessuno sa a che punto era. Il wakelock ha
+risolto la sospensione della CPU, non questo.
 
 Qui quindi i comandi lunghi non si aspettano. Si lanciano con ``nohup``
 scrivendo su un log lato server, e si seguono **a delta**: ogni poll legge solo
@@ -39,7 +41,14 @@ from loguru import logger
 
 from jenny.agent.tools.ssh_backends.base import SshError, SshTarget
 from jenny.config.paths import get_runtime_subdir
+from jenny.runtime.power import keep_awake
 from jenny.utils.path import atomic_write
+
+# Margine fra la scadenza del wakelock e il timeout del comando di poll: il lock
+# deve sopravvivere al comando che protegge. Stesso valore e stesso motivo di
+# ``ssh._SSH_WAKELOCK_MARGIN_S``, tenuto qui perché il registro non importa il
+# modulo dei tool (sarebbe un ciclo).
+_POLL_WAKELOCK_MARGIN_S = 60.0
 
 # Stati di un job. "lost" è distinto da "finished": il processo non c'è più ma
 # non ha lasciato il codice di uscita, quindi è stato ucciso (OOM killer, reboot
@@ -385,14 +394,20 @@ class SshJobStore:
         """Legge la sola parte nuova del log e aggiorna stato e cursore."""
         async with self._lock:
             job = self._require(job_id, alias=alias)
-            result = await backend.exec(
-                target,
-                _poll_command(job, limit=max_bytes),
-                timeout_s=timeout_s,
-                # Spazio per l'intestazione oltre al delta: se il marker venisse
-                # troncato via non sapremmo più dove finisce l'una e inizia l'altro.
-                max_output_chars=max_bytes + 512,
-            )
+            # Un poll è un round trip breve ma è quasi sempre l'ULTIMA cosa che
+            # succede in un turno, e spesso a schermo spento: se la CPU si
+            # sospende mentre aspetta, il comando scade e il cursore non avanza —
+            # il delta non va perso (lo si rilegge), ma il modello riceve un
+            # errore di rete al posto dell'output che stava seguendo.
+            async with keep_awake("ssh", timeout_s=timeout_s + _POLL_WAKELOCK_MARGIN_S):
+                result = await backend.exec(
+                    target,
+                    _poll_command(job, limit=max_bytes),
+                    timeout_s=timeout_s,
+                    # Spazio per l'intestazione oltre al delta: se il marker venisse
+                    # troncato via non sapremmo più dove finisce l'una e inizia l'altro.
+                    max_output_chars=max_bytes + 512,
+                )
             head, marker, chunk = result.stdout.partition(f"{_MARKER}\n")
             if not marker:
                 raise SshJobError(

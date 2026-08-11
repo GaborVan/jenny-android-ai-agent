@@ -191,9 +191,9 @@ async def test_streamed_flag_not_set_on_llm_error(tmp_path):
         on_stream_end=AsyncMock(),
     )
 
-    assert result is not None
-    assert "503" in result.content
-    assert not result.metadata.get("_streamed"), \
+    assert result.message is not None
+    assert "503" in result.text
+    assert not result.message.metadata.get("_streamed"), \
         "_streamed must not be set when stop_reason is error"
 
 
@@ -237,9 +237,9 @@ async def test_ssrf_soft_block_can_finalize_after_streamed_tool_call(tmp_path):
         on_stream_end=AsyncMock(),
     )
 
-    assert result is not None
-    assert result.content == "I cannot access private URLs. Please share the local file."
-    assert result.metadata.get("_streamed") is True
+    assert result.message is not None
+    assert result.text == "I cannot access private URLs. Please share the local file."
+    assert result.message.metadata.get("_streamed") is True
 
 
 @pytest.mark.asyncio
@@ -263,8 +263,8 @@ async def test_next_turn_after_llm_error_keeps_turn_boundary(tmp_path):
     first = await loop._process_message(
         InboundMessage(channel="internal", sender_id="user", chat_id="test", content="first question")
     )
-    assert first is not None
-    assert first.content == "429 rate limit exceeded"
+    assert first.message is not None
+    assert first.text == "429 rate limit exceeded"
 
     session = loop.sessions.get_or_create("internal:test")
     assert [
@@ -278,8 +278,8 @@ async def test_next_turn_after_llm_error_keeps_turn_boundary(tmp_path):
     second = await loop._process_message(
         InboundMessage(channel="internal", sender_id="user", chat_id="test", content="second question")
     )
-    assert second is not None
-    assert second.content == "Recovered answer"
+    assert second.message is not None
+    assert second.text == "Recovered answer"
 
     request_messages = provider.chat_with_retry.await_args_list[1].kwargs["messages"]
     non_system = [message for message in request_messages if message.get("role") != "system"]

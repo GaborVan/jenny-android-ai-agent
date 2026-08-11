@@ -92,6 +92,26 @@ class GraphData:
     edges: list[GraphEdge]
 
 
+@dataclass(frozen=True)
+class PageSource:
+    """Una pagina letta dal disco, con i metadati che se ne ricavano.
+
+    È la materia prima *condivisa* di grafo e indice full-text: entrambi
+    partono dallo stesso testo, e leggerlo due volte significherebbe pagare due
+    volte l'unica parte davvero cara della costruzione (l'I/O su flash, con
+    centinaia di file). Chi vuole solo il grafo usa :func:`build_graph`, che
+    incapsula la lettura; chi vuole entrambi legge una volta con
+    :func:`read_pages` e passa la lista a tutti i costruttori.
+    """
+
+    rel: str  # path relativo alla pages-dir, es. "concepts/foo.md"
+    node_id: str  # id di nodo nel grafo, es. "wiki/concepts/foo.md"
+    stem: str
+    group: str
+    title: str
+    text: str
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
@@ -187,49 +207,94 @@ def build_home_tree(wikis_dir: Path) -> TreeNode:
 # ── Graph ────────────────────────────────────────────────────────────────────
 
 
+def iter_page_files(pages_dir: Path) -> list[tuple[str, Path]]:
+    """``(rel, path)`` delle pagine che entrano nel grafo, in ordine stabile.
+
+    Unico punto in cui si decide *quali* file contano. Il fingerprint della
+    cache (``wiki_search``) e la lettura vera (:func:`read_pages`) devono
+    guardare esattamente lo stesso insieme: se divergessero, o si
+    ricostruirebbe l'indice per una modifica in ``summaries/`` che non lo
+    tocca, oppure — molto peggio — una pagina cambierebbe senza muovere il
+    fingerprint e la ricerca resterebbe ferma al contenuto vecchio.
+
+    L'ordine è per rel-path perché quello di ``rglob`` dipende dal filesystem:
+    da questa lista discende l'indice numerico dei nodi, che è la chiave delle
+    postings dell'indice full-text.
+    """
+    if not pages_dir.exists():
+        return []
+    # I summaries sono esclusi (livello di citazione, non contenuto): niente
+    # nodi, archi né hit di ricerca. Le pagine restano comunque servibili.
+    out: list[tuple[str, Path]] = []
+    for f in pages_dir.rglob("*.md"):
+        rel = f.relative_to(pages_dir).as_posix()
+        if _top_group(rel) in _HIDDEN_TOP_GROUPS:
+            continue
+        out.append((rel, f))
+    out.sort(key=lambda item: item[0])
+    return out
+
+
+def read_pages(pages_dir: Path) -> list[PageSource]:
+    """Legge una volta sola tutte le pagine indicizzabili di una wiki.
+
+    Un file illeggibile (permessi, byte non-UTF-8) viene saltato con un
+    WARNING: è una pagina in meno nel grafo, non un 500 su tutta la wiki.
+    """
+    pages: list[PageSource] = []
+    for rel, f in iter_page_files(pages_dir):
+        try:
+            text = f.read_text("utf-8")
+        except (OSError, UnicodeDecodeError) as err:
+            import logging
+
+            logging.getLogger("wiki").warning("skipping unreadable page %s: %s", rel, err)
+            continue
+        pages.append(
+            PageSource(
+                rel=rel,
+                node_id=f"wiki/{rel}",
+                stem=f.stem,
+                group=_top_group(rel),
+                title=_extract_title(text) or f.stem,
+                text=text,
+            )
+        )
+    return pages
+
+
 def build_graph(wiki_root: Path) -> GraphData:
     """Build a graph of wiki pages and their wikilink connections for one wiki."""
-    pages_dir = wiki_root / "wiki"
-    if not pages_dir.exists():
+    return build_graph_from_pages(read_pages(wiki_root / "wiki"))
+
+
+def build_graph_from_pages(pages: list[PageSource]) -> GraphData:
+    """Grafo dei wikilink a partire da pagine già lette (v. :func:`read_pages`)."""
+    if not pages:
         return GraphData(nodes=[], edges=[])
 
-    # I summaries sono esclusi dal grafo (livello di citazione, non contenuto):
-    # i loro nodi/archi non compaiono; le pagine restano comunque servibili.
-    files = [
-        f for f in pages_dir.rglob("*.md")
-        if _top_group(f.relative_to(pages_dir).as_posix()) not in _HIDDEN_TOP_GROUPS
-    ]
     by_key: dict[str, str] = {}
     nodes: dict[str, GraphNode] = {}
-    contents: dict[str, str] = {}
     # Le chiavi rel-path sono univoche per file; le chiavi per stem possono
     # collidere (es. concepts/foo.md vs entities/foo.md). Raccogliamo i candidati
     # per stem e registriamo la chiave solo se punta a un unico nodo, così i
     # wikilink per stem ambiguo non risolvono in modo non deterministico.
     stem_candidates: dict[str, set[str]] = {}
 
-    for f in files:
-        rel = f.relative_to(pages_dir).as_posix()
-        node_id = f"wiki/{rel}"
-        stem = f.stem
-        group = _top_group(rel)
-        text = f.read_text("utf-8")
-        contents[node_id] = text
-        title = _extract_title(text) or stem
-
-        nodes[node_id] = GraphNode(
-            id=node_id,
-            label=stem,
-            path=rel,
-            group=group,
+    for page in pages:
+        nodes[page.node_id] = GraphNode(
+            id=page.node_id,
+            label=page.stem,
+            path=page.rel,
+            group=page.group,
             degree=0,
-            title=title,
+            title=page.title,
         )
         # Chiave rel-path: sempre univoca, ha precedenza.
-        by_key[rel.removesuffix(".md")] = node_id
-        stem_candidates.setdefault(stem, set()).add(node_id)
-        if stem.lower() != stem:
-            stem_candidates.setdefault(stem.lower(), set()).add(node_id)
+        by_key[page.rel.removesuffix(".md")] = page.node_id
+        stem_candidates.setdefault(page.stem, set()).add(page.node_id)
+        if page.stem.lower() != page.stem:
+            stem_candidates.setdefault(page.stem.lower(), set()).add(page.node_id)
 
     for key, ids in stem_candidates.items():
         if len(ids) == 1 and key not in by_key:
@@ -238,10 +303,9 @@ def build_graph(wiki_root: Path) -> GraphData:
     edges: list[GraphEdge] = []
     seen_pairs: set[frozenset[str]] = set()
 
-    for f in files:
-        rel = f.relative_to(pages_dir).as_posix()
-        src_id = f"wiki/{rel}"
-        for match in _WIKILINK_RE.finditer(contents[src_id]):
+    for page in pages:
+        src_id = page.node_id
+        for match in _WIKILINK_RE.finditer(page.text):
             inner = match.group(1).strip()
             target, _label = _split_wikilink(inner)
             if not target or target.startswith("#"):

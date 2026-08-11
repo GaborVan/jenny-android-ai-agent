@@ -8,6 +8,7 @@ prossimo cambiamento andrà fatto in due posti. Meglio fissarlo adesso.
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -15,6 +16,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from jenny.config.schema import Config
+from jenny.cron.bound_runner import CRON_WAKELOCK_TIMEOUT_S
+from jenny.cron.service import CronJobSkippedError
 from jenny.runtime.cron_dispatch import CronDispatcher
 
 _ATLAS_JOB = SimpleNamespace(name="atlas", id="job-atlas")
@@ -39,8 +42,6 @@ def _dispatcher(agent) -> CronDispatcher:
         get_agent=lambda: agent,
         config=Config(),
         cron=MagicMock(),
-        get_message_tool=lambda: None,
-        deliver_to_channel=MagicMock(),
         heartbeat_cfg=SimpleNamespace(),
     )
 
@@ -97,3 +98,59 @@ async def test_a_run_without_wikis_is_not_an_error(tmp_path):
 
     assert result is None
     assert agent.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_atlas_runs_inside_the_cron_wakelock(tmp_path, monkeypatch):
+    """Dream, atlas e heartbeat non passano da ``bound_runner``.
+
+    Entrano da ``process_direct``, che non è il percorso di turno protetto in
+    ``AgentLoop._dispatch``: senza il wakelock su ``dispatch`` resterebbero
+    scoperti proprio i tre job che girano sempre a schermo spento. Atlas fa da
+    campione per tutti e tre — il blocco è unico e li avvolge insieme.
+    """
+    events: list[tuple[str, str, float]] = []
+
+    @asynccontextmanager
+    async def fake_keep_awake(tag: str, *, timeout_s: float = 0.0):
+        events.append(("enter", tag, timeout_s))
+        try:
+            yield True
+        finally:
+            events.append(("exit", tag, timeout_s))
+
+    async def _fake_run_atlas(agent, *, store=None, force=False):
+        from jenny.agent.atlas import AtlasOutcome
+
+        # Il lock deve essere già preso mentre il job gira, non dopo.
+        assert events == [("enter", "cron", CRON_WAKELOCK_TIMEOUT_S)]
+        return AtlasOutcome(status="written", elapsed=0.1)
+
+    monkeypatch.setattr("jenny.runtime.cron_dispatch.keep_awake", fake_keep_awake)
+    monkeypatch.setattr("jenny.agent.atlas.run_atlas", _fake_run_atlas)
+
+    await _dispatcher(_FakeAgent(tmp_path)).dispatch(_ATLAS_JOB)
+
+    assert [e[0] for e in events] == ["enter", "exit"]
+
+
+@pytest.mark.asyncio
+async def test_a_skipped_job_still_leaves_the_wakelock_block(monkeypatch):
+    # Senza provider ``dispatch`` solleva: il rilascio non può dipendere dal
+    # fatto che ci fosse un agente da far girare.
+    events: list[str] = []
+
+    @asynccontextmanager
+    async def fake_keep_awake(tag: str, *, timeout_s: float = 0.0):
+        events.append("enter")
+        try:
+            yield True
+        finally:
+            events.append("exit")
+
+    monkeypatch.setattr("jenny.runtime.cron_dispatch.keep_awake", fake_keep_awake)
+
+    with pytest.raises(CronJobSkippedError):
+        await _dispatcher(None).dispatch(_ATLAS_JOB)
+
+    assert events == ["enter", "exit"]

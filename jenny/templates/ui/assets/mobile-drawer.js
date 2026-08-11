@@ -4,6 +4,12 @@ export class DrawerManager extends EventTarget {
   constructor() {
     super();
     this.activeDrawer = null;
+    // Chi aveva il fuoco quando il drawer si è aperto: ci torna alla chiusura.
+    this._lastFocus = null;
+    // Vero solo durante il passaggio diretto da un drawer all'altro: non è un
+    // ritorno alla vista, quindi lo sfondo resta inerte e il fuoco non torna
+    // all'invocante per poi rientrare subito nel drawer nuovo.
+    this._swapping = false;
     this.backdrop = document.getElementById('backdrop');
 
     this.backdrop.addEventListener('click', () => this.closeAll());
@@ -43,16 +49,26 @@ export class DrawerManager extends EventTarget {
   }
 
   open(id) {
-    if (this.activeDrawer && this.activeDrawer !== id) {
-      this.close(this.activeDrawer, false);
-    }
-
     const drawer = document.getElementById(`drawer-${id}`);
     if (!drawer) return;
+
+    const previous = this.activeDrawer;
+    if (previous && previous !== id) {
+      this._swapping = true;
+      this.close(previous, false);
+      this._swapping = false;
+    } else if (!previous) {
+      this._lastFocus = document.activeElement;
+    }
 
     drawer.classList.add('open');
     this.backdrop.classList.add('open');
     this.activeDrawer = id;
+    this._setContentInert(true);
+    // Il fuoco entra nel drawer: senza, Tab ripartirebbe da dove si trovava,
+    // cioè dentro il contenuto appena reso inerte — quindi da nessuna parte.
+    const entry = drawer.querySelector('.drawer-close') || drawer;
+    entry.focus?.();
     this.dispatchEvent(new CustomEvent('open', { detail: id }));
   }
 
@@ -63,6 +79,7 @@ export class DrawerManager extends EventTarget {
     if (this.activeDrawer === id) {
       this.activeDrawer = null;
       this.backdrop.classList.remove('open');
+      if (!this._swapping) this._releaseContent();
       if (dispatch) {
         this.dispatchEvent(new CustomEvent('close', { detail: id }));
       }
@@ -74,9 +91,38 @@ export class DrawerManager extends EventTarget {
     this.backdrop.classList.remove('open');
     const previous = this.activeDrawer;
     this.activeDrawer = null;
+    this._releaseContent();
     if (previous) {
       this.dispatchEvent(new CustomEvent('close', { detail: previous }));
     }
+  }
+
+  /** Rende inerte ciò che il drawer copre: le viste dentro `.main`, intestazione
+   *  compresa (il drawer parte da top:0 e ne prende il 75%, quindi il titolo e i
+   *  suoi pulsanti stanno fisicamente sotto). `inert` toglie fuoco, click e
+   *  lettura TalkBack in un colpo solo, senza focus trap fatto a mano.
+   *
+   *  Fuori restano i drawer stessi, il backdrop — che è il modo primario di
+   *  richiudere — e il dock, che vive fuori da `.main`, resta visibile sotto il
+   *  drawer e continua a funzionare: renderlo inerte disattiverebbe un comando
+   *  che si vede. */
+  _setContentInert(on) {
+    const main = document.querySelector('.main');
+    if (!main) return;
+    for (const child of main.children) {
+      if (child === this.backdrop || child.classList.contains('drawer')) continue;
+      child.inert = on;
+    }
+  }
+
+  /** Toglie l'inerzia allo sfondo e riporta il fuoco sull'invocante, se è
+   *  ancora nel documento: la vista sotto può essere stata ridisegnata mentre
+   *  il drawer era aperto, e in quel caso non si sposta niente. */
+  _releaseContent() {
+    this._setContentInert(false);
+    const previous = this._lastFocus;
+    this._lastFocus = null;
+    if (previous && previous.isConnected) previous.focus?.();
   }
 
   toggle(id) {

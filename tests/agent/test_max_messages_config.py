@@ -121,7 +121,7 @@ class TestMaxMessagesIntegration:
                 InboundMessage(channel="internal", sender_id="user", chat_id="test", content="hello")
             )
 
-        assert result is not None
+        assert result.message is not None
         assert mock_hist.call_count == 1
         assert mock_hist.call_args.kwargs["max_messages"] == 25
         assert mock_hist.call_args.kwargs["extend_to_user"] is False
@@ -141,7 +141,7 @@ class TestMaxMessagesIntegration:
                 InboundMessage(channel="internal", sender_id="user", chat_id="test", content="hello")
             )
 
-        assert result is not None
+        assert result.message is not None
         assert mock_hist.call_args.kwargs["max_messages"] == DEFAULT_MAX_MESSAGES
         assert mock_hist.call_args.kwargs["extend_to_user"] is False
 
@@ -176,7 +176,7 @@ class TestMaxMessagesIntegration:
                 )
             )
 
-        assert result is not None
+        assert result.message is not None
         assert mock_hist.call_args.kwargs["extend_to_user"] is False
         sent_messages = loop.provider.chat_with_retry.await_args.kwargs["messages"]
         sent_text = "\n".join(str(message.get("content")) for message in sent_messages)

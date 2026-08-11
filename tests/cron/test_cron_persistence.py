@@ -83,18 +83,27 @@ def test_save_store_failure_does_not_corrupt_existing_file(
     assert store_path.read_bytes() == original
 
 
-def test_load_jobs_preserves_corrupt_store_and_returns_none(
+def test_load_jobs_preserves_corrupt_store_and_reports_the_fallback(
     tmp_path: Path,
 ) -> None:
-    """A corrupt ``jobs.json`` must not be silently treated as an empty
-    list.  The loader returns ``None`` and the corrupt file is moved aside
-    with a ``.corrupt-<ts>`` suffix so an operator can recover it."""
+    """A corrupt ``jobs.json`` must not be silently treated as an empty list.
+
+    Da 0.6.6 il ripiego non è più un ``None``: il loader riparte da una lista
+    vuota ma lo *dichiara*, e il file corrotto viene spostato di lato con un
+    suffisso ``.corrupt-<ts>`` perché resti recuperabile. Il ``None`` è
+    rimasto per il solo caso in cui lo spostamento fallisce
+    (``test_cron_store_recovery.py``).
+    """
     store_path = tmp_path / "cron" / "jobs.json"
     store_path.parent.mkdir(parents=True)
     store_path.write_text("{not valid json", encoding="utf-8")
 
     service = CronService(store_path)
-    assert service._load_jobs() is None
+    loaded = service._load_jobs()
+
+    assert loaded is not None
+    assert loaded.jobs == []
+    assert loaded.recovered_from == "empty"
 
     # Original path is gone; a ``.corrupt-<ts>`` backup exists alongside it.
     assert not store_path.exists()
@@ -103,11 +112,15 @@ def test_load_jobs_preserves_corrupt_store_and_returns_none(
     assert backups[0].read_text(encoding="utf-8") == "{not valid json"
 
 
-def test_start_refuses_to_overwrite_corrupt_store(tmp_path: Path) -> None:
-    """``start`` must abort instead of running ``_save_store`` against an
-    empty in-memory state when the on-disk store is corrupt.  Otherwise the
-    next save would overwrite the (recoverable) corrupt file with an empty
-    job list and the user's jobs would be unrecoverable."""
+def test_start_survives_a_corrupt_store_without_overwriting_it(tmp_path: Path) -> None:
+    """``start`` parte comunque, ma non scrive mai sopra il file corrotto.
+
+    Il contratto è cambiato in 0.6.6: rifiutare l'avvio lasciava l'utente con
+    un'app che non si apre e nessun modo di ripararla dal telefono. Quello che
+    non deve succedere resta identico — ``_save_store`` non deve trasformare il
+    file recuperabile in una lista vuota — ed è garantito dallo spostamento di
+    lato, che avviene prima di qualunque scrittura.
+    """
     store_path = tmp_path / "cron" / "jobs.json"
     store_path.parent.mkdir(parents=True)
     store_path.write_text("{still not json", encoding="utf-8")
@@ -115,15 +128,15 @@ def test_start_refuses_to_overwrite_corrupt_store(tmp_path: Path) -> None:
     service = CronService(store_path)
     import asyncio
 
-    with pytest.raises(RuntimeError, match="corrupt"):
-        asyncio.run(service.start())
+    asyncio.run(service.start())
+    try:
+        assert service.list_jobs() == []
+    finally:
+        service.stop()
 
-    # Service is left in a stopped state so the operator notices.
-    assert service._running is False
-
-    # And the corrupt file is still recoverable from the .corrupt-<ts> copy.
     backups = list(store_path.parent.glob("jobs.json.corrupt-*"))
     assert len(backups) == 1
+    assert backups[0].read_text(encoding="utf-8") == "{still not json"
 
 
 def test_load_store_falls_back_to_in_memory_on_corruption_after_start(

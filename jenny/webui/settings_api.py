@@ -17,7 +17,7 @@ from jenny import __version__
 from jenny.agent.token_usage import token_usage_payload
 from jenny.config import store
 from jenny.config.loader import get_config_path, load_config
-from jenny.config.schema import Config
+from jenny.config.schema import KEEP_AWAKE_MODES, Config
 from jenny.security.workspace_access import workspace_sandbox_status
 from jenny.security.workspace_policy import _safe_expanduser
 from jenny.session.keys import UNIFIED_SESSION_KEY
@@ -334,6 +334,24 @@ def _parse_reasoning_effort(value: str | None) -> str | None | _Unset:
     return normalized
 
 
+def _parse_keep_awake(value: str | None) -> str | None:
+    """Valida ``power.keepAwake`` prima che arrivi al config.
+
+    Lo schema, in caricamento, ricade in silenzio su ``"turns"`` quando trova un
+    valore che non conosce: giusto per un file scritto a mano, sbagliato qui.
+    Una richiesta della WebUI con un modo inventato è un bug del client, e
+    accettarla scriverebbe "turns" mostrando poi un valore che l'utente non ha
+    scelto. Meglio un 400 esplicito.
+    """
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if normalized not in KEEP_AWAKE_MODES:
+        allowed = ", ".join(KEEP_AWAKE_MODES)
+        raise WebUISettingsError(f"keep_awake must be one of: {allowed}")
+    return normalized
+
+
 def _is_first_run(config: Any = None) -> bool:
     """Return True if no provider has been configured yet."""
     config_path = get_config_path()
@@ -504,6 +522,13 @@ def settings_payload(
         "location": {
             "enabled": config.tools.location.enable,
         },
+        # Il wakelock di servizio si prende una volta sola all'avvio: qui si
+        # espone il valore scritto nel config, non lo stato del lock vivo. La UI
+        # deve dire che il cambio vale dal prossimo riavvio.
+        "power": {
+            "keep_awake": config.power.keep_awake,
+            "modes": list(KEEP_AWAKE_MODES),
+        },
         "runtime": {
             "config_path": str(_safe_expanduser(get_config_path())),
             "workspace_path": str(config.workspace_path),
@@ -531,6 +556,7 @@ def settings_payload(
         "requires_restart": requires_restart,
         "version": _version_payload(),
         "config_recovery": _config_recovery_payload(),
+        "cron_recovery": _cron_recovery_payload(),
     }
     return payload
 
@@ -551,6 +577,27 @@ def _config_recovery_payload() -> dict[str, Any] | None:
     quarantine = ctx.config_quarantine_path
     return {
         "restored_from": ctx.config_recovered_from,
+        "broken_file": str(_safe_expanduser(quarantine)) if quarantine else None,
+    }
+
+
+def _cron_recovery_payload() -> dict[str, Any] | None:
+    """Segnala alla UI che ``cron/jobs.json`` era illeggibile all'avvio.
+
+    Separato da ``config_recovery`` perché la conseguenza è diversa e più
+    concreta: con ``restoredFrom`` a "empty" i promemoria che l'utente aveva
+    creato non ci sono più, e nessuna schermata glielo direbbe — se ne
+    accorgerebbe solo quando non suonano. Il file rotto è conservato accanto,
+    così il recupero a mano resta possibile.
+    """
+    from jenny.runtime.context import get_runtime_context
+
+    ctx = get_runtime_context()
+    if not ctx.cron_recovered_from:
+        return None
+    quarantine = ctx.cron_quarantine_path
+    return {
+        "restored_from": ctx.cron_recovered_from,
         "broken_file": str(_safe_expanduser(quarantine)) if quarantine else None,
     }
 
@@ -848,4 +895,58 @@ async def update_location_settings(query: QueryParams) -> dict[str, Any]:
     return settings_payload()
 
 
+async def update_power_settings(query: QueryParams) -> dict[str, Any]:
+    """Aggiorna ``power.keepAwake`` (anti-doze) dentro il funnel della config.
 
+    Solo ``keep_awake`` è esposto: rotazione del wakelock, watchdog e alarm
+    restano config-only perché sono manopole di taratura, non una scelta che
+    l'utente possa fare con cognizione.
+
+    ``requires_restart`` è sempre True quando il valore cambia: il lock di
+    servizio (``"always"``) viene preso una volta sola alla partenza del
+    gateway, quindi il nuovo modo non entra in vigore prima del riavvio.
+    """
+    changed: dict[str, bool] = {}
+
+    def _apply(config: Config) -> bool:
+        keep_awake = _parse_keep_awake(_query_first_alias(query, "keep_awake", "keepAwake"))
+        if keep_awake is None or config.power.keep_awake == keep_awake:
+            changed["required"] = False
+            return False
+        config.power.keep_awake = keep_awake
+        changed["required"] = True
+        return True
+
+    await store.mutate(_apply)
+    return settings_payload(requires_restart=changed.get("required", False))
+
+
+async def power_diagnostics_payload() -> dict[str, Any]:
+    """Stato energetico osservabile: permessi, wakelock e buchi di attività.
+
+    Endpoint a parte e non un pezzo di ``settings_payload`` per due motivi: qui
+    si interroga il bridge Android (tre chiamate JNI, che il payload delle
+    impostazioni non deve pagare a ogni apertura) e il pannello si aggiorna da
+    solo al ritorno da un dialogo di sistema, quando il resto delle
+    impostazioni non è cambiato.
+
+    Fuori da Android ``android`` è ``False`` e i tre booleani non significano
+    niente: la UI si limita a non mostrare il pannello.
+    """
+    from jenny.runtime.gap_history import recent_gaps
+    from jenny.runtime.power import (
+        alarms_available,
+        can_schedule_exact_alarms,
+        is_battery_exempt,
+        is_wakelock_held,
+    )
+
+    config = load_config()
+    return {
+        "android": alarms_available(),
+        "battery_exempt": await is_battery_exempt(),
+        "exact_alarms": await can_schedule_exact_alarms(),
+        "wakelock_held": await is_wakelock_held(),
+        "gap_warning_min": config.power.gap_warning_min,
+        "gaps": recent_gaps(config.workspace_path, limit=5),
+    }

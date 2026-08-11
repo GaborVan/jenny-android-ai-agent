@@ -18,11 +18,13 @@ from jenny.bus.queue import MessageBus
 from jenny.webui.settings_api import (
     WebUISettingsError,
     delete_provider,
+    power_diagnostics_payload,
     provider_models_payload,
     save_onboarding,
     settings_payload,
     update_agent_settings,
     update_location_settings,
+    update_power_settings,
     update_provider,
     update_web_search_settings,
 )
@@ -82,6 +84,10 @@ class WebUISettingsRouter:
             return await self._handle_settings_web_search_update(request)
         if path == "/api/settings/location/update":
             return await self._handle_settings_location_update(request)
+        if path == "/api/settings/power/update":
+            return await self._handle_settings_power_update(request)
+        if path == "/api/settings/power/diagnostics":
+            return await self._handle_settings_power_diagnostics(request)
         if path == "/api/settings/ssh":
             return self._handle_ssh_settings(request)
         if path == "/api/settings/ssh/update":
@@ -229,6 +235,31 @@ class WebUISettingsRouter:
         except Exception:
             self.logger.exception("location settings update failed")
             return self._error_response(500, "failed to update location settings")
+        return self._json_response(payload)
+
+    async def _handle_settings_power_update(self, request: WsRequest) -> Response:
+        if not self._authorized(request):
+            return self._unauthorized()
+        try:
+            payload = await update_power_settings(self._query(request))
+        except WebUISettingsError as e:
+            return self._error_response(e.status, e.message)
+        except Exception:
+            self.logger.exception("power settings update failed")
+            return self._error_response(500, "failed to update power settings")
+        # Nessun _fire_settings_changed: il wakelock di servizio si prende
+        # all'avvio del gateway e non c'è niente da ricostruire a caldo. La
+        # risposta porta requires_restart, la UI lo dice a parole.
+        return self._json_response(payload)
+
+    async def _handle_settings_power_diagnostics(self, request: WsRequest) -> Response:
+        if not self._authorized(request):
+            return self._unauthorized()
+        try:
+            payload = await power_diagnostics_payload()
+        except Exception:
+            self.logger.exception("power diagnostics failed")
+            return self._error_response(500, "failed to read power diagnostics")
         return self._json_response(payload)
 
     # -- SSH ---------------------------------------------------------------- #

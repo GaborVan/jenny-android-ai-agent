@@ -124,3 +124,4 @@ temp/
 *.tmp
 exp/
 .playwright-mcp/
+/roadmap

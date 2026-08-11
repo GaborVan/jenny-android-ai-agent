@@ -41,10 +41,10 @@
   --radius-seg:    999px;
   --dock-height:   56px;
   --dock-icon:     22px;
-  /* Lato del canvas quadrato della mascotte. Default = taglia media; le altre
-     taglie la riscrivono su <html> (v. shared/mascot.js). Tutta la geometria
-     di .jenny-duo e delle bolle minichat ne deriva. */
-  --jenny-size:    160px;
+  /* Lato del canvas quadrato della mascotte. Default = taglia piccola; le
+     altre taglie la riscrivono su <html> (v. shared/mascot.js). Tutta la
+     geometria di .jenny-duo e delle bolle minichat ne deriva. */
+  --jenny-size:    120px;
   --font-sans:     'Inter', system-ui, sans-serif;
   --font-display:  'Tenor Sans', var(--font-sans);
   --font-mono:     'Fira Code', monospace;
@@ -814,7 +814,14 @@ body {
   border-radius: 0 0 16px 16px;
   z-index: 21;
   transform: translateY(-100%);
-  transition: transform .32s cubic-bezier(.34,1.56,.64,1), box-shadow .32s cubic-bezier(.25,.1,.25,1);
+  /* Il markup dei drawer è statico e presente in tutte le sezioni, anche dove
+     non sono nemmeno apribili: fuori schermo per solo `transform` restavano
+     nella tab order e leggibili da TalkBack. La visibility non si interpola,
+     quindi la si ritarda di quanto dura lo scorrimento: l'uscita resta
+     visibile, l'entrata è immediata (v. .open). L'inerzia di ciò che sta
+     *sotto* un drawer aperto la mette DrawerManager. */
+  visibility: hidden;
+  transition: transform .32s cubic-bezier(.34,1.56,.64,1), box-shadow .32s cubic-bezier(.25,.1,.25,1), visibility 0s linear .32s;
   display: flex; flex-direction: column;
   overflow: hidden;
   box-shadow: none;
@@ -823,6 +830,8 @@ body {
 }
 .drawer.open {
   transform: translateY(0);
+  visibility: visible;
+  transition: transform .32s cubic-bezier(.34,1.56,.64,1), box-shadow .32s cubic-bezier(.25,.1,.25,1), visibility 0s linear 0s;
   box-shadow:
     0 16px 56px rgba(0,0,0,0.45),
     0 4px 16px rgba(0,0,0,0.25),
@@ -1284,6 +1293,23 @@ body {
   padding: 14px 16px;
   display: flex; flex-direction: column; gap: 12px;
 }
+/* Niente di impilato in una colonna che scorre può restringersi. La colonna ha
+   spazio libero NEGATIVO appena il contenuto supera lo schermo, e i flex item la
+   assorbono in proporzione al proprio minimo: per un item che è a sua volta uno
+   scroll container (`overflow-y: auto`) quel minimo automatico è ZERO, non
+   l'altezza del contenuto, quindi si schiaccia sul padding mentre il testo dentro
+   occupa ancora una riga intera. Le bolle `.chat-msg` non sono scroll container e
+   si difendono da sole.
+   Un `min-height` fisso coprirebbe una scatola lasciando in piedi l'elasticità,
+   che è l'affermazione sbagliata.
+
+   Questa regola non basta da sola: `display: contents` (`.sa-digest`) solleva i
+   figli nel layout della colonna, ma il selettore `>` continua a vedere il DOM,
+   quindi colpisce il wrapper — che non genera box — e non l'elemento che si
+   schiaccia (misurato: 12px di padding contro 36px di contenuto). Perciò ogni
+   corpo che scorre dichiara `flex-shrink: 0` nella propria regola, dove la
+   proprietà appartiene: vale in qualunque punto finisca. */
+.chat-area > * { flex-shrink: 0; }
 
 /* Ancora per il FAB "vai in fondo" */
 #view-chat { position: relative; }
@@ -1465,6 +1491,15 @@ body {
   color: var(--text-muted);
   max-height: 300px;
   overflow-y: auto;
+  /* Uno scroll container ha min-height automatica ZERO: come flex item di una
+     colonna che scorre si schiaccerebbe sul padding (vedi `.chat-area > *`).
+     Oggi è salvo solo perché vive in una meta-row, che è un flex a RIGA. */
+  flex-shrink: 0;
+  /* Il corpo è un contenitore di scroll suo: uno swipe che arriva in fondo non
+     deve proseguire trascinando la chat sotto (stessa regola di
+     `.sa-stream-list` e `.sa-digest-body`). */
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
   border-left: 2px solid var(--accent);
   padding: 6px 12px;
   margin: 2px 0;
@@ -1475,6 +1510,31 @@ body {
 .chat-thinking-body p {
   margin: 0.3em 0;
 }
+
+/* Pillola "vai in fondo" del ragionamento in diretta: stesso mestiere della FAB
+   della chat e della pillola della lista dei subagent (`.sa-stream-jump`) —
+   compare solo quando l'utente è risalito a leggere mentre il testo continua ad
+   arrivare, ed è il modo di tornare all'ultima riga. Sta nella meta-row insieme
+   al corpo (`.chat-thinking` è `display: contents`), quindi `width: 100%` la
+   manda a capo da sé, sotto al box. */
+.chat-thinking-jump {
+  display: block;
+  width: 100%;
+  margin: 0 0 2px;
+  min-height: 28px;
+  background: var(--overlay-strong);
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius-seg);
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: 10.5px;
+  cursor: pointer;
+}
+.chat-thinking-jump i { margin-right: 4px; font-size: 12px; }
+.chat-thinking-jump:active { background: var(--active); }
+.chat-thinking-jump[hidden] { display: none; }
+/* Chiuso non c'è nessun fondo da raggiungere. */
+.chat-thinking.collapsed .chat-thinking-jump { display: none; }
 
 /* Tool call pills */
 .chat-tools {
@@ -2596,6 +2656,15 @@ body {
 }
 .app-cell:hover { transform: scale(1.05); }
 .app-cell:active { background: var(--hover); transform: scale(0.95); }
+/* Celle e intestazioni sono <div> resi attivabili da tastiera (v. wireEvents in
+   mobile-apps.js): sul Titan 2 Tab è navigazione primaria, quindi l'anello di
+   fuoco deve vedersi. */
+.app-cell:focus-visible,
+.apps-section-header:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius);
+}
 .app-icon {
   width: 48px; height: 48px; border-radius: 14px;
   display: flex; align-items: center; justify-content: center;
@@ -2699,10 +2768,15 @@ body {
 .app-frame-overlay iframe { flex: 1; width: 100%; border: 0; background: transparent; }
 
 /* ── Graph ── */
+/* Colonna, non blocco: breadcrumb e barra di ricerca sono righe ad altezza
+   propria e la tela prende quel che resta. Da blocco l'SVG chiedeva `height:
+   100%` dell'intero wrap *sotto* i breadcrumb, e `overflow: hidden` gli
+   tagliava in silenzio dal fondo tanti pixel quanti ne occupavano loro. */
 .graph-wrap {
   flex: 1; overflow: hidden; position: relative;
+  display: flex; flex-direction: column;
 }
-.graph-wrap svg { width: 100%; height: 100%; }
+.graph-wrap svg { width: 100%; flex: 1; min-height: 0; }
 
 /* Graph legend */
 .graph-legend {
@@ -2757,6 +2831,60 @@ body {
 .graph-wrap .node.dim { opacity: 0.12; }
 .graph-wrap .link.dim { opacity: 0.08; }
 .graph-wrap .node.highlight .node-main { filter: brightness(1.3); }
+
+/* Risultato di ricerca. Marcatore *indipendente* da dim/highlight: quelli
+   dicono "il focus sta guardando qui", questo dice "la query ti riguarda", e
+   le due cose devono poter convivere — entrando nel focus di un risultato i
+   vicini si accendono ma restano distinguibili da chi la query aveva trovato.
+
+   L'anello è nel colore del **fondo** e cade dentro al disco. Non è una scelta
+   estetica: i riempimenti dei nodi sono --accent, --error, --ok e --text-faint,
+   e non esiste un altro token in contrasto con tutti e quattro in tutti i temi
+   — in due dei sette --accent *è* --text, quindi un anello accento (o testo)
+   sparirebbe proprio sui nodi concept, che sono la maggioranza. --bg invece è
+   in contrasto con ogni riempimento per costruzione, altrimenti i nodi non si
+   vedrebbero sullo sfondo; è la stessa ragione per cui l'alone di .node-main
+   funziona ovunque. Marcatore di forma, non di tinta: regge anche i temi
+   monocromatici, dove per definizione nessun colore può distinguere niente. */
+.graph-wrap .node .node-ring {
+  fill: none; stroke: var(--bg); stroke-width: 2; opacity: 0;
+  transition: opacity 0.2s ease;
+}
+.graph-wrap .node.match .node-ring { opacity: 1; }
+.graph-wrap .node-label.match { fill: var(--accent); }
+
+/* ── Ricerca nel grafo ── */
+.graph-search {
+  flex-shrink: 0;
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 16px;
+  background: var(--surface);
+  border-bottom: 0.5px solid var(--border);
+}
+.graph-search[hidden] { display: none; }
+.graph-search-icon { color: var(--text-faint); font-size: 15px; flex-shrink: 0; }
+.graph-search input {
+  flex: 1; min-width: 0;
+  background: none; border: 0; outline: none; padding: 0;
+  color: var(--text); font-size: 13px; font-family: inherit;
+}
+.graph-search input::placeholder { color: var(--text-faint); }
+/* La X nativa di input[type=search] duplicherebbe il nostro pulsante. */
+.graph-search input::-webkit-search-cancel-button { display: none; }
+.graph-search-count {
+  flex-shrink: 0;
+  font-size: 11px; color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+.graph-search-count.empty { color: var(--error); }
+.graph-search-count[hidden] { display: none; }
+.graph-search-clear {
+  flex-shrink: 0;
+  background: none; border: 0; padding: 2px;
+  color: var(--text-faint); font-size: 15px; cursor: pointer;
+  display: flex; align-items: center;
+}
+.graph-search-clear[hidden] { display: none; }
 
 /* ══ Responsive / Touch ══ */
 
@@ -3617,6 +3745,13 @@ body {
   max-height: 40vh;
   overflow-y: auto;
   overscroll-behavior: contain;
+  /* …e proprio per questo non deve poter essere ristretto: uno scroll container
+     ha min-height automatica ZERO, quindi come flex item di una colonna che
+     scorre assorbe tutta la compressione e si riduce al proprio padding — 12px
+     contro 36px di contenuto, cioè la punta dei glifi e nient'altro. Vedi
+     `.chat-area > *`: quella regola non arriva qui, perché `display: contents`
+     sul wrapper solleva questo box oltre il selettore `>`. */
+  flex-shrink: 0;
 }
 .sa-digest.is-error .sa-digest-body { border-left-color: var(--error); }
 .sa-digest-msg {
@@ -3973,6 +4108,22 @@ body {
   padding-right: 24px;
 }
 
+/* Costo della scelta corrente di una select (v. "Tenere sveglia la CPU").
+   Il testo di una <option> nativa non va a capo: quello che non ci sta viene
+   troncato, e in una lista di compromessi la parte tagliata è proprio la
+   clausola sul costo. Qui sotto invece va a capo quanto serve, e resta legata
+   alla select dal filo verticale invece che dalla sola vicinanza. Più leggibile
+   di .settings-hint di proposito: descrive la scelta attiva, non il contorno. */
+.settings-choice-cost {
+  margin: 6px 0 0;
+  padding-left: 8px;
+  border-left: 2px solid var(--border-strong);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+.settings-choice-cost:empty { display: none; }
+
 /* Toggle switch */
 .settings-toggle-row {
   flex-direction: row;
@@ -4139,7 +4290,7 @@ body {
   gap: 4px;
 }
 
-/* Bottone segmented condiviso (lingua, lato mascotte, ...): in lista
+/* Bottone segmented condiviso (lingua, taglia mascotte, ...): in lista
    verticale occupa la riga, dentro .settings-seg si divide la riga. */
 .settings-seg {
   display: flex;
@@ -5422,10 +5573,10 @@ body {
 .jenny-duo {
   position: absolute;
   /* L'arte è il canvas QUADRATO 3000² intero (nessun crop): il personaggio
-     occupa ~45% del quadrato, i margini sono trasparenti. 160px di quadrato
-     ≈ 72px di personaggio visibile; gli offset compensano i margini.
+     occupa ~45% del quadrato, i margini sono trasparenti. 120px di quadrato
+     ≈ 54px di personaggio visibile; gli offset compensano i margini.
      Tutta la geometria deriva da --jenny-size (impostata su :root da
-     shared/mascot.js, default 160px): i rapporti qui sotto valgono a ogni
+     shared/mascot.js, default 120px): i rapporti qui sotto valgono a ogni
      taglia, quindi cambiarne una non richiede di ritoccare gli offset. */
   right: calc(var(--jenny-size) * -0.469);
   /* Fissa per tutti gli stati: appena sopra la barra di input (dock +
@@ -5525,9 +5676,21 @@ body {
   cursor: pointer;
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.25s;
+  /* Lo scrim è un <button> a schermo intero con aria-label: da chiuso, senza
+     visibility, resta una tappa Tab cieca (l'anello di fuoco è invisibile) e un
+     nodo TalkBack fantasma su OGNI schermata. Che il problema fosse noto lo
+     dimostra il tabindex="-1" messo sul .jenny-duo accanto. La visibility non
+     si interpola: la si ritarda di quanto dura la dissolvenza, così l'uscita
+     resta visibile e l'entrata è immediata (v. .open). */
+  visibility: hidden;
+  transition: opacity 0.25s, visibility 0s linear 0.25s;
 }
-.jenny-scrim.open { opacity: 1; pointer-events: auto; }
+.jenny-scrim.open {
+  opacity: 1;
+  pointer-events: auto;
+  visibility: visible;
+  transition: opacity 0.25s, visibility 0s linear 0s;
+}
 /* Nascosta per preferenza (mascotte non visibile) o onboarding, v. setMode()
    in mobile-jenny.js: !important come nel media-query landscape sotto,
    così vince anche su .open. */

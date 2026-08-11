@@ -108,7 +108,7 @@ This is the distinction that matters most in practice, and Jenny makes it for yo
 
 **Long commands** (`ssh_job`) are not waited for at all. Jenny launches them detached from the connection, with output going to a log file on the server (`/tmp/jenny-jobs/<job-id>.log` by default), and then reads that log *incrementally* — each check returns only what's new since the last one. You get a job id back straight away.
 
-The reason is your phone. Jenny's gateway runs as a foreground service **without a wake lock**: with the screen off the CPU can suspend, and a walk from wifi to mobile data kills the TCP connection. An `apt upgrade` waited for over an open SSH channel doesn't fail cleanly — it fails halfway, and nobody knows how far it got. A detached job doesn't care: the server keeps working, the output accumulates safely on the server, and Jenny picks up from the exact byte she'd reached, whether that's thirty seconds or a day later. Jobs survive a dropped connection, a gateway restart, and the app being killed.
+The reason is your phone. Jenny does hold a wake lock while a command is running, so the CPU no longer suspends mid-wait — but a wake lock keeps the processor awake, not the connection. A walk from wifi to mobile data still kills the TCP session underneath an open SSH channel, and so does the gateway being restarted. An `apt upgrade` waited for over an open SSH channel doesn't fail cleanly — it fails halfway, and nobody knows how far it got. A detached job doesn't care: the server keeps working, the output accumulates safely on the server, and Jenny picks up from the exact byte she'd reached, whether that's thirty seconds or a day later. Jobs survive a dropped connection, a gateway restart, and the app being killed.
 
 What you'll notice:
 

@@ -41,6 +41,19 @@ def extract_title(text: str) -> str | None:
     return h1.group(1) if h1 else None
 
 
+def split_frontmatter(text: str) -> tuple[str, str]:
+    """``(testo grezzo del frontmatter, corpo)`` senza parsare lo YAML.
+
+    Serve a chi deve solo *guardare* il frontmatter — l'indice full-text ne
+    pesca i tag — e non può permettersi un ``yaml.safe_load`` per pagina su
+    centinaia di file. Senza frontmatter il primo elemento è la stringa vuota.
+    """
+    m = _FRONTMATTER_RE.match(text)
+    if not m:
+        return "", text
+    return m.group(1), text[m.end() :]
+
+
 def strip_frontmatter(text: str) -> tuple[dict[str, Any] | None, str, str | None]:
     """Return ``(frontmatter, body, title)`` for a page's raw markdown."""
     m = _FRONTMATTER_RE.match(text)
