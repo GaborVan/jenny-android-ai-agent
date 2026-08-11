@@ -6,12 +6,14 @@ settings payload shape and the allowlisted config mutations exposed to WebUI.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import time
 from typing import Any
 
 import httpx
+from loguru import logger
 
 from jenny import __version__
 from jenny.agent.token_usage import token_usage_payload
@@ -26,11 +28,232 @@ from jenny.utils.helpers import validate_timezone_name
 QueryParams = dict[str, list[str]]
 
 
+# Fasi che il layer di installazione può dichiarare. Serve a non far arrivare
+# alla UI una stringa che nessuna traduzione conosce (`i18n.t` stamperebbe la
+# chiave grezza in mezzo alla pagina).
+_UPDATE_PHASES = frozenset(
+    {"idle", "downloading", "installing", "prompt", "error", "done"}
+)
+# Esiti di ``start_install``. "silent" = sessione committata senza interazione
+# (il processo verrà ucciso e ripartirà), "prompt" = tocca all'utente
+# confermare nell'installer di sistema.
+_INSTALL_STATES = frozenset({"silent", "prompt", "error"})
+
+_UPDATE_DEFAULTS: dict[str, Any] = {
+    "current_code": None,
+    "latest": None,
+    "latest_code": None,
+    "update_available": False,
+    "critical": False,
+    "notes_url": None,
+    "summary": None,
+    "last_check": None,
+    "last_success": None,
+}
+
+
+def _last_success_ms(module: Any) -> int | None:
+    """Ultimo controllo *riuscito*, letto in modo tollerante da *module*.
+
+    ``last_success_ms`` è nato dopo ``last_check_ms``: manca su una build che
+    non lo espone ancora e ritorna ``None`` su uno stato scritto prima che il
+    campo esistesse. Entrambi i casi valgono "ignoto", e ignoto è ``None`` —
+    la pagina resta disegnabile, come per tutto il resto di questo payload.
+
+    Serve un accesso a parte proprio perché non può stare nell'``import`` degli
+    altri tre: un ``ImportError`` lì dentro porterebbe via anche ``current_code``
+    e ``last_check``, che invece ci sono.
+    """
+    fn = getattr(module, "last_success_ms", None)
+    if not callable(fn):
+        return None
+    try:
+        value = fn()
+    except Exception:
+        logger.opt(exception=True).debug("last_success_ms is unavailable")
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
 def _version_payload() -> dict[str, Any]:
-    """Return version info for the settings payload."""
+    """Versione installata e, se lo stato dell'updater ne conosce una, la nuova.
+
+    Sincrono e senza rete: ``cached_update`` rilegge soltanto
+    ``<workspace>/update_state.json``, scritto dal job periodico. Chiamare qui
+    ``check_for_update`` significherebbe far pagare un giro di rete a ogni
+    apertura delle impostazioni.
+
+    ``last_check`` e ``last_success`` viaggiano insieme e sono due cose diverse:
+    il primo è scritto a *ogni* tentativo, riuscito o no, il secondo solo quando
+    il manifest è stato davvero letto. È la loro distanza a dire che il
+    meccanismo è morto — con il solo ``last_check`` un manifest irraggiungibile
+    da mesi resta indistinguibile da "sei aggiornato".
+
+    Tutto è dentro un ``try``, e il degrado è verso i default: senza workspace
+    (test, gateway avviato a mano), con lo stato illeggibile o con un updater
+    che solleva, restano i campi nuovi a ``None``/``False`` e ``current``
+    sempre presente. La pagina impostazioni non è il posto dove un updater rotto
+    può togliere all'utente anche il resto.
+    """
+    payload: dict[str, Any] = {"current": __version__, **_UPDATE_DEFAULTS}
+    try:
+        from jenny.runtime import update_check
+
+        payload["current_code"] = update_check.installed_version_code()
+        payload["last_check"] = update_check.last_check_ms()
+        payload["last_success"] = _last_success_ms(update_check)
+        info = update_check.cached_update()
+    except Exception:
+        logger.opt(exception=True).debug("Update state unavailable for the settings payload")
+        return payload
+
+    if info is None:
+        return payload
+
+    payload.update({
+        "latest": info.version_name,
+        "latest_code": info.version_code,
+        "update_available": True,
+        "critical": bool(info.critical),
+        # Il manifest degrada i campi di presentazione a stringa vuota; per la
+        # UI "assente" è più utile di "vuoto ma presente".
+        "notes_url": info.notes_url or None,
+        "summary": info.summary or None,
+    })
+    return payload
+
+
+def _load_update_install() -> Any:
+    """Import tollerante del layer di installazione (``runtime/update_install``).
+
+    Modulo separato e importato al bisogno: l'installazione tocca il
+    PackageInstaller di Android, e la pagina impostazioni deve poter aprirsi su
+    una build in cui quel layer non c'è. Chi lo chiama riceve un 503 parlante
+    invece di un ImportError a caso nel dispatch.
+    """
+    try:
+        from jenny.runtime import update_install
+    except ImportError as exc:
+        raise WebUISettingsError(
+            "the in-app updater is not available in this build",
+            status=503,
+        ) from exc
+    return update_install
+
+
+def _clamp_progress(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    return min(max(int(value), 0), 100)
+
+
+def _as_detail(value: Any) -> str:
+    return value.strip()[:400] if isinstance(value, str) else ""
+
+
+def update_status_payload() -> dict[str, Any]:
+    """Stato dell'installazione in corso, normalizzato per il polling della UI.
+
+    La normalizzazione non è paranoia gratuita: la UI sceglie la stringa da
+    mostrare *dalla* fase, quindi una fase che le traduzioni non conoscono
+    finirebbe stampata com'è. Sconosciuta o mancante vale ``idle``, che è anche
+    lo stato in cui la UI smette di seguire il processo.
+    """
+    module = _load_update_install()
+    raw = module.install_status()
+    data = raw if isinstance(raw, dict) else {}
+    phase = data.get("phase")
+    if phase not in _UPDATE_PHASES:
+        phase = "idle"
     return {
-        "current": __version__,
+        "phase": phase,
+        "progress": _clamp_progress(data.get("progress")),
+        "detail": _as_detail(data.get("detail")),
     }
+
+
+async def start_update_install() -> dict[str, Any]:
+    """Avvia il download+installazione dell'update in cache.
+
+    Ritorna l'esito *applicativo* (``ok``/``state``/``detail``) con HTTP 200
+    anche quando fallisce: "l'installer ha detto di no" è un'informazione da
+    mostrare all'utente nello stesso riquadro in cui poi arriva il progresso,
+    non un errore di trasporto. Restano 4xx/5xx per updater assente e guasti
+    inattesi.
+    """
+    module = _load_update_install()
+    result = await module.start_install()
+    state = getattr(result, "state", None)
+    if state not in _INSTALL_STATES:
+        state = "error"
+    return {
+        "ok": bool(getattr(result, "ok", False)),
+        "state": state,
+        "detail": _as_detail(getattr(result, "detail", "")),
+    }
+
+
+# Un controllo alla volta. La rotta fa rete, e "l'utente pigia due volte" è il
+# caso normale su un bottone che non dà riscontro immediato: senza questo, due
+# richieste al manifest si sovrappongono e riscrivono lo stesso file di stato.
+# Chi arriva secondo non si mette in coda — aspettare in silenzio un controllo
+# che sta già girando non aggiunge niente: riceve ``busy`` e lo stato corrente.
+_update_check_lock = asyncio.Lock()
+
+
+def _check_outcome(version: dict[str, Any]) -> str:
+    """``"ok"`` solo se l'ultimo tentativo ha davvero raggiunto il manifest.
+
+    Il confronto è fra i due timestamp che l'updater scrive: ``last_check`` a
+    ogni tentativo, ``last_success`` solo quando il manifest è stato letto.
+    Su una build che non espone ancora quel secondo segnale la domanda non ha
+    risposta, e allora si tace: annunciare "non riuscito" senza saperlo sarebbe
+    peggio del silenzio, perché è l'avviso stesso a perdere credito.
+    """
+    try:
+        from jenny.runtime import update_check
+    except ImportError:
+        return "ok"
+    if not callable(getattr(update_check, "last_success_ms", None)):
+        return "ok"
+    last_success = version.get("last_success")
+    last_check = version.get("last_check")
+    if not isinstance(last_success, int) or not isinstance(last_check, int):
+        return "failed"
+    return "ok" if last_success >= last_check else "failed"
+
+
+async def run_update_check() -> dict[str, Any]:
+    """Controllo aggiornamenti chiesto a mano, con il payload versione fresco.
+
+    Fa **rete**, e per questo è una rotta a sé invece di un ramo di
+    ``settings_payload()``: quel payload si costruisce a ogni apertura delle
+    impostazioni, e pagarci un giro HTTP ogni volta sarebbe un costo nascosto.
+
+    ``check_for_update`` ignora di proposito ``config.updates.enabled`` — quel
+    flag decide se il job periodico viene registrato, non se un controllo
+    esplicito può essere fatto — e non solleva mai: rete assente o manifest
+    illeggibile tornano ``None``. Il fallimento va quindi dedotto dallo stato,
+    ed è esattamente quello che fa ``_check_outcome``.
+
+    La risposta porta sempre il payload versione aggiornato: la UI deve poter
+    riflettere il nuovo stato senza ricaricarsi.
+    """
+    if _update_check_lock.locked():
+        return {"status": "busy", "version": _version_payload()}
+    async with _update_check_lock:
+        try:
+            from jenny.runtime.update_check import check_for_update
+        except ImportError as exc:
+            raise WebUISettingsError(
+                "the updater is not available in this build",
+                status=503,
+            ) from exc
+        await check_for_update(load_config())
+        version = _version_payload()
+    return {"status": _check_outcome(version), "version": version}
 
 
 # Il tool android_web supporta solo Bing (android_web.py rifiuta ogni altro

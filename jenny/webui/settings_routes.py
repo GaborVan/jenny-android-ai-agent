@@ -20,12 +20,15 @@ from jenny.webui.settings_api import (
     delete_provider,
     power_diagnostics_payload,
     provider_models_payload,
+    run_update_check,
     save_onboarding,
     settings_payload,
+    start_update_install,
     update_agent_settings,
     update_location_settings,
     update_power_settings,
     update_provider,
+    update_status_payload,
     update_web_search_settings,
 )
 from jenny.webui.ssh_api import (
@@ -102,6 +105,12 @@ class WebUISettingsRouter:
             return await self._handle_ssh(request, probe_ssh_host_key, "ssh host key probe")
         if path == "/api/settings/ssh/host-key/accept":
             return await self._handle_ssh(request, accept_ssh_host_key, "ssh host key accept")
+        if path == "/api/updates/check":
+            return await self._handle_update_check(request)
+        if path == "/api/updates/install":
+            return await self._handle_update_install(request)
+        if path == "/api/updates/status":
+            return self._handle_update_status(request)
         if path == "/api/onboarding/save":
             return await self._handle_onboarding_save(request)
         if path == "/api/telegram/status":
@@ -260,6 +269,76 @@ class WebUISettingsRouter:
         except Exception:
             self.logger.exception("power diagnostics failed")
             return self._error_response(500, "failed to read power diagnostics")
+        return self._json_response(payload)
+
+    # -- Aggiornamenti ------------------------------------------------------ #
+
+    async def _handle_update_check(self, request: WsRequest) -> Response:
+        """Controllo aggiornamenti forzato dalle impostazioni.
+
+        In GET come ogni scrittura di questa WebUI (v. ``_handle_update_install``
+        per il perché). È l'unica strada che l'utente ha per sapere se il
+        meccanismo è ancora vivo: il job periodico gira ogni ventiquattr'ore e
+        i suoi fallimenti finiscono solo nel log, che su un telefono non legge
+        nessuno. La protezione contro le chiamate ripetute sta in
+        ``run_update_check``, che è dove vive il lock.
+        """
+        if not self._authorized(request):
+            return self._unauthorized()
+        try:
+            payload = await run_update_check()
+        except WebUISettingsError as e:
+            return self._error_response(e.status, e.message)
+        except Exception:
+            self.logger.exception("manual update check failed")
+            return self._error_response(500, "failed to run the update check")
+        version = payload.get("version") or {}
+        self.logger.info(
+            "[updates] manual check: status={!r} available={} latest={!r}",
+            payload.get("status"),
+            version.get("update_available"),
+            version.get("latest"),
+        )
+        return self._json_response(payload)
+
+    async def _handle_update_install(self, request: WsRequest) -> Response:
+        """Avvia l'installazione dell'update annunciato nel payload versione.
+
+        Il dispatch è per path, non per metodo, come per tutte le scritture di
+        questa WebUI: il server HTTP è quello di ``websockets``, che rifiuta
+        qualunque metodo diverso da GET prima ancora di arrivare qui. La UI
+        chiama quindi in GET; se un giorno il trasporto accettasse POST, questa
+        route lo servirebbe senza modifiche.
+        """
+        if not self._authorized(request):
+            return self._unauthorized()
+        try:
+            payload = await start_update_install()
+        except WebUISettingsError as e:
+            return self._error_response(e.status, e.message)
+        except Exception:
+            self.logger.exception("update install failed to start")
+            return self._error_response(500, "failed to start the update installation")
+        # Loggato anche quando va bene: un'installazione è l'unica azione della
+        # WebUI che si porta via il processo, e senza questa riga il log si
+        # interrompe senza spiegare perché.
+        self.logger.info(
+            "[updates] install requested: ok={} state={!r} detail={!r}",
+            payload.get("ok"), payload.get("state"), payload.get("detail"),
+        )
+        return self._json_response(payload)
+
+    def _handle_update_status(self, request: WsRequest) -> Response:
+        """Fase e progresso dell'installazione, per il polling della UI."""
+        if not self._authorized(request):
+            return self._unauthorized()
+        try:
+            payload = update_status_payload()
+        except WebUISettingsError as e:
+            return self._error_response(e.status, e.message)
+        except Exception:
+            self.logger.exception("update status failed")
+            return self._error_response(500, "failed to read the update status")
         return self._json_response(payload)
 
     # -- SSH ---------------------------------------------------------------- #

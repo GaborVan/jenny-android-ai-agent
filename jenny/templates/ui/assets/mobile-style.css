@@ -3982,6 +3982,99 @@ body {
   word-break: break-all;
 }
 
+/* ── Aggiornamento dell'app ──
+   La pastiglia accanto al numero di versione, e il riquadro di stato che
+   compare solo mentre l'installazione è in corso. La variante -critical usa il
+   colore d'errore di proposito: un aggiornamento di sicurezza deve leggersi
+   diverso da una versione nuova qualsiasi anche a colpo d'occhio. */
+.update-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  background: rgba(var(--accent-rgb), 0.15);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  vertical-align: middle;
+}
+
+.update-badge i { font-size: 11px; }
+
+.update-badge.critical {
+  background: rgba(239, 68, 68, 0.15);
+  color: var(--error);
+}
+
+.update-status {
+  margin-top: 10px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text);
+}
+
+.update-status .update-phase {
+  margin-top: 4px;
+  color: var(--text-muted);
+}
+
+.update-status .update-detail {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-faint);
+  word-break: break-word;
+}
+
+.update-progress-track {
+  margin-top: 8px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--overlay-strong);
+  overflow: hidden;
+}
+
+.update-progress-bar {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+  transition: width 0.3s cubic-bezier(.25,.1,.25,1);
+}
+
+/* Il blocco "ultimo controllo riuscito" + il bottone che ne forza uno. Sta
+   sotto il riquadro dell'aggiornamento ma c'è anche quando quello non c'è: è
+   l'unico posto in cui si vede che il meccanismo è morto, e in quel caso vale
+   più del resto della pagina. La variante .warn prende il colore d'errore
+   perché "non controllo da mesi" e "sei aggiornato" non devono somigliarsi. */
+.update-check {
+  margin-top: 10px;
+}
+
+.update-check-line {
+  margin-bottom: 6px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-faint);
+}
+
+.update-check-line.warn {
+  color: var(--error);
+}
+
+/* `.settings-btn-add` non ha uno stato disabilitato suo: qui serve, perché il
+   controllo dura quanto un giro di rete e un bottone che resta identico invita
+   a ripremerlo. Regola locale e non globale — gli altri bottoni della pagina
+   non si disabilitano mai, e cambiarli tutti per questo sarebbe di troppo. */
+.update-check .settings-btn-add:disabled {
+  opacity: 0.55;
+  cursor: default;
+  transform: none;
+}
+
 .settings-section {
   border: 0.5px solid var(--border);
   border-radius: var(--radius);
