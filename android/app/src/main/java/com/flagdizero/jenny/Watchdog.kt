@@ -155,6 +155,7 @@ object Watchdog {
                 Log.w(
                     TAG,
                     "Gateway looks down (serviceRunning=${GatewayService.isRunning}, " +
+                        "gatewayThreadDead=${GatewayService.isGatewayThreadDead}, " +
                         "heartbeatAgeMs=${heartbeatAgeMs(appContext)}): restarting"
                 )
                 appContext.startForegroundService(Intent(appContext, GatewayService::class.java))
@@ -171,21 +172,31 @@ object Watchdog {
     /**
      * Il gateway è vivo?
      *
-     * Due segnali, e servono entrambi perché rispondono a domande diverse:
+     * Tre segnali, e servono tutti perché rispondono a domande diverse:
      *
      * * `GatewayService.isRunning` è uno static, quindi vale solo DENTRO questo
      *   processo. Se il processo era stato ucciso e la sveglia lo ha appena
      *   fatto ricreare, il flag è `false` perché la classe è appena stata
      *   caricata — che è la risposta giusta (il service non c'è) ma per il
      *   motivo sbagliato, e non dice nulla su cosa girava prima.
+     * * `GatewayService.isGatewayThreadDead` copre il caso che `isRunning` non
+     *   vede: `Service` ancora istanziato — notifica in barra compresa — ma
+     *   runtime Python morto, perché `run_gateway` è uscito. Lì `isRunning`
+     *   dice "vivo" e mente, e finché questo segnale non esisteva la bugia
+     *   reggeva fino a quando il battito diventava stantio: fino a TRE ORE
+     *   (`staleAfterMs`), su un controllo che gira ogni 15-60 minuti.
      * * Il battito su SharedPreferences sopravvive alla morte del processo ed è
-     *   l'unico segnale che copre il caso che il flag non vede: `Service`
-     *   ancora istanziato ma runtime Python morto (`run_gateway` è uscito dopo
-     *   aver esaurito i retry). Lì il flag dice "vivo" e mente.
+     *   l'unico che dice qualcosa su ciò che girava PRIMA. Resta la misura
+     *   giusta per un gateway vivo ma lentissimo o in doze — non per uno che si
+     *   sa già essere uscito, ed è per questo che la soglia generosa non è
+     *   stata toccata: ha semplicemente smesso di essere l'unico strumento per
+     *   un guasto che non era il suo.
      *
-     * Il riavvio ripara davvero anche quel secondo caso perché
+     * Il riavvio ripara davvero anche il secondo caso perché
      * `GatewayService.onStartCommand` richiama `startGateway()`, che riparte se
-     * il thread del gateway non c'è più.
+     * il thread del gateway non c'è più. (Il service ci prova anche da solo, al
+     * massimo una volta ogni 15 minuti: vedi `shouldSelfRestart`. Quando quel
+     * tentativo riesce non si arriva neanche qui.)
      */
     // `internal` e non `private`: la diagnosi la usa anche `GatewayStarter`
     // (`ensureUpIfDown`), e deve restare UNA. Duplicarla là significherebbe due
@@ -193,6 +204,11 @@ object Watchdog {
     // segnali. Resta comunque interna al modulo: non è API per Python.
     internal fun isGatewayAlive(appContext: Context): Boolean {
         if (!GatewayService.isRunning) return false
+        // Prima del battito, e senza appello: qui non stiamo stimando, sappiamo.
+        // Il thread del gateway è terminato in questo processo, quindi dietro al
+        // service non c'è nessun agente — per quanto fresco sia il timestamp
+        // (`onStartCommand` ne scrive uno a ogni avvio, gateway o no).
+        if (GatewayService.isGatewayThreadDead) return false
         val age = heartbeatAgeMs(appContext)
         // Battito mai scritto (primo avvio, dati cancellati): il flag statico è
         // già una prova sufficiente, non si riavvia per una prefs vuota.

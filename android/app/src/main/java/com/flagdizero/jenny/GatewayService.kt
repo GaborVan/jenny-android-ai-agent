@@ -15,6 +15,7 @@ import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import com.chaquo.python.PyObject
 import com.chaquo.python.Python
 import com.chaquo.python.android.AndroidPlatform
 import kotlin.concurrent.thread
@@ -48,6 +49,27 @@ class GatewayService : Service() {
          *  una sveglia di lavoro, non un semplice "assicurati che sia su". */
         const val EXTRA_WAKE_TICK = "com.flagdizero.jenny.extra.WAKE_TICK"
 
+        /** Pausa fra l'uscita di `run_gateway` e il tentativo di rilanciarlo
+         *  nello stesso thread. Allineata a `RETRY_DELAY_S` di
+         *  `jenny/android_entry.py`: è lo stesso ordine di grandezza di attesa
+         *  che il lato Python si concede fra due tentativi. */
+        private const val SELF_RESTART_DELAY_MS = 5_000L
+
+        /**
+         * Distanza minima fra due auto-riavvii del gateway nello stesso thread.
+         *
+         * È l'unica cosa che separa "recupero immediato" da "loop di riavvii".
+         * Quando `run_gateway` esce ha già bruciato i suoi tre tentativi
+         * (`MAX_RETRIES` in `android_entry.py`), quindi un guasto che si
+         * ripresenta subito non è un incidente: è deterministico, e rilanciarlo
+         * a raffica brucerebbe batteria senza mai risalire. Sopra questa soglia
+         * il thread si arrende e lascia il campo al watchdog, che è lento ma
+         * passa da un ciclo di service completo. Tarata sull'intervallo base
+         * del watchdog (15 min): sotto quel valore staremmo solo anticipando un
+         * controllo che sarebbe arrivato comunque.
+         */
+        private const val MIN_SELF_RESTART_INTERVAL_MS = 15 * 60_000L
+
         /**
          * Il `Service` è istanziato in questo processo?
          *
@@ -64,16 +86,62 @@ class GatewayService : Service() {
         @Volatile
         var isRunning: Boolean = false
             private set
-    }
 
-    /** Il thread del gateway è vivo? Non un semplice "l'abbiamo avviato": se
-     *  `run_gateway` esce (retry esauriti, crash del loop) il thread muore e il
-     *  processo resta su con un service vivo e nessun agente dietro. Rileggere
-     *  il thread invece di ricordarsi un booleano è ciò che rende riparabile
-     *  quel caso: il prossimo `onStartCommand` — quello del watchdog — lo
-     *  rilancia. `@Volatile`: scritto dal thread del gateway, letto dal main. */
-    @Volatile
-    private var gatewayThread: Thread? = null
+        /**
+         * Il thread del gateway è vivo? Non un semplice "l'abbiamo avviato": se
+         * `run_gateway` esce (retry esauriti, crash del loop) il thread muore e
+         * il processo resta su con un service vivo e nessun agente dietro.
+         * Rileggere il thread invece di ricordarsi un booleano è ciò che rende
+         * riparabile quel caso: il prossimo `onStartCommand` — quello del
+         * watchdog — lo rilancia. `@Volatile`: scritto dal thread del gateway,
+         * letto dal main.
+         *
+         * Sta nel companion, cioè vale per PROCESSO e non per istanza del
+         * service, per due motivi che vanno insieme:
+         *
+         * * il thread del gateway sopravvive alla morte del `Service` (è un
+         *   thread nudo del processo, non un suo componente). Con il campo
+         *   sull'istanza, un `onDestroy` + ricreazione a processo vivo —
+         *   riavvio sticky, sveglia di recupero — ripartiva da `null` e
+         *   lanciava un SECONDO `run_gateway` nello stesso interprete: due loop
+         *   asyncio, due WebSocket sulla stessa porta. Esattamente il guasto
+         *   che `startGateway` dichiara di voler evitare, per una strada che
+         *   il suo lock non copriva;
+         * * `Watchdog` deve poter chiedere questo stato da una callback di
+         *   sveglia, dove non c'è nessuna istanza a portata di mano (vedi
+         *   `isGatewayThreadDead`).
+         */
+        @Volatile
+        private var gatewayThread: Thread? = null
+
+        /** Lock di `startGateway`. Nel companion perché lo stato che protegge è
+         *  del processo: sincronizzare sull'istanza lascerebbe due istanze del
+         *  service — che nel tempo esistono davvero — a controllare e assegnare
+         *  lo stesso campo senza vedersi. */
+        private val startLock = Any()
+
+        /** Quando è avvenuto l'ultimo auto-riavvio in-place del gateway.
+         *  Del processo, non del thread: bisogna riconoscere anche il caso in
+         *  cui è il watchdog a rifare il thread, che ricrasha subito. */
+        @Volatile
+        private var lastSelfRestartMs: Long = 0L
+
+        /**
+         * Il thread del gateway è PROVATAMENTE uscito?
+         *
+         * `false` anche quando il thread non è mai partito (`null`): "non lo so"
+         * non è "è morto", e al primo avvio — o subito dopo la ricreazione del
+         * processo — la domanda giusta la risponde il battito su
+         * SharedPreferences, non questo.
+         *
+         * Il riferimento al thread È il flag: `isAlive` diventa `false` solo
+         * quando `run()` è terminato davvero, non serve un booleano parallelo da
+         * ricordarsi di azzerare al riavvio (un flag rimasto alzato dopo un
+         * riavvio riuscito farebbe riavviare il service ogni tick, per sempre).
+         */
+        internal val isGatewayThreadDead: Boolean
+            get() = gatewayThread?.isAlive == false
+    }
 
     /** Siamo riusciti ad andare in foreground almeno una volta in questa
      *  istanza? Un `startForeground` fallito NON annulla quello riuscito prima:
@@ -217,15 +285,38 @@ class GatewayService : Service() {
         // il watchdog deve vedere "giù". Lasciarlo a `true` su un service
         // distrutto è l'unico modo in cui il flag statico può mentire.
         isRunning = false
-        // Prima di tutto il resto: mollare il wakelock della modalità "always"
-        // e disarmarne la rotazione. Il lock lo prende Python all'avvio del
-        // gateway (jenny/runtime/power.py::apply_service_lock), ma solo il
-        // service sa di stare morendo, e Python a quel punto non c'è più per
-        // rilasciarlo. Un lock orfano su un processo che sopravvive al service
-        // — è il caso di MainActivity.restartApp — terrebbe la CPU accesa a
-        // schermo spento senza che nessuno possa più spegnerlo; il callback di
-        // rotazione lasciato armato, peggio ancora, la ri-acquisirebbe.
-        PowerBridge.setServiceLock(this, false, 0)
+        // Il wakelock della modalità "always" (e con lui la rotazione) si molla
+        // SOLO se dietro non è rimasto un gateway vivo.
+        //
+        // Il motivo per cui il rilascio esiste resta intatto: il lock lo prende
+        // Python all'avvio del gateway
+        // (jenny/runtime/power.py::apply_service_lock) e solo il service sa di
+        // stare morendo, quindi un lock orfano su un processo che sopravvive al
+        // service — è il caso di MainActivity.restartApp — terrebbe la CPU
+        // accesa a schermo spento senza che nessuno possa più spegnerlo, e il
+        // callback di rotazione lasciato armato, peggio ancora, la
+        // ri-acquisirebbe.
+        //
+        // Ma quel ragionamento vale solo se il gateway se ne sta andando con
+        // noi. Se il thread è vivo il lock NON è orfano: ha ancora il suo
+        // proprietario, che lo vuole. E rilasciarlo lì lo toglieva **per
+        // sempre**, perché nulla lo ri-acquisisce: l'unico ri-acquirente è
+        // `apply_service_lock`, che gira solo all'avvio di un `run_gateway`
+        // fresco, e alla ricreazione del service `startGateway` corto-circuita
+        // proprio perché il thread è sopravvissuto. Sintomo: una riga
+        // "Service wakelock off (was held=true)" e poi più niente, con cron e
+        // heartbeat che ricominciano a slittare in doze profondo — cioè
+        // l'esatta proprietà misurata e rilasciata in 0.6.6.
+        //
+        // A rilasciarlo, nel caso saltato qui, è chi resta: l'uscita del thread
+        // del gateway (vedi la coda di `startGateway`), oppure il prossimo
+        // `onDestroy` a thread ormai morto.
+        val gatewayAlive = synchronized(startLock) { gatewayThread?.isAlive == true }
+        if (gatewayAlive) {
+            Log.i(TAG, "Service destroyed with a live gateway thread: keeping the service wakelock")
+        } else {
+            PowerBridge.setServiceLock(this, false, 0)
+        }
         // Unico punto di programmazione sveglie del progetto: la logica
         // esatto/inesatto con il suo fallback vive in PowerBridge, non
         // duplicata qui.
@@ -241,7 +332,7 @@ class GatewayService : Service() {
     /**
      * Avvia il runtime Python, una volta sola.
      *
-     * `@Synchronized` e non il solo `@Volatile` sul campo: "leggi se il thread è
+     * Un lock e non il solo `@Volatile` sul campo: "leggi se il thread è
      * vivo, poi assegnane uno nuovo" è un check-then-act, e `@Volatile` rende
      * atomica la singola lettura, non la coppia. Due chiamate che si
      * incrociassero lì in mezzo vedrebbero entrambe "nessun thread" e
@@ -259,10 +350,28 @@ class GatewayService : Service() {
      * confronto su un percorso che gira una volta per avvio, e il blocco tiene
      * solo il controllo e l'assegnazione: `Python.start` gira già dentro il
      * thread nuovo, quindi nessuno resta in attesa del bootstrap di Chaquopy.
+     *
+     * Il lock è nel companion — non `@Synchronized`, che avrebbe preso `this` —
+     * perché lo stato che protegge è del processo: due istanze del service (una
+     * distrutta e una ricreata mentre il thread di Python continua a girare)
+     * altrimenti si sincronizzerebbero su due monitor diversi, cioè su niente.
      */
-    @Synchronized
-    private fun startGateway() {
-        if (gatewayThread?.isAlive == true) return
+    private fun startGateway(): Unit = synchronized(startLock) {
+        if (gatewayThread?.isAlive == true) {
+            // Entrambi i rami loggano, ed è il punto: senza, in un dump di
+            // logcat "il watchdog ha riavviato il service e un gateway nuovo è
+            // partito" e "il watchdog ha riavviato il service e non è successo
+            // niente" sono indistinguibili — cioè proprio la domanda a cui si
+            // sta cercando di rispondere quando si guarda quel dump.
+            Log.i(TAG, "startGateway: gateway thread still alive, not spawning a second one")
+            return@synchronized
+        }
+        Log.i(TAG, "startGateway: no live gateway thread, spawning one")
+
+        // Il context dell'applicazione, preso ADESSO: la coda del thread lo usa
+        // per mollare il wakelock di servizio e gira quando questo `Service`
+        // può essere già stato distrutto.
+        val appContext = applicationContext
 
         // Chaquopy's first-run bootstrap (Python.start) unpacks the stdlib/
         // site-packages and can take several seconds; it must never run on the
@@ -294,17 +403,132 @@ class GatewayService : Service() {
                 }
                 val py = Python.getInstance()
                 val module = py.getModule("jenny.android_entry")
-                module.callAttr("run_gateway", filesDir.absolutePath, applicationContext)
+                runGatewayUntilGivenUp(module)
             } catch (e: Exception) {
+                // Solo il bootstrap (provider, Python.start, import del modulo)
+                // arriva qui: il ciclo di `run_gateway` cattura per conto suo.
+                // Un bootstrap di Chaquopy che fallisce non si ritenta in-place
+                // — se la prima unpack della stdlib non è riuscita, rifarla
+                // subito nello stesso processo non ha nessun motivo di riuscire.
                 Log.e(TAG, "Gateway startup failed", e)
             }
-            // Si arriva qui solo se run_gateway è USCITO: retry esauriti, o
-            // ritorno pulito. Il service resta vivo (e la notifica pure), ma
-            // dietro non c'è più nessun agente: senza questo log l'unico
-            // sintomo sarebbe il silenzio. Il thread morto è già di per sé il
-            // segnale che rende `startGateway` capace di rilanciarlo.
+            // Si arriva qui solo se il gateway ha smesso di girare: retry
+            // esauriti, ritorno pulito, o auto-riavvio rinunciato. Il service
+            // resta vivo (e la notifica pure), ma dietro non c'è più nessun
+            // agente: senza questo log l'unico sintomo sarebbe il silenzio. Il
+            // thread morto è già di per sé il segnale — `startGateway` sa
+            // rilanciarlo e `Watchdog` sa vederlo (`isGatewayThreadDead`).
             Log.e(TAG, "Gateway thread exited: no agent behind the service until restarted")
+            // Contropartita esatta del rilascio saltato in `onDestroy`: da qui
+            // in poi NESSUN gateway vuole più il wakelock di servizio, quindi a
+            // mollarlo tocca a chi esce — e con lui alla rotazione, che
+            // altrimenti continuerebbe a ri-acquisirlo ogni N minuti su un
+            // processo senza agente dietro. Insieme, le due metà tengono
+            // l'invariante: il lock è tenuto se e solo se un thread del gateway
+            // vivo lo vuole, senza orfani e senza buchi.
+            //
+            // Incondizionato, non "solo se il service è giù": è l'unico modo di
+            // non lasciare aperta la finestra in cui `onDestroy` ci vede ancora
+            // `isAlive` (lo siamo, stiamo eseguendo queste righe) e salta il
+            // rilascio mentre noi lo saltiamo a nostra volta perché il service
+            // sembrava ancora su. Rilasciare qui non apre il buco opposto: da
+            // questo punto non gira più nessun gateway, quindi non c'è nessuno
+            // che il lock lo voglia. A ri-acquisirlo sarà il prossimo
+            // `apply_service_lock`, cioè il prossimo `run_gateway` — quello che
+            // rilancerà `startGateway` (auto-riavvio del service o watchdog)
+            // trovando finalmente il thread morto.
+            //
+            // Dentro `startLock` e solo se il record punta ancora a noi: se nel
+            // frattempo fosse partito un altro thread, quel lock è suo.
+            // Idempotente per costruzione — se non era tenuto,
+            // `setServiceLock(false)` è un no-op che logga "was held=false".
+            synchronized(startLock) {
+                if (gatewayThread === Thread.currentThread()) {
+                    PowerBridge.setServiceLock(appContext, false, 0)
+                }
+            }
         }
+    }
+
+    /**
+     * Tiene su `run_gateway` finché ha senso ritentare, e ritorna quando non ne
+     * ha più.
+     *
+     * Il rilancio sta QUI, nello stesso thread, e non in un `post` al main
+     * Looper: dal main dovremmo richiamare `startGateway`, che troverebbe
+     * ancora vivo il thread che sta morendo (`isAlive` è vero fino al ritorno di
+     * `run()`) e non farebbe niente — un auto-riavvio che si perde per una gara
+     * con sé stesso. Una seconda iterata del ciclo, invece, non ha ordini da
+     * rispettare: `gatewayThread` continua a puntare al thread giusto, il
+     * segnale `isGatewayThreadDead` resta coerente, e non esiste nessuna
+     * finestra in cui due `run_gateway` possano coesistere.
+     *
+     * Perché serve, visto che il watchdog c'è già: il watchdog lo scopre al
+     * prossimo tick — 15-60 minuti — e paga un ciclo di `startForegroundService`
+     * intero, che da background su Android 12+ può anche essere rifiutato. Qui
+     * il recupero costa cinque secondi e nessun permesso.
+     */
+    private fun runGatewayUntilGivenUp(module: PyObject) {
+        while (true) {
+            try {
+                module.callAttr("run_gateway", filesDir.absolutePath, applicationContext)
+                // RITORNO = uscita PULITA, e i due esiti non vanno scambiati:
+                // `jenny/android_entry.py` ritorna solo dopo un `asyncio.run`
+                // finito da sé (riga 184, `return  # clean exit`); i retry
+                // esauriti fanno `raise` (riga 211) e finiscono nel `catch`.
+                // Alle 3 di notte la riga sbagliata manda a cercare un crash
+                // che non c'è stato, o viceversa.
+                Log.e(TAG, "run_gateway returned: the python side shut down cleanly, no agent left")
+            } catch (e: Exception) {
+                // `PyException` compresa: un'eccezione che sfugge al lato Python
+                // arriva fin qui e vale esattamente quanto un ritorno — in
+                // entrambi i casi non c'è più nessun agente. È anche il ramo su
+                // cui atterrano i retry esauriti (`raise` finale di
+                // `run_gateway`).
+                Log.e(TAG, "run_gateway raised: the python side gave up (retries exhausted)", e)
+            }
+            if (!shouldSelfRestart()) return
+            try {
+                Thread.sleep(SELF_RESTART_DELAY_MS)
+            } catch (e: InterruptedException) {
+                Log.w(TAG, "Self-restart wait interrupted: giving up")
+                Thread.currentThread().interrupt()
+                return
+            }
+            Log.w(TAG, "Self-restarting the gateway in place")
+        }
+    }
+
+    /**
+     * Rilanciare `run_gateway` adesso, o lasciar morire il thread?
+     *
+     * Due sole ragioni per dire di sì, ed è deliberato che siano poche: questo
+     * è il percorso su cui un loop di riavvii costerebbe la batteria di una
+     * notte senza rimettere su niente.
+     */
+    private fun shouldSelfRestart(): Boolean {
+        if (!isRunning) {
+            // Il service sta scendendo (o è già sceso). Rilanciare Python qui
+            // significherebbe lasciarne uno orfano in un processo senza
+            // foreground: a rimettere su tutto è la sveglia di `onDestroy`.
+            Log.i(TAG, "Not self-restarting: the service is going down")
+            return false
+        }
+        val now = System.currentTimeMillis()
+        val since = now - lastSelfRestartMs
+        // `since < 0` = orologio spostato indietro (fuso, sync NTP): l'intervallo
+        // non è misurabile, e si sceglie di riprovare. Stessa convenzione di
+        // `Watchdog.isGatewayAlive`, e il caso peggiore è UN riavvio in più.
+        if (lastSelfRestartMs != 0L && since in 0 until MIN_SELF_RESTART_INTERVAL_MS) {
+            Log.e(
+                TAG,
+                "Gateway died ${since}ms after the last self-restart: giving up, " +
+                    "recovery is left to the watchdog"
+            )
+            return false
+        }
+        lastSelfRestartMs = now
+        return true
     }
 
     private fun buildNotification(): Notification {

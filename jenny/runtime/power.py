@@ -230,8 +230,11 @@ async def apply_service_lock() -> bool:
     È **Python** a leggere il config e a dirlo a Kotlin, non il contrario: il
     parsing di ``config.json`` deve esistere in un linguaggio solo, altrimenti
     la stessa impostazione finisce interpretata due volte e prima o poi le due
-    letture divergono. Il rilascio invece è di Kotlin
-    (``GatewayService.onDestroy``): solo il service sa di stare morendo.
+    letture divergono. Il rilascio invece è tutto di Kotlin, in due punti:
+    ``GatewayService.onDestroy`` quando il thread del gateway è già morto, e
+    l'uscita del thread del gateway stesso negli altri casi — un service
+    distrutto con il thread ancora vivo non deve togliere il lock a chi lo
+    vuole, perché a ri-acquisirlo c'è solo il prossimo ``run_gateway``.
     """
     cfg = _power_config()
     mode = getattr(cfg, "keep_awake", None)

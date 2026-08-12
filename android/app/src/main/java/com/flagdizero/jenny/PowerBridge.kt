@@ -128,8 +128,12 @@ class PowerBridge(context: Context) {
          * Accende o spegne il wakelock che copre l'INTERA vita del gateway.
          *
          * Il chiamante è Python (`jenny/runtime/power.py::apply_service_lock`),
-         * una volta all'avvio del gateway, e `GatewayService.onDestroy` per lo
-         * spegnimento. Kotlin non legge `config.json`: la modalità e il periodo
+         * una volta all'avvio del gateway. Per lo spegnimento i chiamanti sono
+         * due, e insieme coprono l'invariante "il lock è tenuto se e solo se un
+         * thread del gateway vivo lo vuole": `GatewayService.onDestroy`, ma
+         * solo a thread del gateway ormai morto, e la coda del thread del
+         * gateway stesso quando esce lasciandosi dietro un service vivo. Kotlin
+         * non legge `config.json`: la modalità e il periodo
          * di rotazione arrivano già decisi da chi il config lo sa parsare, così
          * la stessa impostazione non finisce interpretata da due linguaggi che
          * possono divergere.
