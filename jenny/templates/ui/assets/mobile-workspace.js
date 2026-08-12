@@ -1,6 +1,7 @@
 /** Mobile Workspace Controller — Finder-style folder browser with CodeMirror editor. */
 
 import { api } from './shared/api-client.js';
+import { rpc } from './shared/rpc-client.js';
 import { escapeHtml, getFileExtension, showToast } from './shared/utils.js';
 import { confirmDialog, promptDialog } from './shared/dialog.js';
 import { i18n } from './shared/i18n.js';
@@ -837,13 +838,17 @@ export class WorkspaceController {
     try {
       const btn = document.querySelector('.ws-save-btn');
       if (btn) btn.disabled = true;
-      await api.writeWorkspaceFile(this.currentPath, content);
+      await rpc.writeWorkspaceFile(this.currentPath, content);
       this._dirty = false;
       if (btn) { btn.textContent = i18n.t('workspace.saved'); btn.classList.remove('dirty'); }
       setTimeout(() => { if (btn) btn.textContent = i18n.t('workspace.save'); }, 2000);
     } catch (err) {
+      // Il motivo va mostrato, non inghiottito: un bottone che dice solo
+      // "Errore" ha tenuto nascosto per mesi un salvataggio che non poteva
+      // riuscire (contenuto in un header HTTP, v. ws-manager.request).
+      showToast(i18n.t('workspace.error') + (err?.message || ''), 'error');
       const btn = document.querySelector('.ws-save-btn');
-      if (btn) { btn.textContent = i18n.t('common.error'); btn.disabled = false; }
+      if (btn) { btn.textContent = i18n.t('workspace.save'); btn.disabled = false; }
     }
   }
 
@@ -981,7 +986,7 @@ export class WorkspaceController {
     const newPath = baseDir ? `${baseDir}/${name}` : name;
     try {
       if (isFile) {
-        await api.writeWorkspaceFile(newPath, '');
+        await rpc.writeWorkspaceFile(newPath, '');
       } else {
         await api.createWorkspaceFolder(newPath);
       }

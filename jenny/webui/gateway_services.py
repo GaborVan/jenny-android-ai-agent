@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from loguru import logger as default_logger
 
+from jenny.webui.commands import CommandContext
 from jenny.webui.media_gateway import WebUIMediaGateway
 from jenny.webui.transcript import WebUITranscriptRecorder
 from jenny.webui.workspaces import WebUIWorkspaceController
@@ -22,6 +23,11 @@ class GatewayServices:
     media: WebUIMediaGateway
     transcripts: WebUITranscriptRecorder
     workspaces: WebUIWorkspaceController
+    # Dipendenze dei comandi con payload (scrittura file, note di audit). Le
+    # serve il canale WebSocket, non le route: gli header HTTP del gateway non
+    # possono trasportare contenuto (8 KB per riga, solo ISO-8859-1), un frame
+    # WS sì. Vedi ``webui.commands`` e ``channels.ws_rpc``.
+    commands: CommandContext
     session_manager: Any | None
     # Getter late-binding del ``SubagentManager``, lo stesso che ricevono le
     # route HTTP. Serve anche al canale WebSocket: il pump dell'attività dei
@@ -30,6 +36,13 @@ class GatewayServices:
     # getter (non l'oggetto) perché durante l'onboarding l'agente non esiste
     # ancora e il gateway serve già la WebUI.
     get_subagent_manager: Callable[[], Any | None] | None = None
+
+
+def _current_workspace_root() -> Path:
+    """Radice del workspace corrente (import lazy come nelle route)."""
+    from jenny.config.paths import get_workspace_path
+
+    return get_workspace_path()
 
 
 def build_gateway_services(
@@ -82,6 +95,10 @@ def build_gateway_services(
         media=media,
         transcripts=transcripts,
         workspaces=workspaces,
+        # Radice risolta a call-time come per le route del file manager: un
+        # cambio di workspace a runtime non deve lasciare i comandi ancorati
+        # alla vecchia directory.
+        commands=CommandContext(get_workspace_root=_current_workspace_root),
         session_manager=session_manager,
         get_subagent_manager=get_subagent_manager,
     )

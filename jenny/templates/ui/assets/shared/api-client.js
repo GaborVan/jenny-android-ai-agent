@@ -209,20 +209,6 @@ class ApiClient {
     return res.json();
   }
 
-  async resolveAudit(id, resolution, wiki) {
-    // Il server websockets accetta solo GET e non legge mai il body HTTP:
-    // il payload JSON viaggia percent-encodato in un header custom, come
-    // writeWorkspaceFile. encodeURIComponent evita caratteri non-Latin1
-    // (vietati negli header fetch) nelle note di risoluzione.
-    const res = await this._fetch(`/api/audit/${encodeURIComponent(id)}/resolve`, {
-      headers: {
-        'X-Jenny-Wiki-Data': encodeURIComponent(JSON.stringify({ resolution, wiki })),
-      },
-    });
-    if (!res.ok) throw new Error(`Resolve failed: ${res.status}`);
-    return res.json();
-  }
-
   // Workspace APIs
   async listWorkspace(path) {
     const res = await this._fetch(`/api/workspace/list?path=${encodeURIComponent(path)}`);
@@ -256,19 +242,6 @@ class ApiClient {
       throw err;
     }
     return res.blob();
-  }
-
-  async writeWorkspaceFile(path, content) {
-    const res = await this._fetch('/api/workspace/write', {
-      headers: {
-        'X-Jenny-Workspace-Data': JSON.stringify({ path, content }),
-      },
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.detail || `Workspace write failed: ${res.status}`);
-    }
-    return res.json();
   }
 
   async createWorkspaceFolder(path) {

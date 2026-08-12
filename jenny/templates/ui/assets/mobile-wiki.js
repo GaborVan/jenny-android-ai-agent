@@ -1,6 +1,7 @@
 /** Mobile Wiki Controller — drawer-based wiki with audits and file tree. */
 
 import { api } from './shared/api-client.js';
+import { rpc } from './shared/rpc-client.js';
 import { escapeHtml, showToast, ensureVendor } from './shared/utils.js';
 import { AppState } from './shared/state.js';
 import { renderTree, wireTreeFolder, wireTreeFiles } from './shared/tree-renderer.js';
@@ -572,7 +573,7 @@ export class WikiController {
           const note = await promptDialog(i18n.t('wiki.resolutionNote'), { placeholder: i18n.t('wiki.resolutionNote') });
           if (note === null) return;  // annullato
           try {
-            await api.resolveAudit(id, note, this.currentWiki);
+            await rpc.resolveAudit(id, this.currentWiki, note);
             await this.loadAudits(this.currentPath);
           } catch (err) { showToast(i18n.t('wiki.failedToResolve') + err.message, 'error'); }
         });

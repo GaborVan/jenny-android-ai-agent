@@ -200,6 +200,13 @@ The frame is a recomputable refresh hint — it is never persisted to the transc
 {"event": "error", "detail": "invalid chat_id"}
 ```
 
+**`rpc_result`** — the single reply to an `rpc` request, correlated by `id`. See
+[Commands (rpc)](#commands-rpc):
+
+```json
+{"event": "rpc_result", "id": "rpc-9f2a", "ok": true, "result": {"path": "SOUL.md", "bytes": 4213}}
+```
+
 ### Client → Server
 
 **Legacy (default chat):** send a plain string, or a JSON object with a recognized text field:
@@ -220,8 +227,51 @@ Recognized fields: `content`, `text`, `message` (checked in that order). Invalid
 |--------|--------|--------|
 | `attach` | — | (Re)subscribe to the shared chat, e.g. after a reconnect. Replies with `attached`. Any `chat_id` field is ignored. |
 | `message` | `content` | Send `content` on the shared chat. Any `chat_id` field is ignored. |
+| `rpc` | `id`, `method`, `params` | Run a gateway command and reply with `rpc_result`. See [Commands (rpc)](#commands-rpc). |
 
 See [The shared chat](#the-shared-chat) for the full flow.
+
+## Commands (rpc)
+
+Operations that carry **content** — the text of a file, a free-text note — travel on this
+channel, not on `/api/`. The HTTP surface is served from the WebSocket handshake hook, which
+never reads a request body: its parameters can only ride the query string or a header, where
+they are capped at 8192 bytes per line and restricted to ISO-8859-1 (a browser refuses to
+put an emoji in a header at all). A WebSocket frame is framed and UTF-8, so a file with
+emoji in it goes through unchanged.
+
+Request:
+
+```json
+{"type": "rpc", "id": "rpc-9f2a", "method": "workspace.write",
+ "params": {"path": "SOUL.md", "content": "# Chi sono\n…"}}
+```
+
+Reply — always one `rpc_result` per request, correlated by the opaque `id`:
+
+```json
+{"event": "rpc_result", "id": "rpc-9f2a", "ok": true, "result": {"path": "SOUL.md", "bytes": 4213}}
+```
+
+```json
+{"event": "rpc_result", "id": "rpc-9f2a", "ok": false,
+ "error": {"code": "too_large", "message": "file too large to save (1300000 > 1000000 bytes)"}}
+```
+
+Error codes: `bad_request`, `forbidden`, `not_found`, `too_large`, `unavailable`, `internal`.
+A frame whose `id` is missing or malformed is dropped with a log line — there is nothing to
+correlate a reply to.
+
+| `method` | `params` | Effect |
+|----------|----------|--------|
+| `workspace.write` | `path`, `content` | Write a workspace text file (1 MB cap). Honours `workspace.enabled` / `workspace.allow_write`. |
+| `audit.resolve` | `audit_id`, `wiki`, `resolution` | Close a wiki audit item with a resolution note. |
+
+**Authorization is the handshake's, not the frame's.** When `token_issue_secret` is set, only
+a connection that presented the token at handshake time may run a command, even if
+`websocket_requires_token` is `false` — otherwise a mutation would sit on a weaker gate than
+`/api/`, which fails closed without a secret. Commands live in `jenny/webui/commands.py`
+(transport-agnostic); the frame handling is `jenny/channels/ws_rpc.py`.
 
 ## Configuration Reference
 

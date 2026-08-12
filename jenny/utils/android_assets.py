@@ -143,6 +143,7 @@ _UI_MANIFEST = [
     "assets/shared/mascot.js",
     "assets/shared/pinch-zoom.js",
     "assets/shared/provider-brand.js",
+    "assets/shared/rpc-client.js",
     "assets/shared/session-manager.js",
     "assets/shared/state.js",
     "assets/shared/subagent-policy.js",

@@ -135,6 +135,14 @@ Every WebUI API call and the WebSocket handshake require a per-install secret (`
 
 Android hands this secret to the WebView as a **URL fragment** (`#bs=<secret>`), never as a query parameter — fragments aren't sent to the server and aren't logged the way query strings can be. The WebView's JavaScript reads the fragment locally and exchanges it once, over `/webui/bootstrap`, for the actual WebSocket URL.
 
+Operations that carry content — saving a workspace file, closing an audit with a note — run as
+**commands over the WebSocket** (`rpc` frames, see the [WebSocket protocol](../reference/websocket.md#commands-rpc)),
+because the HTTP surface cannot carry a request body at all. Their authorization is the
+handshake's verdict, recorded per connection: with a secret configured, only a connection that
+presented it may run a command, even when `websocket_requires_token` is off. Without that rule
+a file write would sit behind a weaker gate than an HTTP call, which fails closed when no
+secret is set.
+
 The gateway listens on `127.0.0.1:18790` by default (WebSocket and HTTP share the same host/port). If you were to reconfigure `websocket.host` to `0.0.0.0` (all interfaces) without setting `tokenIssueSecret`, the config itself refuses to validate — this is rejected before the gateway can even start, specifically to prevent an unauthenticated gateway from being exposed to the rest of your network.
 
 ## Related pages

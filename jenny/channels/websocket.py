@@ -154,6 +154,10 @@ class WebSocketChannel(OutboundSenderMixin):
         # rather than the chat_id.
         self._conn_ids: dict[Any, str] = {}
         self._conns_by_id: dict[str, Any] = {}
+        # Verdetto dell'handshake per connessione: l'RPC client→server pretende
+        # un token valido quando un secret è configurato, e il solo posto dove
+        # quel controllo è già stato fatto è l'handshake.
+        self._conn_authed: dict[Any, bool] = {}
         self._stop_event: asyncio.Event | None = None
         self._server_task: asyncio.Task[None] | None = None
         # Attività fine dei subagent: chi guarda cosa, e l'unico task che la
@@ -243,6 +247,7 @@ class WebSocketChannel(OutboundSenderMixin):
             subs.discard(connection)
             if not subs:
                 self._subs.pop(cid, None)
+        self._conn_authed.pop(connection, None)
         conn_id = self._conn_ids.pop(connection, None)
         if conn_id is not None:
             self._conns_by_id.pop(conn_id, None)
@@ -311,16 +316,31 @@ class WebSocketChannel(OutboundSenderMixin):
         return await self._http_router.dispatch(connection, request)
 
     def _authorize_websocket_handshake(self, connection: Any, query: dict[str, list[str]]) -> Any:
+        """Autorizza l'handshake e **registra il verdetto** per la connessione.
+
+        Il verdetto serve oltre l'handshake: l'RPC client→server
+        (``_handle_rpc``) muta lo stato — scrive file — e con un secret
+        configurato deve accettare solo una connessione che quel secret l'ha
+        presentato. Con ``websocket_requires_token = false`` la chat resta
+        aperta senza token, ma la scrittura no: altrimenti sposterebbe una
+        mutazione su un canale più debole di ``/api/``, che senza secret
+        fallisce chiuso.
+        """
         supplied = _query_first(query, "token")
         secret = self.config.token_issue_secret.strip()
+        token_matches = bool(secret and supplied and hmac.compare_digest(supplied, secret))
 
         if self.config.websocket_requires_token:
-            if not secret or not supplied or not hmac.compare_digest(supplied, secret):
+            if not token_matches:
                 return connection.respond(401, "Unauthorized")
+            self._conn_authed[connection] = True
             return None
 
-        if supplied and secret and not hmac.compare_digest(supplied, secret):
+        if supplied and secret and not token_matches:
             return connection.respond(401, "Unauthorized")
+        # Registrato solo sulle connessioni accettate: un handshake respinto non
+        # arriva mai a ``_cleanup_connection`` e lascerebbe la voce nel dizionario.
+        self._conn_authed[connection] = token_matches
         return None
 
     # -- Server lifecycle and connection ingress ---------------------------
@@ -607,7 +627,55 @@ class WebSocketChannel(OutboundSenderMixin):
             if self._ui_query is not None and cid is not None:
                 self._ui_query.handle_ui_result(cid, envelope)
             return
+        if t == "rpc":
+            await self._handle_rpc(connection, envelope)
+            return
         await self._send_event(connection, "error", detail=f"unknown type: {t!r}")
+
+    # -- RPC client→server -------------------------------------------------
+
+    async def _handle_rpc(self, connection: Any, envelope: dict[str, Any]) -> None:
+        """Esegue un comando richiesto dalla WebUI e risponde con ``rpc_result``.
+
+        È la via per le operazioni che portano contenuto (il salvataggio di un
+        file dall'editor): gli header HTTP del gateway non possono trasportarlo,
+        un frame WebSocket sì. Validazione, autorizzazione e traduzione degli
+        errori stanno in ``channels.ws_rpc``; la logica in ``webui.commands``.
+        """
+        from jenny.channels import ws_rpc
+        from jenny.webui.commands import CommandError
+
+        conn_id = self._conn_ids.get(connection) or "unknown"
+        try:
+            rpc_id, method, params = ws_rpc.parse_rpc_frame(envelope)
+        except ws_rpc.RpcFrameError as exc:
+            ws_rpc.log_dropped_frame(exc, conn_id)
+            return
+        except CommandError as exc:
+            # C'è un id valido ma il resto del frame no: l'errore è recapitabile.
+            raw_id = envelope.get("id")
+            await self._send_event(
+                connection, "rpc_result", **ws_rpc.error_frame(str(raw_id), exc),
+            )
+            return
+
+        try:
+            result = await ws_rpc.run_rpc(
+                self.gateway.commands,
+                method=method,
+                params=params,
+                secret=self.config.token_issue_secret,
+                connection_authenticated=self._conn_authed.get(connection, False),
+            )
+        except CommandError as exc:
+            self.logger.info("rpc {} failed for {}: {}", method, conn_id, exc.code)
+            await self._send_event(
+                connection, "rpc_result", **ws_rpc.error_frame(rpc_id, exc),
+            )
+            return
+        await self._send_event(
+            connection, "rpc_result", **ws_rpc.result_frame(rpc_id, result),
+        )
 
     # -- Osservazione dell'attività di un subagent -------------------------
 

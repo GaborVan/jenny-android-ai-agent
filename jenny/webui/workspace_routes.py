@@ -3,11 +3,16 @@
 Stesso pattern router di ``SkillsRoutes``/``WikiRoutes``. Le operazioni su file
 passano tutte per ``webui.workspace_files.validate_path`` (che delega al gate
 unico symlink-safe/fail-closed del core — Fase 2).
+
+Qui vivono solo letture e operazioni con parametri corti. La **scrittura** non
+c'è di proposito: il contenuto di un file non può viaggiare su questo trasporto
+(l'hook di handshake di ``websockets`` non legge body; query string e header
+stanno in 8192 byte per riga e in ISO-8859-1), quindi ``workspace.write`` è un
+comando dell'RPC WebSocket — v. ``webui.commands`` e ``channels.ws_rpc``.
 """
 
 from __future__ import annotations
 
-import json
 import mimetypes
 from collections.abc import Callable
 from pathlib import Path
@@ -17,7 +22,6 @@ from websockets.http11 import Request as WsRequest
 from websockets.http11 import Response
 
 from jenny.channels.http_utils import (
-    case_insensitive_header,
     http_error,
     http_json_response,
     parse_query,
@@ -66,7 +70,6 @@ class WorkspaceRoutes:
         handlers = {
             "/api/workspace/list": self._list,
             "/api/workspace/read": self._read,
-            "/api/workspace/write": self._write,
             "/api/workspace/mkdir": self._mkdir,
             "/api/workspace/rename": self._rename,
             "/api/workspace/delete": self._delete,
@@ -131,42 +134,6 @@ class WorkspaceRoutes:
             # 415: il client (viewer workspace) reagisce delegando
             # l'apertura all'app di sistema via bridge nativo.
             return http_error(415, "binary file")
-        except ValueError as e:
-            return http_error(400, str(e))
-        except FileNotFoundError:
-            return http_error(404, "path not found")
-        except PermissionError:
-            return http_error(403, "permission denied")
-        except OSError as e:
-            return http_error(400, str(e))
-
-    async def _write(self, request: WsRequest) -> Response:
-        if not self._check_api_token(request):
-            return http_error(401, "Unauthorized")
-        err = self._check_workspace_enabled()
-        if err:
-            return err
-        err = self._require_workspace_flag(
-            "allow_write", 403, "workspace writes are disabled"
-        )
-        if err:
-            return err
-        from jenny.webui.workspace_files import validate_path, write_file
-
-        raw = case_insensitive_header(request.headers, "X-Jenny-Workspace-Data")
-        if not raw:
-            return http_error(400, "missing workspace data header")
-        try:
-            data = json.loads(raw)
-        except Exception:
-            return http_error(400, "invalid JSON in workspace data header")
-        rel_path = data.get("path", "")
-        content = data.get("content", "")
-        workspace_root = self._get_workspace_root()
-        try:
-            full_path = validate_path(workspace_root, rel_path)
-            write_file(full_path, content)
-            return http_json_response({"success": True, "path": rel_path})
         except ValueError as e:
             return http_error(400, str(e))
         except FileNotFoundError:

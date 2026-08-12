@@ -1,5 +1,10 @@
 """Adapter di route HTTP per le API Wiki + Audit della WebUI (estratto da
 ws_http). Stesso pattern di ``WebUISettingsRouter``/``SkillsRoutes``.
+
+Solo letture e parametri corti. La chiusura di un audit non è qui: porta una
+nota di testo libero, e questo trasporto non può trasportare contenuto (v. la
+docstring di ``webui.commands``). È il comando ``audit.resolve`` dell'RPC
+WebSocket.
 """
 
 from __future__ import annotations
@@ -17,7 +22,6 @@ if TYPE_CHECKING:
     from jenny.webui.wiki_search import WikiSearchService
 
 from jenny.channels.http_utils import (
-    case_insensitive_header,
     http_error,
     http_json_response,
     parse_query,
@@ -123,8 +127,6 @@ class WikiRoutes:
             return await self._audit_list(request)
         if path == "/api/audit/create":
             return await self._audit_create(request)
-        if path.startswith("/api/audit/") and path.endswith("/resolve"):
-            return await self._audit_resolve(request, path)
         return None
 
     # -- wiki handlers --
@@ -378,51 +380,6 @@ class WikiRoutes:
                 author=query_first(query, "author") or "anonymous",
             )
             result.pop("entry", None)
-            return http_json_response(result)
-        except FileNotFoundError as exc:
-            return http_error(404, str(exc))
-        except ValueError as exc:
-            return http_error(400, str(exc))
-
-    async def _audit_resolve(self, request: WsRequest, path: str) -> Response:
-        if not self._check_api_token(request):
-            return http_error(401, "Unauthorized")
-        err = self._check_wiki_enabled()
-        if err:
-            return err
-        import json
-        import urllib.parse
-
-        from jenny.webui.wiki import discover_wikis, resolve_audit
-
-        audit_id = path.split("/")[-2]
-
-        # Il server websockets non legge mai il body delle richieste HTTP:
-        # il payload JSON viaggia percent-encodato in un header custom, come
-        # fa /api/workspace/write con X-Jenny-Workspace-Data. Il percent
-        # encoding rende l'header safe per testo non-Latin1 (note in italiano).
-        raw = case_insensitive_header(request.headers, "X-Jenny-Wiki-Data")
-        if not raw:
-            return http_error(400, "missing wiki data header")
-        try:
-            data = json.loads(urllib.parse.unquote(raw))
-        except Exception:
-            return http_error(400, "invalid JSON in wiki data header")
-        if not isinstance(data, dict):
-            return http_error(400, "invalid JSON in wiki data header")
-
-        wiki_name = data.get("wiki", "")
-        if not wiki_name:
-            return http_error(400, "wiki required")
-
-        wikis = discover_wikis(self._get_wikis_dir())
-        if wiki_name not in wikis:
-            return http_error(404, "wiki not found")
-
-        wiki_root = wikis[wiki_name].parent
-
-        try:
-            result = resolve_audit(wiki_root, audit_id, data.get("resolution"))
             return http_json_response(result)
         except FileNotFoundError as exc:
             return http_error(404, str(exc))

@@ -377,7 +377,9 @@
     "genericError": "An error occurred. Check console.",
     "networkError": "Network error. Retrying...",
     "failedToLoadMode": "Failed to load {mode}",
-    "linkNotOpenable": "This link can't be opened from here"
+    "linkNotOpenable": "This link can't be opened from here",
+    "gatewayOffline": "Gateway unreachable: try again once the connection is back.",
+    "requestTimeout": "No answer from the gateway. Try again."
   },
   "dialog": {
     "confirm": "Confirm",

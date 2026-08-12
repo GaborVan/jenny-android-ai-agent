@@ -377,7 +377,9 @@
     "genericError": "Si è verificato un errore. Controlla la console.",
     "networkError": "Errore di rete. Nuovo tentativo...",
     "failedToLoadMode": "Caricamento di {mode} fallito",
-    "linkNotOpenable": "Questo link non si può aprire da qui"
+    "linkNotOpenable": "Questo link non si può aprire da qui",
+    "gatewayOffline": "Gateway non raggiungibile: riprova quando la connessione torna.",
+    "requestTimeout": "Nessuna risposta dal gateway. Riprova."
   },
   "dialog": {
     "confirm": "Conferma",

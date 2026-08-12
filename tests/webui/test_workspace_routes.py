@@ -4,6 +4,9 @@
 copre auth 401, il gate ``workspace.enabled`` (503), il rispetto dei flag
 ``allow_write``/``allow_delete``, i path felici di ogni operazione e il
 rifiuto del path traversal (delegato a ``workspace_files.validate_path``).
+
+La **scrittura** non è più una route (il contenuto di un file non entra in un
+header HTTP): i suoi test sono in ``tests/webui/test_commands.py``.
 """
 
 from __future__ import annotations
@@ -25,14 +28,11 @@ from jenny.webui.workspace_routes import WorkspaceRoutes
 _SECRET = "s3cr3t-workspace"
 
 
-def _request(path: str, token: str | None = _SECRET, data: dict | None = None) -> WsRequest:
+def _request(path: str, token: str | None = _SECRET) -> WsRequest:
     if token is not None and "token=" not in path:
         sep = "&" if "?" in path else "?"
         path = f"{path}{sep}token={urllib.parse.quote(token)}"
-    headers = Headers()
-    if data is not None:
-        headers["X-Jenny-Workspace-Data"] = json.dumps(data)
-    return WsRequest(path=path, headers=headers)
+    return WsRequest(path=path, headers=Headers())
 
 
 @pytest.fixture()
@@ -316,46 +316,6 @@ async def test_read_invalid_utf8_is_tolerated(
     assert "�" in _json(response)["content"]
 
 
-# ---------------------------------------------------------------------------
-# /api/workspace/write
-# ---------------------------------------------------------------------------
-
-
-async def test_write_requires_auth(routes: WorkspaceRoutes, config_path: Path) -> None:
-    response = await routes.dispatch(
-        _request("/api/workspace/write", token=None, data={"path": "a.txt", "content": "x"}),
-        "/api/workspace/write",
-    )
-    assert response.status_code == 401
-
-
-async def test_write_requires_allow_write(routes: WorkspaceRoutes, config_path: Path) -> None:
-    _set_workspace_config(config_path, allow_write=False)
-    response = await routes.dispatch(
-        _request("/api/workspace/write", data={"path": "a.txt", "content": "x"}),
-        "/api/workspace/write",
-    )
-    assert response.status_code == 403
-
-
-async def test_write_fails_closed_when_config_raises(
-    routes: WorkspaceRoutes,
-    workspace_root: Path,
-    config_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def _boom(*args, **kwargs):
-        raise RuntimeError("config unreadable")
-
-    monkeypatch.setattr("jenny.config.loader.load_config", _boom)
-    response = await routes.dispatch(
-        _request("/api/workspace/write", data={"path": "a.txt", "content": "x"}),
-        "/api/workspace/write",
-    )
-    assert response.status_code == 503
-    assert not (workspace_root / "a.txt").exists()
-
-
 async def test_delete_fails_closed_when_config_raises(
     routes: WorkspaceRoutes,
     workspace_root: Path,
@@ -373,71 +333,6 @@ async def test_delete_fails_closed_when_config_raises(
     )
     assert response.status_code == 503
     assert (workspace_root / "keep.txt").exists()
-
-
-async def test_write_missing_header_returns_400(
-    routes: WorkspaceRoutes, config_path: Path
-) -> None:
-    response = await routes.dispatch(_request("/api/workspace/write"), "/api/workspace/write")
-    assert response.status_code == 400
-
-
-async def test_write_invalid_json_header_returns_400(
-    routes: WorkspaceRoutes, config_path: Path
-) -> None:
-    request = _request("/api/workspace/write")
-    request.headers["X-Jenny-Workspace-Data"] = "{not json"
-    response = await routes.dispatch(request, "/api/workspace/write")
-    assert response.status_code == 400
-
-
-async def test_write_happy_path(
-    routes: WorkspaceRoutes, workspace_root: Path, config_path: Path
-) -> None:
-    response = await routes.dispatch(
-        _request("/api/workspace/write", data={"path": "new/note.txt", "content": "ciao"}),
-        "/api/workspace/write",
-    )
-    assert response.status_code == 200
-    assert (workspace_root / "new" / "note.txt").read_text(encoding="utf-8") == "ciao"
-
-
-async def test_write_that_fails_keeps_the_previous_content(
-    routes: WorkspaceRoutes, workspace_root: Path, config_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Salvare dall'editor riscrive il file intero: deve essere atomico.
-
-    Con un write_text nudo il vecchio contenuto era già perso nel momento in cui
-    la scrittura si interrompeva; con il rename finale il file resta quello di
-    prima finché il nuovo non è completo su disco.
-    """
-    target = workspace_root / "note.txt"
-    target.write_text("originale", encoding="utf-8")
-
-    def boom(*_args, **_kwargs):
-        raise OSError("no space left on device")
-
-    monkeypatch.setattr("jenny.webui.workspace_files.atomic_write", boom)
-    response = await routes.dispatch(
-        _request("/api/workspace/write", data={"path": "note.txt", "content": "nuovo"}),
-        "/api/workspace/write",
-    )
-    # 400 e non 500: la route mappa lì ogni OSError (comportamento preesistente).
-    assert response.status_code == 400
-    assert target.read_text(encoding="utf-8") == "originale"
-
-
-async def test_write_rejects_path_traversal(
-    routes: WorkspaceRoutes, config_path: Path
-) -> None:
-    response = await routes.dispatch(
-        _request(
-            "/api/workspace/write", data={"path": "../outside.txt", "content": "x"}
-        ),
-        "/api/workspace/write",
-    )
-    assert response.status_code == 400
 
 
 # ---------------------------------------------------------------------------

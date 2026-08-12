@@ -1,6 +1,7 @@
 /** Shared WebSocket Manager — Chat connection. */
 
 import { api } from './api-client.js';
+import { i18n } from './i18n.js';
 
 class WebSocketManager extends EventTarget {
   constructor() {
@@ -11,6 +12,9 @@ class WebSocketManager extends EventTarget {
     this._reconnectAttempts = 0;
     this.knownChats = new Set();
     this._netListenersBound = false;
+    // RPC client→server in volo: id → {resolve, reject, timer}. Vedi request().
+    this._pendingRpc = new Map();
+    this._rpcSeq = 0;
     this._bindNetworkListeners();
   }
 
@@ -85,6 +89,10 @@ class WebSocketManager extends EventTarget {
     this.chatWs.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data);
+        if (msg.event === 'rpc_result') {
+          this._settleRpc(msg);
+          return;
+        }
         this.dispatchEvent(new CustomEvent('chat:message', { detail: msg }));
         if (msg.chat_id) {
           this.dispatchEvent(new CustomEvent(`chat:${msg.chat_id}:message`, { detail: msg }));
@@ -96,6 +104,9 @@ class WebSocketManager extends EventTarget {
 
     this.chatWs.onclose = () => {
       this.chatConnected = false;
+      // Una richiesta in volo su un socket chiuso non riceverà mai risposta:
+      // rifiutarla subito è ciò che evita un editor appeso fino al timeout.
+      this._rejectAllRpc('connection closed');
       this.dispatchEvent(new CustomEvent('chat:close'));
       this._reconnectAttempts++;
       // Retry indefinito con backoff esponenziale (cap 30s): una WebView locale
@@ -148,6 +159,58 @@ class WebSocketManager extends EventTarget {
     if (!this.chatWs || this.chatWs.readyState !== WebSocket.OPEN) return false;
     this.chatWs.send(JSON.stringify({ type: 'subagent_unwatch', task_id: String(taskId) }));
     return true;
+  }
+
+  /* ── RPC client→server (`rpc` → `rpc_result`) ──────────────────────────
+     La superficie /api/ del gateway non può trasportare contenuto: è servita
+     dall'hook di handshake di `websockets`, che non legge body, e i suoi header
+     stanno in 8 KB per riga e solo in ISO-8859-1 — `new Headers()` rifiuta
+     un'emoji. Un frame WebSocket invece è framed e UTF-8, quindi il
+     salvataggio di un file passa da qui.
+
+     Simmetrico a `ui_query`/`ui_result`, che è lo stesso meccanismo nel verso
+     opposto: un id opaco correla richiesta e risposta. */
+  request(method, params = {}, { timeoutMs = 20000 } = {}) {
+    if (!this.chatWs || this.chatWs.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new Error(i18n.t('common.gatewayOffline')));
+    }
+    const id = `rpc-${Date.now().toString(36)}-${(this._rpcSeq++).toString(36)}`;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this._pendingRpc.delete(id);
+        reject(new Error(i18n.t('common.requestTimeout')));
+      }, timeoutMs);
+      this._pendingRpc.set(id, { resolve, reject, timer });
+      try {
+        this.chatWs.send(JSON.stringify({ type: 'rpc', id, method, params }));
+      } catch (err) {
+        clearTimeout(timer);
+        this._pendingRpc.delete(id);
+        reject(err);
+      }
+    });
+  }
+
+  _settleRpc(msg) {
+    const pending = this._pendingRpc.get(msg.id);
+    if (!pending) return;  // risposta tardiva a una richiesta già scaduta
+    this._pendingRpc.delete(msg.id);
+    clearTimeout(pending.timer);
+    if (msg.ok) {
+      pending.resolve(msg.result || {});
+      return;
+    }
+    const err = new Error(msg.error?.message || 'request failed');
+    err.code = msg.error?.code || 'internal';
+    pending.reject(err);
+  }
+
+  _rejectAllRpc(reason) {
+    for (const [, pending] of this._pendingRpc) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error(reason));
+    }
+    this._pendingRpc.clear();
   }
 
   /* Risposta a una ui_query del server (tool ui_view): il discriminatore
