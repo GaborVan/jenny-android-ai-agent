@@ -190,6 +190,45 @@ class TestStopClearsStuckGoalState:
         assert runner_wall_llm_timeout_s(loop.sessions, key) is None
 
     @pytest.mark.asyncio
+    async def test_stop_says_out_loud_that_it_cancelled_a_goal(self, tmp_path, caplog):
+        """La risposta di /stop conta solo task: il goal cancellato va nel log.
+
+        Senza questa riga non c'era modo — né in chat né in logcat — di sapere se
+        un obiettivo fosse ancora vivo dopo uno /stop.
+        """
+        import logging
+
+        from loguru import logger as loguru_logger
+
+        from jenny.bus.events import InboundMessage
+        from jenny.command.builtin import cmd_stop
+        from jenny.command.router import CommandContext
+        from jenny.session.goal_state import GOAL_STATE_KEY
+
+        loop, _bus = self._make_loop_with_real_sessions(tmp_path)
+        key = "test:c1"
+        session = loop.sessions.get_or_create(key)
+        session.metadata[GOAL_STATE_KEY] = {
+            "status": "active",
+            "objective": "do the thing forever",
+            "ui_summary": "the thing",
+            "started_at": "2026-01-01T00:00:00",
+        }
+        loop.sessions.save(session)
+
+        msg = InboundMessage(channel="test", sender_id="u1", chat_id="c1", content="/stop")
+        ctx = CommandContext(msg=msg, session=None, key=key, raw="/stop", loop=loop)
+        handler_id = loguru_logger.add(caplog.handler, format="{message}", level="INFO")
+        try:
+            with caplog.at_level(logging.INFO):
+                await cmd_stop(ctx)
+        finally:
+            loguru_logger.remove(handler_id)
+
+        assert "Sustained goal cancelled by hard-stop" in caplog.text
+        assert "the thing" in caplog.text
+
+    @pytest.mark.asyncio
     async def test_stop_leaves_non_goal_session_untouched(self, tmp_path):
         """No active goal: /stop must not fabricate goal_state metadata."""
         from jenny.bus.events import InboundMessage

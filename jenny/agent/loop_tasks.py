@@ -203,6 +203,13 @@ class LoopTasksMixin:
         if updated is None:
             return
         self.sessions.save(session)
+        # Detto a voce: la risposta di ``/stop`` conta solo task e subagent, così
+        # un goal cancellato qui non lasciava traccia da nessuna parte e non
+        # c'era modo di sapere se l'obiettivo fosse ancora vivo o no.
+        logger.info(
+            "Sustained goal cancelled by hard-stop on session {} ({})",
+            key, updated.get("ui_summary") or "no summary",
+        )
 
     async def close_background_tasks(self, *, timeout_s: float | None = None) -> None:
         """Drain pending background archives.
