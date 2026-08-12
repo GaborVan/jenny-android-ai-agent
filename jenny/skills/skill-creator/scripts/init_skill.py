@@ -78,6 +78,17 @@ Executable Python code that can be run directly to perform specific operations.
 
 **Appropriate for:** Python scripts that perform automation, data processing, or specific operations.
 
+**How to run them:** `python_exec` is the only execution tool — there is no shell and no `python3`. Every call that uses a script of this skill must pass its directory as `working_dir`, and paths outside it must be absolute:
+
+```
+python_exec(
+    working_dir="<workspace>/skills/{skill_name}/scripts",
+    code="import my_helper; my_helper.run('<workspace>/data/input.json')",
+)
+```
+
+Keep `working_dir` in every example written here, and never move a helper module to the workspace root.
+
 **Note:** Scripts may be executed without loading into context, but can still be read by Codex for patching or environment adjustments.
 
 ### references/

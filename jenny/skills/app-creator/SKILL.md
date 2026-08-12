@@ -117,8 +117,14 @@ Only after confirmation, create the folder and write, in this order:
 Run the validator and fix anything it reports:
 
 ```
-python_exec(code="import sys; sys.argv = ['validate_app.py', 'apps/<slug>']; exec(open('skills/app-creator/scripts/validate_app.py').read())")
+python_exec(
+    working_dir="<workspace>/skills/app-creator/scripts",
+    code="import validate_app; validate_app.main(['validate_app.py', '<workspace>/apps/<slug>'])",
+)
 ```
+
+`working_dir` is what makes the bare `import` resolve; the app path must be absolute, because
+the script walks it with `pathlib`.
 
 Then tell the user the app is ready and will appear in the Jenny Apps grid.
 

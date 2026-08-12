@@ -140,7 +140,7 @@ Sources to ingest:
 
 ## Audit backlog
 
-*(none — run `python3 skills/llm-wiki/llm-wiki/scripts/audit_review.py <wiki-root> --open` to refresh)*
+*(none — refresh with `python_exec(working_dir="<workspace>/skills/llm-wiki/scripts", code="import audit_review; audit_review.main('<wiki-root>', 'open')")`)*
 
 ## Notes for the LLM
 
@@ -209,9 +209,10 @@ Next steps:
   2. Add sources to raw/ (copy articles/papers/notes into raw/<subfolder>/)
   3. Run ingest: tell your LLM agent "ingest raw/<file>.md"
   4. Ask questions: "what does the wiki say about X?"
-  5. Run lint periodically:  python3 skills/llm-wiki/llm-wiki/scripts/lint_wiki.py {root}
-  6. Process feedback:       python3 skills/llm-wiki/llm-wiki/scripts/audit_review.py {root} --open
-  7. Lint the whole workspace: python3 skills/llm-wiki/llm-wiki/scripts/lint_wiki.py --workspace {wikis_dir}
+  5. Run these through python_exec, with working_dir="<workspace>/skills/llm-wiki/scripts":
+       lint:               import lint_wiki; lint_wiki.lint({root!r})
+       feedback:           import audit_review; audit_review.main({root!r}, 'open')
+       whole workspace:    import lint_wiki; lint_wiki.lint_workspace({str(wikis_dir)!r})
 """)
 
 

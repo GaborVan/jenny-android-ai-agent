@@ -96,7 +96,7 @@ This spec is the single source of truth for the anchor format.
 
 See `SKILL.md` → "The five operations" → `audit` for the canonical version. In short:
 
-1. `python3 scripts/audit_review.py <wiki-root> --open` → get a grouped list.
+1. `python_exec(working_dir="<workspace>/skills/llm-wiki/scripts", code="import audit_review; audit_review.main('<wiki-root>', 'open')")` → get a grouped list.
 2. For each open audit:
    - Read the file, use the anchor to locate the range in the target.
    - Decide: accept / partial / reject / defer.

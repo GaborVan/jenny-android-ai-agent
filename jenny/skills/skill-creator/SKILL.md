@@ -22,6 +22,38 @@ Do NOT create skills directly. Do NOT skip the conversation phases.
 Only proceed to file creation AFTER the user has confirmed name and description in Phase 3.
 </rule>
 
+## Where a Skill's Code Lives, and How It Runs
+
+<rule>
+**A skill's helper code lives inside the skill folder, at `skills/<name>/scripts/<mod>.py`.
+NEVER write a helper module to the workspace root.** A module dropped there is
+indistinguishable from scratch debris, and the next cleanup deletes it.
+
+**`python_exec` is the only execution tool on this platform.** There is no shell: never write
+`python3 …`, `bash …`, or any other command line into a skill.
+
+**Every `python_exec` call that touches a skill's own scripts MUST pass
+`working_dir="<workspace>/skills/<name>/scripts"`**, and then `import <mod>` plainly.
+`working_dir` puts that directory at the head of `sys.path` and makes relative paths resolve
+against it. Without it a bare `import <mod>` raises `ModuleNotFoundError` and a relative
+`open("scripts/x.py")` reads from the workspace root instead. Every path *outside* the scripts
+directory (a data file, a target folder) must then be absolute, because relative ones are now
+measured from `working_dir`.
+
+**Every SKILL.md you generate must carry `working_dir` in every `python_exec` example it
+emits.** Do not replace it with prose ("run from the workspace root"): the next agent copies
+the block verbatim, and a block without `working_dir` does not run. This has already happened.
+</rule>
+
+Copy-pasteable shape:
+
+```
+python_exec(
+    working_dir="<workspace>/skills/my-skill/scripts",
+    code="import my_helper; print(my_helper.run('<workspace>/data/input.json'))",
+)
+```
+
 ## Guided Conversation Flow
 
 When a user initiates skill creation with a generic request (e.g., "voglio creare una nuova skill"), follow this structured flow. Ask ONE question at a time. Do NOT overwhelm the user.
@@ -69,7 +101,10 @@ Only after the user confirms the name and description:
 
 1. Run `init_skill.py` to scaffold:
    ```
-   python_exec(code="import sys; sys.argv = ['init_skill.py', 'skill-name', '--path', './workspace/skills']; exec(open('scripts/init_skill.py').read())")
+   python_exec(
+       working_dir="<workspace>/skills/skill-creator/scripts",
+       code="import init_skill; init_skill.init_skill('skill-name', '<workspace>/skills', [], False)",
+   )
    ```
 
 2. Read the created SKILL.md and show the body to the user:
@@ -91,6 +126,13 @@ After each section, move to the next:
 
 After the body is complete:
 > Perfetto! La skill è pronta. Vuoi che la validi con `quick_validate.py`?
+
+```
+python_exec(
+    working_dir="<workspace>/skills/skill-creator/scripts",
+    code="import quick_validate; print(quick_validate.validate_skill('<workspace>/skills/skill-name'))",
+)
+```
 
 If validation passes:
 > La skill è valida! Per testarla, riavvia Jenny e prova a dire [trigger example].
@@ -367,24 +409,31 @@ When creating a new skill from scratch, always run the `init_skill.py` script vi
 
 For `Jenny`, custom skills should live under the active workspace `skills/` directory so they can be discovered automatically at runtime (for example, `<workspace>/skills/my-skill/SKILL.md`).
 
-Usage:
+The script has no command line — it exposes
+`init_skill(skill_name, path, resources, include_examples)`. Import it and call it:
 
 ```
-python_exec(code="exec(open('scripts/init_skill.py').read())")
+python_exec(
+    working_dir="<workspace>/skills/skill-creator/scripts",
+    code="import init_skill; init_skill.init_skill('my-skill', '<workspace>/skills', [], False)",
+)
 ```
 
-Or run the script directly with arguments:
-
-```
-python_exec(code="import sys; sys.argv = ['init_skill.py', 'my-skill', '--path', './workspace/skills', '--resources', 'scripts,references']; exec(open('scripts/init_skill.py').read())")
-```
+`path` must be **absolute** — the script does `Path(path).resolve()`, which does not measure
+from the workspace. `resources` is a list drawn from `scripts`, `references`, `assets`;
+`include_examples` adds placeholder files inside them.
 
 Examples:
 
 ```
-python_exec(code="import sys; sys.argv = ['init_skill.py', 'my-skill', '--path', './workspace/skills']; exec(open('scripts/init_skill.py').read())")
-python_exec(code="import sys; sys.argv = ['init_skill.py', 'my-skill', '--path', './workspace/skills', '--resources', 'scripts,references']; exec(open('scripts/init_skill.py').read())")
-python_exec(code="import sys; sys.argv = ['init_skill.py', 'my-skill', '--path', './workspace/skills', '--resources', 'scripts', '--examples']; exec(open('scripts/init_skill.py').read())")
+python_exec(
+    working_dir="<workspace>/skills/skill-creator/scripts",
+    code="import init_skill; init_skill.init_skill('my-skill', '<workspace>/skills', ['scripts', 'references'], False)",
+)
+python_exec(
+    working_dir="<workspace>/skills/skill-creator/scripts",
+    code="import init_skill; init_skill.init_skill('my-skill', '<workspace>/skills', ['scripts'], True)",
+)
 ```
 
 The script:
@@ -399,15 +448,6 @@ After initialization, customize the SKILL.md and add resources as needed. If you
 ### Step 4: Edit the Skill
 
 When editing the (newly-generated or existing) skill, remember that the skill is being created for another instance of the agent to use. Include information that would be beneficial and non-obvious to the agent. Consider what procedural knowledge, domain-specific details, or reusable assets would help another agent instance execute these tasks more effectively.
-
-#### Learn Proven Design Patterns
-
-Consult these helpful guides based on your skill's needs:
-
-- **Multi-step processes**: See references/workflows.md for sequential workflows and conditional logic
-- **Specific output formats or quality standards**: See references/output-patterns.md for template and example patterns
-
-These files contain established best practices for effective skill design.
 
 #### Start with Reusable Skill Contents
 
@@ -442,13 +482,19 @@ Write instructions for using the skill and its bundled resources.
 Once development of the skill is complete, it must be packaged into a distributable .skill file that gets shared with user. The packaging process automatically validates the skill first to ensure it meets all requirements:
 
 ```
-python_exec(code="import sys; sys.argv = ['package_skill.py', 'path/to/skill-folder']; exec(open('scripts/package_skill.py').read())")
+python_exec(
+    working_dir="<workspace>/skills/skill-creator/scripts",
+    code="import package_skill; package_skill.package_skill('<workspace>/skills/my-skill')",
+)
 ```
 
-Optional output directory specification:
+Optional output directory specification (second argument, absolute):
 
 ```
-python_exec(code="import sys; sys.argv = ['package_skill.py', 'path/to/skill-folder', './dist']; exec(open('scripts/package_skill.py').read())")
+python_exec(
+    working_dir="<workspace>/skills/skill-creator/scripts",
+    code="import package_skill; package_skill.package_skill('<workspace>/skills/my-skill', '<workspace>/dist')",
+)
 ```
 
 The packaging script will:

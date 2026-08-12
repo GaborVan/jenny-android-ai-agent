@@ -47,11 +47,20 @@ workspace/
 └── skills/llm-wiki/       ← This skill (a checkout of the llm-wiki repo)
 ```
 
-Each wiki root is `wikis/<name>/`. **The skill operates on one wiki root at a time** (see wiki selection below). All script invocations in this doc are written relative to the workspace root:
+Each wiki root is `wikis/<name>/`. **The skill operates on one wiki root at a time** (see wiki selection below).
+
+### Running the scripts
+
+There is no shell on this platform: `python_exec` is the only execution tool. The scripts live at `skills/llm-wiki/scripts/`, so every invocation in this doc has the same shape — `working_dir` on the scripts directory (which puts it at the head of `sys.path`), then a plain import and a function call:
 
 ```
-python3 skills/llm-wiki/llm-wiki/scripts/<script>.py …
+python_exec(
+    working_dir="<workspace>/skills/llm-wiki/scripts",
+    code="import lint_wiki; lint_wiki.lint('<workspace>/wikis/<name>')",
+)
 ```
+
+**Wiki paths passed to a script must be absolute** (`<workspace>/wikis/<name>`): the scripts walk the tree with `pathlib`, which measures a relative path from the process directory, not from the workspace. Never drop `working_dir` — without it the import fails.
 
 ### `wikis/_index.md` — the workspace registry
 
@@ -70,11 +79,16 @@ python3 skills/llm-wiki/llm-wiki/scripts/<script>.py …
 
 Each scope line comes from the wiki's `CLAUDE.md` — its `summary:` frontmatter field if present, otherwise the first bullet under `## Scope`. Only the text between the markers is machine-managed; everything else is yours. Regenerate it with:
 
-```bash
-python3 skills/llm-wiki/llm-wiki/scripts/reindex_wikis.py wikis
+```
+python_exec(
+    working_dir="<workspace>/skills/llm-wiki/scripts",
+    code="import reindex_wikis; print(reindex_wikis.regenerate_index('<workspace>/wikis'))",
+)
 ```
 
-`scaffold.py` calls this automatically when it creates a wiki, so a new wiki is registered immediately. `lint --workspace` verifies the block is in sync with the wikis on disk. Rename or delete a wiki → rerun `reindex_wikis.py`.
+(`reindex_wikis.check_index('<workspace>/wikis')` returns the list of drift problems without writing.)
+
+`scaffold.py` calls this automatically when it creates a wiki, so a new wiki is registered immediately. `lint --workspace` verifies the block is in sync with the wikis on disk. Rename or delete a wiki → rerun `regenerate_index`.
 
 ### Session start & wiki selection
 
@@ -87,14 +101,20 @@ At the start of every session, in order:
 Then perform operations on that one wiki root. Do not touch other wikis in the same operation.
 
 ### Lint the whole workspace
-```bash
-python3 skills/llm-wiki/llm-wiki/scripts/lint_wiki.py --workspace wikis
 ```
-This lints every wiki and checks that `wikis/_index.md` is in sync. To lint a single wiki, pass its root instead: `lint_wiki.py wikis/<name>`.
+python_exec(
+    working_dir="<workspace>/skills/llm-wiki/scripts",
+    code="import lint_wiki; lint_wiki.lint_workspace('<workspace>/wikis')",
+)
+```
+This lints every wiki and checks that `wikis/_index.md` is in sync. To lint a single wiki, call `lint_wiki.lint('<workspace>/wikis/<name>')` instead. Pass `fix=True` to `lint_workspace` to repair registry drift.
 
 ### Scaffold a new wiki
-```bash
-python3 skills/llm-wiki/llm-wiki/scripts/scaffold.py wikis/<new-name> "<Topic Title>"
+```
+python_exec(
+    working_dir="<workspace>/skills/llm-wiki/scripts",
+    code="import scaffold; scaffold.scaffold('<workspace>/wikis/<new-name>', '<Topic Title>')",
+)
 ```
 
 ## Directory layout
@@ -231,7 +251,7 @@ Every action on the wiki is one of these five. Each appends an entry to the curr
 - [ ] Every page appears exactly once in `wiki/index.md`.
 - [ ] No diagram left in ASCII — flows/hierarchies/state are mermaid (core principle 2).
 - [ ] A log line for this compile exists in `log/YYYYMMDD.md`.
-- [ ] **You actually ran `lint_wiki.py wikis/<name>` and it exits clean** (or every issue is fixed / explicitly deferred to the user). This is a hard gate: run the script, read its real output, fix, re-run — then **paste the literal lint output into your reply**. Verification is by running the tool, not by remembering the rules; a summary of "looks satisfied" is not acceptable.
+- [ ] **You actually ran `lint_wiki.lint('<workspace>/wikis/<name>')` and it exits clean** (or every issue is fixed / explicitly deferred to the user). This is a hard gate: run the script, read its real output, fix, re-run — then **paste the literal lint output into your reply**. Verification is by running the tool, not by remembering the rules; a summary of "looks satisfied" is not acceptable.
 
 ### 2. `ingest`
 
@@ -260,12 +280,15 @@ Add a new source. **One source typically touches 5–15 wiki pages.**
 - [ ] The new pages are cross-linked to at least one existing concept, not just listed in `index.md`.
 - [ ] No diagram written in ASCII — any flow/hierarchy/state is mermaid (core principle 2).
 - [ ] A log line for this ingest exists in `log/YYYYMMDD.md`.
-- [ ] **You actually ran `lint_wiki.py wikis/<name>` and it exits clean.** This is a hard gate, not a self-assessment: run the script (see below), read its real output, fix every issue (or explicitly defer it to the user with a reason), and re-run until clean. The lint catches exactly the mistakes this checklist is about — missing summaries, orphan/dead links, pages whose `sources:` don't resolve to `raw/`, un-cross-linked pages, malformed log entries.
+- [ ] **You actually ran `lint_wiki.lint('<workspace>/wikis/<name>')` and it exits clean.** This is a hard gate, not a self-assessment: run the script (see below), read its real output, fix every issue (or explicitly defer it to the user with a reason), and re-run until clean. The lint catches exactly the mistakes this checklist is about — missing summaries, orphan/dead links, pages whose `sources:` don't resolve to `raw/`, un-cross-linked pages, malformed log entries.
 
 **Verification is by running the tool, not by remembering the rules.** Do not report an ingest as done from memory. End the operation by actually invoking:
 
-```bash
-python3 skills/llm-wiki/llm-wiki/scripts/lint_wiki.py wikis/<name>
+```
+python_exec(
+    working_dir="<workspace>/skills/llm-wiki/scripts",
+    code="import lint_wiki; lint_wiki.lint('<workspace>/wikis/<name>')",
+)
 ```
 
 and **paste the script's literal output into your reply.** If you cannot show a clean (or explicitly-deferred) lint run, the ingest is not done. Pasting real output is the contract — a summary of "the checklist looks satisfied" is not acceptable, because that is precisely the step that has silently failed before.
@@ -291,9 +314,15 @@ Answer a question **grounded in the wiki**, not general knowledge.
 
 Health check. Run one wiki, or the whole workspace:
 
-```bash
-python3 skills/llm-wiki/llm-wiki/scripts/lint_wiki.py wikis/<name>
-python3 skills/llm-wiki/llm-wiki/scripts/lint_wiki.py --workspace wikis
+```
+python_exec(
+    working_dir="<workspace>/skills/llm-wiki/scripts",
+    code="import lint_wiki; lint_wiki.lint('<workspace>/wikis/<name>')",
+)
+python_exec(
+    working_dir="<workspace>/skills/llm-wiki/scripts",
+    code="import lint_wiki; lint_wiki.lint_workspace('<workspace>/wikis')",
+)
 ```
 
 Per-wiki, the script reports:
@@ -309,7 +338,7 @@ Per-wiki, the script reports:
 - **Cross-link coverage** — every concept/entity page has at least one wikilink to or from another content page (being listed in `index.md` alone doesn't count)
 - **Summary completeness** — every ingested source under `raw/{articles,papers,notes}` has a matching `wiki/summaries/<slug>.md`
 
-In `--workspace` mode it lints every wiki, then verifies `wikis/_index.md`'s registry block is in sync with the wikis on disk (missing, extra, or stale entries). Add `--fix` to repair registry drift automatically, or run `reindex_wikis.py wikis`.
+`lint_workspace` lints every wiki, then verifies `wikis/_index.md`'s registry block is in sync with the wikis on disk (missing, extra, or stale entries). Pass `fix=True` to repair registry drift automatically, or call `reindex_wikis.regenerate_index('<workspace>/wikis')`.
 
 For each issue, propose a fix, confirm with the user, then apply. Log: `## [HH:MM] lint | <N> issues found, <M> fixed`.
 
@@ -318,7 +347,14 @@ For each issue, propose a fix, confirm with the user, then apply. Log: `## [HH:M
 Process human feedback from `audit/`.
 
 **Steps**:
-1. Run `python3 skills/llm-wiki/llm-wiki/scripts/audit_review.py wikis/<name> --open` to get a grouped list. (Use `--workspace wikis` to survey audits across all wikis.)
+1. Get a grouped list of the open audits:
+   ```
+   python_exec(
+       working_dir="<workspace>/skills/llm-wiki/scripts",
+       code="import audit_review; audit_review.main('<workspace>/wikis/<name>', 'open')",
+   )
+   ```
+   Modes are `open`, `resolved`, `all`. Use `audit_review.run_workspace('<workspace>/wikis', 'open')` to survey audits across all wikis.
 2. For each open audit, read the file. Use the `anchor_before` / `anchor_text` / `anchor_after` window to locate the exact range in the target file (line numbers may have drifted).
 3. Decide the action:
    - **Accept**: apply the correction to the target file.
@@ -357,12 +393,15 @@ See `references/audit-guide.md` for the full audit file format.
 
 Audit files are plain Markdown with a YAML frontmatter anchor (see `references/audit-guide.md`), so they can be filed by hand or by any tool that follows that format.
 
-**Run these scripts; do not reimplement them.** Invoke `scaffold.py`/`lint_wiki.py`/`reindex_wikis.py`/`audit_review.py` directly (via `python_exec` or the shell) rather than hand-rolling their logic inline — the scripts are the source of truth for file shapes. In particular, when you append to `log/YYYYMMDD.md` by hand, keep the exact format `scaffold.py` established: the H1 is the ISO date `# YYYY-MM-DD` (e.g. `# 2026-07-17`), **not** the compact `# YYYYMMDD`. `lint_wiki.py` flags a mismatched H1 as a log-shape issue.
+**Run these scripts; do not reimplement them.** Invoke `scaffold.py`/`lint_wiki.py`/`reindex_wikis.py`/`audit_review.py` directly (via `python_exec`, see “Running the scripts” above) rather than hand-rolling their logic inline — the scripts are the source of truth for file shapes. In particular, when you append to `log/YYYYMMDD.md` by hand, keep the exact format `scaffold.py` established: the H1 is the ISO date `# YYYY-MM-DD` (e.g. `# 2026-07-17`), **not** the compact `# YYYYMMDD`. `lint_wiki.py` flags a mismatched H1 as a log-shape issue.
 
 ## Starting a new wiki
 
-```bash
-python3 skills/llm-wiki/llm-wiki/scripts/scaffold.py wikis/<new-name> "<Topic Title>"
+```
+python_exec(
+    working_dir="<workspace>/skills/llm-wiki/scripts",
+    code="import scaffold; scaffold.scaffold('<workspace>/wikis/<new-name>', '<Topic Title>')",
+)
 ```
 
 Creates the full tree (including `log/<today>.md`, `audit/`, `audit/resolved/`), a blank `CLAUDE.md` based on the new template, and a blank `wiki/index.md` with the recommended category layout. It also registers the new wiki in `wikis/_index.md`.
