@@ -88,6 +88,7 @@ if TYPE_CHECKING:
     from jenny.config.schema import (
         ToolsConfig,
     )
+    from jenny.cron.heartbeat_followup import HeartbeatFollowup
     from jenny.cron.service import CronService
 
 
@@ -525,6 +526,17 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
     def _runtime_events(self) -> RuntimeEventPublisher:
         # Costruito esplicitamente in __init__ (self.runtime_event_publisher).
         return self.runtime_event_publisher
+
+    def _heartbeat_followup(self) -> "HeartbeatFollowup | None":
+        """Il registratore dell'esito di un controllo dell'heartbeat delegato.
+
+        Registrato sul servizio cron dal ``CronDispatcher``, che è chi conosce
+        l'heartbeat; qui si legge soltanto. ``None`` per un ``AgentLoop`` senza
+        servizio cron (test, comandi) e finché il dispatcher non è stato
+        costruito — in entrambi i casi non c'è nessun heartbeat che possa avere
+        delegato qualcosa.
+        """
+        return getattr(self.cron_service, "heartbeat_followup", None)
 
     async def submit_cron_turn(self, msg: InboundMessage) -> TurnOutcome:
         return await self._cron_turns.submit(msg)
@@ -1294,6 +1306,25 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             session_key=key,
             current_runtime_lines=self._location_runtime_lines(channel, chat_id),
         )
+        # Un controllo dell'heartbeat delegato con ``spawn`` non ha un esito nel
+        # turno che lo delega: `spawn` ritorna subito. QUESTO turno è l'unico che
+        # il risultato ce l'ha, ed è già quello a cui il preambolo dell'heartbeat
+        # affida la decisione di parlare; qui riceve anche il modo di registrare
+        # l'esito. Il blocco è vuoto per ogni altra sessione e per un heartbeat
+        # che non ha delegato niente, quindi nessun altro annuncio cambia di un
+        # byte. Aggiunto DOPO ``build_messages`` e fuori dal salvataggio
+        # (``save_skip``): è un'istruzione per questo turno, non un messaggio
+        # della conversazione.
+        followup = self._heartbeat_followup() if is_subagent else None
+        followup_block = ""
+        if followup is not None:
+            try:
+                followup_block = followup.prompt_block(key)
+            except Exception:
+                logger.exception("Heartbeat follow-up: could not build the prompt block")
+        if followup_block:
+            messages.append({"role": "user", "content": followup_block})
+        save_skip = 1 + len(history) + (1 if followup_block else 0)
         t_wall = time.time()
         # Differenza deliberata dallo stato RUN della FSM: il path di sistema NON
         # emette run_status_changed("running"). Un turno subagent/announce è di
@@ -1323,7 +1354,7 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
         self._finalize_turn_save(
             session,
             all_msgs,
-            1 + len(history),
+            save_skip,
             turn_latency_ms=latency_ms,
             session_key=key,
             ephemeral=False,
@@ -1339,7 +1370,25 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             # risposta") e' esattamente cio che consegnava all'utente il
             # riempitivo di un lavoro che non aveva chiesto; l'unico modo di
             # parlare resta il tool ``message``.
-            return TurnOutcome.spoke_via_tool() if spoke_via_tool else TurnOutcome.silent()
+            # ``final_text`` viaggia anche qui: un turno silenzioso non consegna
+            # nulla, ma la sua risposta finale resta l'unico posto in cui il
+            # modello puo' dichiarare un esito su di se' senza parlare.
+            text = final_content or ""
+            if followup is not None:
+                # L'esito di un controllo delegato si scrive qui e in nessun
+                # altro posto: questo turno non torna al dispatcher cron — è
+                # nato dal bus — e con lui finirebbe l'unica occasione di
+                # registrarlo. Isolato: un registratore rotto non deve poter
+                # far fallire un turno di background.
+                try:
+                    followup.record(key, final_text=text, spoke=spoke_via_tool)
+                except Exception:
+                    logger.exception("Heartbeat follow-up: could not record the outcome")
+            return (
+                TurnOutcome.spoke_via_tool(final_text=text)
+                if spoke_via_tool
+                else TurnOutcome.silent(final_text=text)
+            )
         # Differenza deliberata dal path utente: nessuna soppressione MessageTool
         # (_assemble_outbound). Un turno di sistema VISIBILE ha un contratto di
         # outbound proprio e restituisce sempre una risposta (contenuto o fallback).
@@ -1484,7 +1533,11 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             ctx.turn_id,
             len(ctx.trace),
         )
-        return TurnOutcome.of(ctx.outbound, spoke_via_tool=ctx.spoke_via_tool)
+        return TurnOutcome.of(
+            ctx.outbound,
+            spoke_via_tool=ctx.spoke_via_tool,
+            final_text=ctx.final_content or "",
+        )
 
     def _assemble_outbound(
         self,
@@ -1543,10 +1596,59 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
         interno del proprio run e non come consegna all'utente. Il tipo di esito
         vive dove si prende la decisione di consegna, cioe' in ``_dispatch``.
 
+        Chi l'esito lo vuole davvero (l'heartbeat: gli serve ``final_text``, in
+        cui il modello dichiara quali task non ha potuto eseguire) chiama
+        :meth:`process_direct_outcome`, che e' lo stesso turno senza la perdita
+        di informazione. Un fratello additivo invece di un tipo di ritorno piu'
+        largo: questa firma e' condivisa da Dream, Atlas e dai comandi, e
+        cambiarla per un solo chiamante li toccherebbe tutti.
+
         ``visibility`` dichiara esplicitamente se il turno puo' raggiungere
         l'utente: serve a chi gira lavoro interno su un canale *utente* (e' il
         caso dell'heartbeat, che tiene ``websocket:default`` come target cosi il
         tool ``message`` ha dove consegnare quando la condizione scatta).
+        """
+        outcome = await self.process_direct_outcome(
+            content,
+            session_key=session_key,
+            channel=channel,
+            chat_id=chat_id,
+            media=media,
+            on_progress=on_progress,
+            on_stream=on_stream,
+            on_stream_end=on_stream_end,
+            ephemeral=ephemeral,
+            tools=tools,
+            persist_user_message=persist_user_message,
+            visibility=visibility,
+            metadata=metadata,
+        )
+        return outcome.message
+
+    async def process_direct_outcome(
+        self,
+        content: str,
+        session_key: str = "internal:direct",
+        channel: str = INTERNAL_CHANNEL,
+        chat_id: str = "direct",
+        media: list[str] | None = None,
+        on_progress: Callable[..., Awaitable[None]] | None = None,
+        on_stream: Callable[[str], Awaitable[None]] | None = None,
+        on_stream_end: Callable[..., Awaitable[None]] | None = None,
+        ephemeral: bool = False,
+        tools: ToolRegistry | None = None,
+        persist_user_message: bool = True,
+        visibility: TurnVisibility | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> TurnOutcome:
+        """Come :meth:`process_direct`, ma restituisce l'esito intero del turno.
+
+        Serve a un solo tipo di chiamante: quello che gira un turno *silenzioso*
+        e ha comunque bisogno di sapere cosa e' successo dentro. Su un turno
+        silenzioso il payload e' ``None`` per costruzione, quindi
+        ``process_direct`` non puo' dire ne se l'agente ha parlato col tool
+        ``message`` ne cosa ha scritto come risposta finale — ed e' li che
+        l'heartbeat dichiara i task che non ha potuto eseguire.
         """
         metadata = dict(metadata or {})
         if not persist_user_message:
@@ -1575,11 +1677,10 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
                 }
                 if tools is not None:
                     kwargs["tools"] = tools
-                outcome = await self._process_message(
+                return await self._process_message(
                     msg,
                     **kwargs,
                 )
-                return outcome.message
         finally:
             reset_turn_id(turn_id_token)
             await self._runtime_events().run_status_changed(msg, session_key, "idle")

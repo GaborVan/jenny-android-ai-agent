@@ -52,24 +52,43 @@ class TurnOutcome:
     disposition: TurnDisposition
     message: OutboundMessage | None = None
 
-    @classmethod
-    def delivered(cls, message: OutboundMessage) -> "TurnOutcome":
-        return cls(TurnDisposition.DELIVERED, message)
+    final_text: str = ""
+    """Risposta finale del modello, **consegnata o no**.
+
+    Da non confondere con :attr:`text`, che e' il testo *consegnato* e resta
+    vuoto quando non c'e' consegna. Su un turno silenzioso il modello scrive
+    comunque una risposta finale, che oggi non legge nessuno: e' l'unico canale
+    gia' esistente in cui puo' dichiarare un fatto su se' stesso senza parlare
+    all'utente. I monitor cron lo usano per distinguere "non ho nulla da dire"
+    da "non ho potuto controllare" (v. ``jenny/cron/bound_runner.py``).
+    """
 
     @classmethod
-    def spoke_via_tool(cls) -> "TurnOutcome":
-        return cls(TurnDisposition.SPOKE_VIA_TOOL)
+    def delivered(cls, message: OutboundMessage, *, final_text: str = "") -> "TurnOutcome":
+        return cls(TurnDisposition.DELIVERED, message, final_text or message.content)
 
     @classmethod
-    def silent(cls) -> "TurnOutcome":
-        return cls(TurnDisposition.SILENT)
+    def spoke_via_tool(cls, *, final_text: str = "") -> "TurnOutcome":
+        return cls(TurnDisposition.SPOKE_VIA_TOOL, None, final_text)
 
     @classmethod
-    def of(cls, message: OutboundMessage | None, *, spoke_via_tool: bool) -> "TurnOutcome":
+    def silent(cls, *, final_text: str = "") -> "TurnOutcome":
+        return cls(TurnDisposition.SILENT, None, final_text)
+
+    @classmethod
+    def of(
+        cls,
+        message: OutboundMessage | None,
+        *,
+        spoke_via_tool: bool,
+        final_text: str = "",
+    ) -> "TurnOutcome":
         """Costruisce l'esito dai due soli fatti che il turno conosce."""
         if message is not None:
-            return cls.delivered(message)
-        return cls.spoke_via_tool() if spoke_via_tool else cls.silent()
+            return cls.delivered(message, final_text=final_text)
+        if spoke_via_tool:
+            return cls.spoke_via_tool(final_text=final_text)
+        return cls.silent(final_text=final_text)
 
     @property
     def spoke(self) -> bool:

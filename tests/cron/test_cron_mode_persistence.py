@@ -53,6 +53,28 @@ _LEGACY_JOB: dict[str, Any] = {
 }
 
 
+# Chiavi di stato nate dopo ``_LEGACY_JOB``, insieme al terzo esito dei monitor
+# (``could_not_check``). Come ``payload.mode``, un salvataggio le aggiunge coi
+# loro default; qui servono a dire "questo è tutto ciò che il giro load → save ha
+# aggiunto", tenendo il resto dell'asserzione un confronto esatto.
+_COULD_NOT_CHECK_DEFAULTS: dict[str, Any] = {
+    "consecutiveCouldNotCheck": 0,
+    "couldNotCheckSinceMs": None,
+    "couldNotCheckEscalated": False,
+    # Lo stesso terzo esito per singolo task dell'heartbeat: vuoto per ogni job
+    # che non sia l'heartbeat, e vuoto anche per un heartbeat sano.
+    "taskChecks": {},
+}
+
+
+def _as_saved(job: dict[str, Any], *, mode: str) -> dict[str, Any]:
+    """Il job come lo riscrive ``_save_store``: stessi dati, campi nuovi ai default."""
+    expected = copy.deepcopy(job)
+    expected["payload"]["mode"] = mode
+    expected["state"] = {**expected["state"], **_COULD_NOT_CHECK_DEFAULTS}
+    return expected
+
+
 def _write_store(tmp_path: Path, job: dict[str, Any]) -> Path:
     store_path = tmp_path / "cron" / "jobs.json"
     store_path.parent.mkdir(parents=True)
@@ -89,9 +111,7 @@ def test_reloading_a_legacy_job_loses_nothing_but_gains_the_default_mode(
 
     saved = json.loads(store_path.read_text(encoding="utf-8"))
 
-    expected_job = copy.deepcopy(_LEGACY_JOB)
-    expected_job["payload"]["mode"] = "reminder"
-    assert saved == {"version": 1, "jobs": [expected_job]}
+    assert saved == {"version": 1, "jobs": [_as_saved(_LEGACY_JOB, mode="reminder")]}
 
 
 def test_a_mode_this_version_cannot_execute_falls_back_instead_of_crashing(
@@ -222,5 +242,5 @@ def test_a_monitor_job_survives_a_full_save_load_cycle(tmp_path: Path) -> None:
     assert reloaded.payload.mode == "monitor"
     assert json.loads(store_path.read_text(encoding="utf-8")) == {
         "version": 1,
-        "jobs": [monitor],
+        "jobs": [_as_saved(monitor, mode="monitor")],
     }

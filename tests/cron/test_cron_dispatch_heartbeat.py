@@ -19,11 +19,20 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from jenny.agent.turn_types import TurnOutcome
+from jenny.cron.types import CronJob, CronPayload
 from jenny.runtime.cron_dispatch import _HEARTBEAT_PREAMBLE, CronDispatcher
 from jenny.session.keys import HEARTBEAT_SESSION_KEY
 from jenny.session.turn_visibility import TurnVisibility
 
-_HEARTBEAT_JOB = SimpleNamespace(name="heartbeat", id="job-heartbeat")
+
+def _heartbeat_job() -> CronJob:
+    """Il job vero e non un doppio: da B13 il ramo heartbeat legge e scrive
+    ``job.state`` (lo stato per-task), quindi un ``SimpleNamespace`` senza stato
+    nasconderebbe proprio la parte nuova."""
+    return CronJob(
+        id="heartbeat", name="heartbeat", payload=CronPayload(kind="system_event")
+    )
 
 _HEARTBEAT_MD = """# Heartbeat
 
@@ -58,10 +67,12 @@ class _FakeAgent:
         self.sessions = _FakeSessions()
         self.calls: list[dict] = []
 
-    async def process_direct(self, prompt: str, **kwargs):
+    async def process_direct_outcome(self, prompt: str, **kwargs) -> TurnOutcome:
         self.calls.append({"prompt": prompt, **kwargs})
         # Un turno silenzioso non restituisce payload: è ciò che fa la FSM.
-        return None
+        # Il testo finale c'è comunque, ed è dove il modello dichiara i task
+        # che non ha potuto eseguire (qui: nessuno).
+        return TurnOutcome.silent(final_text="")
 
     def evict_pruned_sessions(self, keys) -> None:  # pragma: no cover - non usato qui
         pass
@@ -89,7 +100,7 @@ class TestTheHeartbeatTurnIsSilent:
     async def test_the_turn_declares_itself_silent(self, dispatcher) -> None:
         disp, agent = dispatcher
 
-        await disp.dispatch(_HEARTBEAT_JOB)
+        await disp.dispatch(_heartbeat_job())
 
         assert agent.calls[0]["visibility"] is TurnVisibility.SILENT
 
@@ -98,7 +109,7 @@ class TestTheHeartbeatTurnIsSilent:
         dove consegnare quando la condizione scatta."""
         disp, agent = dispatcher
 
-        await disp.dispatch(_HEARTBEAT_JOB)
+        await disp.dispatch(_heartbeat_job())
 
         assert agent.calls[0]["channel"] == "websocket"
         assert agent.calls[0]["chat_id"] == "default"
@@ -112,14 +123,14 @@ class TestTheHeartbeatTurnIsSilent:
         """
         disp, _agent = dispatcher
 
-        assert await disp.dispatch(_HEARTBEAT_JOB) is None
+        assert await disp.dispatch(_heartbeat_job()) is None
         assert not hasattr(disp, "_deliver_to_channel")
         assert not hasattr(disp, "_get_message_tool")
 
     async def test_the_session_tail_is_still_pruned(self, dispatcher) -> None:
         disp, agent = dispatcher
 
-        await disp.dispatch(_HEARTBEAT_JOB)
+        await disp.dispatch(_heartbeat_job())
 
         assert agent.sessions.session.retained == [8]
         assert agent.sessions.saved == 1
@@ -134,7 +145,7 @@ class TestTheHeartbeatTurnIsSilent:
             heartbeat_cfg=SimpleNamespace(keep_recent_messages=8),
         )
 
-        assert await disp.dispatch(_HEARTBEAT_JOB) is None
+        assert await disp.dispatch(_heartbeat_job()) is None
         assert agent.calls == []
 
 
@@ -155,6 +166,25 @@ class TestThePreambleContract:
     def test_it_says_that_saying_nothing_is_correct(self) -> None:
         assert "do NOT call `message`" in _HEARTBEAT_PREAMBLE
         assert "correct, expected outcome" in _HEARTBEAT_PREAMBLE
+
+    def test_it_teaches_the_third_outcome_and_its_exact_form(self) -> None:
+        """Silenzio e parola non bastano: un task che non è partito deve poterlo
+        dire, e lo dice in una riga che non raggiunge nessuno."""
+        text = _HEARTBEAT_PREAMBLE
+        assert "third outcome, and it is NOT silence" in text
+        assert "CHECK_FAILED <task number>:" in text
+        assert "Those lines reach nobody" in text
+
+    def test_it_says_an_instructed_silent_skip_is_not_a_failure(self) -> None:
+        """Il task WaterBot reale dice "se hps è irraggiungibile salta il ciclo in
+        silenzio": quello skip è ciò che gli è stato chiesto, non un guasto."""
+        text = _HEARTBEAT_PREAMBLE
+        assert "ITS OWN" in text
+        assert "skip the cycle silently" in text
+        assert "that is not a failure" in text
+
+    def test_a_task_that_found_nothing_still_writes_no_line(self) -> None:
+        assert "ran and found nothing is a success" in _HEARTBEAT_PREAMBLE
 
     def test_it_still_forbids_leaking_internal_file_names(self) -> None:
         assert "HEARTBEAT.md" in _HEARTBEAT_PREAMBLE

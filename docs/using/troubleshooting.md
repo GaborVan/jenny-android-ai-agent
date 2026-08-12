@@ -75,7 +75,7 @@ See [Scheduling and proactivity](./scheduling.md) for the full model, and [Confi
 
 ## A periodic check never writes to me
 
-If you asked Jenny for something like *"every 10 minutes check whether the site is back up and tell me"*, she may have created it as a **monitor**: a recurring job that runs quietly and only messages you when the check actually finds something. A monitor that never speaks is usually working, not broken — so before assuming a fault, tell the three cases apart.
+If you asked Jenny for something like *"every 10 minutes check whether the site is back up and tell me"*, she may have created it as a **monitor**: a recurring job that runs quietly and only messages you when the check actually finds something. A monitor that never speaks is usually working, not broken — so before assuming a fault, tell the four cases apart.
 
 Ask Jenny to **list your reminders** and look at the job's `Last run:` line:
 
@@ -83,6 +83,7 @@ Ask Jenny to **list your reminders** and look at the job's `Last run:` line:
 |---|---|---|
 | `Last run: <recent time> — silenced` | It ran, it looked, there was nothing worth reporting. This is the normal outcome of a healthy monitor, exactly like Heartbeat's "I set a task and never hear anything". | Nothing. If you'd rather hear from it every time, ask for a plain reminder instead ("tell me the result every hour, even if nothing changed"). |
 | `Last run:` far in the past, or no `Last run:` at all | The app was killed and the cycles in that window simply didn't run — there's no catch-up replay, same as for Heartbeat above. | Check **Settings → Background activity**: if the window shows up under "Recorded outages", the phone shut Jenny down. Exempt her from battery optimization from that same page and keep the app from being swiped away. |
+| `Last run: <time> — could_not_check` (usually with the reason in parentheses), plus a `Could not check: N consecutive run(s), since …` line | The cycle ran, but the check itself never happened — a helper script is missing, a device or host is unreachable, a tool broke. This is the case that used to be invisible: it produced the same silence as a healthy run. | Nothing for the first two cycles; a blip is normal. After three in a row Jenny writes to you once by herself. The reason in parentheses is the fix to chase — most often a script that was moved or a device that is off. |
 | `Last run: <time> — error` (usually with the reason in parentheses) | The job genuinely failed — a provider error, a tool that couldn't reach the target. | Ask Jenny to check her logs (first section of this page); fix the underlying cause, or recreate the job. |
 
 Two things that look like faults but aren't:

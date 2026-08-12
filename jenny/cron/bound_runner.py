@@ -11,6 +11,11 @@ from typing import Any, Protocol
 from jenny.agent.tools.cron import CronTool
 from jenny.agent.turn_types import TurnOutcome
 from jenny.bus.events import InboundMessage
+from jenny.cron.could_not_check import (
+    COULD_NOT_CHECK_MARKER,
+    ESCALATE_AFTER_FAILURES,
+    could_not_check_reason,
+)
 from jenny.cron.session_delivery import origin_delivery_context
 from jenny.cron.session_turns import (
     CRON_DEFER_UNTIL_IDLE_META,
@@ -18,7 +23,12 @@ from jenny.cron.session_turns import (
     CRON_TRIGGER_META,
     monitor_session_key,
 )
-from jenny.cron.types import CronJob, CronJobSilencedError
+from jenny.cron.types import (
+    CronJob,
+    CronJobSilencedError,
+    CronJobState,
+    CronMonitorCouldNotCheckError,
+)
 from jenny.cron.webui_metadata import cron_proactive_delivery_metadata
 from jenny.runtime.power import keep_awake
 from jenny.session.turn_visibility import mark_silent_turn
@@ -36,6 +46,29 @@ MONITOR_KEEP_RECENT_MESSAGES = 8
 # invece di girare — è la causa misurata degli scarti fra 30 e 83 minuti su un
 # cron da mezz'ora.
 CRON_WAKELOCK_TIMEOUT_S = 1800.0
+
+# Marcatore, soglia e parser vivono in :mod:`jenny.cron.could_not_check`: da
+# quando l'heartbeat ha lo stesso terzo esito (per-task), i lettori sono due e
+# la forma che il modello scrive deve restare una sola. Ri-esportati qui coi
+# nomi con cui il monitor li conosce.
+MONITOR_COULD_NOT_CHECK_MARKER = COULD_NOT_CHECK_MARKER
+MONITOR_ESCALATE_AFTER_FAILURES = ESCALATE_AFTER_FAILURES
+
+
+def should_escalate_could_not_check(state: CronJobState) -> bool:
+    """True quando è QUESTO run a dover avvisare, se anche lui non controlla.
+
+    Il conteggio nello stato riguarda i run già conclusi, quindi la soglia si
+    confronta con ``K - 1``: con K=3 l'istruzione entra nel prompt del terzo
+    tentativo, ed è quel turno — l'unico che sappia se il controllo è riuscito
+    adesso — a decidere se chiamare ``message``. Nessun turno in più, e nessuna
+    consegna generata da fuori il turno: il dispatcher cron non ne ha una, per
+    scelta (v. la docstring di ``jenny/runtime/cron_dispatch.py``).
+    """
+    return (
+        not state.could_not_check_escalated
+        and state.consecutive_could_not_check >= MONITOR_ESCALATE_AFTER_FAILURES - 1
+    )
 
 
 class BoundCronAgent(Protocol):
@@ -138,10 +171,18 @@ async def _run_bound_cron_job(
     # sessione in cui il turno viene eseguito.
     turn_session_key = monitor_session_key(job.id) if monitor else session_key
 
+    # L'escalation si decide PRIMA del turno, perché è una riga di prompt: solo
+    # il modello, dentro il turno, sa se il controllo è riuscito adesso, ed è
+    # anche l'unico che possa consegnare (tool ``message``).
+    escalate = monitor and should_escalate_could_not_check(job.state)
     prompt = render_template(
         "agent/cron_monitor.md" if monitor else "agent/cron_reminder.md",
         strip=True,
         message=job.payload.message,
+        # Assenti dal template del reminder e falsi sul monitor normale: il
+        # prompt reso resta byte-identico a prima finché non c'è un guasto.
+        escalate=escalate,
+        failed_runs=job.state.consecutive_could_not_check if escalate else 0,
     )
     prompt_ref = _cron_prompt_ref(prompt, monitor=monitor)
     run_id = f"{job.id}:{int(time.time() * 1000)}:{uuid.uuid4().hex[:8]}"
@@ -214,6 +255,29 @@ async def _run_bound_cron_job(
 
     if monitor:
         _prune_monitor_session(agent, turn_session_key)
+        # Terzo stato, e va guardato PRIMA di ``spoke``: un monitor che non ha
+        # potuto controllare resta un monitor che non ha controllato anche
+        # quando ha parlato per dirlo. Legarlo a ``spoke`` azzererebbe la
+        # sequenza proprio sul run dell'escalation, e l'avviso ripartirebbe ogni
+        # tre cicli per sempre.
+        reason = could_not_check_reason(outcome.final_text)
+        if reason is not None:
+            cron.write_run_record(
+                run_id,
+                {
+                    **run_record_base,
+                    "status": "could_not_check",
+                    "reason": reason or None,
+                    "delivery": "agent_message" if outcome.spoke else "suppressed",
+                },
+            )
+            raise CronMonitorCouldNotCheckError(
+                f"cron monitor job {job.id} could not run its check",
+                reason=reason or None,
+                # L'avviso è "dato" solo se è davvero uscito: un modello che
+                # ignora l'istruzione deve ritrovarsela al giro dopo.
+                escalated=escalate and outcome.spoke,
+            )
         # L'esito lo dice da sé: per un monitor l'outbound finale è sempre None,
         # e ``spoke`` distingue "ho parlato col tool ``message``" da "non avevo
         # nulla da riferire" — che è un successo, non un fallimento.

@@ -290,6 +290,13 @@ class CronTool(Tool, ContextAware):
             if state.last_error:
                 info += f" ({state.last_error})"
             lines.append(info)
+        # Un monitor rotto deve saperlo dire quando gli si chiede l'elenco:
+        # ``last_status`` da solo racconta l'ultimo giro, non da quanto dura.
+        if state.consecutive_could_not_check:
+            note = f"  Could not check: {state.consecutive_could_not_check} consecutive run(s)"
+            if state.could_not_check_since_ms:
+                note += f", since {self._format_timestamp(state.could_not_check_since_ms, display_tz)}"
+            lines.append(note)
         if state.next_run_at_ms:
             lines.append(f"  Next run: {self._format_timestamp(state.next_run_at_ms, display_tz)}")
         return lines

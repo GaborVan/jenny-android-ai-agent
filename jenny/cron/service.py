@@ -8,7 +8,7 @@ from contextlib import suppress
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Coroutine, Literal, NamedTuple
+from typing import TYPE_CHECKING, Any, Callable, Coroutine, Literal, NamedTuple
 
 from filelock import SoftFileLock
 from loguru import logger
@@ -18,10 +18,12 @@ from jenny.cron.types import (
     CronJob,
     CronJobSilencedError,
     CronJobState,
+    CronMonitorCouldNotCheckError,
     CronPayload,
     CronRunRecord,
     CronSchedule,
     CronStore,
+    CronTaskCheckState,
 )
 
 # Modulo, non simboli: i test sostituiscono ``power.schedule_wake`` &co. per
@@ -29,6 +31,9 @@ from jenny.cron.types import (
 # non arriverebbe qui.
 from jenny.runtime import power
 from jenny.utils.path import atomic_write
+
+if TYPE_CHECKING:
+    from jenny.cron.heartbeat_followup import HeartbeatFollowup
 
 _LockClass = SoftFileLock
 
@@ -206,6 +211,13 @@ class CronService:
         self._alarm_armed_ms: int | None = None
         self._alarm_lock = asyncio.Lock()
         self._alarm_tasks: set[asyncio.Task] = set()
+        # Registrato dal ``CronDispatcher`` (che è chi conosce l'heartbeat) e
+        # letto dall'``AgentLoop`` sul turno di ritorno di un subagent. Sta qui
+        # perché il servizio cron è l'unico oggetto che entrambi hanno già in
+        # mano: il turno d'annuncio non passa dal dispatcher — arriva dal bus —
+        # e senza questo aggancio l'esito di un controllo delegato non avrebbe
+        # nessuna strada per tornare nello stato del job.
+        self.heartbeat_followup: "HeartbeatFollowup | None" = None
 
     def _is_unbound_agent_job(self, job: CronJob) -> bool:
         return job.payload.kind == "agent_turn" and not is_bound_cron_job(job)
@@ -298,6 +310,31 @@ class CronService:
                     last_run_at_ms=j.get("state", {}).get("lastRunAtMs"),
                     last_status=j.get("state", {}).get("lastStatus"),
                     last_error=j.get("state", {}).get("lastError"),
+                    # Assenti negli store scritti prima del terzo stato: i
+                    # default del dataclass valgono "monitor sano", che è il
+                    # ripiego giusto — un contatore inventato farebbe partire
+                    # un avviso per un guasto che non c'è.
+                    consecutive_could_not_check=(
+                        j.get("state", {}).get("consecutiveCouldNotCheck") or 0
+                    ),
+                    could_not_check_since_ms=j.get("state", {}).get("couldNotCheckSinceMs"),
+                    could_not_check_escalated=bool(
+                        j.get("state", {}).get("couldNotCheckEscalated")
+                    ),
+                    task_checks={
+                        task_id: CronTaskCheckState(
+                            consecutive_could_not_check=entry.get(
+                                "consecutiveCouldNotCheck"
+                            ) or 0,
+                            since_ms=entry.get("sinceMs"),
+                            escalated=bool(entry.get("escalated")),
+                            label=entry.get("label") or "",
+                            pending_since_ms=entry.get("pendingSinceMs"),
+                        )
+                        for task_id, entry in (
+                            j.get("state", {}).get("taskChecks") or {}
+                        ).items()
+                    },
                     run_history=[
                         CronRunRecord(
                             run_at_ms=r["runAtMs"],
@@ -525,6 +562,19 @@ class CronService:
                         "lastRunAtMs": j.state.last_run_at_ms,
                         "lastStatus": j.state.last_status,
                         "lastError": j.state.last_error,
+                        "consecutiveCouldNotCheck": j.state.consecutive_could_not_check,
+                        "couldNotCheckSinceMs": j.state.could_not_check_since_ms,
+                        "couldNotCheckEscalated": j.state.could_not_check_escalated,
+                        "taskChecks": {
+                            task_id: {
+                                "consecutiveCouldNotCheck": e.consecutive_could_not_check,
+                                "sinceMs": e.since_ms,
+                                "escalated": e.escalated,
+                                "label": e.label,
+                                "pendingSinceMs": e.pending_since_ms,
+                            }
+                            for task_id, e in j.state.task_checks.items()
+                        },
                         "runHistory": [
                             {
                                 "runAtMs": r.run_at_ms,
@@ -843,6 +893,20 @@ class CronService:
             self._timer_active = False
         self._arm_timer()
 
+    @staticmethod
+    def _reset_could_not_check(state: CronJobState) -> None:
+        """Chiude la sequenza di controlli mancati: il controllo è avvenuto.
+
+        Chiamata solo da ``ok`` e ``silenced``, che sono le due prove che il
+        controllo è stato eseguito. ``error`` e ``skipped`` la lasciano stare
+        apposta: non dimostrano né che il monitor sia sano né che sia rotto, e
+        azzerare su un errore trasformerebbe un guasto intermittente in un
+        guasto invisibile — esattamente ciò che questo stato esiste per evitare.
+        """
+        state.consecutive_could_not_check = 0
+        state.could_not_check_since_ms = None
+        state.could_not_check_escalated = False
+
     async def _execute_job(self, job: CronJob) -> None:
         """Execute a single job."""
         start_ms = _now_ms()
@@ -854,8 +918,28 @@ class CronService:
 
             job.state.last_status = "ok"
             job.state.last_error = None
+            self._reset_could_not_check(job.state)
             logger.info("Cron: job '{}' completed", job.name)
 
+        except CronMonitorCouldNotCheckError as e:
+            # PRIMA di ``CronJobSilencedError``, di cui è sottoclasse: qui si
+            # separa "ho guardato e non c'era niente" da "non sono riuscito a
+            # guardare", che senza questo ramo producevano lo stesso identico
+            # nulla. Non è un errore del job — il turno è andato a termine —
+            # quindi il job resta armato; è una sequenza che va contata.
+            job.state.last_status = "could_not_check"
+            job.state.last_error = e.reason
+            job.state.consecutive_could_not_check += 1
+            if job.state.could_not_check_since_ms is None:
+                job.state.could_not_check_since_ms = start_ms
+            if e.escalated:
+                job.state.could_not_check_escalated = True
+            logger.warning(
+                "Cron: job '{}' could not run its check ({} in a row): {}",
+                job.name,
+                job.state.consecutive_could_not_check,
+                e.reason or "no reason given",
+            )
         except CronJobSilencedError:
             # Esito riuscito, non mancato: il job monitor ha girato fino in
             # fondo e ha deciso che non c'era niente da dire. Nessun
@@ -863,6 +947,7 @@ class CronService:
             # resterebbe appeso e farebbe sembrare guasto un job sano.
             job.state.last_status = "silenced"
             job.state.last_error = None
+            self._reset_could_not_check(job.state)
             logger.info("Cron: job '{}' completed silently", job.name)
         except CronJobSkippedError as e:
             job.state.last_status = "skipped"
@@ -1134,6 +1219,20 @@ class CronService:
         if store is None:
             return None
         return next((j for j in store.jobs if j.id == job_id), None)
+
+    def persist_job_state(self) -> None:
+        """Scrive su disco lo stato dei job mutato da un chiamante esterno.
+
+        Serve al solo caso in cui uno stato cambia **fuori** da un run: il
+        verdetto di un controllo delegato arriva col turno d'annuncio del
+        subagent, che non passa da ``_execute_job`` e quindi non incontra il
+        salvataggio di fine ciclo. Il chiamante muta il job restituito da
+        ``get_job`` — che è l'oggetto vivo dello store, non una copia — e poi
+        chiama questo. Nessun ``_load_store`` prima: rileggere qui butterebbe
+        via proprio la mutazione appena fatta.
+        """
+        if self._store is not None:
+            self._save_store()
 
     def status(self) -> dict:
         """Get service status."""
