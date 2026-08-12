@@ -157,6 +157,72 @@ class TestLoadBootstrapFiles:
 
 
 # ---------------------------------------------------------------------------
+# _load_bootstrap_files — guardia sul template intatto
+# ---------------------------------------------------------------------------
+
+
+def _bundled(name: str) -> str:
+    from importlib.resources import files as pkg_files
+
+    tpl = pkg_files("jenny") / "templates" / name
+    if not tpl.is_file():
+        pytest.skip(f"{name} template not bundled")
+    return tpl.read_text(encoding="utf-8")
+
+
+class TestBootstrapTemplateGuard:
+    """Un file di bootstrap mai toccato non è contenuto scritto dall'utente.
+
+    ``USER.md`` intatto è un modulo vuoto e viene omesso (stessa risposta che
+    ``MEMORY.md`` riceve in ``build_system_prompt``); ``AGENTS.md`` e ``SOUL.md``
+    intatti sono il comportamento di serie e restano, ma etichettati.
+    """
+
+    def test_untouched_user_md_is_skipped(self, tmp_path):
+        (tmp_path / "USER.md").write_text(_bundled("USER.md"), encoding="utf-8")
+        builder = _builder(tmp_path)
+        result = builder._load_bootstrap_files()
+        assert result == ""
+
+    def test_edited_user_md_is_injected_without_notice(self, tmp_path):
+        (tmp_path / "USER.md").write_text("- **Name**: Luca", encoding="utf-8")
+        builder = _builder(tmp_path)
+        result = builder._load_bootstrap_files()
+        assert "## USER.md" in result
+        assert "Luca" in result
+        assert ContextBuilder._BOOTSTRAP_TEMPLATE_NOTICE not in result
+
+    @pytest.mark.parametrize("filename", ["AGENTS.md", "SOUL.md"])
+    def test_untouched_default_is_kept_but_labelled(self, tmp_path, filename):
+        content = _bundled(filename)
+        (tmp_path / filename).write_text(content, encoding="utf-8")
+        builder = _builder(tmp_path)
+        result = builder._load_bootstrap_files()
+        assert f"## {filename}" in result
+        assert ContextBuilder._BOOTSTRAP_TEMPLATE_NOTICE in result
+        # Il comportamento di serie non deve sparire: niente regressione di
+        # identità o di guida operativa su un'installazione nuova.
+        assert content.strip() in result
+
+    @pytest.mark.parametrize("filename", ["AGENTS.md", "SOUL.md"])
+    def test_edited_file_carries_no_notice(self, tmp_path, filename):
+        (tmp_path / filename).write_text(_bundled(filename) + "\n\nExtra rule.", encoding="utf-8")
+        builder = _builder(tmp_path)
+        result = builder._load_bootstrap_files()
+        assert "Extra rule." in result
+        assert ContextBuilder._BOOTSTRAP_TEMPLATE_NOTICE not in result
+
+    def test_pristine_workspace_omits_only_the_placeholder(self, tmp_path):
+        for name in ContextBuilder.BOOTSTRAP_FILES:
+            (tmp_path / name).write_text(_bundled(name), encoding="utf-8")
+        builder = _builder(tmp_path)
+        result = builder._load_bootstrap_files()
+        assert "## AGENTS.md" in result
+        assert "## SOUL.md" in result
+        assert "## USER.md" not in result
+
+
+# ---------------------------------------------------------------------------
 # _is_template_content (static)
 # ---------------------------------------------------------------------------
 

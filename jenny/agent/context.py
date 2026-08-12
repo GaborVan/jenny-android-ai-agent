@@ -27,6 +27,29 @@ class ContextBuilder:
     """Builds the context (system prompt + messages) for the agent."""
 
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md"]
+    # File di bootstrap da omettere del tutto quando sono ancora il template
+    # intatto. L'elenco è corto apposta: ``USER.md`` intatto è un modulo vuoto —
+    # "(your name)", caselle non spuntate, sezioni fra parentesi — cioè zero
+    # informazione e un invito a rispondere a caselle. È lo stesso caso di
+    # ``MEMORY.md`` e riceve la stessa risposta: si salta.
+    #
+    # ``AGENTS.md`` e ``SOUL.md`` no. I loro template non sono segnaposto: sono
+    # il comportamento di serie (le regole di cron/heartbeat; l'identità di
+    # Jenny, che non è scritta in nessun altro punto del prompt). Ometterli
+    # perché nessuno li ha ancora modificati toglierebbe personalità e guida
+    # operativa a ogni installazione nuova — una regressione, non una
+    # correzione. Restano nel prompt, etichettati per quello che sono, così che
+    # il modello non li citi come preferenze dell'utente.
+    #
+    # Quando il lavoro di ``roadmap/agents-md-ownership.md`` avrà spostato la
+    # metà "di sistema" di AGENTS.md sotto ``templates/agent/``, quel che resta
+    # sarà un segnaposto come USER.md e basterà aggiungerlo qui (è la domanda
+    # aperta 1 di quel documento).
+    _BOOTSTRAP_SKIP_IF_TEMPLATE = frozenset({"USER.md"})
+    _BOOTSTRAP_TEMPLATE_NOTICE = (
+        "[Unmodified default — this file still matches the template shipped with the app; "
+        "the user has not written any of it. Nothing below states a user preference.]"
+    )
     _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
     _MAX_RECENT_HISTORY = 50
     _MAX_HISTORY_TOKENS = 8_000  # hard cap on recent history section size (tokens)
@@ -234,15 +257,29 @@ class ContextBuilder:
         return ContextBuilder._RUNTIME_CONTEXT_TAG + "\n" + "\n".join(lines) + "\n" + ContextBuilder._RUNTIME_CONTEXT_END
 
     def _load_bootstrap_files(self, workspace: Path | None = None) -> str:
-        """Load all bootstrap files from workspace."""
+        """Load all bootstrap files from workspace.
+
+        Un file di bootstrap ancora identico al template che il primo avvio ha
+        copiato nel workspace non è roba scritta dall'utente, e finora entrava
+        nel prompt come se lo fosse — mentre ``MEMORY.md`` ha la sua guardia
+        (``_is_template_content``, sopra). Qui però la risposta giusta non è la
+        stessa per tutti e tre, perché i tre template non sono la stessa cosa:
+        vedi ``_BOOTSTRAP_SKIP_IF_TEMPLATE``.
+        """
         parts = []
         root = workspace or self.workspace
 
         for filename in self.BOOTSTRAP_FILES:
             file_path = root / filename
-            if file_path.exists():
-                content = file_path.read_text(encoding="utf-8")
+            if not file_path.exists():
+                continue
+            content = file_path.read_text(encoding="utf-8")
+            if not self._is_template_content(content, filename):
                 parts.append(f"## {filename}\n\n{content}")
+                continue
+            if filename in self._BOOTSTRAP_SKIP_IF_TEMPLATE:
+                continue
+            parts.append(f"## {filename}\n\n{self._BOOTSTRAP_TEMPLATE_NOTICE}\n\n{content}")
 
         return "\n\n".join(parts) if parts else ""
 
