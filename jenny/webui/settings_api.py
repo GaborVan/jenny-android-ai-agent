@@ -203,6 +203,20 @@ async def start_update_install() -> dict[str, Any]:
 _update_check_lock = asyncio.Lock()
 
 
+def reset_update_check_state() -> None:
+    """Rimpiazza il lock del controllo aggiornamenti prima di un nuovo loop.
+
+    Simmetrico ai ``reset_*`` dei bridge; chiamato da
+    ``android_entry.run_gateway``. Qui il lock resta preso attraverso una
+    chiamata di rete: se il loop muore mentre il manifest è in volo, il lock
+    può sopravvivere già acquisito, e la guardia ``locked()`` di
+    :func:`run_update_check` risponderebbe ``busy`` per sempre — bottone
+    "controlla aggiornamenti" morto fino al force-stop dell'app.
+    """
+    global _update_check_lock
+    _update_check_lock = asyncio.Lock()
+
+
 def _check_outcome(version: dict[str, Any]) -> str:
     """``"ok"`` solo se l'ultimo tentativo ha davvero raggiunto il manifest.
 

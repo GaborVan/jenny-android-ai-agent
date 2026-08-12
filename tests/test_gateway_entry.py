@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from jenny.android_entry import run_gateway
+from jenny.android_entry import MAX_RETRIES, run_gateway
 from jenny.config.bootstrap import ensure_minimal_config
 from jenny.runtime.context import get_runtime_context
 
@@ -40,6 +40,68 @@ def test_run_gateway_prepares_workspace_and_passes_overrides(
         port=18000,
         ws_port=18000,
     )
+
+
+def test_run_gateway_retries_after_a_system_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """B2: SystemExit non è una Exception. Con il vecchio `except Exception`
+    i tre tentativi venivano saltati e run_gateway tornava a Kotlin lasciando
+    il servizio in piedi senza agente dietro."""
+    monkeypatch.setattr(get_runtime_context(), "workspace_dir", None)
+    monkeypatch.setattr("jenny.android_entry.RETRY_DELAY_S", 0)
+
+    calls: list[int] = []
+
+    async def _fake_run(**_kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise SystemExit(2)
+
+    with patch("jenny.gateway_runtime._run_gateway", new=_fake_run):
+        run_gateway(str(tmp_path), host="127.0.0.1", port=18001)
+
+    assert len(calls) == 2
+
+
+def test_run_gateway_reraises_after_max_retries_of_base_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Esaurititi i tentativi la BaseException risale, come per Exception."""
+    monkeypatch.setattr(get_runtime_context(), "workspace_dir", None)
+    monkeypatch.setattr("jenny.android_entry.RETRY_DELAY_S", 0)
+
+    calls: list[int] = []
+
+    async def _always_exit(**_kwargs):
+        calls.append(1)
+        raise SystemExit(9)
+
+    with patch("jenny.gateway_runtime._run_gateway", new=_always_exit):
+        with pytest.raises(SystemExit):
+            run_gateway(str(tmp_path), host="127.0.0.1", port=18002)
+
+    assert len(calls) == MAX_RETRIES
+
+
+def test_run_gateway_does_not_retry_a_keyboard_interrupt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Ctrl-C è volontario: un solo tentativo, poi risale."""
+    monkeypatch.setattr(get_runtime_context(), "workspace_dir", None)
+    monkeypatch.setattr("jenny.android_entry.RETRY_DELAY_S", 0)
+
+    calls: list[int] = []
+
+    async def _interrupted(**_kwargs):
+        calls.append(1)
+        raise KeyboardInterrupt
+
+    with patch("jenny.gateway_runtime._run_gateway", new=_interrupted):
+        with pytest.raises(KeyboardInterrupt):
+            run_gateway(str(tmp_path), host="127.0.0.1", port=18003)
+
+    assert len(calls) == 1
 
 
 def test_ensure_minimal_config_writes_minimal_json(tmp_path: Path):

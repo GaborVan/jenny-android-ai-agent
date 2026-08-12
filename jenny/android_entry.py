@@ -88,15 +88,20 @@ def run_gateway(
     # Reset Android-only bridge state so a fresh gateway start cannot inherit
     # a stale bridge or locked asyncio state from a previous crashed loop.
     # Tutti i bridge (web-search + installed-apps + notifier + location + power
-    # + ssh + updater) vengono resettati qui, simmetricamente.
+    # + ssh + updater) vengono resettati qui, simmetricamente, insieme alle
+    # altre primitive asyncio tenute in globali di modulo (config store, lock
+    # del controllo aggiornamenti, registro dei job SSH).
     try:
         from jenny.agent.tools.android_web import reset_android_web_state
+        from jenny.agent.tools.ssh_jobs import reset_job_store
         from jenny.agent.tools.ssh_transport import reset_ssh_backend
+        from jenny.config.store import reset_config_store_state
         from jenny.runtime.location import reset_location_state
         from jenny.runtime.notifier import reset_notifier_state
         from jenny.runtime.power import reset_power_state
         from jenny.runtime.update_install import reset_install_state
         from jenny.webui.android_apps_api import reset_installed_apps_state
+        from jenny.webui.settings_api import reset_update_check_state
 
         reset_android_web_state()
         reset_installed_apps_state()
@@ -113,6 +118,22 @@ def run_gateway(
         # Il backend SSH tiene il pool di sessioni: ereditarlo da un loop morto
         # lascerebbe connessioni legate a un event loop che non esiste più.
         reset_ssh_backend()
+        # Il registro dei job SSH è un singleton di modulo il cui lock resta
+        # preso *durante* l'exec remoto: due poll concorrenti si accodano
+        # davvero, e questo lega il lock al loop. Senza reset, dopo un restart
+        # in-process ogni operazione sui job SSH morirebbe con "bound to a
+        # different event loop"; lo stato vero sta su file, qui si scorda solo
+        # la cache.
+        reset_job_store()
+        # Il lock delle scritture di config.json vive in una globale di modulo
+        # e tutte le ~16 scritture ci passano: se resta legato al loop
+        # precedente, config.json diventa di sola lettura per il resto della
+        # vita del processo.
+        reset_config_store_state()
+        # Il controllo aggiornamenti tiene il suo lock attraverso la rete: se
+        # il loop muore lì in mezzo, la guardia ``locked()`` risponde ``busy``
+        # per sempre e il bottone resta morto.
+        reset_update_check_state()
     except Exception:
         # Non-fatale: al peggio si eredita un bridge stale (verrà ricreato).
         logger.opt(exception=True).debug("Could not reset Android bridge state")
@@ -182,9 +203,26 @@ def run_gateway(
                 )
             )
             return  # clean exit
-        except Exception as exc:
+        except KeyboardInterrupt:
+            # Unico caso non ritentabile: è un'interruzione voluta. Su Android
+            # non viene mai generata (l'interrupt di python_exec usa la sua
+            # PythonExecInterrupted via PyThreadState_SetAsyncExc, mai
+            # KeyboardInterrupt, e GatewayContainer.run la assorbe già per lo
+            # shutdown pulito); qui resta solo il Ctrl-C dell'esecuzione
+            # manuale, che non va combattuto con tre restart.
+            logger.info("Gateway interrupted, not restarting")
+            raise
+        except BaseException as exc:
+            # BaseException e non Exception: SystemExit — sollevata dal codice
+            # dell'agente dentro python_exec — non è una Exception, quindi con
+            # `except Exception` i retry venivano saltati e run_gateway tornava
+            # a Kotlin lasciando il servizio senza agente dietro (vedi B1/B2).
             logger.opt(exception=True).error(
-                "Gateway crashed (attempt {}/{}): {}", attempt, MAX_RETRIES, exc
+                "Gateway crashed (attempt {}/{}): {}: {}",
+                attempt,
+                MAX_RETRIES,
+                type(exc).__name__,
+                exc,
             )
             if attempt < MAX_RETRIES:
                 logger.info("Restarting in {} seconds...", RETRY_DELAY_S)

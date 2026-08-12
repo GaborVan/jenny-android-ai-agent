@@ -89,3 +89,25 @@ async def persist_schema_migrations(*, config_path: Path | None = None) -> bool:
 def locked() -> bool:
     """True se una mutazione è in corso (usato dai test)."""
     return _LOCK.locked()
+
+
+def reset_config_store_state() -> None:
+    """Rimpiazza il lock delle scritture prima di un nuovo event loop.
+
+    Simmetrico ai ``reset_*`` dei bridge Android; chiamato da
+    ``android_entry.run_gateway``. Una ``asyncio.Lock`` si lega al loop la
+    prima volta che qualcuno ci si **accoda** — la strada senza contesa non
+    passa da ``_get_loop`` — e da lì in avanti ogni accodamento su un loop
+    diverso solleva ``RuntimeError: ... is bound to a different event loop``.
+
+    Oggi il corpo di :func:`mutate` è interamente sincrono, quindi su un solo
+    loop due scrittori non si incrociano mai e la coda non si forma: il
+    pericolo è latente, non attivo. Ma il gateway riparte apposta nello stesso
+    processo (retry di ``run_gateway`` e restart lato Kotlin), e basta un
+    ``await`` dentro la sezione critica — o un secondo loop che tocchi
+    ``mutate`` — perché il lock resti legato a un loop morto: da quel momento
+    *ogni* scrittura della config fallisce e ``config.json`` diventa di sola
+    lettura fino al force-stop dell'app.
+    """
+    global _LOCK
+    _LOCK = asyncio.Lock()
