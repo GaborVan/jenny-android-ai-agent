@@ -1,8 +1,16 @@
 """Tests for sustained-goal continuation in AgentRunner.
 
-When a goal_active_predicate returns True, the runner must not exit with
-stop_reason="completed" after a plain-text final response. Instead it should
-inject a continuation message and keep looping (similar to mid-turn injection).
+When a goal_active_predicate returns True and the model has just done real work,
+the runner must not exit with stop_reason="completed" after a plain-text final
+response: it injects a continuation message and keeps looping (similar to
+mid-turn injection).
+
+The nudge is bounded, though. It is withheld when the model produced no tool call
+since the previous continuation, when the final text reads as a question to the
+user, and when the per-run cap is reached — the three shapes that made a guided
+Q&A flow burn 9 LLM calls in 45 seconds on 2026-08-12. In all three cases the run
+ends normally and reports ``goal_stalled``, so the product layer can park the goal
+instead of letting the model close it with a false recap.
 """
 
 from __future__ import annotations
@@ -12,9 +20,32 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from jenny.config.schema import AgentDefaults
-from jenny.providers.base import LLMProvider, LLMResponse
+from jenny.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 
 _MAX_TOOL_RESULT_CHARS = AgentDefaults().max_tool_result_chars
+
+
+def _tools() -> MagicMock:
+    """Registry that executes any tool call and returns a short result."""
+    tools = MagicMock()
+    tools.get_definitions.return_value = []
+    tools.execute = AsyncMock(return_value="tool result")
+    return tools
+
+
+def _tool_response() -> LLMResponse:
+    return LLMResponse(
+        content=None,
+        tool_calls=[ToolCallRequest(id="call_1", name="read_file", arguments={"path": "x"})],
+    )
+
+
+def _goal_continue_messages(messages: list[dict]) -> list[dict]:
+    return [
+        m
+        for m in messages
+        if m.get("role") == "user" and "sustained goal" in str(m.get("content", ""))
+    ]
 
 
 @pytest.mark.asyncio
@@ -69,92 +100,204 @@ async def test_runner_exits_normally_with_inactive_goal():
 
 
 @pytest.mark.asyncio
-async def test_runner_forces_continue_when_goal_active():
-    """Predicate returns True on final text → runner injects continuation and loops.
+async def test_runner_forces_continue_after_real_tool_progress():
+    """Tool work then plain text with an active goal → one continuation, then stop.
 
-    We set max_iterations=3 and let the provider return final text every time.
-    Without the fix this would exit on the first iteration with stop_reason
-    "completed". With the fix the runner is forced to continue until
-    max_iterations is hit.
+    Il nudge utile è questo: il modello ha eseguito un tool e si è fermato a
+    commentare mentre il goal è ancora aperto. Al giro dopo, però, non c'è nuovo
+    lavoro da cui ripartire, quindi il run si chiude invece di insistere.
+    """
+    from jenny.agent.runner import AgentRunner, AgentRunSpec
+
+    provider = MagicMock(spec=LLMProvider)
+    calls = {"n": 0}
+
+    async def chat_with_retry(**_kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _tool_response()
+        return LLMResponse(content="still working on it", tool_calls=[], usage={})
+
+    provider.chat_with_retry = chat_with_retry
+
+    runner = AgentRunner(provider)
+    result = await runner.run(AgentRunSpec(
+        initial_messages=[{"role": "user", "content": "do task"}],
+        tools=_tools(),
+        model="test-model",
+        max_iterations=20,
+        max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+        goal_active_predicate=lambda: True,
+    ))
+
+    # tool → testo (nudge) → testo (niente progresso: stop). Non 20.
+    assert calls["n"] == 3
+    assert result.stop_reason == "completed"
+    assert len(_goal_continue_messages(result.messages)) == 1
+    assert result.goal_stalled is True
+
+
+@pytest.mark.asyncio
+async def test_runner_withholds_continuation_without_tool_progress():
+    """Text-only answers with an active goal must not be nudged at all.
+
+    Regressione diretta dell'incidente del 2026-08-12: la continuation sintetica
+    non veniva contata da ``_MAX_INJECTION_CYCLES``, quindi un flusso guidato che
+    risponde solo a parole veniva spronato fino a ``max_iterations`` (200 di
+    default). Ora un turno senza tool esce al primo giro.
     """
     from jenny.agent.runner import AgentRunner, AgentRunSpec
 
     provider = MagicMock(spec=LLMProvider)
     provider.chat_with_retry = AsyncMock(return_value=LLMResponse(
-        content="still working", tool_calls=[], usage={},
+        content="ok, tell me more when you can", tool_calls=[], usage={},
     ))
-    tools = MagicMock()
-    tools.get_definitions.return_value = []
 
     runner = AgentRunner(provider)
     result = await runner.run(AgentRunSpec(
         initial_messages=[{"role": "user", "content": "do task"}],
-        tools=tools,
+        tools=_tools(),
         model="test-model",
-        max_iterations=3,
+        max_iterations=50,
+        max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+        goal_active_predicate=lambda: True,
+        finalize_on_max_iterations=False,
+    ))
+
+    assert provider.chat_with_retry.await_count == 1
+    assert result.stop_reason == "completed"
+    assert result.final_content == "ok, tell me more when you can"
+    assert _goal_continue_messages(result.messages) == []
+    assert result.goal_stalled is True
+
+
+@pytest.mark.asyncio
+async def test_runner_withholds_continuation_when_answer_is_a_question():
+    """A final response that asks the user something parks the goal, tools or not.
+
+    È la forma esatta di ``app-creator``: una domanda per turno. Nessuna
+    continuation può rispondere al posto dell'utente.
+    """
+    from jenny.agent.runner import AgentRunner, AgentRunSpec
+
+    provider = MagicMock(spec=LLMProvider)
+    calls = {"n": 0}
+
+    async def chat_with_retry(**_kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _tool_response()
+        return LLMResponse(
+            content="prima domanda: cosa dovrebbe fare questa app?\n\ndammi un'idea anche vaga",
+            tool_calls=[],
+            usage={},
+        )
+
+    provider.chat_with_retry = chat_with_retry
+
+    runner = AgentRunner(provider)
+    result = await runner.run(AgentRunSpec(
+        initial_messages=[{"role": "user", "content": "create an app, guide me"}],
+        tools=_tools(),
+        model="test-model",
+        max_iterations=50,
         max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
         goal_active_predicate=lambda: True,
     ))
 
-    # Because the predicate keeps returning True, the runner should never
-    # naturally complete. It loops until max_iterations is exhausted.
-    assert result.stop_reason == "max_iterations"
-    # The injected continuation message should be present in the message list.
-    user_msgs = [m for m in result.messages if m.get("role") == "user"]
-    assert any("active sustained goal" in str(m.get("content", "")) for m in user_msgs)
+    # Il tool ha prodotto progresso, ma la risposta è una domanda: zero nudge.
+    assert calls["n"] == 2
+    assert result.stop_reason == "completed"
+    assert _goal_continue_messages(result.messages) == []
+    assert result.goal_stalled is True
 
 
 @pytest.mark.asyncio
-async def test_runner_respects_max_iterations_even_with_active_goal():
-    """A single iteration with active goal still hits max_iterations."""
+async def test_runner_goal_continue_respects_per_run_cap(monkeypatch):
+    """Even alternating tool/text work cannot nudge past _MAX_GOAL_CONTINUE_CYCLES."""
+    from jenny.agent import runner as runner_mod
+    from jenny.agent.runner import AgentRunner, AgentRunSpec
+
+    monkeypatch.setattr(runner_mod, "_MAX_GOAL_CONTINUE_CYCLES", 2)
+    provider = MagicMock(spec=LLMProvider)
+    calls = {"n": 0}
+
+    async def chat_with_retry(**_kwargs):
+        calls["n"] += 1
+        # Alterna lavoro e commento: ogni testo è preceduto da progresso vero,
+        # quindi solo il tetto può fermare la catena.
+        if calls["n"] % 2 == 1:
+            return _tool_response()
+        return LLMResponse(content="chunk done", tool_calls=[], usage={})
+
+    provider.chat_with_retry = chat_with_retry
+
+    runner = AgentRunner(provider)
+    result = await runner.run(AgentRunSpec(
+        initial_messages=[{"role": "user", "content": "do task"}],
+        tools=_tools(),
+        model="test-model",
+        max_iterations=50,
+        max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+        goal_active_predicate=lambda: True,
+    ))
+
+    assert len(_goal_continue_messages(result.messages)) == 2
+    assert result.stop_reason == "completed"
+    assert result.goal_stalled is True
+
+
+@pytest.mark.asyncio
+async def test_runner_goal_stalled_false_when_goal_inactive():
+    """No goal, no parking: goal_stalled stays False on an ordinary run."""
     from jenny.agent.runner import AgentRunner, AgentRunSpec
 
     provider = MagicMock(spec=LLMProvider)
     provider.chat_with_retry = AsyncMock(return_value=LLMResponse(
-        content="still working", tool_calls=[], usage={},
+        content="anything else?", tool_calls=[], usage={},
     ))
-    tools = MagicMock()
-    tools.get_definitions.return_value = []
 
     runner = AgentRunner(provider)
     result = await runner.run(AgentRunSpec(
-        initial_messages=[{"role": "user", "content": "do task"}],
-        tools=tools,
+        initial_messages=[{"role": "user", "content": "hi"}],
+        tools=_tools(),
         model="test-model",
-        max_iterations=1,
+        max_iterations=3,
         max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
-        goal_active_predicate=lambda: True,
+        goal_active_predicate=lambda: False,
     ))
 
-    assert result.stop_reason == "max_iterations"
+    assert result.goal_stalled is False
+    assert result.stop_reason == "completed"
 
 
 @pytest.mark.asyncio
-async def test_runner_goal_continue_not_limited_by_injection_cycle_cap():
-    """Synthetic goal continuation should be governed by max_iterations."""
-    from jenny.agent.runner import _MAX_INJECTION_CYCLES, AgentRunner, AgentRunSpec
+async def test_runner_respects_max_iterations_even_with_active_goal():
+    """A goal that keeps calling tools still stops at max_iterations.
+
+    Il budget di iterazioni resta il tetto del turno: il fix tocca solo i nudge
+    sintetici, non la libertà di un goal che sta davvero lavorando.
+    """
+    from jenny.agent.runner import AgentRunner, AgentRunSpec
 
     provider = MagicMock(spec=LLMProvider)
-    provider.chat_with_retry = AsyncMock(return_value=LLMResponse(
-        content="still working", tool_calls=[], usage={},
-    ))
-    tools = MagicMock()
-    tools.get_definitions.return_value = []
-    max_iterations = _MAX_INJECTION_CYCLES + 3
+    provider.chat_with_retry = AsyncMock(return_value=_tool_response())
 
     runner = AgentRunner(provider)
     result = await runner.run(AgentRunSpec(
         initial_messages=[{"role": "user", "content": "do task"}],
-        tools=tools,
+        tools=_tools(),
         model="test-model",
-        max_iterations=max_iterations,
+        max_iterations=1,
         max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
         goal_active_predicate=lambda: True,
         finalize_on_max_iterations=False,
     ))
 
     assert result.stop_reason == "max_iterations"
-    assert provider.chat_with_retry.await_count == max_iterations
+    # Un turno chiuso dal budget non è un goal in attesa: la continuazione
+    # interna (session.turn_continuation) ha ancora la parola.
+    assert result.goal_stalled is False
 
 
 @pytest.mark.asyncio
@@ -189,20 +332,24 @@ async def test_runner_uses_custom_goal_continue_message():
     from jenny.agent.runner import AgentRunner, AgentRunSpec
 
     provider = MagicMock(spec=LLMProvider)
-    provider.chat_with_retry = AsyncMock(return_value=LLMResponse(
-        content="still working", tool_calls=[], usage={},
-    ))
-    tools = MagicMock()
-    tools.get_definitions.return_value = []
+    calls = {"n": 0}
+
+    async def chat_with_retry(**_kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _tool_response()
+        return LLMResponse(content="still working", tool_calls=[], usage={})
+
+    provider.chat_with_retry = chat_with_retry
 
     custom_msg = "CUSTOM_CONTINUE_PLEASE"
 
     runner = AgentRunner(provider)
     result = await runner.run(AgentRunSpec(
         initial_messages=[{"role": "user", "content": "do task"}],
-        tools=tools,
+        tools=_tools(),
         model="test-model",
-        max_iterations=2,
+        max_iterations=3,
         max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
         goal_active_predicate=lambda: True,
         goal_continue_message=custom_msg,
@@ -218,11 +365,15 @@ async def test_runner_resolves_goal_continue_message_lazily():
     from jenny.agent.runner import AgentRunner, AgentRunSpec
 
     provider = MagicMock(spec=LLMProvider)
-    provider.chat_with_retry = AsyncMock(return_value=LLMResponse(
-        content="still working", tool_calls=[], usage={},
-    ))
-    tools = MagicMock()
-    tools.get_definitions.return_value = []
+    llm_calls = {"n": 0}
+
+    async def chat_with_retry(**_kwargs):
+        llm_calls["n"] += 1
+        if llm_calls["n"] == 1:
+            return _tool_response()
+        return LLMResponse(content="still working", tool_calls=[], usage={})
+
+    provider.chat_with_retry = chat_with_retry
     calls = {"n": 0}
 
     def dynamic_msg() -> str:
@@ -232,9 +383,9 @@ async def test_runner_resolves_goal_continue_message_lazily():
     runner = AgentRunner(provider)
     result = await runner.run(AgentRunSpec(
         initial_messages=[{"role": "user", "content": "do task"}],
-        tools=tools,
+        tools=_tools(),
         model="test-model",
-        max_iterations=1,
+        max_iterations=2,
         max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
         goal_active_predicate=lambda: True,
         goal_continue_message=dynamic_msg,

@@ -13,6 +13,7 @@ from typing import Any, Mapping, MutableMapping
 from loguru import logger
 
 from jenny.session.goal_state import (
+    goal_awaiting_input,
     goal_state_runtime_lines,
     sustained_goal_active,
     sustained_goal_turn,
@@ -202,6 +203,11 @@ def _goal_continuation_available(
     if not sustained_goal_turn(session_metadata, message_metadata=message_metadata):
         return False
     if not sustained_goal_active(session_metadata):
+        return False
+    # Un goal parcheggiato in attesa dell'utente non va portato avanti da un
+    # turno di continuazione: non c'è nulla da continuare finché non risponde, e
+    # accodarne fino a 12 è l'amplificazione che rende costoso uno stallo.
+    if goal_awaiting_input(session_metadata):
         return False
     try:
         rounds = int((session_metadata or {}).get(_GOAL_CONTINUATION_ROUNDS_KEY) or 0)

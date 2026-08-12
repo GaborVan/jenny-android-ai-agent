@@ -65,6 +65,7 @@ from jenny.utils.runtime import (
     build_length_recovery_message,
     ensure_nonempty_tool_result,
     is_blank_text,
+    looks_like_user_question,
 )
 
 GoalContinueMessage = str | Callable[[], str | None]
@@ -93,6 +94,14 @@ _TRUNCATION_LOW_EFFORTS = frozenset({"none", "minimal", "minimum", "low"})
 _OUTPUT_BUDGET_HEADROOM = 2048
 _MAX_INJECTIONS_PER_TURN = 3
 _MAX_INJECTION_CYCLES = 5
+# Backstop per run sulle goal-continuation sintetiche. Alto di proposito: un goal
+# che avanza davvero (ogni nudge preceduto da lavoro con i tool, v.
+# ``_goal_continue_allowed``) non deve sbatterci mai contro; serve solo a rendere
+# impossibile un loop illimitato dentro i 200 giri di ``max_tool_iterations``.
+_MAX_GOAL_CONTINUE_CYCLES = 30
+# Oltre questa soglia il log passa a WARNING: un turno con dieci nudge è
+# anomalo e deve essere visibile in logcat senza doverlo cercare.
+_GOAL_CONTINUE_WARN_AT = 10
 # read_file is the recovery path for persisted results; exempting it prevents persist->read->persist loops.
 _TOOL_RESULT_OFFLOAD_EXEMPT_TOOLS = frozenset({"read_file"})
 
@@ -162,6 +171,10 @@ class AgentRunResult:
     tool_events: list[dict[str, str]] = field(default_factory=list)
     had_injections: bool = False
     images_stripped: bool = False
+    # True quando un goal sostenuto era attivo ma il run ha rifiutato di
+    # spronarlo: sta aspettando l'utente. Il product layer lo usa per
+    # parcheggiare il goal invece di lasciare che il modello lo chiuda.
+    goal_stalled: bool = False
 
 
 @dataclass
@@ -200,6 +213,13 @@ class _RunCounters:
     had_injections: bool = False
     injection_cycles: int = 0
     images_stripped: bool = False
+    # Budget e memoria del progresso per le goal-continuation sintetiche.
+    # ``tools_at_last_goal_continue`` è il valore di ``len(tools_used)`` all'ultimo
+    # nudge: se non è cresciuto, fra un nudge e l'altro non è stato eseguito nessun
+    # tool e ripetere «continua» non può che riprodurre lo stesso testo.
+    goal_continue_cycles: int = 0
+    tools_at_last_goal_continue: int = 0
+    goal_stalled: bool = False
 
 
 class AgentRunner(RequestExecutionMixin, ToolExecutionMixin):
@@ -240,6 +260,7 @@ class AgentRunner(RequestExecutionMixin, ToolExecutionMixin):
         phase: str = "after error",
         iteration: int | None = None,
         allow_goal_continue: bool = False,
+        state: _RunCounters | None = None,
     ) -> tuple[bool, int]:
         """Drain pending injections. Returns (should_continue, updated_cycles).
 
@@ -247,6 +268,10 @@ class AgentRunner(RequestExecutionMixin, ToolExecutionMixin):
         append them to *messages* (and emit a checkpoint if *assistant_message*
         and *iteration* are both provided) and return (True, cycles+1) so the
         caller continues the iteration loop.  Otherwise return (False, cycles).
+
+        ``state`` va passato solo dal call-site che abilita ``allow_goal_continue``:
+        la continuation sintetica ha un budget suo (v. ``_goal_continue_allowed``),
+        separato da ``injection_cycles``, che conta i messaggi reali dell'utente.
         """
         injections: list[dict[str, Any]] = []
         real_injection = False
@@ -254,9 +279,14 @@ class AgentRunner(RequestExecutionMixin, ToolExecutionMixin):
             injections = await self._drain_injections(spec)
             real_injection = bool(injections)
         if not injections and allow_goal_continue and assistant_message is not None:
-            predicate = spec.goal_active_predicate
-            if predicate is not None and predicate():
+            if self._goal_continue_allowed(spec, state, assistant_message):
                 injections = [self._build_goal_continue_message(spec)]
+                if state is not None:
+                    state.goal_continue_cycles += 1
+                    state.tools_at_last_goal_continue = len(state.tools_used)
+                    # Il goal sta avanzando di nuovo: un rifiuto precedente in
+                    # questo stesso run non deve più farlo parcheggiare.
+                    state.goal_stalled = False
         if not injections:
             return False, injection_cycles
         if real_injection:
@@ -282,8 +312,66 @@ class AgentRunner(RequestExecutionMixin, ToolExecutionMixin):
                 len(injections), phase, injection_cycles, _MAX_INJECTION_CYCLES,
             )
         else:
-            logger.info("Injected sustained-goal continuation {}", phase)
+            cycles = state.goal_continue_cycles if state is not None else 0
+            # Il contatore nella riga è ciò che rende un runaway leggibile in
+            # logcat: nove righe identiche non dicevano che erano nove.
+            log = logger.warning if cycles >= _GOAL_CONTINUE_WARN_AT else logger.info
+            log(
+                "Injected sustained-goal continuation {} ({}/{})",
+                phase, cycles, _MAX_GOAL_CONTINUE_CYCLES,
+            )
         return True, injection_cycles
+
+    def _goal_continue_allowed(
+        self,
+        spec: AgentRunSpec,
+        state: _RunCounters | None,
+        assistant_message: dict[str, Any],
+    ) -> bool:
+        """Whether to synthesize a "keep working on your goal" nudge right now.
+
+        Il nudge esiste per un caso preciso: il modello ha fatto un pezzo di lavoro
+        e si è fermato a commentarlo mentre il goal è ancora aperto. Fuori da quel
+        caso è dannoso — il 2026-08-12 un flusso guidato (``app-creator``, che fa
+        UNA domanda per turno) ne ha ricevuti 9 in 45 secondi, uno per ogni domanda
+        rivolta all'utente, finché il modello non si è liberato chiudendo il goal
+        con un recap falso. Tre condizioni, tutte necessarie:
+
+        1. **progresso**: almeno un tool andato a buon fine dall'ultimo nudge
+           (``tools_used`` conta solo gli ``ok``). Spronare chi ha appena prodotto
+           solo testo riproduce lo stesso testo, per definizione; spronare chi ha
+           solo tool falliti rimanda a sbattere sullo stesso muro.
+        2. **non una domanda all'utente** (euristica, v. ``looks_like_user_question``):
+           chi aspetta una risposta non può avanzare da solo.
+        3. **budget**: ``_MAX_GOAL_CONTINUE_CYCLES`` per run.
+
+        Quando nega con un goal attivo alza ``state.goal_stalled``: il turno finisce
+        normalmente e il product layer parcheggia il goal (resta ``active``) invece
+        di lasciare che il modello lo chiuda per uscire.
+        """
+        predicate = spec.goal_active_predicate
+        if predicate is None or not predicate():
+            return False
+        if state is None:
+            # Nessuno stato = nessun budget da spendere: comportamento storico.
+            return True
+
+        reason: str | None = None
+        if len(state.tools_used) <= state.tools_at_last_goal_continue:
+            reason = "no tool progress since the last continuation"
+        elif looks_like_user_question(str(assistant_message.get("content") or "")):
+            reason = "final response asks the user something"
+        elif state.goal_continue_cycles >= _MAX_GOAL_CONTINUE_CYCLES:
+            reason = f"cap reached ({_MAX_GOAL_CONTINUE_CYCLES})"
+        if reason is None:
+            return True
+
+        state.goal_stalled = True
+        logger.info(
+            "Sustained-goal continuation withheld for {}: {} (nudges this run: {})",
+            spec.session_key or "default", reason, state.goal_continue_cycles,
+        )
+        return False
 
     def _build_goal_continue_message(self, spec: AgentRunSpec) -> dict[str, str]:
         custom = spec.goal_continue_message
@@ -510,6 +598,7 @@ class AgentRunner(RequestExecutionMixin, ToolExecutionMixin):
                 phase="after final response",
                 iteration=iteration,
                 allow_goal_continue=True,
+                state=state,
             )
             if should_continue:
                 state.had_injections = True
@@ -578,6 +667,10 @@ class AgentRunner(RequestExecutionMixin, ToolExecutionMixin):
             tool_events=state.tool_events,
             had_injections=state.had_injections,
             images_stripped=state.images_stripped,
+            # Solo uno stallo vero: se il turno è finito col budget di iterazioni
+            # esaurito, la continuazione interna (``session.turn_continuation``) ha
+            # ancora la parola e il goal non sta aspettando nessuno.
+            goal_stalled=state.goal_stalled and state.stop_reason != "max_iterations",
         )
 
     # --- Branch handlers estratti da ``_run_core`` (behavior-identical) ---

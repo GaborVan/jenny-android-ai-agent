@@ -63,6 +63,11 @@ hand-rolled overlay `<div>`. See "Internal navigation and the Android back butto
 **Follow the Guided Conversation Flow below.** Ask ONE question at a time. Only write files
 AFTER the user has confirmed name and actions in Phase 3.
 Never write real secrets into app.json or index.html — use `secretRef` (see Secrets below).
+
+**This conversation is not a sustained goal: do not call `long_task` for it.** Each phase
+ends by asking the user something and waiting, which is the one thing a goal cannot do for
+you — registering one only makes the runtime prod you to keep going while you have nothing to
+go on. Ask the question of the current phase and end the turn.
 </rule>
 
 ## Guided Conversation Flow

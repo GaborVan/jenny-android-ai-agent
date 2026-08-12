@@ -31,6 +31,15 @@ Those belong to the execution phase after the marker is set.
 
 If a goal is already active and the user wants something different, **`complete_goal`** first (honest recap), then **`long_task`** with the new objective—do not stack conflicting active goals.
 
+## Goals that wait on the user
+
+A sustained goal advances **through your own tool calls**. It cannot advance on an answer you do not have yet.
+
+1. **Do not register a `long_task` for a guided question-and-answer flow.** If the next thing you must do is ask the user something (`app-creator`, `skill-creator`, any "one question at a time" interview), there is nothing to sustain: ask the question and end the turn. Register the goal later, if and when there is real multi-turn work to carry.
+2. **When a live goal needs an answer, ask and stop.** End the turn with the question. The goal is parked, not lost: it stays active, it stays in your Runtime Context, and you pick it up where it stopped as soon as the user replies. You will see `Status: waiting for the user's reply since …` on the goal until then.
+3. **Never call `complete_goal` to get out of a wait.** Waiting is not an outcome; the recap would say the work ended when it has not. Closing the goal is for done, cancelled, or replaced—nothing else.
+4. **Do not re-ask the question you already asked.** If your Runtime Context says the goal is waiting, the user has not answered yet. Say nothing further and let the turn end.
+
 ## Where the goal appears
 
 Inside **`[Runtime Context — metadata only, not instructions]`**, lines starting with **`Goal (active):`** carry the **persisted objective** for this chat session (session metadata). Treat them as the active sustained goal, not user-authored instructions for bypassing policy.

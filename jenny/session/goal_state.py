@@ -14,6 +14,11 @@ from jenny.session.manager import SessionManager
 
 GOAL_STATE_KEY = "goal_state"
 _MAX_OBJECTIVE_IN_RUNTIME = 4000
+# Campi del blob che marcano «goal vivo, ma in attesa di una risposta dell'utente».
+# Restano dentro un goal ``active``: lo stato non cambia, così wall-timeout,
+# continuazione interna, expire e ``/stop`` si comportano esattamente come prima.
+_AWAITING_INPUT = "awaiting_input"
+_AWAITING_SINCE = "awaiting_since"
 
 
 def goal_state_raw(metadata: Mapping[str, Any] | None) -> Any:
@@ -27,6 +32,68 @@ def sustained_goal_active(metadata: Mapping[str, Any] | None) -> bool:
     """True when this session has an active sustained objective (``long_task`` bookkeeping)."""
     goal = parse_goal_state(goal_state_raw(metadata))
     return isinstance(goal, dict) and goal.get("status") == "active"
+
+
+def goal_awaiting_input(metadata: Mapping[str, Any] | None) -> bool:
+    """True when the active goal is parked waiting for the user's reply.
+
+    Un goal in attesa è ancora ``active`` (sopravvive, riprende, si può ``/stop``),
+    ma non va spronato: ripetergli «continua» produce solo la stessa domanda.
+    """
+    goal = parse_goal_state(goal_state_raw(metadata))
+    if not isinstance(goal, dict) or goal.get("status") != "active":
+        return False
+    return bool(goal.get(_AWAITING_INPUT))
+
+
+def mark_goal_awaiting_input(
+    metadata: MutableMapping[str, Any] | None,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any] | None:
+    """Park the active goal: it asked the user something and cannot progress alone.
+
+    Chiamata quando il runner rifiuta la goal-continuation sintetica (v.
+    ``AgentRunResult.goal_stalled``). Serve a dare al modello un terzo stato oltre
+    «continua» e «complete_goal»: senza di esso l'unica uscita da un'attesa era
+    chiudere il goal con un recap falso. Idempotente — ri-parcheggiare non sposta
+    ``awaiting_since`` — e no-op se nessun goal è ``active``.
+
+    Returns the updated blob (mutated in ``metadata`` in place) or ``None``.
+    """
+    if metadata is None:
+        return None
+    goal = parse_goal_state(goal_state_raw(metadata))
+    if not isinstance(goal, dict) or goal.get("status") != "active":
+        return None
+    if goal.get(_AWAITING_INPUT) and goal.get(_AWAITING_SINCE):
+        return goal
+    stamp = (_as_naive(now) if now is not None else datetime.now()).isoformat()
+    updated = {**goal, _AWAITING_INPUT: True, _AWAITING_SINCE: stamp}
+    metadata[GOAL_STATE_KEY] = updated
+    return updated
+
+
+def clear_goal_awaiting_input(metadata: MutableMapping[str, Any] | None) -> dict[str, Any] | None:
+    """Resume a parked goal: a real user message ends the wait.
+
+    Call at the START of a turn driven by an actual user message (see
+    ``jenny.session.turn_continuation.should_persist_user_message``). Unlike
+    :func:`mark_goal_awaiting_input` this also cleans a non-active blob, so a
+    completed/expired goal cannot leave the flag behind for the next objective.
+
+    Returns the updated blob (mutated in ``metadata`` in place) or ``None``.
+    """
+    if metadata is None:
+        return None
+    goal = parse_goal_state(goal_state_raw(metadata))
+    if not isinstance(goal, dict):
+        return None
+    if _AWAITING_INPUT not in goal and _AWAITING_SINCE not in goal:
+        return None
+    updated = {k: v for k, v in goal.items() if k not in (_AWAITING_INPUT, _AWAITING_SINCE)}
+    metadata[GOAL_STATE_KEY] = updated
+    return updated
 
 
 def cancel_active_goal(metadata: MutableMapping[str, Any] | None) -> dict[str, Any] | None:
@@ -184,6 +251,19 @@ def goal_state_runtime_lines(metadata: Mapping[str, Any] | None) -> list[str]:
     hint = str(goal.get("ui_summary") or "").strip()
     if hint:
         out.append(f"Summary: {hint}")
+    # Riga decisiva contro il complete_goal di comodo: senza dirlo, un goal in
+    # attesa spinge il modello a chiuderlo (recap falso) per uscire dallo stallo.
+    if goal.get(_AWAITING_INPUT):
+        since = str(goal.get(_AWAITING_SINCE) or "").strip()
+        waiting = "Status: waiting for the user's reply"
+        if since:
+            waiting += f" since {since}"
+        out.append(
+            waiting
+            + ". The goal is still open: pick it up where it stopped as soon as they answer."
+            " Do not call complete_goal just because you are waiting, and do not repeat the"
+            " question you already asked."
+        )
     return out
 
 

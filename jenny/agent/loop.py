@@ -69,8 +69,11 @@ from jenny.security.workspace_access import (
 )
 from jenny.session import turn_continuation
 from jenny.session.goal_state import (
+    clear_goal_awaiting_input,
     expire_stale_goal,
+    goal_awaiting_input,
     goal_state_runtime_lines,
+    mark_goal_awaiting_input,
     runner_wall_llm_timeout_s,
     sustained_goal_active,
 )
@@ -78,6 +81,7 @@ from jenny.session.keys import UNIFIED_SESSION_KEY, session_key_for_channel
 from jenny.session.manager import Session, SessionManager
 from jenny.session.turn_visibility import (
     TurnVisibility,
+    is_silent_turn,
     mark_silent_turn,
     resolve_turn_visibility,
 )
@@ -816,6 +820,15 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             from jenny.config.runtime_env import goal_inactivity_ttl_h
 
             expire_stale_goal(session.metadata, ttl_h=goal_inactivity_ttl_h())
+            # Un messaggio vero dell'utente *è* la fine dell'attesa: il goal
+            # parcheggiato torna spronabile da questo turno in poi. Le
+            # continuazioni interne e i turni che non persistono input utente
+            # (heartbeat, lavoro di sistema) non contano come risposta.
+            if (
+                turn_continuation.should_persist_user_message(metadata)
+                and not is_silent_turn(metadata)
+            ):
+                clear_goal_awaiting_input(session.metadata)
         session_metadata = session.metadata if session is not None else None
 
         async def _on_context_overflow(new_window: int) -> None:
@@ -872,7 +885,14 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
                     message_metadata=metadata,
                 ),
                 tool_choice=self.tool_choice if self.tool_choice != "auto" else None,
-                goal_active_predicate=lambda: sustained_goal_active(session.metadata) if session is not None else False,
+                # Un goal parcheggiato in attesa dell'utente resta ``active`` ma
+                # non va spronato: finché aspetta, nessun turno (nemmeno interno)
+                # spende una chiamata per ripetergli «continua».
+                goal_active_predicate=lambda: (
+                    session is not None
+                    and sustained_goal_active(session.metadata)
+                    and not goal_awaiting_input(session.metadata)
+                ),
                 goal_continue_message=_goal_continue,
                 finalize_on_max_iterations=turn_continuation.should_finalize_on_max_iterations(
                     pending_queue_available=pending_queue is not None and session is not None,
@@ -886,6 +906,17 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             reset_request_context(request_token)
             reset_file_states(file_state_token)
         self._last_usage = result.usage
+        if result.goal_stalled and session is not None:
+            # Il runner ha rifiutato di spronare il goal: sta aspettando una
+            # risposta. Marcarlo tiene il goal vivo e onesto — l'alternativa che
+            # il modello trovava da solo era chiuderlo con un recap falso. La
+            # scrittura su disco arriva dal salvataggio di fine turno
+            # (``_finalize_turn_save``), come per ``note_goal_turn``.
+            if mark_goal_awaiting_input(session.metadata) is not None:
+                logger.info(
+                    "Sustained goal parked waiting for the user ({})",
+                    session.key,
+                )
         if result.images_stripped and result.final_content:
             # Il fallback in providers/base.py ha tolto le immagini in silenzio
             # dopo un rifiuto non transitorio del provider (modello senza

@@ -163,3 +163,36 @@ def test_save_skip_unchanged_for_standalone_current_message():
         history_count=1,
         user_persisted_early=False,
     ) == 2
+
+
+def test_no_internal_continuation_while_goal_awaits_the_user():
+    """Un goal in attesa non accoda turni di continuazione (fino a 12) a vuoto."""
+    from jenny.session.turn_continuation import _continuation_available
+
+    metadata = {
+        GOAL_STATE_KEY: {
+            "status": "active",
+            "objective": "Create the app.",
+            "awaiting_input": True,
+            "awaiting_since": "2026-08-12T20:41:00",
+        }
+    }
+
+    assert _continuation_available(
+        stop_reason="max_iterations",
+        pending_queue_available=True,
+        session_metadata=metadata,
+    ) is False
+    # Senza continuazione interna il turno deve spendere la sua risposta finale.
+    assert should_finalize_on_max_iterations(
+        pending_queue_available=True,
+        session_metadata=metadata,
+    ) is True
+
+    # Tolta l'attesa, la continuazione torna disponibile.
+    del metadata[GOAL_STATE_KEY]["awaiting_input"]
+    assert _continuation_available(
+        stop_reason="max_iterations",
+        pending_queue_available=True,
+        session_metadata=metadata,
+    ) is True

@@ -7,8 +7,11 @@ from datetime import datetime, timedelta
 from jenny.session.goal_state import (
     GOAL_STATE_KEY,
     cancel_active_goal,
+    clear_goal_awaiting_input,
     expire_stale_goal,
+    goal_awaiting_input,
     goal_state_runtime_lines,
+    mark_goal_awaiting_input,
     note_goal_turn,
     parse_goal_state,
     runner_wall_llm_timeout_s,
@@ -188,3 +191,105 @@ def test_note_goal_turn_noop_when_not_active():
     meta = {GOAL_STATE_KEY: {"status": "completed", "objective": "x"}}
     assert note_goal_turn(meta) is None
     assert "last_turn_at" not in meta[GOAL_STATE_KEY]
+
+
+def test_mark_goal_awaiting_input_parks_active_goal():
+    now = datetime(2026, 8, 12, 20, 41, 0)
+    meta = {GOAL_STATE_KEY: {"status": "active", "objective": "Create the app."}}
+
+    updated = mark_goal_awaiting_input(meta, now=now)
+
+    assert updated is not None
+    assert updated["awaiting_input"] is True
+    assert updated["awaiting_since"] == now.isoformat()
+    # Il goal resta attivo: wall-timeout, expire, /stop e la continuazione
+    # interna continuano a vederlo esattamente come prima.
+    assert sustained_goal_active(meta) is True
+    assert goal_awaiting_input(meta) is True
+
+
+def test_mark_goal_awaiting_input_is_idempotent():
+    first = datetime(2026, 8, 12, 20, 41, 0)
+    later = first + timedelta(minutes=30)
+    meta = {GOAL_STATE_KEY: {"status": "active", "objective": "x"}}
+
+    mark_goal_awaiting_input(meta, now=first)
+    mark_goal_awaiting_input(meta, now=later)
+
+    # Ri-parcheggiare non riazzera l'orologio dell'attesa.
+    assert meta[GOAL_STATE_KEY]["awaiting_since"] == first.isoformat()
+
+
+def test_mark_goal_awaiting_input_noop_without_active_goal():
+    assert mark_goal_awaiting_input(None) is None
+    meta = {GOAL_STATE_KEY: {"status": "completed", "objective": "x"}}
+    assert mark_goal_awaiting_input(meta) is None
+    assert "awaiting_input" not in meta[GOAL_STATE_KEY]
+
+
+def test_clear_goal_awaiting_input_resumes_goal():
+    meta = {GOAL_STATE_KEY: {"status": "active", "objective": "x"}}
+    mark_goal_awaiting_input(meta)
+
+    updated = clear_goal_awaiting_input(meta)
+
+    assert updated is not None
+    assert "awaiting_input" not in updated
+    assert "awaiting_since" not in updated
+    assert goal_awaiting_input(meta) is False
+    assert sustained_goal_active(meta) is True
+    # Niente da pulire la seconda volta.
+    assert clear_goal_awaiting_input(meta) is None
+
+
+def test_clear_goal_awaiting_input_cleans_non_active_blob():
+    """Un goal chiuso non deve lasciare il flag in eredità al prossimo obiettivo."""
+    meta = {
+        GOAL_STATE_KEY: {
+            "status": "completed",
+            "objective": "x",
+            "awaiting_input": True,
+            "awaiting_since": "2026-08-12T20:41:00",
+        }
+    }
+
+    updated = clear_goal_awaiting_input(meta)
+
+    assert updated is not None
+    assert "awaiting_input" not in meta[GOAL_STATE_KEY]
+
+
+def test_goal_awaiting_input_false_when_goal_not_active():
+    meta = {
+        GOAL_STATE_KEY: {
+            "status": "expired",
+            "objective": "x",
+            "awaiting_input": True,
+        }
+    }
+    assert goal_awaiting_input(meta) is False
+
+
+def test_runtime_lines_announce_the_wait_and_forbid_closing_the_goal():
+    meta = {
+        GOAL_STATE_KEY: {
+            "status": "active",
+            "objective": "Create the shopping-list app.",
+            "awaiting_since": "2026-08-12T20:41:00",
+            "awaiting_input": True,
+        }
+    }
+
+    lines = goal_state_runtime_lines(meta)
+
+    assert lines[0] == "Goal (active):"
+    waiting = lines[-1]
+    assert "waiting for the user's reply since 2026-08-12T20:41:00" in waiting
+    # È la riga che impedisce il complete_goal di comodo per uscire dallo stallo.
+    assert "Do not call complete_goal" in waiting
+    assert "do not repeat the question" in waiting
+
+
+def test_runtime_lines_have_no_wait_line_when_not_waiting():
+    meta = {GOAL_STATE_KEY: {"status": "active", "objective": "Keep going."}}
+    assert goal_state_runtime_lines(meta) == ["Goal (active):", "Keep going."]
