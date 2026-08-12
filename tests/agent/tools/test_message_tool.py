@@ -61,7 +61,7 @@ async def test_message_tool_suppresses_delivery_when_active() -> None:
 
 
 @pytest.mark.asyncio
-async def test_message_tool_marks_channel_delivery_only_for_media() -> None:
+async def test_message_tool_marks_channel_delivery_for_proactive_sends() -> None:
     sent: list[OutboundMessage] = []
 
     async def _send(msg: OutboundMessage) -> None:
@@ -74,10 +74,30 @@ async def test_message_tool_marks_channel_delivery_only_for_media() -> None:
         content="with file", channel="websocket", chat_id="1", media=["/tmp/generated.png"]
     )
 
-    # Nessun contesto di turno ⇒ invii cross-target ⇒ marcati proattivi.
-    # ``_record_channel_delivery`` compare solo per la consegna con media.
-    assert sent[0].metadata == {"_proactive_fanout": True}
-    assert sent[1].metadata == {"_record_channel_delivery": True, "_proactive_fanout": True}
+    # Nessun contesto di turno ⇒ invii cross-target ⇒ proattivi, e un invio
+    # proattivo va registrato in cronologia con o senza allegati: è ciò che il
+    # modello ha detto all'utente da fuori la conversazione.
+    expected = {"_record_channel_delivery": True, "_proactive_fanout": True}
+    assert sent[0].metadata == expected
+    assert sent[1].metadata == expected
+
+
+@pytest.mark.asyncio
+async def test_message_tool_does_not_record_a_plain_same_target_reply() -> None:
+    """Una risposta nella chat corrente la persiste già il turno: registrarla qui
+    la duplicherebbe. Il record scatta solo su allegato (per conservare i media)."""
+    sent: list[OutboundMessage] = []
+
+    async def _send(msg: OutboundMessage) -> None:
+        sent.append(msg)
+
+    tool = _visible_tool(sent)
+
+    await tool.execute(content="risposta")
+    await tool.execute(content="ecco il file", media=["/tmp/generated.png"])
+
+    assert "_record_channel_delivery" not in sent[0].metadata
+    assert sent[1].metadata["_record_channel_delivery"] is True
 
 
 @pytest.mark.asyncio
@@ -161,8 +181,12 @@ async def test_message_tool_does_not_inherit_metadata_for_cross_target() -> None
 
     await tool.execute(content="channel reply", channel="other-channel", chat_id="C999")
 
-    # Cross-target: nessun metadata ereditato dal turno, ma marcato proattivo.
-    assert sent[0].metadata == {"_proactive_fanout": True}
+    # Cross-target: nessun metadata ereditato dal turno, ma marcato proattivo
+    # (fan-out) e da registrare in cronologia.
+    assert sent[0].metadata == {
+        "_record_channel_delivery": True,
+        "_proactive_fanout": True,
+    }
 
 
 @pytest.mark.asyncio
@@ -487,6 +511,20 @@ async def test_a_silent_turn_delivers_its_first_alert() -> None:
 
     assert "Message sent" in result
     assert [m.content for m in sent] == ["umidità al 9%, sotto soglia"]
+
+
+@pytest.mark.asyncio
+async def test_a_silent_alert_is_marked_for_the_history() -> None:
+    """L'avviso di un ciclo silenzioso gira su una sessione interna ma lo legge
+    l'utente: senza questo marker il turno dopo non ne trova traccia (misurato
+    il 2026-08-12: avviso WaterBot alle 18:33, "sicura?" alle 18:39 senza
+    contesto)."""
+    sent: list[OutboundMessage] = []
+    tool = _silent_tool(sent)
+
+    await tool.execute(content="hps non è raggiungibile")
+
+    assert sent[0].metadata["_record_channel_delivery"] is True
 
 
 @pytest.mark.asyncio

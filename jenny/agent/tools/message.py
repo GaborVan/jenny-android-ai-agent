@@ -269,7 +269,20 @@ class MessageTool(Tool, ContextAware):
         metadata = dict(self._default_metadata.get()) if same_target else {}
         if message_id:
             metadata["message_id"] = message_id
-        if media:
+        # Un invio proattivo è l'unica cosa che il modello dice all'utente da
+        # FUORI la conversazione: gira su una sessione interna (heartbeat, cron,
+        # Dream), quindi il suo testo finisce nella history di *quella* sessione
+        # e non in quella unificata. Senza questa registrazione l'utente vede
+        # l'avviso (transcript WebUI + notifica Android) e al turno dopo il
+        # modello non ne ha traccia. Misurato sul dispositivo il 2026-08-12:
+        # avviso "hps non è raggiungibile" alle 18:33 dall'heartbeat, "sicura?"
+        # alle 18:39 su ``unified:default`` — risposto come se non fosse mai
+        # stato detto, perché nel contesto di quel turno non c'era.
+        # La registrazione segue l'intento proattivo, che è la ragione vera:
+        # prima dipendeva dalla presenza di un allegato (che la attivava per il
+        # motivo diverso di conservare la copia dei media in cronologia).
+        proactive = not same_target or is_silent_turn(self._default_metadata.get())
+        if proactive or media:
             metadata["_record_channel_delivery"] = True
         # Fan-out cross-canale SOLO per un invio davvero proattivo/cross-channel.
         # Un allegato o messaggio nella conversazione corrente (``same_target``)
@@ -284,7 +297,7 @@ class MessageTool(Tool, ContextAware):
         # cron dispatcher per l'heartbeat. La condizione si legge dai metadata del
         # turno gia propagati in ``set_context``: nessuno stato nuovo sul tool e
         # nessun call site in piu da tenere allineato.
-        if not same_target or is_silent_turn(self._default_metadata.get()):
+        if proactive:
             metadata["_proactive_fanout"] = True
 
         msg = OutboundMessage(

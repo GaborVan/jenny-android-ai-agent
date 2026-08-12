@@ -27,6 +27,33 @@ Tool descriptions, skills, and replayed session history also shape model behavio
 
 Anything written into memory, session history, or prompt inputs can be replayed into future LLM calls. Metadata such as timestamps, local media paths, tool-call echoes, and raw fallback dumps must be bounded and sanitized before they become examples for the model to imitate.
 
+## Transcript ≠ session history
+
+Two different stores hold what looks like "the conversation", and only one of them reaches
+the model:
+
+- the **WebUI transcript** (`jenny/webui/transcript_store.py`, written by
+  `channels/ws_sender.py`) is what the user sees and what a reload replays;
+- the **session history** (`jenny/session/manager.py`) is what `turn_states._state_build`
+  replays into the prompt. The transcript is never read back into context.
+
+So any new path that sends the user a message must *also* write it into the session, or the
+model will not know it ever spoke. Measured on device 2026-08-12: a heartbeat alert ("hps
+non è raggiungibile") reached the user as an Android notification and a transcript row, then
+the user's "sicura?" was answered as if nothing had been said — the alert lived in the
+`heartbeat` session, and the reply was built from `unified:default`.
+
+The supported way in is the `message` tool: a proactive send (cross-channel, or any silent
+turn — cron/heartbeat/Dream) is marked `_record_channel_delivery`, and
+`runtime/delivery.py::ChannelDeliverer` hands it to `AgentLoop.record_channel_delivery`,
+which appends it as an `assistant` message with the `_channel_delivery` marker (the marker
+the replay window helpers in `utils/helpers.py` look for so the alert stays attached to the
+user's answer). Write it **through that hook**, not with a bare
+`session.add_message` from another task: a turn holds the per-session lock for its whole
+duration and `_save_turn` appends its block at the end, so an unlocked append can land
+between an `assistant`/`tool_calls` message and its `tool` result — an illegal request for
+the provider.
+
 ## Skills as Extension Point
 
 Built-in skills live in `jenny/skills/` (markdown + YAML frontmatter format). Agent capabilities that are "know-how" rather than code should be added as skills, not hardcoded into the agent loop. External skills can be published to and installed from ClawHub.

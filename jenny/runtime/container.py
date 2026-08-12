@@ -124,6 +124,17 @@ class GatewayContainer:
             return [("telegram", chat_id)]
         return []
 
+    def _delivery_record_hook(self) -> Any:
+        """Hook di registrazione in sessione per il ``ChannelDeliverer``.
+
+        Late-binding sull'agente vivo (l'onboarding lo crea dopo il gateway e
+        ``set_agent`` lo rimpiazza): è lui a possedere il lock di sessione che
+        serializza la scrittura con un turno in corso. Prima dell'agente non c'è
+        nulla da serializzare e il deliverer scrive per conto proprio.
+        """
+        agent = self._agent
+        return getattr(agent, "record_channel_delivery", None) if agent is not None else None
+
     async def _snapshot_before_dream(self) -> None:
         """Checkpoint del workspace prima che Dream riscriva la memoria."""
         if self.snapshot:
@@ -194,12 +205,14 @@ class GatewayContainer:
 
         # Il ChannelDeliverer va costruito prima dell'agente: fornisce la
         # callback ``_deliver_to_channel`` che ``_instantiate_agent`` collega al
-        # tool ``message``. Non dipende dall'agente (``_telegram_targets`` è una
-        # lambda valutata a posteriori), quindi l'ordine è sicuro.
+        # tool ``message``. Non dipende dall'agente (``_telegram_targets`` e
+        # ``_delivery_record_hook`` sono valutati a posteriori), quindi l'ordine
+        # è sicuro.
         self._deliverer = ChannelDeliverer(
             bus=self.bus,
             session_manager=self.session_manager,
             extra_targets=self._telegram_targets,
+            record_hook=self._delivery_record_hook,
         )
         self._deliver_to_channel = self._deliverer.deliver
 

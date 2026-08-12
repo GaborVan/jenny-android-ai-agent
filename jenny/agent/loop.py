@@ -1573,6 +1573,77 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
         )
 
 
+    def _append_channel_delivery(
+        self, session_key: str, content: str, media: list[str] | None
+    ) -> None:
+        """Append the proactive delivery to *session_key* (caller holds the lock)."""
+        session = self.sessions.get_or_create(session_key)
+        extra: dict[str, Any] = {"_channel_delivery": True}
+        if media:
+            extra["media"] = list(media)
+        session.add_message("assistant", content, **extra)
+        self.sessions.save(session)
+
+    async def _record_channel_delivery_locked(
+        self, session_key: str, content: str, media: list[str] | None
+    ) -> None:
+        async with self._session_locks.get(session_key):
+            self._append_channel_delivery(session_key, content, media)
+
+    async def record_channel_delivery(
+        self,
+        *,
+        session_key: str,
+        content: str,
+        media: list[str] | None = None,
+    ) -> None:
+        """Register a proactive delivery as an ``assistant`` message in the session.
+
+        Chiamato dal ``ChannelDeliverer`` quando il tool ``message`` consegna un
+        avviso proattivo: gira su una sessione interna (heartbeat, cron, Dream)
+        ma l'utente lo legge nella conversazione unificata, quindi la riga deve
+        finire *lì* o il turno successivo non ne ha traccia.
+
+        La scrittura passa dal lock di sessione condiviso (``_session_locks``),
+        che è l'invariante per mutare ``session.messages``: un turno lo tiene per
+        tutta la sua durata e ``_save_turn`` appende il proprio blocco in coda,
+        quindi un append concorrente da un altro task infilerebbe un messaggio
+        assistant tra lo user persistito early e la coppia
+        ``assistant``/``tool_calls`` + ``tool`` del turno — richiesta illegale al
+        provider — oltre a correre col ``sessions.save``. Anche una
+        consolidation detached muta la stessa lista sotto lo stesso lock.
+
+        Due percorsi, per non bloccare mai il tool che sta consegnando:
+
+        - lock libero (il caso normale: l'avviso arriva a sessione utente ferma)
+          → scrittura inline, così l'avviso è durabile quando il tool ritorna;
+        - lock occupato (turno utente in volo, o consolidation) → task in
+          background che attende il lock. ``asyncio.Lock`` è FIFO, quindi la
+          riga atterra dopo il blocco del turno in corso e prima che il turno
+          successivo acquisisca il lock per costruire il proprio contesto.
+
+        Compromesso accettato: un avviso consegnato *durante* un turno utente si
+        colloca dopo il blocco di quel turno, non nell'istante esatto della
+        consegna. È l'unica posizione legale senza rimaneggiare i messaggi, e
+        l'ordine resta monotono.
+        """
+        if not content.strip():
+            return
+        lock = self._session_locks.get(session_key)
+        if not lock.locked():
+            # ``Lock.acquire()`` su un lock libero non cede il controllo, quindi
+            # qui non c'è finestra in cui un turno possa infilarsi: e anche se
+            # cedesse, l'append avverrebbe comunque sotto lock.
+            await self._record_channel_delivery_locked(session_key, content, media)
+            return
+        logger.debug(
+            "Channel delivery for session {} deferred: session busy",
+            session_key,
+        )
+        self._schedule_background(
+            self._record_channel_delivery_locked(session_key, content, media)
+        )
+
     async def process_direct(
         self,
         content: str,

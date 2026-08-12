@@ -2,13 +2,16 @@
 
 Copre: pubblicazione sul bus, mirroring nella sessione unificata quando
 ``record`` è attivo (via parametro o via metadata ``_record_channel_delivery``),
-i branch che saltano il mirroring (canale interno, contenuto vuoto, session
-manager senza i metodi richiesti) e la propagazione degli errori del canale.
+l'inoltro della registrazione all'hook dell'AgentLoop quando c'è (e il fallback
+alla scrittura diretta quando non c'è), i branch che saltano il mirroring
+(canale interno, contenuto vuoto, session manager senza i metodi richiesti) e la
+propagazione degli errori del canale.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -152,6 +155,60 @@ async def test_deliver_skips_recording_when_session_manager_lacks_hooks(tmp_path
     msg = OutboundMessage(channel="websocket", chat_id="1", content="ciao")
 
     # Non deve sollevare nonostante manchino i metodi di sessione.
+    await deliverer.deliver(msg, record=True)
+
+    assert bus.published == [msg]
+
+
+async def test_deliver_routes_recording_through_the_hook_when_present(tmp_path: Path) -> None:
+    """Con l'agente vivo la scrittura passa da lui: è l'unico che possa
+    serializzarla col lock di sessione di un turno in corso."""
+    calls: list[dict[str, Any]] = []
+
+    async def _hook(**kwargs: Any) -> None:
+        calls.append(kwargs)
+
+    bus = _FakeBus()
+    sessions = SessionManager(tmp_path)
+    deliverer = ChannelDeliverer(
+        bus=bus, session_manager=sessions, record_hook=lambda: _hook
+    )
+    msg = OutboundMessage(channel="websocket", chat_id="1", content="ciao", media=["/a.png"])
+
+    await deliverer.deliver(msg, record=True)
+
+    assert calls == [
+        {"session_key": UNIFIED_SESSION_KEY, "content": "ciao", "media": ["/a.png"]}
+    ]
+    # Nessuna scrittura diretta: l'hook è la sola via.
+    assert sessions.get_or_create(UNIFIED_SESSION_KEY).messages == []
+    assert bus.published == [msg]
+
+
+async def test_deliver_falls_back_to_direct_write_when_hook_is_unset(tmp_path: Path) -> None:
+    """Prima dell'onboarding l'agente non esiste ancora: il getter torna None e
+    la registrazione resta quella diretta."""
+    deliverer, _bus, sessions = _deliverer(tmp_path)
+    deliverer._record_hook = lambda: None
+    msg = OutboundMessage(channel="websocket", chat_id="1", content="ciao")
+
+    await deliverer.deliver(msg, record=True)
+
+    assert len(sessions.get_or_create(UNIFIED_SESSION_KEY).messages) == 1
+
+
+async def test_deliver_survives_a_failing_record_hook(tmp_path: Path) -> None:
+    """Perdere la riga di cronologia è meno grave che perdere l'avviso."""
+
+    async def _hook(**_kwargs: Any) -> None:
+        raise RuntimeError("sessione illeggibile")
+
+    bus = _FakeBus()
+    deliverer = ChannelDeliverer(
+        bus=bus, session_manager=SessionManager(tmp_path), record_hook=lambda: _hook
+    )
+    msg = OutboundMessage(channel="websocket", chat_id="1", content="ciao")
+
     await deliverer.deliver(msg, record=True)
 
     assert bus.published == [msg]
