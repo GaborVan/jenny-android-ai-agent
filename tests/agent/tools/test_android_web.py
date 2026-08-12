@@ -261,6 +261,17 @@ class TestBridgeFetchDecoding:
         assert html == "<html>plain</html>"
         assert final == "https://example.com"
 
+    @pytest.mark.parametrize("raw", ["", "   \n"])
+    async def test_blank_result_raises_instead_of_empty_success(self, raw):
+        # `fetchUrl` non replica il controllo che `searchBing` fa sul proprio
+        # risultato: `evaluateJavascript` senza valore arriva qui come stringa
+        # vuota. Senza guardia diventava un fetch "riuscito" con testo vuoto e
+        # status 200 — un fallimento silenzioso.
+        bridge = self._bridge(raw)
+        with patch.object(android_web, "_get_bridge", return_value=bridge):
+            with pytest.raises(ValueError, match="empty result"):
+                await android_web._bridge_fetch(object(), "https://example.com")
+
 
 class TestBridgeCallsAreSerialized:
     """The hidden WebView shares its Chromium renderer with the app's visible
@@ -404,6 +415,37 @@ class TestAndroidWebFetchToolExecute:
         destroy.assert_called_once()
         assert "WebView fetch failed" in out["error"]
         assert "no bridge" in out["error"]
+
+    async def test_no_document_error_is_actionable_and_spares_the_bridge(self):
+        """Un URL che non è una pagina HTML non deve costare il WebView condiviso.
+
+        Il bridge risponde, ma senza documento: plain text servito con CSP
+        `sandbox` (raw.githubusercontent.com), download, binari. Il WebView è
+        sano — è l'URL a non essere una pagina — e distruggerlo butterebbe
+        cookie, localStorage e warm-up del renderer per il chiamante successivo.
+        L'errore deve inoltre dire cosa fare, non solo che è andata male.
+        """
+        with patch.object(
+            android_web,
+            "_bridge_fetch",
+            side_effect=ValueError("WebView returned no HTML document"),
+        ):
+            with patch.object(android_web, "destroy_bridge") as destroy:
+                out = json.loads(await self._tool().execute("https://example.com/a.md"))
+        destroy.assert_not_called()
+        assert "no HTML document" in out["error"]
+        assert "http_get" in out["hint"]
+
+    async def test_timeout_error_also_suggests_http_get(self):
+        # Una risposta che il browser scarica invece di aprire non fa mai
+        # scattare `onPageFinished` (nessun DownloadListener lato Kotlin): da
+        # qui si vede solo un timeout, quindi anche quello porta il consiglio.
+        with patch.object(android_web, "_bridge_fetch", side_effect=asyncio.TimeoutError):
+            with patch.object(android_web, "destroy_bridge") as destroy:
+                out = json.loads(await self._tool().execute("https://example.com/x.zip"))
+        destroy.assert_called_once()
+        assert "timed out" in out["error"]
+        assert "http_get" in out["hint"]
 
     async def test_final_url_redirected_to_loopback_is_blocked(self):
         """The WebView follows redirects/JS navigation with no per-hop SSRF
