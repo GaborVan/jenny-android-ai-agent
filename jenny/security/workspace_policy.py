@@ -78,20 +78,74 @@ def _path_key(path: str | Path) -> str:
     return os.path.normcase(os.fspath(path))
 
 
-def _is_path_within(path: str | Path, root: str | Path) -> bool:
-    """Return True when *path* resolves to *root* or a descendant of *root*."""
+# ---------------------------------------------------------------------------
+# Cache della RADICE risolta
+# ---------------------------------------------------------------------------
+#
+# ``resolve_allowed_path`` risolveva la radice consentita a ogni chiamata, e
+# ``Path.resolve()`` passa da ``realpath``, cioè una ``lstat`` per OGNI
+# componente del percorso (~43 syscall per una radice tipica sul device).
+# Dentro un ``python_exec`` guardato ogni singola operazione su file passa di
+# qui, quindi la stessa identica radice veniva ricalcolata centinaia di volte
+# per esecuzione.
+#
+# In cache va SOLO la radice, mai il percorso da validare: la radice è una
+# directory che l'app possiede e che non cambia mentre un exec gira, il percorso
+# è invece l'input non fidato del chiamante e va risolto ogni volta.
+#
+# Invalidazione — l'unica che serve, e va detta per intero: la voce può
+# diventare stantia solo se la radice viene ricreata puntando altrove (p.es.
+# sostituita da un symlink) mentre il processo vive. ``invalidate_root_cache()``
+# è il gancio, e lo chiama ``python_exec.PythonNamespace._enter_guard``
+# all'ingresso di ogni esecuzione guardata: dentro un exec la radice non può
+# cambiare, quindi la finestra di staleness è al massimo un exec.
+_ROOT_RESOLVE_CACHE: dict[str, Path] = {}
+_ROOT_RESOLVE_CACHE_MAX = 256
+
+
+def invalidate_root_cache() -> None:
+    """Svuota la cache delle radici risolte (vedi ``_ROOT_RESOLVE_CACHE``)."""
+    _ROOT_RESOLVE_CACHE.clear()
+
+
+def _resolved_root(root: str | Path) -> Path:
+    """Radice risolta, memoizzata. Vedi ``_ROOT_RESOLVE_CACHE``."""
+    key = _path_key(root)
+    cached = _ROOT_RESOLVE_CACHE.get(key)
+    if cached is not None:
+        return cached
+    resolved = _safe_expanduser(root).resolve(strict=False)
+    if len(_ROOT_RESOLVE_CACHE) >= _ROOT_RESOLVE_CACHE_MAX:
+        # Limite di crescita: la cache è un'ottimizzazione, non uno stato.
+        _ROOT_RESOLVE_CACHE.clear()
+    _ROOT_RESOLVE_CACHE[key] = resolved
+    return resolved
+
+
+def _is_path_within(path: str | Path, root: str | Path, *, path_resolved: bool = False) -> bool:
+    """Return True when *path* resolves to *root* or a descendant of *root*.
+
+    ``path_resolved=True`` dichiara che *path* è GIÀ il risultato di una
+    ``Path.resolve()``: rifarla costerebbe un secondo giro di ``realpath`` sullo
+    stesso percorso senza cambiarne il valore (``resolve`` è idempotente).
+    """
     try:
-        resolved_path = _safe_expanduser(path).resolve(strict=False)
-        resolved_root = _safe_expanduser(root).resolve(strict=False)
+        if path_resolved:
+            resolved_path = path if isinstance(path, Path) else Path(path)
+        else:
+            resolved_path = _safe_expanduser(path).resolve(strict=False)
+        resolved_root = _resolved_root(root)
         resolved_path.relative_to(resolved_root)
         return True
     except (OSError, RuntimeError, TypeError, ValueError):
         return False
 
 
-def _is_path_allowed(path: str | Path, roots: Iterable[str | Path]) -> bool:
+def _is_path_allowed(
+    path: str | Path, roots: Iterable[str | Path], *, path_resolved: bool = False
+) -> bool:
     """Return True when *path* is inside any allowed root."""
-    return any(_is_path_within(path, root) for root in roots)
+    return any(_is_path_within(path, root, path_resolved=path_resolved) for root in roots)
 
 
 def _is_path_exactly_allowed(
@@ -150,7 +204,9 @@ def resolve_allowed_path(
         resolved,
         files,
     )
-    if not _is_path_allowed(resolved, roots) and not exact_allowed:
+    # `resolved` viene già da `_resolve_path(..., strict=False)`, cioè da una
+    # `Path.resolve()`: dichiararlo evita un secondo `realpath` identico.
+    if not _is_path_allowed(resolved, roots, path_resolved=True) and not exact_allowed:
         boundary = _safe_expanduser(allowed_root) if allowed_root is not None else "allowed files"
         raise WorkspaceBoundaryError(
             f"Path {path} is outside allowed directory {boundary}"

@@ -44,9 +44,16 @@ class _SessionStopped(BaseException):
     """Internal signal raised at a cooperative-cancellation checkpoint.
 
     Subclasses BaseException (not Exception) so a broad ``except Exception``
-    in user code or in ``PythonNamespace.execute``/``call_function`` cannot
-    accidentally swallow a requested stop, mirroring how CPython itself uses
-    BaseException (e.g. KeyboardInterrupt) for cooperative interrupts.
+    in user code cannot accidentally swallow a requested stop, mirroring how
+    CPython itself uses BaseException (e.g. KeyboardInterrupt) for cooperative
+    interrupts.
+
+    Non basta più da solo: ``PythonNamespace.execute``/``call_function`` sono
+    diventate ``except BaseException`` (confine del sandbox contro il
+    ``SystemExit`` che uccideva il gateway) e ingoiavano anche questa,
+    rendendo morto l'``except _SessionStopped`` di ``_run`` qui sotto. Sono
+    perciò elencate esplicitamente nelle loro tuple di carve-out — quella è
+    l'invariante da tenere ferma, non la sola discendenza da BaseException.
     """
 
 
@@ -140,15 +147,14 @@ class _PythonSession:
     def _run(self):
         # Note: no redirect_stdout/redirect_stderr here. The actual stdout/
         # stderr capture happens inside self.namespace.execute()/
-        # call_function() (python_exec.py), which already redirect to their
-        # own buffers under a process-wide lock (`_stdout_redirect_lock`) to
-        # keep genuinely concurrent executions (this background thread vs.
-        # another session's thread, or a one-shot python_exec call in the
-        # executor threadpool) from cross-contaminating each other's
-        # captured output. Redirecting again at this layer would be
-        # redundant (its buffers are never read; the inner call's returned
-        # strings are used instead) and would deadlock against that lock if
-        # it also tried to acquire it.
+        # call_function() (python_exec.py), which route the stream PER THREAD
+        # (`_ThreadRoutedStream`) so that genuinely concurrent executions —
+        # this background thread vs. another session's thread, or a one-shot
+        # python_exec call on the dedicated pool — each get their own buffer
+        # without any process-wide serialisation. Redirecting again at this
+        # layer would be redundant (these buffers are never read; the inner
+        # call's returned strings are used instead) and would defeat the
+        # per-thread routing by mutating sys.stdout globally again.
         try:
             if self._stop_event.is_set():
                 raise _SessionStopped()
@@ -163,7 +169,7 @@ class _PythonSession:
                     if stderr:
                         self._output_chunks.append(f"STDERR:\n{stderr}")
                     if result is not None:
-                        self._output_chunks.append(f"Result: {result!r}")
+                        self._output_chunks.append(format_result_line(result))
                 elif self.code:
                     stdout, stderr, result = self.namespace.execute(self.code)
                     if stdout:
@@ -171,7 +177,7 @@ class _PythonSession:
                     if stderr:
                         self._output_chunks.append(f"STDERR:\n{stderr}")
                     if result is not None:
-                        self._output_chunks.append(f"Result: {result!r}")
+                        self._output_chunks.append(format_result_line(result))
                 else:
                     self._output_chunks.append("Error: Provide 'code' or 'function'")
                     self._exit_code = 1
@@ -180,7 +186,17 @@ class _PythonSession:
         except _SessionStopped:
             self._output_chunks.append("Execution stopped (session was terminated).")
             self._exit_code = -1
-        except Exception:
+        # `BaseException` e non `Exception`, per il motivo opposto a quello che
+        # vale in `PythonNamespace.execute`. Là la tupla di carve-out ri-alza
+        # `asyncio.CancelledError` e `PythonExecInterrupted` perché a valle c'è
+        # un consumatore (l'await di `run_python_async`) che sa cosa farne. Qui
+        # siamo nel corpo di un thread che NESSUNO aspetta: qualunque cosa
+        # sfugga muore stampando "Exception in thread" sullo stderr vero, e il
+        # `finally` qui sotto riporta al modello output vuoto ed exit code 0 —
+        # cioè successo. Un `raise asyncio.CancelledError()` (o `SystemExit`)
+        # scritto dal codice utente diventava esattamente questo.
+        # `_SessionStopped` resta sopra: è l'unico caso che non è un errore.
+        except BaseException:
             tb = traceback.format_exc()
             self._output_chunks.append(f"STDERR:\n{tb}")
             self._exit_code = 1
@@ -378,6 +394,31 @@ class ExecSessionManager:
 
 DEFAULT_EXEC_SESSION_MANAGER = ExecSessionManager()
 atexit.register(DEFAULT_EXEC_SESSION_MANAGER.shutdown)
+
+
+def format_result_line(result: Any) -> str:
+    """Riga ``Result:`` per il valore di ritorno di un exec.
+
+    Il ``repr()`` del risultato gira FUORI dalla finestra guardata: sia qui che
+    in ``run_python_async`` l'oggetto arriva dopo che ``PythonNamespace.execute``
+    ha già eseguito ``_exit_guard``. Un ``__repr__`` scritto dall'agente è quindi
+    codice utente senza confine di workspace, e questo NON è chiuso: vale il
+    commento TRUST BOUNDARY in testa a ``python_exec.py`` — leggere fuori dal
+    workspace da dentro un ``__repr__`` richiede di scriverlo apposta, e chi lo
+    scrive apposta ha già altre porte documentate.
+
+    Quel che invece va chiuso, ed è il motivo per cui questa funzione esiste, è
+    la ``BaseException``: senza il ``try`` qui sotto un ``__repr__`` che alza
+    ``SystemExit`` scavalcherebbe il confine del sandbox che
+    ``PythonNamespace.execute`` installa proprio contro quello — l'eccezione
+    nasce dopo il ``finally``, atterra sul future e asyncio la rilancia fuori
+    dall'event loop, cioè esattamente il crash che quel confine esiste per
+    evitare.
+    """
+    try:
+        return f"Result: {result!r}"
+    except BaseException as exc:  # noqa: BLE001 - vedi il docstring
+        return f"Result: <repr() raised {type(exc).__name__}: {type(result).__name__} object>"
 
 
 def clamp_session_int(value: int | None, default: int, minimum: int, maximum: int) -> int:

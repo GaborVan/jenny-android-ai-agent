@@ -27,6 +27,27 @@ logger = logging.getLogger("jenny.agent.tools.python_exec")
 _SAFE_ENV_KEYS = frozenset({"PATH", "LANG", "PYTHONPATH"})
 
 
+def _compile_script(code: str, filename: str) -> types.CodeType:
+    """Compila *code* SENZA ereditare i ``__future__`` di questo modulo.
+
+    ``exec(code, ns)`` compila ereditando i flag ``__future__`` del frame
+    chiamante, e questo file apre con ``from __future__ import annotations``:
+    qualunque script caricato con un ``exec`` nudo da qui veniva quindi
+    compilato in PEP 563, con le annotazioni ridotte a stringhe. Il sintomo
+    misurato (stesso di ``PythonNamespace._compile``, che lo ha chiuso per il
+    codice dell'agente): un ``@dataclass`` nello script entra nel ramo
+    ``isinstance(type, str)`` di ``dataclasses._process_class``, che risale a
+    ``sys.modules.get(cls.__module__).__dict__`` — e un modulo costruito a mano
+    non sta in ``sys.modules``, quindi muore con
+    "AttributeError: 'NoneType' object has no attribute '__dict__'".
+
+    ``dont_inherit=True`` restituisce allo script la semantica standard
+    dell'interprete: se vuole PEP 563 se lo dichiara da sé, come farebbe se
+    fosse importato normalmente.
+    """
+    return compile(code, filename, "exec", dont_inherit=True)
+
+
 def _register_builtin_functions(
     ns: PythonNamespace,
     workspace: str | None = None,
@@ -37,14 +58,59 @@ def _register_builtin_functions(
     import re
     from pathlib import Path
 
+    def _resolution_base() -> str | None:
+        """Directory da cui si misura un percorso RELATIVO dentro il sandbox.
+
+        Unico punto in cui questa domanda riceve risposta: la usano sia chi
+        APRE i file (``_enforce_path``) sia chi RIPORTA un percorso al modello
+        (``path_resolve``, ``path_base``). Tenerle allineate è tutto il punto —
+        prima ``path_resolve("out.txt")`` rispondeva ``/out.txt`` (cwd del
+        processo) mentre ``read_file("out.txt")`` leggeva dal workspace, quindi
+        il modello poteva calcolare un percorso con un builtin e vederselo
+        rifiutare da un altro.
+
+        Sotto restrizione è il ``working_dir`` dell'exec in corso (B5) e, in sua
+        assenza, la radice del workspace. Senza restrizione è ``None``, cioè "la
+        cwd del processo": lì ``open()`` è il builtin nudo e misura da lì, e
+        agganciare i soli builtin alla base creerebbe la discordanza che qui si
+        sta togliendo.
+
+        La stessa identica risposta la dà ora ``os.getcwd()`` dentro il sandbox
+        (``python_exec._reported_working_directory``), e non per coincidenza: in
+        entrambe le modalità le due funzioni sono d'accordo per costruzione —
+        sotto restrizione ``_active_path_base() or workspace``, fuori la cwd del
+        processo, che è ciò a cui la ``getcwd`` patchata delega quando non c'è
+        confine. Cambiarne una senza l'altra rimette in piedi la trappola.
+        """
+        if not restrict_to_workspace:
+            return None
+        # Import locale: `python_exec` importa questo modulo, il contrario a
+        # livello di modulo sarebbe un ciclo.
+        from jenny.agent.tools.python_exec import _active_path_base
+
+        return _active_path_base() or workspace
+
     def _enforce_path(path: str) -> Path:
-        """Resolve path and enforce workspace boundary when restricted."""
+        """Resolve path and enforce workspace boundary when restricted.
+
+        Un percorso RELATIVO si misura dalla base di ``_resolution_base()``,
+        cioè dalla stessa che usa ``open()`` dentro il sandbox. Il CONFINE resta
+        la radice del workspace: la base si sposta, il confine no.
+        """
         if not restrict_to_workspace:
             from jenny.security.workspace_policy import _safe_expanduser
             return _safe_expanduser(path).resolve()
+        from jenny.agent.tools.python_exec import _path_guard_bypass
         from jenny.security.workspace_policy import resolve_allowed_path
 
-        return resolve_allowed_path(path, workspace=workspace, allowed_root=workspace)
+        # La base va letta PRIMA del bypass, che la azzera. Il bypass copre la
+        # sola risoluzione: `Path.resolve()` passa da `os.lstat` su ogni
+        # prefisso del percorso e sotto guard quei prefissi sono fuori dal
+        # workspace, quindi senza bypass ogni chiamata logga una raffica di
+        # rifiuti spuri (stessa ragione di `_guarded_os_path`).
+        base = _resolution_base()
+        with _path_guard_bypass():
+            return resolve_allowed_path(path, workspace=base, allowed_root=workspace)
 
     # File I/O
     def read_file(path: str, encoding: str = "utf-8") -> str:
@@ -174,16 +240,55 @@ def _register_builtin_functions(
         return re.sub(pattern, replacement, text)
 
     # Path utilities
+    #
+    # `path_join`/`path_parent`/`path_name` restano ARITMETICA LESSICALE sulla
+    # stringa: non toccano il filesystem e non pretendono di restituire un
+    # percorso assoluto (`path_parent("out.txt")` è `"."`, come in pathlib). Chi
+    # vuole una risposta assoluta la chiede a `path_resolve`, che è l'unico di
+    # questa famiglia ad ancorarsi a una base.
     def path_join(*parts: str) -> str:
-        """Join path components."""
+        """Join path components (purely lexical)."""
         return str(Path(*parts))
 
     def path_resolve(path: str) -> str:
-        """Resolve a path to absolute."""
-        return str(Path(path).resolve())
+        """Resolve a path to absolute, from the same base the sandbox reads from.
+
+        Un relativo si misura da ``_resolution_base()``, cioè esattamente da
+        dove lo misurano ``read_file``/``open`` in questa stessa esecuzione.
+
+        Due scelte deliberate:
+
+        * risoluzione LOGICA (``os.path.abspath``, symlink non dereferenziati)
+          invece di ``Path.resolve()``. Quest'ultima passa da ``os.lstat`` su
+          ogni prefisso: sotto guard i prefissi sono fuori dal confine e la sola
+          richiesta di un percorso produceva una raffica di WARNING "refused",
+          per giunta dentro lo stderr che il modello legge. Non serve nemmeno
+          che il file esista, e non deve: si usa anche per costruire il percorso
+          di un file da CREARE.
+        * nessun controllo di confine. Questa è aritmetica su stringhe: può
+          nominare un percorso fuori dal workspace, ma chi lo USA lo rifiuta
+          come sempre. Il rifiuto appartiene all'operazione, non al calcolo.
+        """
+        from jenny.security.workspace_policy import _resolve_logical_path
+
+        return str(_resolve_logical_path(path, _resolution_base()))
+
+    def path_base() -> str:
+        """Directory that relative paths are measured from in this execution.
+
+        Nato quando ``os.getcwd()`` non era patchata e rispondeva ``/`` in ogni
+        caso: era l'unico modo di sapere da dove si misura davvero. Ora
+        ``os.getcwd()`` risponde la stessa cosa (vedi
+        ``python_exec._reported_working_directory``) e questo builtin resta come
+        il modo ESPLICITO di chiederlo — stessa risposta, nome che dice cosa
+        vuol dire. Il ``or os.getcwd()`` non è un secondo parere: è il ramo
+        senza restrizione, dove la base È la cwd del processo e la ``getcwd``
+        patchata delega comunque a quella vera.
+        """
+        return str(_resolution_base() or os.getcwd())
 
     def path_parent(path: str) -> str:
-        """Get parent directory."""
+        """Get parent directory (purely lexical)."""
         return str(Path(path).parent)
 
     def path_name(path: str) -> str:
@@ -274,9 +379,28 @@ def _register_builtin_functions(
         except Exception:
             logger.warning("importlib failed for %s; falling back to exec()", script_path)
             mod = types.ModuleType(name.removesuffix(".py"))
+            # `__file__` come lo metterebbe importlib: gli script delle skill
+            # ricavano da lì la propria directory
+            # (`sys.path.insert(0, dirname(abspath(__file__)))`), e su questo
+            # ramo il nome non esisteva affatto.
+            mod.__file__ = str(script_path)
             code = script_path.read_text(encoding="utf-8")
-            exec(code, mod.__dict__)
+            # `_compile_script`, non `exec(code, ...)`: vedi lì il perché.
+            exec(_compile_script(code, str(script_path)), mod.__dict__)
             return mod
+
+    def _wiki_root(root: str) -> str:
+        """Porta *root* alla stessa base degli altri builtin, prima di passarlo.
+
+        Gli script della wiki fanno ``Path(root)`` per conto proprio, e la loro
+        idea di "relativo" è la cwd del processo (``/`` in ``python_exec``):
+        ``wiki_lint("wikis/main")`` finiva quindi su ``/wikis/main`` mentre
+        ``read_file("wikis/main/...")`` leggeva dal workspace. Passare per
+        ``_enforce_path`` allinea la base e, sotto restrizione, fa fallire subito
+        e con un messaggio chiaro una root fuori dal confine invece di lasciar
+        morire lo script più a valle.
+        """
+        return str(_enforce_path(root))
 
     def wiki_scaffold(root: str, title: str) -> str:
         """Bootstrap a new LLM Wiki directory structure at root."""
@@ -285,7 +409,7 @@ def _register_builtin_functions(
         mod = _load_wiki_script("scaffold.py")
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            mod.scaffold(root, title)
+            mod.scaffold(_wiki_root(root), title)
         return buf.getvalue()
 
     def wiki_lint(root: str) -> str:
@@ -295,7 +419,7 @@ def _register_builtin_functions(
         mod = _load_wiki_script("lint_wiki.py")
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            mod.lint(root)
+            mod.lint(_wiki_root(root))
         return buf.getvalue() or "No output"
 
     def wiki_audit(root: str, mode: str = "open") -> str:
@@ -305,7 +429,7 @@ def _register_builtin_functions(
         mod = _load_wiki_script("audit_review.py")
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            mod.main(root, mode)
+            mod.main(_wiki_root(root), mode)
         return buf.getvalue()
 
     # Register all
@@ -327,6 +451,7 @@ def _register_builtin_functions(
         "regex_replace": regex_replace,
         "path_join": path_join,
         "path_resolve": path_resolve,
+        "path_base": path_base,
         "path_parent": path_parent,
         "path_name": path_name,
         "get_env": get_env,

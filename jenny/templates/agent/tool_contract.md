@@ -53,6 +53,7 @@ This platform has no shell, subprocess, or CLI tools. The only code-execution to
   `grep_files`, `http_get`, `http_post`, `json_parse`, `json_dump`, `regex_match`,
   `regex_replace`, `path_join`, `path_resolve`, `file_exists`, `md5`, `sha256`,
   `base64_encode`, `base64_decode`, `url_encode`, `url_decode`, `platform_info`.
+- `class` definitions work, but `@dataclass` needs real type objects in its field annotations: quoted types or `from __future__ import annotations` make it fail inside `python_exec`.
 - Execution has a configurable timeout (default 60s) and output is truncated at 10000 chars.
 - For long-running code, use `yield_time_ms`; if execution continues, `python_exec` returns
   a `session_id` that can be polled with `write_stdin`.

@@ -5,8 +5,13 @@ from pathlib import Path
 import pytest
 
 from jenny.security.workspace_policy import (
+    _ROOT_RESOLVE_CACHE,
+    _ROOT_RESOLVE_CACHE_MAX,
     WorkspaceBoundaryError,
     _is_path_within,
+    _path_key,
+    _resolved_root,
+    invalidate_root_cache,
     resolve_allowed_path,
 )
 
@@ -119,3 +124,78 @@ def test_resolve_allowed_path_extra_file_blocks_link_escape(tmp_path: Path) -> N
             allowed_root=workspace / "skills",
             extra_allowed_files=[logical_allowed],
         )
+
+
+# ---------------------------------------------------------------------------
+# Cache della radice risolta
+# ---------------------------------------------------------------------------
+#
+# `resolve_allowed_path` risolveva la radice a OGNI chiamata, e `Path.resolve()`
+# passa da `realpath`, cioè una `lstat` per componente (~43 syscall per una
+# radice tipica). Dentro un `python_exec` guardato ogni operazione su file passa
+# di qui: la stessa radice veniva ricalcolata centinaia di volte per exec.
+
+
+def test_resolved_root_is_memoised(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    invalidate_root_cache()
+
+    first = _resolved_root(workspace)
+    assert _ROOT_RESOLVE_CACHE
+
+    # Avvelenare la voce in cache è l'unico modo per osservare che la seconda
+    # chiamata NON ha rifatto `realpath`.
+    sentinel = Path("/sentinel")
+    _ROOT_RESOLVE_CACHE[next(iter(_ROOT_RESOLVE_CACHE))] = sentinel
+    assert _resolved_root(workspace) is sentinel
+    assert first == workspace.resolve()
+
+
+def test_invalidate_root_cache_forces_a_fresh_resolution(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    invalidate_root_cache()
+    _resolved_root(workspace)
+    _ROOT_RESOLVE_CACHE[next(iter(_ROOT_RESOLVE_CACHE))] = Path("/sentinel")
+
+    invalidate_root_cache()
+
+    assert _resolved_root(workspace) == workspace.resolve()
+
+
+def test_the_path_itself_is_never_cached(tmp_path: Path) -> None:
+    """In cache va solo la RADICE: il percorso è l'input non fidato."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    invalidate_root_cache()
+
+    resolve_allowed_path("a.txt", workspace=workspace, allowed_root=workspace)
+
+    assert set(_ROOT_RESOLVE_CACHE) == {_path_key(workspace)}
+
+
+def test_entering_the_guard_invalidates_the_cache(tmp_path: Path) -> None:
+    """L'invalidazione dichiarata: una voce stantia vive al massimo un exec."""
+    from jenny.agent.tools.python_exec import PythonNamespace
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    invalidate_root_cache()
+    _ROOT_RESOLVE_CACHE["stale"] = Path("/sentinel")
+
+    namespace = PythonNamespace(
+        working_dir=str(workspace), restrict_to_workspace=True, workspace=str(workspace)
+    )
+    namespace.execute("1 + 1")
+
+    assert "stale" not in _ROOT_RESOLVE_CACHE
+
+
+def test_cache_is_bounded(tmp_path: Path) -> None:
+    invalidate_root_cache()
+    for index in range(_ROOT_RESOLVE_CACHE_MAX + 5):
+        _resolved_root(tmp_path / f"root{index}")
+    assert len(_ROOT_RESOLVE_CACHE) <= _ROOT_RESOLVE_CACHE_MAX

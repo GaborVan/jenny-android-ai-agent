@@ -15,7 +15,12 @@ import time
 
 import pytest
 
-from jenny.agent.tools.exec_session import ExecSessionManager, format_session_poll
+from jenny.agent.tools.exec_session import (
+    ExecSessionManager,
+    _PythonSession,
+    format_result_line,
+    format_session_poll,
+)
 from jenny.agent.tools.python_exec import PythonNamespace
 
 # A loop with no natural end that periodically hits a Python-level line
@@ -183,21 +188,26 @@ SLOW_PRINTING_SESSION_CODE = (
 
 
 def test_concurrent_session_and_oneshot_exec_do_not_cross_contaminate_stdout():
-    """Regression test for the process-global sys.stdout/sys.stderr redirect
-    race: PythonNamespace.execute()/call_function() and
-    _PythonSession._run() both use contextlib.redirect_stdout/redirect_stderr,
-    which mutate the process-wide sys.stdout/sys.stderr attribute for the
-    duration of the call. Real execution happens on separate OS threads (a
-    dedicated background thread per exec session; a threadpool executor
-    thread per one-shot python_exec call in production), so a long-running
-    session and a concurrent one-shot call could otherwise transiently swap
-    each other's capture buffer and misattribute or lose output.
+    """Two concurrent executions must not steal each other's output.
 
-    This exercises genuine overlap: a session prints periodically over
-    ~300ms while a one-shot execute() call starts partway through and must
-    wait (serialized by `_stdout_redirect_lock`) rather than racing it.
+    Storicamente questa era la regressione del redirect GLOBALE:
+    ``PythonNamespace.execute()``/``call_function()`` e ``_PythonSession._run()``
+    usavano ``contextlib.redirect_stdout``/``redirect_stderr``, che mutano il
+    ``sys.stdout``/``sys.stderr`` di PROCESSO per la durata della chiamata.
+    L'esecuzione vera avviene su thread separati (un thread dedicato per exec
+    session; un worker del pool di python_exec per ogni chiamata one-shot),
+    quindi due esecuzioni sovrapposte potevano scambiarsi il buffer di cattura.
+    La cura era un lock di processo tenuto per tutta la finestra guardata: ha
+    risolto l'attribuzione e ha creato R9 (un thread parcheggiato su
+    ``lock.acquire()`` non è interrompibile).
+
+    Ora la cattura è PER THREAD (``python_exec._ThreadRoutedStream``), quindi
+    l'invariante da tenere ferma è più forte di prima: nessuna
+    contaminazione **e** nessuna serializzazione. L'ultima asserzione è quella
+    che cambia segno — il one-shot NON deve più aspettare la sessione.
     """
     from jenny.agent.tools.exec_session import _PythonSession
+    from jenny.agent.tools.python_exec import _ThreadRoutedStream
 
     real_stdout = sys.stdout
     real_stderr = sys.stderr
@@ -248,17 +258,23 @@ def test_concurrent_session_and_oneshot_exec_do_not_cross_contaminate_stdout():
     assert "SESSION-" in session_output
     assert "ONESHOT" not in session_output
 
-    # The real process-wide sys.stdout/sys.stderr must be restored once both
-    # finish -- the actual failure mode of the race is that a nested
-    # redirect_stdout's __exit__ restores to the wrong prior value.
-    assert sys.stdout is real_stdout
-    assert sys.stderr is real_stderr
+    # Il thread che non sta catturando nulla continua a scrivere sullo stream
+    # VERO: il proxy è trasparente, non un dirottamento globale. (Il proxy
+    # resta montato — come ogni altro patch di python_exec — quindi si verifica
+    # il bersaglio, non l'identità dell'oggetto.)
+    for stream, real in ((sys.stdout, real_stdout), (sys.stderr, real_stderr)):
+        if isinstance(stream, _ThreadRoutedStream):
+            assert stream._jenny_target is real
+        else:
+            assert stream is real
 
-    # The one-shot call must have actually waited for the session's redirect
-    # window to release (proving the two executions genuinely overlapped in
-    # time rather than happening to run back-to-back anyway).
+    # Sovrapposizione genuina: il one-shot è partito mentre la sessione stava
+    # ancora stampando...
     assert oneshot_result["start"] - session.started_at < 0.1
-    assert oneshot_result["end"] - oneshot_result["start"] > 0.15
+    # ...e NON ha dovuto aspettare che finisse. La sessione stampa per ~300ms;
+    # prima della cattura per-thread il one-shot restava fermo sul lock per
+    # tutto quel tempo.
+    assert oneshot_result["end"] - oneshot_result["start"] < 0.15
 
 
 @pytest.mark.asyncio
@@ -282,3 +298,110 @@ async def test_stop_event_does_not_break_normal_short_execution():
     assert poll.exit_code == 0
     assert "Result: 2" in poll.output
     assert session_id not in manager._python_sessions
+
+
+def test_stop_is_reported_as_a_stop_not_as_a_traceback():
+    """`_SessionStopped` deve risalire attraverso `PythonNamespace.execute()`.
+
+    È una `BaseException` proprio perché nessun `except Exception` la ingoi;
+    quando `execute()`/`call_function()` sono passate a `except BaseException`
+    (confine del sandbox contro `SystemExit`) hanno però iniziato a ingoiare
+    anche questa, rendendo morto l'`except _SessionStopped` di `_run()`: uno
+    `/stop` stampava un traceback grezzo e chiudeva con exit code 0, cioè
+    successo.
+    """
+    session = _PythonSession(
+        session_id="stopped",
+        code=LOOPING_CODE,
+        function=None,
+        args=None,
+        kwargs=None,
+        namespace=PythonNamespace(),
+        timeout=None,
+    )
+    # Lascia partire il thread prima di chiedere lo stop, così l'interruzione
+    # cade DENTRO l'exec e non sul controllo preliminare di _run().
+    time.sleep(0.1)
+    session.stop()
+    session.join(timeout=5.0)
+
+    assert not session._thread.is_alive()
+    output = "".join(session._output_chunks)
+    assert "Execution stopped (session was terminated)." in output
+    assert "Traceback" not in output
+    assert session._exit_code == -1
+
+
+def _run_session_raising(raised: str) -> _PythonSession:
+    session = _PythonSession(
+        session_id=f"raised-{raised}",
+        code=f"import asyncio\nraise {raised}",
+        function=None,
+        args=None,
+        kwargs=None,
+        namespace=PythonNamespace(),
+        timeout=None,
+    )
+    session.join(timeout=5.0)
+    assert not session._thread.is_alive()
+    return session
+
+
+def test_a_cancellederror_in_a_session_is_reported_as_a_failure():
+    """``asyncio.CancelledError`` non deve passare per successo silenzioso.
+
+    È nella tupla di carve-out di ``PythonNamespace.execute`` perché nel
+    percorso one-shot c'è un consumatore (l'await di ``run_python_async``).
+    Qui no: risaliva fino a uccidere il thread con un "Exception in thread"
+    sullo stderr vero, e il ``finally`` di ``_run`` chiudeva con output vuoto
+    ed exit code 0. Il modello leggeva "riuscito, niente da dire".
+    """
+    session = _run_session_raising("asyncio.CancelledError()")
+    output = "".join(session._output_chunks)
+    assert "Traceback" in output, f"nessun traceback: {output!r}"
+    assert session._exit_code == 1
+
+
+@pytest.mark.parametrize("raised", ["SystemExit(2)", "KeyboardInterrupt()"])
+def test_a_systemexit_in_a_session_at_least_reaches_the_model(raised: str):
+    """Il traceback arriva al modello; l'exit code resta 0, ed è un difetto noto.
+
+    Queste due non risalgono fino a ``_run``: le ferma il confine del sandbox
+    in ``PythonNamespace.execute``, che le rende testo su ``stderr_buf`` e
+    ritorna normalmente. Quindi ``_run`` non vede nessuna eccezione e il
+    ``finally`` chiude a 0, mentre il traceback è comunque nell'output.
+
+    Distinguere "stderr non vuoto" da "il codice è esploso" richiede che
+    ``execute()`` dica quale dei due è stato — un cambio di firma su un file
+    che va maneggiato con calma. Il test inchioda il comportamento di oggi:
+    se qualcuno lo corregge diventa rosso, ed è il momento giusto per
+    aggiornarlo.
+    """
+    session = _run_session_raising(raised)
+    output = "".join(session._output_chunks)
+    assert "Traceback" in output, f"nessun traceback per {raised}: {output!r}"
+    assert raised.split("(")[0] in output
+    assert session._exit_code == 0
+
+
+def test_format_result_line_renders_a_normal_repr():
+    assert format_result_line([1, "a"]) == """Result: [1, 'a']"""
+
+
+def test_format_result_line_contains_a_baseexception_from_repr():
+    """Un ``__repr__`` che alza ``SystemExit`` non deve uscire dal sandbox.
+
+    Il ``repr`` del risultato viene reso DOPO ``_exit_guard``, quindi fuori
+    dall'``except BaseException`` di ``PythonNamespace.execute``: senza la
+    protezione in ``format_result_line`` l'eccezione atterrerebbe sul future e
+    asyncio la rilancerebbe fuori dall'event loop — lo stesso crash (B1) che
+    quel confine esiste per evitare.
+    """
+
+    class _Hostile:
+        def __repr__(self) -> str:
+            raise SystemExit(2)
+
+    line = format_result_line(_Hostile())
+    assert line.startswith("Result: <repr() raised SystemExit")
+    assert "_Hostile" in line
