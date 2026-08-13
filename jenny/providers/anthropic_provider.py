@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncGenerator, Awaitable, Callable
+from contextlib import suppress
 from typing import Any
 
 import httpx
@@ -67,14 +68,20 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
         return normalized
 
     @classmethod
-    def _handle_error(cls, e: Exception) -> LLMResponse:
+    def _handle_error(cls, e: Exception, *, partial_content: str | None = None) -> LLMResponse:
         response = getattr(e, "response", None)
         headers = getattr(response, "headers", None)
-        payload = (
-            getattr(e, "body", None)
-            or getattr(e, "doc", None)
-            or getattr(response, "text", None)
-        )
+        # ``.text`` su una response in streaming non ancora letta solleva
+        # ResponseNotRead: qui l'errore vero è ``e``, non il fallimento della
+        # lettura, quindi si degrada a payload assente.
+        try:
+            payload = (
+                getattr(e, "body", None)
+                or getattr(e, "doc", None)
+                or getattr(response, "text", None)
+            )
+        except Exception:
+            payload = None
         if payload is None and response is not None:
             response_json = getattr(response, "json", None)
             if callable(response_json):
@@ -114,6 +121,7 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
             content=msg,
             finish_reason="error",
             retry_after=retry_after,
+            partial_content=partial_content or None,
             error_status_code=int(status_code) if status_code is not None else None,
             error_kind=error_kind,
             error_type=error_type,
@@ -325,13 +333,12 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
             messages, tools, model, max_tokens, temperature,
             reasoning_effort, tool_choice,
         )
-        try:
-            response = await self._http_client.post("/v1/messages", json=kwargs)
-            response.raise_for_status()
-            return self._parse_response_dict(response.json())
-        except httpx.HTTPStatusError as e:
-            text = e.response.text if e.response else ""
-            raise RuntimeError(f"HTTP {e.response.status_code}: {text[:500]}") from e
+        response = await self._http_client.post("/v1/messages", json=kwargs)
+        # HTTPStatusError sale intatta fino a chat(): riavvolgerla in una
+        # RuntimeError butterebbe via ``.response``, e con essa status code,
+        # retry-after e error_type di cui vive la retry policy.
+        response.raise_for_status()
+        return self._parse_response_dict(response.json())
 
     async def _http_chat_stream(
         self,
@@ -366,6 +373,13 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
 
         try:
             async with self._http_client.stream("POST", "/v1/messages", json=kwargs) as response:
+                if response.status_code >= 400:
+                    # Il body di uno stream non è ancora stato letto e il
+                    # context manager lo chiude prima che l'except giri: senza
+                    # questa aread() ogni accesso a ``.text`` a valle solleva
+                    # ResponseNotRead e maschera lo status reale.
+                    with suppress(Exception):
+                        await response.aread()
                 response.raise_for_status()
                 sse_iter = self._iter_anthropic_sse(response).__aiter__()
                 while True:
@@ -453,11 +467,11 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
                 error_kind="timeout",
             )
         except httpx.HTTPStatusError as e:
-            text = e.response.text if e.response else ""
-            return LLMResponse(
-                content=f"Error: HTTP {e.response.status_code}: {text[:500]}",
-                finish_reason="error",
-                partial_content="".join(content_parts) or None,
+            # Passa da _handle_error: status code, retry-after e error_type
+            # arrivano così alla retry policy, che altrimenti vedrebbe solo
+            # testo e non riproverebbe un 429.
+            return self._handle_error(
+                e, partial_content="".join(content_parts) or None,
             )
         except Exception as exc:
             # Mirrors LLMProvider._safe_chat_stream's generic error message so

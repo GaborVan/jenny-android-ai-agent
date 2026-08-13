@@ -110,8 +110,9 @@ class _FakeAnthropicStreamResponse:
     """Stand-in for the httpx streaming response consumed by
     AnthropicProvider._http_chat_stream via response.aiter_lines()."""
 
-    def __init__(self, lines: list[str]):
+    def __init__(self, lines: list[str], status_code: int = 200):
         self._lines = lines
+        self.status_code = status_code
 
     def raise_for_status(self) -> None:
         pass
