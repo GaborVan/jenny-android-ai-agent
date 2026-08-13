@@ -50,6 +50,68 @@ export const THEMES = [
 
 export const DEFAULT_THEME = 'chanel';
 
+/** Ponte dei token verso le mini-app (iframe a origine opaca).
+ *
+ * Le custom property non attraversano il confine dell'iframe, così
+ * `jenny-kit.css` porta una copia dei token della SPA — ma statica: una palette
+ * dark e una light, non i 7 temi. Il risultato era che l'unico colore a seguire
+ * il tema era `--accent` (l'unico che l'SDK riscriveva): tutto il resto restava
+ * l'indaco di riserva del kit, visibile sul velo di sfondo del `<body>` e sul
+ * pressed dei bottoni primari.
+ *
+ * Questa mappa dice quale token della SPA alimenta ogni token del kit, e
+ * `themeTokens()` ne legge i valori *risolti* dal tema attivo: il kit non può
+ * più andare fuori sincrono con `mobile-style.css`, e un tema nuovo arriva
+ * nelle app senza toccare niente.
+ *
+ * Fuori dalla mappa, di proposito:
+ * - `--accent` / `--on-accent` viaggiano già sul loro canale (`accent=` /
+ *   `onAccent=`), da cui l'SDK deriva `--accent-rgb`, `--accent-subtle` e
+ *   `--bg-pattern`;
+ * - `--green` / `--success-bg`: l'`--ok` della SPA vale avorio su chanel,
+ *   giallo su sticker (lo stesso identico del suo `--warning`) e quasi nero su
+ *   fumetto. Nella SPA il significato lo porta l'icona accanto; in un'app
+ *   `.badge-ok` è una pillola isolata dove il colore *è* il messaggio, e su 3
+ *   temi su 7 smetterebbe di leggersi come "ok". Resta il verde del kit;
+ * - `--radius*`, `--font-*`: strutturali, non dipendono dal tema.
+ */
+export const APP_TOKEN_MAP = {
+  '--bg-solid':     '--bg',
+  '--bg':           '--surface',
+  '--bg2':          '--surface',
+  '--bg3':          '--surface-2',
+  '--border':       '--border',
+  '--border2':      '--border-strong',
+  '--glass-border': '--border-strong',
+  '--glass':        '--overlay',
+  '--glass-strong': '--overlay-strong',
+  '--hover-bg':     '--hover',
+  '--text':         '--text',
+  '--text2':        '--text-muted',
+  '--text3':        '--text-faint',
+  '--heading':      '--heading',
+  '--accent-hover': '--accent-hover',
+  '--error':        '--error',
+  '--warning':      '--warning',
+};
+
+/** Palette del tema attivo per un'app, come `nome:valore;...` (senza `--`).
+ *
+ *  Legge i valori *calcolati* invece dei letterali del registro: è la stessa
+ *  lettura che fa `syncNativeBars` per le barre di sistema, e vale anche per i
+ *  token che il registro non conosce. Viaggia nella query string dell'iframe
+ *  (il primo paint non può aspettare un postMessage) e nel messaggio
+ *  `jenny:theme` a ogni cambio tema. */
+export function themeTokens() {
+  const cs = getComputedStyle(document.documentElement);
+  const out = [];
+  for (const [kit, spa] of Object.entries(APP_TOKEN_MAP)) {
+    const value = cs.getPropertyValue(spa).trim();
+    if (value) out.push(kit.slice(2) + ':' + value);
+  }
+  return out.join(';');
+}
+
 /** Legacy 'tc-theme' values from the old dark/light/match switcher. */
 export const MIGRATION = { dark: 'chanel', light: 'pietra', match: 'chanel' };
 

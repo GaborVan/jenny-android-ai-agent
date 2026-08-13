@@ -157,10 +157,24 @@ Every app links the kit in `<head>` — never write a custom design from scratch
 
 The kit provides:
 
-1. **Theme tokens** — the same CSS variables as the SPA (`--bg`, `--bg2`, `--text`,
-   `--text2`, `--accent`, `--border2`, ...). Dark/light follows the SPA automatically (the
-   SDK stamps `data-theme` on the iframe's root). Always color with the variables, never
-   with hardcoded hex values.
+1. **Theme tokens** — the kit's own CSS variables, fed at runtime from whichever of Jenny's
+   7 themes the user picked (the SDK stamps `data-theme` and applies the palette; the values
+   in the kit stylesheet are only the fallback). **Always color with the variables, never
+   with hardcoded hex values** — a hex ignores the theme and stays identical on all 7, which
+   is exactly what makes an app look foreign. The vocabulary:
+
+   | Group | Tokens |
+   |-------|--------|
+   | Surfaces | `--bg-solid` (page), `--bg` (topbar), `--bg2` (card), `--bg3` (code/pre) |
+   | Text | `--text`, `--text2` (secondary), `--text3` (faint), `--heading` |
+   | Lines | `--border`, `--border2`, `--glass-border` |
+   | Fills | `--glass`, `--glass-strong`, `--hover-bg` |
+   | Accent | `--accent`, `--accent-hover` (pressed), `--accent-subtle`, `--on-accent` (text *on* accent) |
+   | Status | `--green`, `--warning`, `--error` (+ `--success-bg`, `--warning-bg`, `--error-bg`) |
+
+   Note `--green` is a fixed green on purpose: it is the one signal where the color carries
+   the whole message (`.badge-ok`), and some themes resolve their own "ok" to ivory or to
+   the same yellow as their warning.
 2. **Classless base** — semantic HTML is styled out of the box: `h1`–`h3`, `p`, `button`,
    `input`, `select`, `textarea`, `table`, `dialog` all look native with zero classes.
    Prefer semantic HTML; reach for classes only when a component below fits.

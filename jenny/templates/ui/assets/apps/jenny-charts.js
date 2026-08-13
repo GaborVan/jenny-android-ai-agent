@@ -15,8 +15,10 @@
 
   function palette() {
     return {
-      accent: cssVar('--accent', '#818cf8'),
-      subtle: cssVar('--accent-subtle', 'rgba(129,140,248,0.15)'),
+      // Riserve allineate a quelle di jenny-kit.css (chanel): un indaco che
+      // nessun tema ha renderebbe muto un token mancante invece che evidente.
+      accent: cssVar('--accent', '#f4f1ea'),
+      subtle: cssVar('--accent-subtle', 'rgba(244,241,234,0.15)'),
       text2: cssVar('--text2', '#8b8b96'),
       text3: cssVar('--text3', '#52525e'),
       border: cssVar('--border2', 'rgba(255,255,255,0.1)'),

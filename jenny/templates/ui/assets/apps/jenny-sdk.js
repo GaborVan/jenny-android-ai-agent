@@ -16,20 +16,72 @@
   // Accent colors cross an origin boundary via the query string: validate
   // strictly as hex before injecting into styles.
   const HEX = /^#[0-9a-f]{3,8}$/i;
+
+  /** `"r, g, b"` da un colore esadecimale, o null se non lo è. */
+  function rgbOf(color) {
+    if (!HEX.test(color || '')) return null;
+    const full = color.length === 4
+      ? '#' + [...color.slice(1)].map(c => c + c).join('')
+      : color.slice(0, 7);
+    const rgb = [1, 3, 5].map(i => parseInt(full.slice(i, i + 2), 16));
+    return rgb.every(Number.isFinite) ? rgb.join(', ') : null;
+  }
+
   function applyAccent(accent, onAccent) {
     if (!HEX.test(accent || '')) return;
     const root = document.documentElement.style;
     root.setProperty('--accent', accent);
     if (HEX.test(onAccent || '')) root.setProperty('--on-accent', onAccent);
-    const full = accent.length === 4
-      ? '#' + [...accent.slice(1)].map(c => c + c).join('')
-      : accent.slice(0, 7);
-    const rgb = [1, 3, 5].map(i => parseInt(full.slice(i, i + 2), 16));
-    if (rgb.every(Number.isFinite)) {
-      root.setProperty('--accent-rgb', rgb.join(', '));
-      root.setProperty('--accent-subtle', `rgba(${rgb.join(', ')}, 0.15)`);
+    const rgb = rgbOf(accent);
+    if (rgb) {
+      root.setProperty('--accent-rgb', rgb);
+      root.setProperty('--accent-subtle', `rgba(${rgb}, 0.15)`);
+      // Il velo di sfondo del <body> è una tinta dell'accent, non un indaco
+      // fisso: la forma del gradiente resta quella del kit, cambia la tinta.
+      root.setProperty(
+        '--bg-pattern',
+        `linear-gradient(135deg, rgba(${rgb}, 0.04) 0%, transparent 50%, rgba(${rgb}, 0.03) 100%)`
+      );
     }
     window.jenny.accent = accent;
+  }
+
+  /* ── Palette del tema ──────────────────────────────────────────────────────
+     Le custom property non attraversano l'origine opaca dell'iframe: il resto
+     dei token del tema arriva serializzato dal parent (query string al primo
+     paint, `jenny:theme` a ogni cambio) — v. `APP_TOKEN_MAP` in shared/theme.js.
+
+     Nomi e valori sono comunque ripassati qui dentro: da dentro il frame non si
+     può verificare chi ha scritto nella query string o chi ha mandato il
+     messaggio. Il whitelist dei nomi impedisce di scrivere proprietà che il kit
+     non prevede, e il formato dei valori ammette solo colori — in particolare
+     tiene fuori `url(`, che sarebbe una richiesta di rete pilotabile da fuori. */
+  const KIT_TOKENS = new Set([
+    'bg-solid', 'bg', 'bg2', 'bg3', 'border', 'border2', 'glass-border',
+    'glass', 'glass-strong', 'hover-bg', 'text', 'text2', 'text3', 'heading',
+    'accent-hover', 'error', 'warning',
+  ]);
+  const COLOR = /^#[0-9a-f]{3,8}$|^rgba?\([\d.,\s%/]+\)$/i;
+
+  function applyTokens(spec) {
+    if (typeof spec !== 'string' || !spec) return;
+    const root = document.documentElement.style;
+    const applied = {};
+    for (const pair of spec.split(';')) {
+      const sep = pair.indexOf(':');
+      if (sep < 1) continue;
+      const name = pair.slice(0, sep).trim();
+      const value = pair.slice(sep + 1).trim();
+      if (!KIT_TOKENS.has(name) || !COLOR.test(value)) continue;
+      root.setProperty('--' + name, value);
+      applied[name] = value;
+    }
+    // I fondi delle pillole di stato seguono il colore che accompagnano: senza
+    // questo `.badge-err` avrebbe il testo del tema su un alone rosso fisso.
+    for (const tone of ['error', 'warning']) {
+      const rgb = rgbOf(applied[tone]);
+      if (rgb) root.setProperty(`--${tone}-bg`, `rgba(${rgb}, 0.10)`);
+    }
   }
 
   document.documentElement.setAttribute('data-theme', theme);
@@ -158,6 +210,7 @@
       const next = msg.theme === 'light' ? 'light' : 'dark';
       document.documentElement.setAttribute('data-theme', next);
       window.jenny.theme = next;
+      applyTokens(msg.tokens);
       applyAccent(msg.accent, msg.onAccent);
     } else if (msg.type === 'jenny:go-back') {
       // Prima il dialog più in alto, poi la schermata: l'ordine è quello della
@@ -175,5 +228,6 @@
   });
 
   window.jenny = { slug, theme, lang, accent: null, action, discuss, navigate, back };
+  applyTokens(qs.get('tokens'));
   applyAccent(qs.get('accent'), qs.get('onAccent'));
 })();

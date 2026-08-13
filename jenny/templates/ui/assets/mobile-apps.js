@@ -5,7 +5,7 @@ import { escapeHtml, showToast } from './shared/utils.js';
 import { confirmDialog } from './shared/dialog.js';
 import { i18n } from './shared/i18n.js';
 import { wsManager } from './shared/ws-manager.js';
-import { currentTheme } from './shared/theme.js';
+import { currentTheme, themeTokens } from './shared/theme.js';
 import { setupLongPress } from './shared/longpress.js';
 import { advancedMode } from './shared/advanced-mode.js';
 
@@ -52,11 +52,14 @@ export class AppsController {
       if (e.detail?.event === 'apps_list_changed') this._reloadJennyApps();
     });
     // SPA theme toggled while an app is open → restamp the iframe's theme.
-    // Apps receive the resolved binary scheme plus the theme accent.
+    // Apps receive the resolved binary scheme, the theme accent and the rest of
+    // the palette (`themeTokens`): senza quest'ultima l'app resterebbe alla
+    // copia statica di jenny-kit.css e solo l'accent seguirebbe il tema.
     new MutationObserver(() => {
       const t = currentTheme();
       this._openApp?.iframe.contentWindow?.postMessage(
-        { type: 'jenny:theme', theme: t.scheme, accent: t.accent, onAccent: t.onAccent }, '*');
+        { type: 'jenny:theme', theme: t.scheme, accent: t.accent, onAccent: t.onAccent,
+          tokens: themeTokens() }, '*');
     }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
     window.addEventListener('advancedmodechange', () => this.render());
   }
@@ -361,7 +364,8 @@ export class AppsController {
     const src = `/apps/${encodeURIComponent(slug)}/index.html`
       + `?token=${encodeURIComponent(api.getSecret())}`
       + `&theme=${encodeURIComponent(t.scheme)}&lang=${encodeURIComponent(lang)}`
-      + `&accent=${encodeURIComponent(t.accent)}&onAccent=${encodeURIComponent(t.onAccent)}`;
+      + `&accent=${encodeURIComponent(t.accent)}&onAccent=${encodeURIComponent(t.onAccent)}`
+      + `&tokens=${encodeURIComponent(themeTokens())}`;
 
     this.closeApp();
     const overlay = document.createElement('div');

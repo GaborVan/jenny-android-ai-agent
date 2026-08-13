@@ -20,6 +20,36 @@ STORAGE_OPS = {"append", "set", "update", "delete", "query"}
 HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
 SECRET_KEYS = {"token", "password", "apikey", "api_key", "key", "secret", "bearer"}
 
+# Colori scritti a mano nel CSS dell'app. La regola "colori sempre dalle
+# variabili, mai hex fissi" era in references/manifest.md ma non la applicava
+# nessuno: un'app poteva essere interamente indaco e passare con 0 rilievi,
+# restando dello stesso colore su tutti e 7 i temi.
+HEX_COLOR_RE = re.compile(r"#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3}(?:[0-9a-fA-F]{2})?)?(?![0-9a-fA-F])")
+# `#f0f {` è un selettore d'id, non un colore: a destra di un hex-colore non si
+# arriva mai a una graffa aperta restando fra i caratteri di un selettore.
+SELECTOR_TAIL_RE = re.compile(r"""^[\s,>+~.#\w\[\]='"()-]*\{""")
+
+
+def css_regions(html):
+    """I punti dell'HTML dove un hex è un colore: <style> e attributi style."""
+    for match in re.finditer(r"<style\b[^>]*>(.*?)</style>", html, re.S | re.I):
+        yield match.group(1)
+    for match in re.finditer(r"""\sstyle\s*=\s*(["'])(.*?)\1""", html, re.S | re.I):
+        yield match.group(2)
+
+
+def hardcoded_colors(html):
+    """Colori esadecimali nel CSS dell'app, in ordine di apparizione, senza duplicati."""
+    found = []
+    for css in css_regions(html):
+        for match in HEX_COLOR_RE.finditer(css):
+            if SELECTOR_TAIL_RE.match(css[match.end():]):
+                continue
+            value = match.group(0).lower()
+            if value not in found:
+                found.append(value)
+    return found
+
 
 def validate_action(action, index, has_server, errors, warnings):
     where = f"actions[{index}]"
@@ -182,6 +212,14 @@ def validate_app(app_dir):
             warnings.append(
                 "app/index.html does not load the SDK (/html-mobile/assets/apps/jenny-sdk.js) "
                 "— use jenny.action() for all action calls"
+            )
+        hexes = hardcoded_colors(html)
+        if hexes:
+            shown = ", ".join(hexes[:6]) + ("..." if len(hexes) > 6 else "")
+            warnings.append(
+                f"app/index.html hardcodes {len(hexes)} color(s) in CSS ({shown}) — these "
+                "ignore the user's theme and stay the same on all 7 of them; color with the "
+                "kit tokens instead (var(--accent), var(--text), var(--bg2), ...)"
             )
         if re.search(r"fetch\s*\(\s*[`'\"][^)]*?/api/apps/", html):
             warnings.append(

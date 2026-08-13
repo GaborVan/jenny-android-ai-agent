@@ -2,7 +2,16 @@
    Apps run in sandboxed iframes with an opaque origin: CSS custom properties
    do NOT cross the iframe boundary, so this file carries its own copies of
    the SPA theme tokens (source of truth: mobile-style.css). jenny-sdk.js
-   stamps data-theme on <html> from the iframe query string. */
+   stamps data-theme on <html> from the iframe query string.
+
+   I due blocchi qui sotto sono solo la *riserva*: la palette del tema attivo
+   arriva a runtime dall'SDK (`APP_TOKEN_MAP` in shared/theme.js la serializza
+   dai valori calcolati della SPA), perché questo file da solo non può
+   conoscere quale dei 7 temi è in uso. La riserva porta quindi i colori dei
+   due temi di default — chanel per lo scuro, pietra per il chiaro, come in
+   `MIGRATION` — e non un accent inventato: quando erano indaco, un accent che
+   nessun tema ha, i punti che l'SDK non riscriveva ancora (il velo di sfondo
+   del <body>, il pressed dei bottoni primari) restavano blu per sempre. */
 
 @import url("/html-mobile/assets/vendor/fonts/google-fonts.css");
 @import url("/html-mobile/assets/vendor/@tabler/icons-webfont@3.19.0/dist/tabler-icons.min.css");
@@ -16,10 +25,10 @@
   --text:        #d4d4d8;
   --text2:       #8b8b96;
   --text3:       #52525e;
-  --accent:      #818cf8;
-  --accent-hover:#a5b4fc;
-  --accent-subtle: rgba(129, 140, 248, 0.15);
-  --on-accent:   #ffffff;
+  --accent:      #f4f1ea;
+  --accent-hover:#ffffff;
+  --accent-subtle: rgba(244, 241, 234, 0.15);
+  --on-accent:   #141414;
   --green:       #22c55e;
   --success-bg:  rgba(34,197,94,.10);
   --error:       #ef4444;
@@ -32,7 +41,7 @@
   --glass-strong:rgba(255, 255, 255, 0.06);
   --glass-border:rgba(255, 255, 255, 0.08);
   --bg-solid:    #0c0c12;
-  --bg-pattern:  linear-gradient(135deg, rgba(129,140,248,0.03) 0%, transparent 50%, rgba(129,140,248,0.02) 100%);
+  --bg-pattern:  linear-gradient(135deg, rgba(244,241,234,0.04) 0%, transparent 50%, rgba(244,241,234,0.03) 100%);
   --radius:      10px;
   --radius-sm:   6px;
   --radius-pill: 999px;
@@ -49,10 +58,10 @@
   --text:        #1a1a22;
   --text2:       #6b6b78;
   --text3:       #9b9ba8;
-  --accent:      #6366f1;
-  --accent-hover:#4f46e5;
-  --accent-subtle: rgba(99, 102, 241, 0.10);
-  --on-accent:   #ffffff;
+  --accent:      #8c6f4e;
+  --accent-hover:#a08258;
+  --accent-subtle: rgba(140, 111, 78, 0.15);
+  --on-accent:   #f4f1ec;
   --green:       #16a34a;
   --success-bg:  rgba(22,163,74,.08);
   --error:       #dc2626;
@@ -65,7 +74,7 @@
   --glass-strong:rgba(255, 255, 255, 0.65);
   --glass-border:rgba(255, 255, 255, 0.55);
   --bg-solid:    #f0f0f4;
-  --bg-pattern:  linear-gradient(135deg, rgba(99,102,241,0.04) 0%, transparent 50%, rgba(99,102,241,0.03) 100%);
+  --bg-pattern:  linear-gradient(135deg, rgba(140,111,78,0.04) 0%, transparent 50%, rgba(140,111,78,0.03) 100%);
 }
 
 /* ── Classless base: semantic HTML looks native with zero classes ── */
