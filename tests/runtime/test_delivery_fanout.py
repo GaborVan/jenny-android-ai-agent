@@ -10,6 +10,7 @@ from jenny.bus.events import INTERNAL_CHANNEL, OutboundMessage
 from jenny.bus.queue import MessageBus
 from jenny.runtime.delivery import ChannelDeliverer
 from jenny.session.keys import UNIFIED_SESSION_KEY
+from jenny.webui.metadata import WEBUI_TURN_METADATA_KEY
 
 
 class StubSession:
@@ -173,3 +174,76 @@ async def test_legacy_behavior_without_extra_targets() -> None:
     assert len(published) == 1
     assert published[0].channel == "telegram"
     assert not published[0].metadata.get("_mirror")
+
+
+async def test_proactive_delivery_stamps_a_webui_turn_id() -> None:
+    """Ogni consegna proattiva porta la chiave del turno WebUI.
+
+    Senza di essa ``TranscriptRecorder._annotate_turn`` esce senza stampare
+    ``turn_id``/``turn_phase``/``turn_seq`` sul record, e nel replay
+    ``_same_turn`` considera quel record "stesso turno" di qualunque altro.
+    Misurato sul dispositivo il 2026-08-13: quattro avvisi heartbeat scritti
+    consecutivi nel transcript (righe 17720-17723) tutti con ``turn_id: None``,
+    fra un turno utente e un turno cron che invece il proprio id l'avevano —
+    e in chat ne compariva solo l'ultimo.
+    """
+    bus = MessageBus()
+    deliverer = ChannelDeliverer(
+        bus=bus, session_manager=StubSessionManager(),
+        extra_targets=lambda: [("telegram", "42")],
+    )
+    await deliverer.deliver(
+        OutboundMessage(channel="websocket", chat_id="default", content="avviso"),
+        proactive=True,
+    )
+    published = _drain(bus)
+    assert len(published) == 2
+    # Il primario websocket è quello che scrive il transcript: l'id serve a lui.
+    ids = {m.metadata.get(WEBUI_TURN_METADATA_KEY) for m in published}
+    assert len(ids) == 1
+    turn_id = ids.pop()
+    assert isinstance(turn_id, str) and turn_id.startswith("proactive:")
+
+
+async def test_each_proactive_delivery_gets_its_own_turn_id() -> None:
+    """Due avvisi distinti sono due turni distinti: è l'asimmetria fra i loro id
+    che impedisce al replay di fonderli."""
+    bus = MessageBus()
+    deliverer = ChannelDeliverer(bus=bus, session_manager=StubSessionManager())
+    for text in ("primo", "secondo"):
+        await deliverer.deliver(
+            OutboundMessage(channel="websocket", chat_id="default", content=text),
+            proactive=True,
+        )
+    published = _drain(bus)
+    assert len(published) == 2
+    first, second = (m.metadata[WEBUI_TURN_METADATA_KEY] for m in published)
+    assert first != second
+
+
+async def test_non_proactive_delivery_gets_no_turn_id() -> None:
+    """Una consegna dentro la conversazione corrente eredita già l'id del turno
+    dal canale: qui non si conia niente."""
+    bus = MessageBus()
+    deliverer = ChannelDeliverer(bus=bus, session_manager=StubSessionManager())
+    await deliverer.deliver(
+        OutboundMessage(channel="websocket", chat_id="default", content="risposta")
+    )
+    published = _drain(bus)
+    assert WEBUI_TURN_METADATA_KEY not in published[0].metadata
+
+
+async def test_existing_turn_id_is_preserved() -> None:
+    """``cron_proactive_delivery_metadata`` conia già il proprio id per il monitor
+    cron: il deliverer riempie solo il buco, non sovrascrive."""
+    bus = MessageBus()
+    deliverer = ChannelDeliverer(bus=bus, session_manager=StubSessionManager())
+    await deliverer.deliver(
+        OutboundMessage(
+            channel="websocket", chat_id="default", content="promemoria",
+            metadata={WEBUI_TURN_METADATA_KEY: "cron:job-1:abc"},
+        ),
+        proactive=True,
+    )
+    published = _drain(bus)
+    assert published[0].metadata[WEBUI_TURN_METADATA_KEY] == "cron:job-1:abc"

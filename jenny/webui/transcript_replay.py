@@ -92,9 +92,28 @@ def replay_transcript_to_ui_messages(
         return fields
 
     def _same_turn(message: dict[str, Any], turn_fields: dict[str, Any]) -> bool:
+        """Se i due record appartengano allo stesso turno.
+
+        Un id mancante su **entrambi** i lati resta permissivo: è il caso dei
+        transcript scritti prima che il turno venisse annotato, che devono
+        continuare a ripiegarsi come sempre.
+
+        Un id presente da un lato solo, invece, ora dice "turni diversi". Prima
+        bastava che *uno* mancasse per far combaciare tutto, e i tre punti di
+        fusione che consultano questo predicato — aggancio del reasoning,
+        adozione del placeholder, ``absorb_complete`` — assorbivano record di
+        turni estranei l'uno nell'altro. Non è un caso di confine: ogni append
+        al transcript passa una ``phase`` non nulla, quindi dentro un turno l'id
+        c'è per tutti i record o per nessuno, e l'asimmetria si presenta solo
+        *fra* turni diversi. È esattamente lì che serve separarli.
+        """
         turn_id = turn_fields.get("turnId")
         message_turn_id = message.get("turnId")
-        return not turn_id or not message_turn_id or turn_id == message_turn_id
+        if not turn_id and not message_turn_id:
+            return True
+        if not turn_id or not message_turn_id:
+            return False
+        return turn_id == message_turn_id
 
     def _ensure_activity_segment() -> str:
         return active_activity_segment_id or _new_activity_segment()

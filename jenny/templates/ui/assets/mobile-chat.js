@@ -687,7 +687,19 @@ export class ChatController {
         continue;
       }
       const turnId = msg.turnId || msg.turn_id;
-      if (!currentTurn || currentTurn.turnId !== turnId) {
+      // Un messaggio senza turno non entra MAI nel turno precedente. Prima la
+      // condizione era `currentTurn.turnId !== turnId`, e con due id assenti
+      // `undefined !== undefined` è falso: ogni messaggio assistant privo di id
+      // veniva concatenato al precedente in un'unica bolla. Misurato sul
+      // dispositivo il 2026-08-13: quattro avvisi heartbeat scritti fra 01:31 e
+      // 05:02 (righe 17720-17723 del transcript, tutte con `turn_id: None`)
+      // resi come una bolla sola da quattro paragrafi. La causa a monte è
+      // corretta nel deliverer, che ora conia un id per ogni consegna
+      // proattiva; questa guardia serve alla cronologia **già scritta**, che
+      // quell'id non l'avrà mai. Dentro un turno vero tutte le parti portano lo
+      // stesso id (ogni append al transcript passa una `phase` non nulla),
+      // quindi qui non si spezza niente che fosse legittimamente unito.
+      if (!currentTurn || !turnId || currentTurn.turnId !== turnId) {
         if (currentTurn) turns.push(currentTurn);
         currentTurn = { turnId, toolEvents: [], reasoning: '', content: '', fileEdits: [], media: [] };
       }

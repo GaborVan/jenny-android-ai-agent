@@ -208,3 +208,62 @@ def test_ordinary_message_carries_no_session_boundary_flag() -> None:
     lines = [{"event": "message", "chat_id": "c1", "text": "ciao"}]
     messages = replay_transcript_to_ui_messages(lines)
     assert "session_boundary" not in messages[0]
+
+
+def _reasoning_then_answer(
+    reasoning_turn: str | None, answer_turn: str | None
+) -> list[dict[str, object]]:
+    """Un placeholder di solo-reasoning seguito da una risposta completa.
+
+    È la coppia su cui ``absorb_complete`` decide se fondere o accodare, e
+    l'unico posto dove l'asimmetria degli id è osservabile dall'API pubblica.
+    """
+    reasoning: dict[str, object] = {"event": "message", "kind": "reasoning", "text": "penso"}
+    answer: dict[str, object] = {"event": "message", "text": "risposta"}
+    if reasoning_turn:
+        reasoning |= {"turn_id": reasoning_turn, "turn_phase": "reasoning"}
+    if answer_turn:
+        answer |= {"turn_id": answer_turn, "turn_phase": "answer"}
+    return [reasoning, answer]
+
+
+def test_answer_absorbs_reasoning_placeholder_of_the_same_turn() -> None:
+    messages = replay_transcript_to_ui_messages(_reasoning_then_answer("t1", "t1"))
+    assert len(messages) == 1
+    assert messages[0]["content"] == "risposta"
+    assert messages[0]["reasoning"] == "penso"
+
+
+def test_answer_does_not_absorb_a_placeholder_of_another_turn() -> None:
+    messages = replay_transcript_to_ui_messages(_reasoning_then_answer("t1", "t2"))
+    assert len(messages) == 2
+    assert messages[1]["content"] == "risposta"
+
+
+def test_turnless_record_no_longer_absorbs_a_turn_annotated_one() -> None:
+    """Regressione: bastava che *uno* dei due lati fosse senza id perché
+    ``_same_turn`` dicesse "stesso turno", e record di turni estranei venivano
+    assorbiti l'uno nell'altro. Ora l'asimmetria significa turni diversi."""
+    assert len(replay_transcript_to_ui_messages(_reasoning_then_answer(None, "t2"))) == 2
+    assert len(replay_transcript_to_ui_messages(_reasoning_then_answer("t1", None))) == 2
+
+
+def test_two_records_without_any_turn_id_still_fold_as_before() -> None:
+    """Compatibilità coi transcript scritti prima che il turno venisse annotato:
+    id assente su entrambi i lati resta permissivo."""
+    messages = replay_transcript_to_ui_messages(_reasoning_then_answer(None, None))
+    assert len(messages) == 1
+    assert messages[0]["content"] == "risposta"
+
+
+def test_consecutive_proactive_answers_stay_distinct_messages() -> None:
+    """Quattro avvisi proattivi consecutivi, ognuno col proprio turno, restano
+    quattro bolle. È la forma che il transcript ha ora sul dispositivo (righe
+    17720-17723), lì scritta senza ``turn_id``."""
+    lines: list[dict[str, object]] = [
+        {"event": "message", "text": f"avviso {i}", "turn_id": f"proactive:{i}",
+         "turn_phase": "answer"}
+        for i in range(4)
+    ]
+    messages = replay_transcript_to_ui_messages(lines)
+    assert [m["content"] for m in messages] == [f"avviso {i}" for i in range(4)]

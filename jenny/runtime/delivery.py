@@ -7,6 +7,7 @@ rispecchia nella sessione del canale così la cronologia resta coerente.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
@@ -14,6 +15,7 @@ from loguru import logger
 
 from jenny.bus.events import INTERNAL_CHANNEL, OutboundMessage
 from jenny.session.keys import session_key_for_channel
+from jenny.webui.metadata import WEBUI_TURN_METADATA_KEY
 
 if TYPE_CHECKING:
     from jenny.bus.queue import MessageBus
@@ -76,6 +78,23 @@ class ChannelDeliverer:
         metadata = dict(msg.metadata or {})
         record = record or bool(metadata.pop("_record_channel_delivery", False))
         proactive = proactive or bool(metadata.pop("_proactive_fanout", False))
+        # Ogni consegna proattiva è un turno a sé, e deve dirlo. Il turno che la
+        # produce è interno (heartbeat, cron, Dream) e i suoi metadata non
+        # portano la chiave del turno WebUI, quindi
+        # ``TranscriptRecorder._annotate_turn`` esce senza stampare né
+        # ``turn_id`` né ``turn_phase``/``turn_seq`` sul record — e nel replay
+        # ``_same_turn`` considera "stesso turno" qualunque record privo di id.
+        # Misurato sul dispositivo il 2026-08-13: quattro avvisi heartbeat
+        # consegnati fra 01:31 e 05:02 stanno nel transcript come quattro record
+        # ``message`` consecutivi (righe 17720-17723) **tutti** con
+        # ``turn_id: None``, incastonati fra un turno utente e un turno cron che
+        # il proprio id l'avevano. In chat ne compare solo l'ultimo. Questa
+        # patch chiude la causa a monte (l'id mancante); quale passo del
+        # rendering scarti gli altri tre non è ancora identificato.
+        # Chi ha già coniato il proprio id (``cron_proactive_delivery_metadata``,
+        # per il monitor cron) lo mantiene: qui si riempie solo il buco.
+        if proactive and not metadata.get(WEBUI_TURN_METADATA_KEY):
+            metadata[WEBUI_TURN_METADATA_KEY] = f"proactive:{uuid.uuid4().hex}"
         if metadata != (msg.metadata or {}):
             msg = OutboundMessage(
                 channel=msg.channel,
