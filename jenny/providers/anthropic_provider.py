@@ -15,6 +15,7 @@ from jenny.providers.anthropic_conversion import (
     AnthropicConversionMixin,
     _gen_tool_id,
     derive_tool_id,
+    replayable_thinking_blocks,
 )
 from jenny.providers.base import (
     LLMProvider,
@@ -258,12 +259,8 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
                     content_parts.append(text)
             elif block_type == "tool_use":
                 tool_uses.append(block)
-            elif block_type == "thinking":
-                thinking_blocks.append({
-                    "type": "thinking",
-                    "thinking": block.get("thinking", ""),
-                    "signature": block.get("signature", ""),
-                })
+            elif block_type in ("thinking", "redacted_thinking"):
+                thinking_blocks.append(block)
 
         tool_calls = [
             ToolCallRequest(
@@ -303,7 +300,7 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
             tool_calls=tool_calls,
             finish_reason=finish_reason,
             usage=usage,
-            thinking_blocks=thinking_blocks or None,
+            thinking_blocks=replayable_thinking_blocks(thinking_blocks) or None,
         )
 
     # ------------------------------------------------------------------
@@ -402,6 +399,7 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
         tool_blocks: dict[str, dict[str, Any]] = {}
+        thinking_buffers: dict[str, dict[str, Any]] = {}
         finish_reason = "stop"
         usage: dict[str, int] = {}
 
@@ -433,7 +431,8 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
                     if event_type == "content_block_start":
                         block = event.get("content_block") or {}
                         index = event.get("index", 0)
-                        if block.get("type") == "tool_use":
+                        block_type = block.get("type")
+                        if block_type == "tool_use":
                             tool_blocks[str(index)] = {
                                 "id": block.get("id", ""),
                                 "name": block.get("name", ""),
@@ -446,6 +445,17 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
                                     "name": str(block.get("name") or ""),
                                     "arguments_delta": "",
                                 })
+                        elif block_type == "thinking":
+                            thinking_buffers[str(index)] = {
+                                "type": "thinking",
+                                "thinking": str(block.get("thinking") or ""),
+                                "signature": str(block.get("signature") or ""),
+                            }
+                        elif block_type == "redacted_thinking":
+                            thinking_buffers[str(index)] = {
+                                "type": "redacted_thinking",
+                                "data": str(block.get("data") or ""),
+                            }
                     elif event_type == "content_block_delta":
                         delta = event.get("delta") or {}
                         index = event.get("index", 0)
@@ -460,8 +470,20 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
                             text = delta.get("thinking", "")
                             if text:
                                 reasoning_parts.append(text)
+                                buf = thinking_buffers.get(str(index))
+                                if buf is not None and "thinking" in buf:
+                                    buf["thinking"] += text
                                 if on_thinking_delta:
                                     await on_thinking_delta(text)
+                        elif delta_type == "signature_delta":
+                            # La firma è ciò che rende un blocco thinking
+                            # RIMANDABILE indietro: con thinking + tool use
+                            # l'API pretende di riavere i blocchi firmati del
+                            # turno, e senza questo delta non ne conservavamo
+                            # nemmeno uno.
+                            buf = thinking_buffers.get(str(index))
+                            if buf is not None and "signature" in buf:
+                                buf["signature"] += str(delta.get("signature") or "")
                         elif delta_type == "input_json_delta":
                             partial = delta.get("partial_json", "")
                             if partial:
@@ -540,6 +562,7 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
             finish_reason=stop_map.get(finish_reason, finish_reason),
             usage=usage,
             reasoning_content="".join(reasoning_parts) or None,
+            thinking_blocks=replayable_thinking_blocks(thinking_buffers.values()) or None,
         )
 
     # ------------------------------------------------------------------

@@ -12,6 +12,7 @@ import hashlib
 import re
 import secrets
 import string
+from collections.abc import Iterable
 from typing import Any
 
 from jenny.providers.base import tool_arguments_object_for_replay
@@ -33,6 +34,30 @@ def derive_tool_id(seed: str, idx: int, salt: int = 1) -> str:
     """
     digest = hashlib.sha1(f"{seed}:{idx}:{salt}".encode()).hexdigest()
     return f"toolu_{digest[:22]}"
+
+
+def replayable_thinking_blocks(blocks: Iterable[Any]) -> list[dict[str, Any]]:
+    """Filtra i blocchi thinking che si possono rimandare all'API.
+
+    Un blocco ``thinking`` vale solo con la sua firma: l'API rifiuta quelli non
+    firmati, quindi uno senza firma va scartato, non inviato — scartarlo riporta
+    al comportamento di prima (nessun blocco), inviarlo sarebbe un 400. Un
+    ``redacted_thinking`` non ha testo né firma: porta ``data``, opaco, e va
+    ripassato tale e quale.
+    """
+    result: list[dict[str, Any]] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "thinking" and block.get("signature"):
+            result.append({
+                "type": "thinking",
+                "thinking": block.get("thinking", ""),
+                "signature": block["signature"],
+            })
+        elif block.get("type") == "redacted_thinking" and block.get("data"):
+            result.append({"type": "redacted_thinking", "data": block["data"]})
+    return result
 
 
 _VALID_TOOL_ID = re.compile(r"^[a-zA-Z0-9_-]+$")
@@ -119,13 +144,11 @@ class AnthropicConversionMixin:
         blocks: list[dict[str, Any]] = []
         content = msg.get("content")
 
-        for tb in msg.get("thinking_blocks") or []:
-            if isinstance(tb, dict) and tb.get("type") == "thinking":
-                blocks.append({
-                    "type": "thinking",
-                    "thinking": tb.get("thinking", ""),
-                    "signature": tb.get("signature", ""),
-                })
+        # I blocchi thinking vanno PRIMA di testo e tool_use: è l'ordine in cui
+        # il modello li ha prodotti, ed è quello che l'API si aspetta di
+        # riavere. ``replayable_thinking_blocks`` scarta quelli inutilizzabili
+        # invece di farli rifiutare dall'API.
+        blocks.extend(replayable_thinking_blocks(msg.get("thinking_blocks") or []))
 
         if isinstance(content, str) and content:
             blocks.append({"type": "text", "text": content})
