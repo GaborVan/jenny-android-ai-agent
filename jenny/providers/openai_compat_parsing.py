@@ -21,6 +21,7 @@ from jenny.providers.openai_compat_helpers import (
     _get,
     _short_tool_id,
 )
+from jenny.providers.tool_ids import dedupe_tool_ids
 
 
 class ResponseParsingMixin:
@@ -279,11 +280,15 @@ class ResponseParsingMixin:
         # Some providers (e.g. Zhipu/GLM) reuse the same tool_call id for
         # parallel tool calls in streaming mode. Deduplicate before building
         # the response so downstream tool messages don't collide.
-        _seen_tc_ids: set[str] = set()
-        for b in tc_bufs.values():
-            if not b["id"] or b["id"] in _seen_tc_ids:
-                b["id"] = _short_tool_id()
-            _seen_tc_ids.add(b["id"])
+        bufs = list(tc_bufs.values())
+        for buf, unique_id in zip(
+            bufs,
+            dedupe_tool_ids(
+                [b["id"] for b in bufs],
+                replacement=lambda _raw, _idx: _short_tool_id(),
+            ),
+        ):
+            buf["id"] = unique_id
 
         return LLMResponse(
             content="".join(content_parts) or None,

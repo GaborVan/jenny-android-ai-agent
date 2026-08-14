@@ -7,7 +7,6 @@ import hashlib
 import json
 import time
 import uuid
-from collections import deque
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import suppress
 from typing import Any
@@ -53,6 +52,7 @@ from jenny.providers.openai_responses import (
     convert_tools,
     parse_response_output,
 )
+from jenny.providers.tool_ids import unique_tool_ids_in_history
 
 
 class OpenAICompatProvider(ResponseParsingMixin, LLMProvider):
@@ -210,46 +210,25 @@ class OpenAICompatProvider(ResponseParsingMixin, LLMProvider):
     def _sanitize_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Strip non-standard keys, disambiguate colliding tool_call IDs."""
         sanitized = LLMProvider._sanitize_request_messages(messages, _ALLOWABLE_MSG_KEYS)
-        pending_tool_ids: dict[str, deque[str]] = {}
-
-        def unique_tool_id(value: Any, used_ids: set[str], idx: int) -> str:
-            base = value if isinstance(value, str) and value else _short_tool_id()
-            if base not in used_ids:
-                return base
-            seed = value if isinstance(value, str) and value else base
-            salt = 1
-            while True:
-                candidate = self._normalize_tool_call_id(f"{seed}:{idx}:{salt}")
-                if isinstance(candidate, str) and candidate not in used_ids:
-                    return candidate
-                salt += 1
-
-        def map_tool_result_id(value: Any) -> Any:
-            if not isinstance(value, str):
-                return value
-            queue = pending_tool_ids.get(value)
-            if queue:
-                mapped = queue.popleft()
-                if not queue:
-                    pending_tool_ids.pop(value, None)
-                return mapped
-            return value
+        # Unicità/riaccoppiamento degli id: regola condivisa con l'Anthropic
+        # provider, vedi ``providers/tool_ids.py``. Il resto del loop qui sotto è
+        # wire-specifico e resta dove sta.
+        sanitized = unique_tool_ids_in_history(
+            sanitized,
+            fresh_id=_short_tool_id,
+            derive_id=lambda seed, idx, salt: self._normalize_tool_call_id(
+                f"{seed}:{idx}:{salt}"
+            ),
+        )
 
         for clean in sanitized:
             if isinstance(clean.get("tool_calls"), list):
                 normalized = []
-                used_ids: set[str] = set()
-                for idx, tc in enumerate(clean["tool_calls"]):
+                for tc in clean["tool_calls"]:
                     if not isinstance(tc, dict):
                         normalized.append(tc)
                         continue
                     tc_clean = dict(tc)
-                    raw_id = tc_clean.get("id")
-                    mapped_id = unique_tool_id(raw_id, used_ids, idx)
-                    tc_clean["id"] = mapped_id
-                    used_ids.add(mapped_id)
-                    if isinstance(raw_id, str) and raw_id:
-                        pending_tool_ids.setdefault(raw_id, deque()).append(mapped_id)
                     function = tc_clean.get("function")
                     if isinstance(function, dict):
                         function_clean = dict(function)
@@ -266,8 +245,6 @@ class OpenAICompatProvider(ResponseParsingMixin, LLMProvider):
                     # Some OpenAI-compatible gateways reject assistant messages
                     # that mix non-empty content with tool_calls.
                     clean["content"] = None
-            if "tool_call_id" in clean and clean["tool_call_id"]:
-                clean["tool_call_id"] = map_tool_result_id(clean["tool_call_id"])
         return self._enforce_role_alternation(sanitized)
 
     # ------------------------------------------------------------------
