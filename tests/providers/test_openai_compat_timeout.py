@@ -1,5 +1,7 @@
 from unittest.mock import patch, sentinel
 
+import pytest
+
 from jenny.providers.openai_compat_helpers import (
     _LOCAL_REQUEST_TIMEOUT_S,
     _OPENAI_COMPAT_REQUEST_TIMEOUT_S,
@@ -72,3 +74,16 @@ async def test_the_shared_env_name_also_applies_here(monkeypatch) -> None:
     await provider._ensure_client()
 
     assert provider._http_client.timeout.read == 450.0
+
+
+@pytest.mark.parametrize("bad", ["0", "-5", "abc"])
+async def test_a_malformed_timeout_falls_back_to_the_default(monkeypatch, bad: str) -> None:
+    """Zero non disabilita il timeout: httpx lo prende alla lettera."""
+    monkeypatch.setenv("JENNY_OPENAI_COMPAT_TIMEOUT_S", bad)
+
+    provider = OpenAICompatProvider(
+        api_key="test-key", api_base="https://example.com/v1", default_model="test"
+    )
+    await provider._ensure_client()
+
+    assert provider._http_client.timeout.read == _OPENAI_COMPAT_REQUEST_TIMEOUT_S

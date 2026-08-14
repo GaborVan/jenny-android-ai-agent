@@ -67,8 +67,17 @@ def llm_http_timeout_s(default: float) -> float:
     solo per quello che ha nel nome.
     """
     for name in ("JENNY_LLM_HTTP_TIMEOUT_S", "JENNY_OPENAI_COMPAT_TIMEOUT_S"):
-        if os.environ.get(name, "").strip():
-            return _float_env(name, default)
+        raw = os.environ.get(name, "").strip()
+        if not raw:
+            continue
+        value = _float_env(name, default)
+        # Un timeout a zero o negativo non "disabilita" niente: httpx lo prende
+        # alla lettera e fa scadere ogni richiesta immediatamente. Va trattato
+        # come valore malformato, come faceva il resolver da cui questo arriva.
+        if value <= 0:
+            logger.warning("Ignoring non-positive {}={!r}; using {}", name, raw, default)
+            return default
+        return value
     return default
 
 
