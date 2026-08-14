@@ -245,3 +245,32 @@ async def test_two_large_results_no_longer_collide_on_disk(tmp_path: Path) -> No
         path.read_text() for path in (tmp_path / ".jenny" / "tool-results").rglob("*.txt")
     )
     assert stored == payloads
+
+
+async def test_the_streamed_id_is_already_the_final_one() -> None:
+    """Chi ascolta i delta deve vedere subito l'id che finirà nella history.
+
+    Il tracker file-edit e la UI chiavano per ``call_id``: se lo stream annuncia
+    un id e la risposta ne riporta un altro, gli eventi live e quelli finali
+    finiscono su due righe diverse. Deduplicare all'apertura del blocco, e non a
+    stream concluso, è ciò che tiene le due cose allineate.
+    """
+    seen: list[dict[str, Any]] = []
+    body = _tool_use_stream("call_dup", "call_dup")
+    provider = _provider(lambda _req: httpx.Response(
+        200, content=body, headers={"content-type": "text/event-stream"},
+    ))
+
+    async def collect(delta: dict[str, Any]) -> None:
+        seen.append(delta)
+
+    response = await provider.chat_stream(
+        messages=[{"role": "user", "content": "leggi"}], on_tool_call_delta=collect,
+    )
+
+    final_ids = [tc.id for tc in response.tool_calls]
+    announced = [d["call_id"] for d in seen if d.get("call_id")]
+    assert set(announced) == set(final_ids)
+    # E ogni delta di argomenti resta appeso alla sua chiamata.
+    per_index = {d["index"]: d["call_id"] for d in seen}
+    assert list(per_index.values()) == final_ids

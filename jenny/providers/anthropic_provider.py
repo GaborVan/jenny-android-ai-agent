@@ -256,6 +256,25 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _unique_stream_id(raw_id: str, index: Any, used: set[str]) -> str:
+        """Id libero per un ``tool_use`` appena annunciato in streaming.
+
+        Come ``tool_ids._unique_id``, ma applicato all'apertura del blocco
+        anziché a stream concluso: qui l'id viene subito emesso ai consumatori
+        dei delta, e cambiarlo dopo li disallineerebbe.
+        """
+        if raw_id and raw_id not in used:
+            return raw_id
+        seed = raw_id or "toolu"
+        position = index if isinstance(index, int) else 0
+        salt = 1
+        while True:
+            candidate = derive_tool_id(seed, position, salt)
+            if candidate not in used:
+                return candidate
+            salt += 1
+
+    @staticmethod
     def _unique_call_ids(blocks: list[dict[str, Any]]) -> list[str]:
         """Id univoci per i tool_use di *una* risposta, in ordine di arrivo.
 
@@ -449,15 +468,25 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
                         index = event.get("index", 0)
                         block_type = block.get("type")
                         if block_type == "tool_use":
+                            # Deduplica QUI, non alla fine dello stream: i
+                            # consumatori dei delta (tracker file-edit, UI)
+                            # chiavano per ``call_id``, e un id corretto solo a
+                            # posteriori li lascerebbe con eventi live su un id e
+                            # quelli finali su un altro.
+                            call_id = self._unique_stream_id(
+                                str(block.get("id") or ""),
+                                index,
+                                {buf["id"] for buf in tool_blocks.values()},
+                            )
                             tool_blocks[str(index)] = {
-                                "id": block.get("id", ""),
+                                "id": call_id,
                                 "name": block.get("name", ""),
                                 "arguments": "",
                             }
                             if on_tool_call_delta:
                                 await on_tool_call_delta({
                                     "index": index,
-                                    "call_id": str(block.get("id") or ""),
+                                    "call_id": call_id,
                                     "name": str(block.get("name") or ""),
                                     "arguments_delta": "",
                                 })

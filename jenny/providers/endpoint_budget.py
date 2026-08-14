@@ -17,6 +17,8 @@ from __future__ import annotations
 from ipaddress import ip_address
 from urllib.parse import urlparse
 
+from jenny.config.runtime_env import llm_http_timeout_s
+
 __all__ = [
     "DEFAULT_REQUEST_TIMEOUT_S",
     "LOCAL_REQUEST_TIMEOUT_S",
@@ -64,7 +66,5 @@ def request_timeout_s(*, local: bool = False) -> float:
     entrambi i casi; il nome storico ``JENNY_OPENAI_COMPAT_TIMEOUT_S`` resta
     valido, ma non è provider-specifico e non lo è mai stato.
     """
-    from jenny.config.runtime_env import llm_http_timeout_s
-
     default = LOCAL_REQUEST_TIMEOUT_S if local else DEFAULT_REQUEST_TIMEOUT_S
     return llm_http_timeout_s(default)

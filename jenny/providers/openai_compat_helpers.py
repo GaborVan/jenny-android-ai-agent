@@ -9,12 +9,9 @@ il provider → nessun ciclo. Il provider re-importa i nomi che usa.
 from __future__ import annotations
 
 import json
-import os
 import secrets
 import string
 from typing import Any
-
-from loguru import logger
 
 from jenny.providers.body_merge import deep_merge
 from jenny.providers.endpoint_budget import (
@@ -127,21 +124,6 @@ def _openai_compat_timeout_s(*, local: bool = False) -> float:
     condivisa con l'Anthropic provider.
     """
     return request_timeout_s(local=local)
-
-
-def _float_env(name: str, default: float) -> float:
-    raw = os.environ.get(name)
-    if raw is None or not raw.strip():
-        return default
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        logger.warning("Ignoring invalid {}={!r}; using {}", name, raw, default)
-        return default
-    if value <= 0:
-        logger.warning("Ignoring non-positive {}={!r}; using {}", name, raw, default)
-        return default
-    return value
 
 
 def _short_tool_id() -> str:
