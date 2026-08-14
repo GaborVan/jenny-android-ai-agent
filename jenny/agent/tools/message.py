@@ -14,7 +14,7 @@ from jenny.bus.events import OutboundMessage
 from jenny.config.paths import get_workspace_path
 from jenny.security.workspace_access import current_tool_workspace
 from jenny.security.workspace_policy import _safe_expanduser
-from jenny.session.turn_visibility import is_silent_turn
+from jenny.session.turn_visibility import is_silent_turn, mark_silent_turn
 
 # Sentinel di default per i flag per-turno: condiviso, mai mutato. Un turno vero
 # riceve il suo dict fresco da ``start_turn()``.
@@ -267,6 +267,17 @@ class MessageTool(Tool, ContextAware):
                 return f"Error: media path is not allowed: {str(e)}"
 
         metadata = dict(self._default_metadata.get()) if same_target else {}
+        # La visibilità del turno sopravvive al cambio di target. Un invio
+        # cross-channel butta via lo stato di *routing* dell'origine (message_id
+        # su tutti: instraderebbe la risposta nella chat sbagliata), ma la
+        # visibilità non è una proprietà del target: è del turno, risolta una
+        # volta al suo confine, e i consumatori a valle la leggono dai metadata
+        # (v. ``jenny.session.turn_visibility``). Serve al ChannelDeliverer, che
+        # da qui sa se questa consegna è un turno WebUI a sé — e deve quindi
+        # chiuderselo da solo — o se vive dentro un turno visibile che il suo
+        # ``turn_end`` ce l'ha già.
+        if not same_target and is_silent_turn(self._default_metadata.get()):
+            mark_silent_turn(metadata)
         if message_id:
             metadata["message_id"] = message_id
         # Un invio proattivo è l'unica cosa che il modello dice all'utente da

@@ -29,6 +29,7 @@ from jenny.bus.queue import MessageBus
 from jenny.providers.base import LLMResponse
 from jenny.session.keys import HEARTBEAT_SESSION_KEY, UNIFIED_SESSION_KEY
 from jenny.session.turn_visibility import silent_turn_metadata
+from jenny.webui.metadata import WEBUI_TURN_METADATA_KEY
 
 
 def _make_loop(tmp_path: Path) -> AgentLoop:
@@ -262,6 +263,56 @@ class TestTheOnlyWayOutIsTheMessageTool:
         assert outcome.disposition is TurnDisposition.SPOKE_VIA_TOOL
         assert outcome.message is None
         assert outcome.spoke is True
+
+    @pytest.mark.parametrize("origin_channel", ["websocket", "internal"])
+    async def test_the_alert_it_sends_is_a_turn_that_closes(
+        self, tmp_path: Path, origin_channel: str
+    ) -> None:
+        """L'unica uscita di un turno silenzioso apre un turno WebUI, e quel
+        turno deve chiudersi.
+
+        Il turno che manda l'avviso non ha vista WebUI, quindi nessun
+        ``turn_end`` arriva dal coordinator: senza quello del deliverer il
+        client resta con un turno aperto per sempre — mascotte incantata in
+        ``thinking``, e l'avviso successivo che sovrascrive la bolla del
+        precedente invece di aprirne una nuova.
+
+        Le due parametrizzazioni sono i due modi in cui l'avviso può partire:
+        stesso target del turno, o cross-channel (l'heartbeat gira sul canale
+        interno e consegna alla WebUI). Nel secondo il tool non eredita i
+        metadata del turno d'origine, e la visibilità deve arrivare comunque.
+        """
+        from jenny.agent.tools.context import RequestContext
+        from jenny.agent.tools.message import MessageTool
+        from jenny.runtime.delivery import ChannelDeliverer
+
+        bus = MessageBus()
+        deliverer = ChannelDeliverer(bus=bus, session_manager=MagicMock())
+        tool = MessageTool(send_callback=lambda msg: deliverer.deliver(msg))
+        tool.set_context(
+            RequestContext(
+                channel=origin_channel,
+                chat_id="default" if origin_channel == "websocket" else "heartbeat",
+                metadata=silent_turn_metadata(),
+            )
+        )
+
+        await tool.execute(
+            content="il monitoraggio delle piante non sta girando",
+            channel="websocket",
+            chat_id="default",
+        )
+
+        published = [await bus.consume_outbound() for _ in range(bus.outbound_size)]
+        assert [
+            (m.channel, bool(m.metadata.get("_turn_end"))) for m in published
+        ] == [("websocket", False), ("websocket", True)]
+        # Stesso turno: è l'id condiviso a far annotare la chiusura come
+        # ``complete`` di quell'avviso e non di un turno altrui.
+        assert (
+            published[1].metadata[WEBUI_TURN_METADATA_KEY]
+            == published[0].metadata[WEBUI_TURN_METADATA_KEY]
+        )
 
 
 class TestTheAnnouncePromptFollowsTheVisibility:

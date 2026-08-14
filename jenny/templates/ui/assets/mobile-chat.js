@@ -166,6 +166,9 @@ export class ChatController {
     this._currentMsg = null;
     this._currentThinking = null;
     this._currentContent = null;
+    // Turno a cui appartiene la bolla che stiamo componendo (v.
+    // `_applyTurnBoundary`). null = nessun turno in corso.
+    this._currentTurnId = null;
     this._toolStates = {};
     this._goalBanner = null;
     this._goalTimer = null;
@@ -988,7 +991,53 @@ export class ChatController {
     // mai renderizzata).
   }
 
+  /* Eventi che appartengono al rendering di un turno, e che quindi passano dal
+     confine di turno. Fuori: i frame fuori banda (subagent, modello runtime,
+     goal) e `user`, che il proprio azzeramento se lo fa già. */
+  static TURN_SCOPED_EVENTS = new Set([
+    'delta', 'reasoning_delta', 'reasoning_end', 'stream_end',
+    'message', 'file_edit', 'turn_end',
+  ]);
+
+  /* Confine di turno sui frame live: dice se questo frame va processato, e
+     apre una bolla nuova quando il turno cambia.
+
+     Ogni frame live porta il proprio `turn_id` — il recorder lo stampa sul
+     payload prima che parta sul filo — ma il client lo leggeva solo nella
+     cronologia. Nel live tutto finiva nella bolla corrente, e un turno può
+     atterrare *dentro* un altro: un avviso proattivo (heartbeat, cron, Dream)
+     è un turno a sé e non aspetta che la risposta in corso finisca. Da lì i due
+     sintomi, con una causa sola: l'avviso riusava la bolla della risposta
+     sovrascrivendone il testo, e il suo `turn_end` chiudeva un turno che non
+     era il suo.
+
+     Le regole seguono `_same_turn` lato server, con l'asimmetria che conta:
+
+     - frame senza id → vale il turno corrente. Non è un caso teorico: il retry
+       di una consegna parziale ricostruisce il payload con `skip_persist`, che
+       salta l'annotazione, quindi arriva senza id (misurato: il turn_end
+       ritrasmesso è `{event, chat_id}` e basta).
+     - nessun turno in corso → questo frame lo apre, e ne adotta l'id.
+     - id diverso da quello in corso → è un altro turno: `turn_end` non lo
+       riguarda e va ignorato, tutto il resto apre una bolla nuova. La risposta
+       interrotta a metà riprende nella propria: due bolle separate dall'avviso
+       sono l'ordine in cui le cose sono davvero successe. */
+  _applyTurnBoundary(msg) {
+    if (!ChatController.TURN_SCOPED_EVENTS.has(msg.event)) return true;
+    const turnId = msg.turn_id || msg.turnId || null;
+    if (!turnId || turnId === this._currentTurnId) return true;
+    if (this._currentTurnId === null) {
+      this._currentTurnId = turnId;
+      return true;
+    }
+    if (msg.event === 'turn_end') return false;
+    this._resetStreamState();
+    this._currentTurnId = turnId;
+    return true;
+  }
+
   handleMessage(msg) {
+    if (!this._applyTurnBoundary(msg)) return;
     switch (msg.event) {
       case 'delta':
         this._handleDelta(msg.text || '');
@@ -1337,6 +1386,8 @@ export class ChatController {
     this._currentMsg = null;
     this._currentThinking = null;
     this._currentContent = null;
+    // Il turno finisce con la sua bolla: il frame dopo ne adotterà uno nuovo.
+    this._currentTurnId = null;
     this._deltaBuffer = '';
     this._reasoningBuffer = '';
     this._reasoningSegmentClosed = false;

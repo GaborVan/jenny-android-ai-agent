@@ -156,7 +156,11 @@ async def test_the_heartbeat_alert_reaches_the_unified_session_end_to_end(
     result = await tool.execute(content=ALERT)
 
     assert "Message sent" in result
-    assert [m.content for m in published] == [ALERT]
+    # L'avviso, e dietro il ``turn_end`` che chiude il turno WebUI che ha
+    # aperto (v. ``ChannelDeliverer._close_webui_turn``): il turno silenzioso
+    # che l'ha prodotto non ne emette nessuno.
+    assert [m.content for m in published] == [ALERT, ""]
+    assert published[1].metadata.get("_turn_end") is True
     unified = loop.sessions.get_or_create(UNIFIED_SESSION_KEY).messages
     assert [m["content"] for m in unified] == [ALERT]
     assert loop.sessions.get_or_create("heartbeat").messages == []

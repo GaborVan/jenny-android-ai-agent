@@ -961,6 +961,54 @@ async def test_stream_transcript_persists_without_subscribers() -> None:
 
 
 @pytest.mark.asyncio
+async def test_proactive_delivery_frames_form_one_closed_turn() -> None:
+    """I due frame che ``ChannelDeliverer`` pubblica per un avviso proattivo.
+
+    Un turno silenzioso (heartbeat, cron, Dream) non ha vista WebUI, quindi il
+    coordinator non emette nessun ``turn_end``: lo emette il deliverer, con lo
+    stesso ``webui_turn_id`` del messaggio. È quell'id a far annotare al
+    recorder il record di chiusura come ``complete`` dello stesso turno — senza,
+    ``_annotate_turn`` esce subito e il turno resta aperto sia sul filo che sul
+    disco.
+    """
+    from jenny.webui.metadata import WEBUI_TURN_METADATA_KEY
+    from jenny.webui.transcript import read_transcript_lines
+
+    bus = MagicMock()
+    channel = WebSocketChannel({"enabled": True, "allowFrom": ["*"]}, bus, gateway=_basic_handler(bus))
+    mock_ws = AsyncMock()
+    channel._attach(mock_ws, "default")
+    turn_id = "proactive:deadbeef"
+
+    await channel.send(OutboundMessage(
+        channel="websocket",
+        chat_id="default",
+        content="il monitoraggio non sta girando",
+        metadata={WEBUI_TURN_METADATA_KEY: turn_id},
+    ))
+    await channel.send(OutboundMessage(
+        channel="websocket",
+        chat_id="default",
+        content="",
+        metadata={WEBUI_TURN_METADATA_KEY: turn_id, "_turn_end": True},
+    ))
+
+    # Sul filo: il client vede il turno chiudersi (è il frame che riporta la
+    # mascotte a idle e azzera lo stato di stream), e ogni frame porta l'id del
+    # proprio turno — è quello che permette al client di non applicare la
+    # chiusura a un turno che non è il suo.
+    payloads = _sent_ws_payloads(mock_ws)
+    assert [p["event"] for p in payloads] == ["message", "turn_end", "session_updated"]
+    assert [p.get("turn_id") for p in payloads[:2]] == [turn_id, turn_id]
+    # Sul disco: un turno solo, aperto dalla risposta e chiuso da `complete`.
+    lines = read_transcript_lines("websocket:default")
+    assert [(line["event"], line.get("turn_id"), line.get("turn_phase")) for line in lines] == [
+        ("message", turn_id, "answer"),
+        ("turn_end", turn_id, "complete"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_send_turn_end_emits_turn_end_event() -> None:
     bus = MagicMock()
     channel = WebSocketChannel({"enabled": True, "allowFrom": ["*"]}, bus, gateway=_basic_handler(bus))

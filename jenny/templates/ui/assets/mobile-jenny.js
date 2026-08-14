@@ -119,6 +119,9 @@ export class JennyCompanion {
     // cosa c'è a schermo e li azzera `_closeMini()`, questo descrive cosa c'è
     // in volo sul WebSocket e lo chiude solo `turn_end`/`error`.
     this._pendingTurn = false;
+    // Id del turno che sta animando (v. `_trackedTurnMatches`): la mascotte ne
+    // segue uno alla volta, e un turno estraneo non glielo deve togliere.
+    this._streamTurnId = null;
     this._talk = {
       timer: null, animIdx: 0, open: false,
       lastTextAt: 0, switchAt: 0,
@@ -373,6 +376,7 @@ export class JennyCompanion {
     this.mode = mode;
     this._agentState = 'idle';
     this._turnActive = false;
+    this._streamTurnId = null;
     if (this._abortFlight) this._abortFlight();
     this._closeMini();
     // Nascosta durante l'onboarding, oppure per preferenza utente
@@ -995,6 +999,12 @@ export class JennyCompanion {
     const closing = msg.event === 'turn_end' || msg.event === 'error';
     const onScreen = this.awaiting || this.el.classList.contains('thinking');
     if (!onScreen && !(closing && this._pendingTurn)) return;
+    // Il tracciamento si nutre dei frame che la mascotte anima davvero (quelli
+    // scartati qui sopra non li ha mai visti), e serve a una cosa sola: un
+    // turno estraneo — l'avviso proattivo atterrato durante l'attesa — non
+    // chiude la domanda in volo, la cui risposta sta ancora arrivando.
+    const mine = this._trackedTurnMatches(msg);
+    if (closing && !mine) return;
 
     switch (msg.event) {
       case 'delta':
@@ -1034,6 +1044,7 @@ export class JennyCompanion {
       case 'turn_end':
         this._turnActive = false;
         this._pendingTurn = false;
+        this._streamTurnId = null;
         this.awaiting = false;
         if (this._replyTimer) {
           clearTimeout(this._replyTimer);
@@ -1046,6 +1057,7 @@ export class JennyCompanion {
       case 'error':
         this._turnActive = false;
         this._pendingTurn = false;
+        this._streamTurnId = null;
         this.awaiting = false;
         this._showReply(plainText(msg.detail || msg.reason || i18n.t('jenny.genericError')));
         this._setAgentState('idle');
@@ -1066,7 +1078,36 @@ export class JennyCompanion {
     this._setAgentState('thinking'); // _syncArt -> think
   }
 
+  /* Il turno che la mascotte sta seguendo.
+
+     Regola opposta a quella della chat, e per una ragione: la chat *rende*
+     tutti i turni, quindi a ogni cambio d'id apre una bolla nuova; la mascotte
+     ne **anima uno solo**, e deve restare su quello finché non si chiude. Se
+     adottasse l'id di un avviso proattivo atterrato in mezzo a una risposta,
+     il `turn_end` della risposta non combacerebbe più con nulla e lei
+     resterebbe animata per sempre — cioè di nuovo il difetto da cui siamo
+     partiti, da un'altra porta.
+
+     Quindi: a turno fermo si adotta l'id del primo frame che lo apre; a turno
+     in corso lo si tiene. Un frame senza id vale sempre per il turno corrente
+     (il retry di una consegna parziale arriva senza annotazione). */
+  _trackedTurnMatches(msg) {
+    const turnId = msg.turn_id || msg.turnId || null;
+    if (!turnId) return true;
+    if (this._streamTurnId === null) {
+      // Una chiusura non apre mai un tracciamento — chiuderebbe un turno che
+      // non abbiamo mai visto aprirsi — ma resta permissiva: è il caso della
+      // minichat chiusa a metà turno, dove i frame intermedi sono stati
+      // scartati perché non c'era niente a schermo, e ignorare anche il
+      // `turn_end` lascerebbe `_pendingTurn` alzato per sempre.
+      if (msg.event !== 'turn_end' && msg.event !== 'error') this._streamTurnId = turnId;
+      return true;
+    }
+    return this._streamTurnId === turnId;
+  }
+
   _handleChatStream(msg) {
+    const mine = this._trackedTurnMatches(msg);
     switch (msg.event) {
       case 'delta':
         this._setAgentState('talking');
@@ -1100,7 +1141,12 @@ export class JennyCompanion {
         break;
       case 'turn_end':
       case 'error':
+        // La chiusura di un turno che non stiamo seguendo (un avviso proattivo
+        // atterrato in mezzo a una risposta) non ci riguarda: la risposta vera
+        // sta ancora arrivando.
+        if (!mine) break;
         this._turnActive = false;
+        this._streamTurnId = null;
         // Un turno partito dalla minichat e concluso dopo essere passati nella
         // sezione chat: il flag va chiuso anche qui, altrimenti resterebbe
         // alzato per sempre (qui lo storico non serve invalidarlo, la chat è

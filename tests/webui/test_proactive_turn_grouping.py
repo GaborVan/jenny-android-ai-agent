@@ -56,14 +56,25 @@ def _closed_user_turn(turn_id: str) -> None:
                                    "turn_seq": 4, "latency_ms": 1000})
 
 
-def _proactive_alerts(*, with_turn_ids: bool) -> None:
-    """I quattro avvisi, consecutivi e senza ``turn_end``: un turno silenzioso
-    non ne emette."""
+def _proactive_alerts(*, with_turn_ids: bool, closed: bool = False) -> None:
+    """I quattro avvisi consecutivi.
+
+    ``closed`` è la forma prodotta oggi: il turno silenzioso non emette nessun
+    ``turn_end``, quindi lo emette ``ChannelDeliverer._close_webui_turn`` con
+    l'id dell'avviso. Senza (il default) è la forma **già scritta** su disco
+    prima di quella fix — un turno aperto e mai chiuso — che va comunque
+    ricostruita bene.
+    """
     for i, text in enumerate(AVVISI):
         rec: dict = {"event": "message", "chat_id": "default", "text": text}
         if with_turn_ids:
             rec |= {"turn_id": f"proactive:{i}", "turn_phase": "answer", "turn_seq": 1}
         append_transcript_object(KEY, rec)
+        if closed and with_turn_ids:
+            append_transcript_object(KEY, {
+                "event": "turn_end", "chat_id": "default",
+                "turn_id": f"proactive:{i}", "turn_phase": "complete", "turn_seq": 2,
+            })
 
 
 def _assistant_texts(messages: list[dict]) -> list[str]:
@@ -110,6 +121,29 @@ def test_alerts_are_not_folded_into_the_previous_user_turn(data_dir) -> None:
     for m in payload["messages"]:
         if str(m.get("content") or "") in AVVISI:
             assert m.get("turnId") != "u1"
+
+
+def test_closed_proactive_turns_stay_four_distinct_messages(data_dir) -> None:
+    """La forma prodotta oggi: ogni avviso è seguito dal proprio ``turn_end``.
+
+    Il delimitatore serve al client live (chiude il turno: mascotte a idle,
+    stato di stream azzerato, bolla nuova per l'avviso dopo) e allo split del
+    transcript. Qui si verifica che rileggendoli non cambi niente di ciò che il
+    fold restituiva prima: quattro messaggi, quattro turni distinti.
+    """
+    _closed_user_turn("u1")
+    _proactive_alerts(with_turn_ids=True, closed=True)
+    payload = build_webui_thread_response(KEY)
+    assert payload is not None
+    testi = _assistant_texts(payload["messages"])
+    for avviso in AVVISI:
+        assert avviso in testi, f"avviso perso o accorpato: {avviso!r}"
+    ids = [
+        m.get("turnId")
+        for m in payload["messages"]
+        if str(m.get("content") or "") in AVVISI
+    ]
+    assert len(set(ids)) == len(AVVISI), f"turnId condivisi fra avvisi: {ids}"
 
 
 def test_legacy_alerts_without_turn_id_still_arrive_as_separate_messages(data_dir) -> None:

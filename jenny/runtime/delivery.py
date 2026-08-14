@@ -15,7 +15,8 @@ from loguru import logger
 
 from jenny.bus.events import INTERNAL_CHANNEL, OutboundMessage
 from jenny.session.keys import session_key_for_channel
-from jenny.webui.metadata import WEBUI_TURN_METADATA_KEY
+from jenny.session.turn_visibility import is_silent_turn
+from jenny.webui.metadata import WEBUI_DEFAULT_CHAT_ID, WEBUI_TURN_METADATA_KEY
 
 if TYPE_CHECKING:
     from jenny.bus.queue import MessageBus
@@ -24,6 +25,8 @@ if TYPE_CHECKING:
 # Firma dell'hook di registrazione fornito dall'AgentLoop
 # (``AgentLoop.record_channel_delivery``).
 RecordHook = Callable[..., Awaitable[None]]
+
+WEBSOCKET_CHANNEL = "websocket"
 
 
 class ChannelDeliverer:
@@ -49,6 +52,52 @@ class ChannelDeliverer:
 
     def _channel_session_key(self, channel: str, chat_id: str) -> str:
         return session_key_for_channel(channel, chat_id)
+
+    async def _close_webui_turn(self, chat_id: str, metadata: dict[str, Any]) -> None:
+        """Chiude il turno WebUI aperto da una consegna proattiva.
+
+        Solo se il turno che l'ha prodotta è SILENT, e la condizione non è
+        prudenziale: è esattamente il complemento di chi chiude i turni normali.
+        ``webui_view_target`` non dà nessuna vista a un turno silenzioso, quindi
+        ``WebuiTurnCoordinator.handle_turn_end`` per quel turno non emette
+        niente; per ogni altro turno la emette lui, e un secondo ``turn_end``
+        qui troncherebbe una risposta ancora in streaming (caso reale: l'utente
+        in chat chiede di mandare qualcosa su Telegram, e quella consegna è
+        proattiva pur vivendo dentro un turno visibile).
+
+        Un avviso proattivo è dunque un turno a sé — ha il suo ``turn_id``,
+        coniato in ``deliver`` — che prima si apriva e non si chiudeva mai,
+        perché nel protocollo live ``turn_end`` è l'unico frame che chiude un
+        turno. Le conseguenze, entrambe osservate in chat:
+
+        - la mascotte passa a ``talking`` sul messaggio, dopo un secondo di
+          silenzio l'animatore della bocca la mette in ``thinking`` — e lì
+          restava per sempre, perché solo ``turn_end``/``error`` la riportano a
+          ``idle``;
+        - il client non azzera lo stato di stream (``_resetStreamState``), così
+          l'avviso proattivo successivo riusava la bolla del precedente e ne
+          **sovrascriveva** il testo: quattro avvisi live, una bolla sola con
+          dentro l'ultimo.
+
+        Il frame vale anche a zero client connessi: ``send_turn_end`` persiste
+        comunque il record, ed è quel record a delimitare i turni nello split
+        del transcript (``transcript_store``, ``transcript_replay``).
+
+        Nessuna ``latency_ms``: non c'è nessuna attesa dell'utente da misurare.
+        """
+        if not is_silent_turn(metadata):
+            return
+        turn_id = metadata.get(WEBUI_TURN_METADATA_KEY)
+        if not isinstance(turn_id, str) or not turn_id:
+            return
+        await self._bus.publish_outbound(
+            OutboundMessage(
+                channel=WEBSOCKET_CHANNEL,
+                chat_id=chat_id,
+                content="",
+                metadata={WEBUI_TURN_METADATA_KEY: turn_id, "_turn_end": True},
+            )
+        )
 
     async def deliver(
         self,
@@ -88,9 +137,11 @@ class ChannelDeliverer:
         # consegnati fra 01:31 e 05:02 stanno nel transcript come quattro record
         # ``message`` consecutivi (righe 17720-17723) **tutti** con
         # ``turn_id: None``, incastonati fra un turno utente e un turno cron che
-        # il proprio id l'avevano. In chat ne compare solo l'ultimo. Questa
-        # patch chiude la causa a monte (l'id mancante); quale passo del
-        # rendering scarti gli altri tre non è ancora identificato.
+        # il proprio id l'avevano. In chat ne compariva solo l'ultimo: a
+        # scartare gli altri tre era il percorso **live**, che senza ``turn_end``
+        # non azzerava lo stato di stream e riusava la bolla precedente
+        # sovrascrivendone il testo (v. ``_close_webui_turn``, che quel
+        # ``turn_end`` ora lo emette).
         # Chi ha già coniato il proprio id (``cron_proactive_delivery_metadata``,
         # per il monitor cron) lo mantiene: qui si riempie solo il buco.
         if proactive and not metadata.get(WEBUI_TURN_METADATA_KEY):
@@ -129,30 +180,35 @@ class ChannelDeliverer:
 
         if msg.channel == INTERNAL_CHANNEL or self._extra_targets is None or not proactive:
             await self._bus.publish_outbound(msg)
+            if proactive and msg.channel == WEBSOCKET_CHANNEL:
+                await self._close_webui_turn(msg.chat_id, metadata)
             return
 
         # Fan-out proattivo: il target websocket è SEMPRE incluso (è lui a
         # scrivere la riga nel transcript WebUI); gli altri target ricevono
         # copie marcate ``_mirror`` che non ri-persistono nulla.
         targets: dict[str, str] = {msg.channel: msg.chat_id}
-        targets.setdefault("websocket", "default")
+        targets.setdefault(WEBSOCKET_CHANNEL, WEBUI_DEFAULT_CHAT_ID)
         try:
             for name, chat in self._extra_targets():
                 if name and chat:
                     targets.setdefault(name, chat)
         except Exception:  # pragma: no cover - difensivo sul callback
             pass
-        primary = "websocket" if "websocket" in targets else msg.channel
+        primary = WEBSOCKET_CHANNEL if WEBSOCKET_CHANNEL in targets else msg.channel
+        primary_chat = targets.pop(primary)
         await self._bus.publish_outbound(
             OutboundMessage(
                 channel=primary,
-                chat_id=targets.pop(primary),
+                chat_id=primary_chat,
                 content=msg.content,
                 media=msg.media,
                 metadata=metadata,
                 buttons=msg.buttons,
             )
         )
+        if primary == WEBSOCKET_CHANNEL:
+            await self._close_webui_turn(primary_chat, metadata)
         for name, chat in targets.items():
             await self._bus.publish_outbound(
                 OutboundMessage(

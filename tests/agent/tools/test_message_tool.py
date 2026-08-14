@@ -3,7 +3,7 @@ import os
 import pytest
 
 from jenny.agent.tools.message import MessageTool
-from jenny.bus.events import OutboundMessage
+from jenny.bus.events import INTERNAL_CHANNEL, OutboundMessage
 from jenny.config.paths import get_workspace_path
 
 
@@ -187,6 +187,42 @@ async def test_message_tool_does_not_inherit_metadata_for_cross_target() -> None
         "_record_channel_delivery": True,
         "_proactive_fanout": True,
     }
+
+
+@pytest.mark.asyncio
+async def test_cross_target_send_keeps_the_turn_visibility() -> None:
+    """La visibilità del turno sopravvive al cambio di target.
+
+    Lo stato di *routing* dell'origine si butta (``message_id`` instraderebbe la
+    risposta nella chat sbagliata), ma la visibilità è una proprietà del turno,
+    non del target. La legge il ``ChannelDeliverer``: da lì sa che questa
+    consegna è un turno WebUI a sé — nessun coordinator gliene chiuderà uno — e
+    deve emettersi il proprio ``turn_end``, altrimenti il client resta con un
+    turno aperto per sempre.
+    """
+    from jenny.session.turn_visibility import is_silent_turn, silent_turn_metadata
+
+    sent: list[OutboundMessage] = []
+
+    async def _send(msg: OutboundMessage) -> None:
+        sent.append(msg)
+
+    tool = MessageTool(send_callback=_send)
+    from jenny.agent.tools.context import RequestContext
+
+    tool.set_context(
+        RequestContext(
+            channel=INTERNAL_CHANNEL,
+            chat_id="heartbeat",
+            metadata=silent_turn_metadata({"message_id": "m-1"}),
+        ),
+    )
+
+    await tool.execute(content="il monitoraggio non gira", channel="websocket", chat_id="default")
+
+    assert is_silent_turn(sent[0].metadata)
+    # Il routing dell'origine, invece, resta a terra.
+    assert "message_id" not in sent[0].metadata
 
 
 @pytest.mark.asyncio
