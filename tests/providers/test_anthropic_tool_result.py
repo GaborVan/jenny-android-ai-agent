@@ -132,3 +132,16 @@ def test_anthropic_sanitized_tool_ids_avoid_simple_collisions():
     ids = [block["id"] for block in blocks if block["type"] == "tool_use"]
     assert len(ids) == len(set(ids)) == 2
     assert all(all(ch.isalnum() or ch in "_-" for ch in tool_id) for tool_id in ids)
+
+
+def test_an_assistant_turn_with_nothing_in_it_gets_a_placeholder():
+    """``content`` deve avere almeno un blocco, ma un text VUOTO è un 400.
+
+    L'API rifiuta i blocchi text vuoti ("text content blocks must be
+    non-empty"), quindi il riempitivo per un turno assistant senza contenuto né
+    tool call — capita da una history troncata — deve essere un placeholder,
+    come per il contenuto utente.
+    """
+    blocks = AnthropicProvider._assistant_blocks({"role": "assistant", "content": None})
+
+    assert blocks == [{"type": "text", "text": "(empty)"}]

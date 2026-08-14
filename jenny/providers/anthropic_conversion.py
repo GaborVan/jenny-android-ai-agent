@@ -145,7 +145,11 @@ class AnthropicConversionMixin:
                 "input": tool_arguments_object_for_replay(args),
             })
 
-        return blocks or [{"type": "text", "text": ""}]
+        # Un blocco text VUOTO è proprio la forma che l'API rifiuta ("text
+        # content blocks must be non-empty"): il fallback esiste perché
+        # ``content`` deve avere almeno un blocco, quindi deve essere un
+        # placeholder, coerente con ``_convert_user_content``.
+        return blocks or [{"type": "text", "text": "(empty)"}]
 
     @staticmethod
     def _convert_user_content(content: Any) -> Any:

@@ -20,9 +20,9 @@ from jenny.providers.base import (
     LLMProvider,
     LLMResponse,
     ToolCallRequest,
+    parse_tool_arguments,
     resolve_first_output_timeout_s,
     resolve_stream_idle_timeout_s,
-    tool_arguments_object_for_replay,
 )
 from jenny.providers.tool_ids import dedupe_tool_ids, unique_tool_ids_in_history
 
@@ -520,11 +520,17 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
 
         stop_map = {"tool_use": "tool_calls", "end_turn": "stop", "max_tokens": "length"}
         bufs = list(tool_blocks.values())
+        # ``parse_tool_arguments``, non la variante "for_replay": queste tool
+        # call stanno per essere ESEGUITE, e la variante di replay ripara il JSON
+        # malformato (vedi il suo docstring in ``base.py``). Su uno stream
+        # troncato a metà di un ``input_json_delta`` quella riparazione
+        # inventerebbe argomenti plausibili e li si eseguirebbe; meglio lasciare
+        # la stringa grezza, che il registry rifiuta.
         tool_calls = [
             ToolCallRequest(
                 id=unique_id,
                 name=buf.get("name", ""),
-                arguments=tool_arguments_object_for_replay(buf.get("arguments", "{}")),
+                arguments=parse_tool_arguments(buf.get("arguments", "{}")),
             )
             for buf, unique_id in zip(bufs, self._unique_call_ids(bufs))
         ]
