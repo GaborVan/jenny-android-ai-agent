@@ -13,6 +13,8 @@ from loguru import logger
 
 from jenny.providers.anthropic_conversion import (
     AnthropicConversionMixin,
+    _gen_tool_id,
+    derive_tool_id,
 )
 from jenny.providers.base import (
     LLMProvider,
@@ -22,6 +24,7 @@ from jenny.providers.base import (
     resolve_stream_idle_timeout_s,
     tool_arguments_object_for_replay,
 )
+from jenny.providers.tool_ids import dedupe_tool_ids, unique_tool_ids_in_history
 
 
 class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
@@ -156,7 +159,18 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
         tool_choice: str | dict[str, Any] | None,
     ) -> dict[str, Any]:
         model_name = self._strip_prefix(model or self.default_model)
-        system, anthropic_msgs = self._convert_messages(self._sanitize_empty_content(messages))
+        # Passaggio di unicità sul formato *interno*, prima della conversione:
+        # è la stessa funzione che usa l'OpenAI-compat provider, e serve a
+        # risanare le sessioni in cui un id duplicato è già stato persistito —
+        # senza, ogni richiesta successiva rimanda lo stesso duplicato e la
+        # conversazione resta murata finché non la si cancella. Su una history
+        # sana è un no-op.
+        prepared = unique_tool_ids_in_history(
+            self._sanitize_empty_content(messages),
+            fresh_id=_gen_tool_id,
+            derive_id=derive_tool_id,
+        )
+        system, anthropic_msgs = self._convert_messages(prepared)
         anthropic_tools = self._convert_tools(tools)
 
         system, anthropic_msgs, anthropic_tools = self._apply_cache_control(
@@ -212,11 +226,26 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
     # Response parsing
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _unique_call_ids(blocks: list[dict[str, Any]]) -> list[str]:
+        """Id univoci per i tool_use di *una* risposta, in ordine di arrivo.
+
+        GLM (e chiunque parli questo wire-format dietro un gateway) riusa lo
+        stesso id per le chiamate parallele. Va corretto qui, in parsing, non
+        solo in invio: a valle l'id è una chiave, e un duplicato fa scomparire un
+        evento dal transcript e fa collidere due risultati grossi sullo stesso
+        file su disco (vedi ``providers/tool_ids.py``).
+        """
+        return dedupe_tool_ids(
+            [block.get("id") for block in blocks],
+            replacement=lambda raw, idx: derive_tool_id(str(raw or "toolu"), idx),
+        )
+
     @classmethod
     def _parse_response_dict(cls, response: dict[str, Any]) -> LLMResponse:
         """Parse a dict Anthropic Messages API response."""
         content_parts: list[str] = []
-        tool_calls: list[ToolCallRequest] = []
+        tool_uses: list[dict[str, Any]] = []
         thinking_blocks: list[dict[str, Any]] = []
 
         for block in response.get("content", []):
@@ -228,17 +257,22 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
                 if text:
                     content_parts.append(text)
             elif block_type == "tool_use":
-                tool_calls.append(ToolCallRequest(
-                    id=block.get("id", ""),
-                    name=block.get("name", ""),
-                    arguments=block.get("input", {}),
-                ))
+                tool_uses.append(block)
             elif block_type == "thinking":
                 thinking_blocks.append({
                     "type": "thinking",
                     "thinking": block.get("thinking", ""),
                     "signature": block.get("signature", ""),
                 })
+
+        tool_calls = [
+            ToolCallRequest(
+                id=unique_id,
+                name=block.get("name", ""),
+                arguments=block.get("input", {}),
+            )
+            for block, unique_id in zip(tool_uses, cls._unique_call_ids(tool_uses))
+        ]
 
         stop_reason = response.get("stop_reason") or "stop"
         stop_map = {"tool_use": "tool_calls", "end_turn": "stop", "max_tokens": "length"}
@@ -485,13 +519,14 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
             )
 
         stop_map = {"tool_use": "tool_calls", "end_turn": "stop", "max_tokens": "length"}
+        bufs = list(tool_blocks.values())
         tool_calls = [
             ToolCallRequest(
-                id=buf.get("id", ""),
+                id=unique_id,
                 name=buf.get("name", ""),
                 arguments=tool_arguments_object_for_replay(buf.get("arguments", "{}")),
             )
-            for buf in tool_blocks.values()
+            for buf, unique_id in zip(bufs, self._unique_call_ids(bufs))
         ]
         return LLMResponse(
             content="".join(content_parts) or None,

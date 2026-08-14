@@ -23,6 +23,18 @@ def _gen_tool_id() -> str:
     return "toolu_" + "".join(secrets.choice(_ALNUM) for _ in range(22))
 
 
+def derive_tool_id(seed: str, idx: int, salt: int = 1) -> str:
+    """Id sostitutivo per una tool call il cui id è già occupato.
+
+    Deterministico di proposito: la stessa history deve produrre gli stessi id a
+    ogni richiesta. Con id casuali il prefisso della conversazione cambierebbe a
+    ogni retry e il prompt caching — che qui è sempre attivo, vedi
+    ``_apply_cache_control`` — ripartirebbe da zero ogni volta.
+    """
+    digest = hashlib.sha1(f"{seed}:{idx}:{salt}".encode()).hexdigest()
+    return f"toolu_{digest[:22]}"
+
+
 _VALID_TOOL_ID = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
