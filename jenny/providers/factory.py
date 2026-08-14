@@ -31,6 +31,9 @@ def _make_provider_core(config: Config) -> LLMProvider:
             api_base=p.api_base,
             default_model=model,
             extra_headers=p.extra_headers,
+            extra_body=p.extra_body,
+            extra_query=p.extra_query,
+            api_type=p.api_type,
         )
     else:  # "openai_compat"
         from jenny.providers.openai_compat_provider import OpenAICompatProvider

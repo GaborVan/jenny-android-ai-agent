@@ -332,7 +332,9 @@ class AnthropicConversionMixin:
             return {"type": "auto"}
         if tool_choice is None or tool_choice == "auto":
             return {"type": "auto"}
-        if tool_choice == "required":
+        # ``any`` è il valore nativo Anthropic e uno di quelli che lo schema di
+        # config ammette; senza questo ramo cadeva nel default auto.
+        if tool_choice in ("required", "any"):
             return {"type": "any"}
         if tool_choice == "none":
             return None

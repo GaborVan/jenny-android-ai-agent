@@ -26,6 +26,7 @@ from jenny.providers.base import (
     resolve_first_output_timeout_s,
     resolve_stream_idle_timeout_s,
 )
+from jenny.providers.body_merge import deep_merge
 from jenny.providers.tool_ids import dedupe_tool_ids, unique_tool_ids_in_history
 
 
@@ -42,10 +43,23 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
         api_base: str | None = None,
         default_model: str = "claude-sonnet-4-20250514",
         extra_headers: dict[str, str] | None = None,
+        extra_body: dict[str, Any] | None = None,
+        extra_query: dict[str, str] | None = None,
+        api_type: str = "auto",
     ):
         super().__init__(api_key, api_base)
         self.default_model = default_model
         self.extra_headers = extra_headers or {}
+        self._extra_body = extra_body or {}
+        self._extra_query = extra_query or {}
+        if api_type and api_type != "auto":
+            # ``api_type`` sceglie fra Chat Completions e Responses API, che sono
+            # due dialetti OpenAI: qui non significa niente. Meglio dirlo che
+            # ignorarlo in silenzio, come si faceva con extra_body/extra_query.
+            logger.warning(
+                "Provider apiType={!r} has no meaning for the Anthropic format; ignoring",
+                api_type,
+            )
         self._http_client: httpx.AsyncClient | None = None
         self._init_http_client()
 
@@ -213,14 +227,21 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
         elif not omit_temperature:
             kwargs["temperature"] = temperature
 
-        if anthropic_tools:
+        # ``tool_choice: "none"`` si rispetta togliendo i tool dal body: l'unico
+        # modo che ogni gateway accetta. Lasciarli con un tool_choice assente
+        # significa lasciare il default (auto), cioè non rispettarlo affatto.
+        if anthropic_tools and str(tool_choice or "").strip().lower() != "none":
             kwargs["tools"] = anthropic_tools
             tc = self._convert_tool_choice(tool_choice, thinking_enabled)
             if tc:
                 kwargs["tool_choice"] = tc
 
-        if self.extra_headers:
-            kwargs["extra_headers"] = self.extra_headers
+        # ``extra_headers`` viaggia negli header, dove ``_init_http_client`` lo
+        # ha già messo. Qui dentro finiva nel CORPO della richiesta — residuo di
+        # quando questo provider passava dall'SDK, per cui era un kwarg del
+        # client — e l'API rifiuta i campi di body che non conosce.
+        if self._extra_body:
+            kwargs = deep_merge(kwargs, self._extra_body)
 
         return kwargs
 
@@ -347,7 +368,9 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
             messages, tools, model, max_tokens, temperature,
             reasoning_effort, tool_choice,
         )
-        response = await self._http_client.post("/v1/messages", json=kwargs)
+        response = await self._http_client.post(
+            "/v1/messages", json=kwargs, params=self._extra_query or None,
+        )
         # HTTPStatusError sale intatta fino a chat(): riavvolgerla in una
         # RuntimeError butterebbe via ``.response``, e con essa status code,
         # retry-after e error_type di cui vive la retry policy.
@@ -387,7 +410,9 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
         raw_usage: dict[str, Any] = {}
 
         try:
-            async with self._http_client.stream("POST", "/v1/messages", json=kwargs) as response:
+            async with self._http_client.stream(
+                "POST", "/v1/messages", json=kwargs, params=self._extra_query or None,
+            ) as response:
                 if response.status_code >= 400:
                     # Il body di uno stream non è ancora stato letto e il
                     # context manager lo chiude prima che l'except giri: senza

@@ -18,6 +18,8 @@ from urllib.parse import urlparse
 
 from loguru import logger
 
+from jenny.providers.body_merge import deep_merge
+
 _ALLOWABLE_MSG_KEYS = frozenset({
     "role", "content", "tool_calls", "tool_call_id", "name",
     "reasoning_content", "extra_content",
@@ -255,23 +257,9 @@ def _responses_circuit_key(
     return f"{model_name}:{effort}"
 
 
-def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-    """Recursively merge *override* into *base*, returning a new dict.
-
-    Nested dicts are merged key-by-key; all other types in *override*
-    replace the corresponding key in *base*.
-    """
-    merged = dict(base)
-    for key, value in override.items():
-        if (
-            key in merged
-            and isinstance(merged[key], dict)
-            and isinstance(value, dict)
-        ):
-            merged[key] = _deep_merge(merged[key], value)
-        else:
-            merged[key] = value
-    return merged
+# Casa in ``providers/body_merge.py``, condivisa con l'Anthropic provider.
+# L'alias preserva i call-site e i test che importano ``_deep_merge`` da qui.
+_deep_merge = deep_merge
 
 
 def _merge_unique_list(base: Any, override: Any) -> Any:
