@@ -20,6 +20,10 @@ from loguru import logger as loguru_logger
 
 from jenny.config.schema import Config
 from jenny.providers.anthropic_provider import AnthropicProvider
+from jenny.providers.endpoint_budget import (
+    DEFAULT_REQUEST_TIMEOUT_S,
+    LOCAL_REQUEST_TIMEOUT_S,
+)
 from jenny.providers.factory import make_provider
 
 MESSAGES = [{"role": "user", "content": "ciao"}]
@@ -166,3 +170,33 @@ def test_the_factory_hands_the_anthropic_provider_its_config() -> None:
     assert isinstance(provider, AnthropicProvider)
     assert provider._extra_body == {"metadata": {"user_id": "u1"}}
     assert provider._extra_query == {"api-version": "2024-01"}
+
+
+# ── Budget HTTP: la regola è quella condivisa, non un 120 scritto a mano ──
+
+def test_a_remote_endpoint_gets_the_tight_timeout() -> None:
+    provider = _provider()
+
+    assert provider._http_client.timeout.read == DEFAULT_REQUEST_TIMEOUT_S
+
+
+def test_a_loopback_endpoint_gets_the_long_timeout() -> None:
+    """Un model server locale macina il prompt in silenzio per minuti."""
+    provider = AnthropicProvider(api_key="k", api_base="http://127.0.0.1:11434")
+
+    assert provider._http_client.timeout.read == LOCAL_REQUEST_TIMEOUT_S
+
+
+def test_the_http_timeout_can_be_raised_by_env(monkeypatch) -> None:
+    """Senza questo, il budget lungo per il primo token era irraggiungibile."""
+    monkeypatch.setenv("JENNY_LLM_HTTP_TIMEOUT_S", "450")
+    provider = _provider()
+
+    assert provider._http_client.timeout.read == 450.0
+
+
+def test_the_historic_env_name_still_works_for_both(monkeypatch) -> None:
+    monkeypatch.setenv("JENNY_OPENAI_COMPAT_TIMEOUT_S", "45")
+    provider = _provider()
+
+    assert provider._http_client.timeout.read == 45.0

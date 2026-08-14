@@ -54,6 +54,24 @@ def llm_timeout_s(default: float = 300.0) -> float:
     return _float_env("JENNY_LLM_TIMEOUT_S", default)
 
 
+def llm_http_timeout_s(default: float) -> float:
+    """Timeout della singola richiesta HTTP verso il provider del modello.
+
+    Distinto da ``llm_timeout_s``, che limita il *turno*: questo è il budget del
+    trasporto, e su uno stream si applica fra un chunk e il successivo. Il
+    default arriva dal chiamante, che sa se l'endpoint è in loopback (vedi
+    ``providers/endpoint_budget.py``).
+
+    Env: ``JENNY_LLM_HTTP_TIMEOUT_S``, oppure il nome storico
+    ``JENNY_OPENAI_COMPAT_TIMEOUT_S`` — che vale per entrambi i provider, e non
+    solo per quello che ha nel nome.
+    """
+    for name in ("JENNY_LLM_HTTP_TIMEOUT_S", "JENNY_OPENAI_COMPAT_TIMEOUT_S"):
+        if os.environ.get(name, "").strip():
+            return _float_env(name, default)
+    return default
+
+
 def ws_send_timeout_s(default: float = 12.0) -> float:
     """Timeout wall-clock per singolo ``connection.send()`` sul canale WebSocket.
 

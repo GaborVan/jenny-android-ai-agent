@@ -12,13 +12,17 @@ import json
 import os
 import secrets
 import string
-from ipaddress import ip_address
 from typing import Any
-from urllib.parse import urlparse
 
 from loguru import logger
 
 from jenny.providers.body_merge import deep_merge
+from jenny.providers.endpoint_budget import (
+    DEFAULT_REQUEST_TIMEOUT_S,
+    LOCAL_REQUEST_TIMEOUT_S,
+    is_local_endpoint,
+    request_timeout_s,
+)
 
 _ALLOWABLE_MSG_KEYS = frozenset({
     "role", "content", "tool_calls", "tool_call_id", "name",
@@ -54,12 +58,11 @@ _MIMO_THINKING_MODELS: frozenset[str] = frozenset({
     "mimo-v2-pro",
     "mimo-v2-omni",
 })
-_OPENAI_COMPAT_REQUEST_TIMEOUT_S = 120.0
-# Un model server in loopback macina il prompt prima di emettere il primo
-# token, e in quella fase la connessione resta muta: su llama.cpp on-device i
-# soli schemi tool sono ~5.800 token, cioè minuti di prompt processing. Il
-# limite dei provider remoti taglierebbe ogni richiesta prima della risposta.
-_LOCAL_REQUEST_TIMEOUT_S = 600.0
+# Budget HTTP e riconoscimento loopback vivono in ``providers/endpoint_budget.py``,
+# condivisi con l'Anthropic provider. Gli alias preservano i call-site e i test
+# che importano questi nomi da qui.
+_OPENAI_COMPAT_REQUEST_TIMEOUT_S = DEFAULT_REQUEST_TIMEOUT_S
+_LOCAL_REQUEST_TIMEOUT_S = LOCAL_REQUEST_TIMEOUT_S
 
 # Maps thinking_style → extra_body builder.
 # Each builder takes a bool (thinking_enabled) and returns the dict to
@@ -120,12 +123,10 @@ def _thinking_extra_body(style: str, thinking_enabled: bool) -> dict[str, Any] |
 def _openai_compat_timeout_s(*, local: bool = False) -> float:
     """Return the bounded request timeout used for OpenAI-compatible providers.
 
-    *local* alza il limite per gli endpoint in loopback, dove il silenzio
-    prima del primo token è prompt processing e non un blocco. L'override via
-    env vale per entrambi i casi.
+    Delegatore verso ``providers/endpoint_budget.py``, dove la regola è
+    condivisa con l'Anthropic provider.
     """
-    default = _LOCAL_REQUEST_TIMEOUT_S if local else _OPENAI_COMPAT_REQUEST_TIMEOUT_S
-    return _float_env("JENNY_OPENAI_COMPAT_TIMEOUT_S", default)
+    return request_timeout_s(local=local)
 
 
 def _float_env(name: str, default: float) -> float:
@@ -214,29 +215,8 @@ _RESPONSES_FAILURE_THRESHOLD = 3
 _RESPONSES_PROBE_INTERVAL_S = 300  # 5 minutes
 
 
-def _is_local_endpoint(api_base: str | None) -> bool:
-    """Return True when the endpoint is a loopback-only model server.
-
-    On Android the app sandbox cannot reach LAN or Docker hosts, so only
-    localhost/loopback addresses are considered local.
-    """
-    if not api_base:
-        return False
-    raw = api_base.strip().lower()
-    parsed = urlparse(raw if "://" in raw else f"//{raw}")
-    try:
-        host = parsed.hostname
-    except ValueError:
-        return False
-    if host == "localhost":
-        return True
-    if not host:
-        return False
-    try:
-        addr = ip_address(host)
-    except ValueError:
-        return False
-    return addr.is_loopback
+# Casa in ``providers/endpoint_budget.py``, condiviso con l'Anthropic provider.
+_is_local_endpoint = is_local_endpoint
 
 
 def _is_direct_openai_base(api_base: str | None) -> bool:

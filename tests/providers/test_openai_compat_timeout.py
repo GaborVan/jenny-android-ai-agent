@@ -60,3 +60,15 @@ async def test_openai_compat_provider_timeout_can_be_overridden_by_env(monkeypat
     await provider._ensure_client()
 
     assert provider._http_client.timeout.read == 45.0
+
+
+async def test_the_shared_env_name_also_applies_here(monkeypatch) -> None:
+    """Il knob è del trasporto, non di un provider: vale su entrambi i rami."""
+    monkeypatch.setenv("JENNY_LLM_HTTP_TIMEOUT_S", "450")
+
+    provider = OpenAICompatProvider(
+        api_key="test-key", api_base="https://example.com/v1", default_model="test"
+    )
+    await provider._ensure_client()
+
+    assert provider._http_client.timeout.read == 450.0

@@ -27,6 +27,7 @@ from jenny.providers.base import (
     resolve_stream_idle_timeout_s,
 )
 from jenny.providers.body_merge import deep_merge
+from jenny.providers.endpoint_budget import is_local_endpoint, request_timeout_s
 from jenny.providers.tool_ids import dedupe_tool_ids, unique_tool_ids_in_history
 
 
@@ -72,10 +73,15 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
         }
         if self.extra_headers:
             headers.update(self.extra_headers)
+        # Il timeout era 120s scritti a mano, senza override e senza il caso
+        # loopback: rendeva irraggiungibile il budget lungo per il primo token
+        # (``resolve_first_output_timeout_s``, 300s di default), perché la read
+        # timeout scadeva prima. Adesso la regola è quella condivisa.
+        self._is_local = is_local_endpoint(self.api_base)
         self._http_client = httpx.AsyncClient(
             base_url=base_url,
             headers=headers,
-            timeout=120.0,
+            timeout=request_timeout_s(local=self._is_local),
         )
 
     @staticmethod
@@ -397,7 +403,9 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
         )
         kwargs["stream"] = True
         idle_timeout_s = resolve_stream_idle_timeout_s()
-        first_output_timeout_s = max(resolve_first_output_timeout_s(), idle_timeout_s)
+        first_output_timeout_s = max(
+            resolve_first_output_timeout_s(local=self._is_local), idle_timeout_s,
+        )
         # Prima del primo blocco di contenuto vale il budget lungo: il modello
         # sta ancora ragionando e il silenzio è previsto.
         saw_output = False
