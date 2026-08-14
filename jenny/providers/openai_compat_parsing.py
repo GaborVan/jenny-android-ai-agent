@@ -24,6 +24,15 @@ from jenny.providers.openai_compat_helpers import (
 from jenny.providers.tool_ids import dedupe_tool_ids
 
 
+def _id_text(raw: Any) -> str:
+    """Id come stringa, con la stessa coercizione del path streaming.
+
+    Un id non-stringa (qualche gateway manda interi) va trasformato, non
+    scartato: ``_accum_tc`` fa ``str(tc_id)`` e questo path non deve divergere.
+    """
+    return str(raw) if raw else ""
+
+
 class ResponseParsingMixin:
     """Metodi di parsing risposta → LLMResponse (mixin del provider)."""
 
@@ -172,14 +181,21 @@ class ResponseParsingMixin:
             if reasoning_content is None:
                 reasoning_content = m.get("reasoning_content")
 
+        # Stessa deduplica del path streaming (vedi ``_parse_chunks``): un
+        # provider che riusa un id fra chiamate parallele lo fa a prescindere da
+        # come lo si legge, e a valle quell'id è una chiave.
+        unique_ids = dedupe_tool_ids(
+            [_id_text((self._maybe_mapping(tc) or {}).get("id")) for tc in raw_tool_calls],
+            replacement=lambda _raw, _idx: _short_tool_id(),
+        )
         parsed_tool_calls = []
-        for tc in raw_tool_calls:
+        for tc, unique_id in zip(raw_tool_calls, unique_ids):
             tc_map = self._maybe_mapping(tc) or {}
             fn = self._maybe_mapping(tc_map.get("function")) or {}
             args = parse_tool_arguments(fn.get("arguments", {}))
             ec, prov, fn_prov = _extract_tc_extras(tc)
             parsed_tool_calls.append(ToolCallRequest(
-                id=str(tc_map.get("id") or _short_tool_id()),
+                id=unique_id,
                 name=str(fn.get("name") or ""),
                 arguments=args,
                 extra_content=ec,
