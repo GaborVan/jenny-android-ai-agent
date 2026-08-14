@@ -17,6 +17,7 @@ from jenny.providers.anthropic_conversion import (
     derive_tool_id,
     replayable_thinking_blocks,
 )
+from jenny.providers.anthropic_usage import merge_raw_usage, normalize_usage
 from jenny.providers.base import (
     LLMProvider,
     LLMResponse,
@@ -275,25 +276,7 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
         stop_map = {"tool_use": "tool_calls", "end_turn": "stop", "max_tokens": "length"}
         finish_reason = stop_map.get(stop_reason, stop_reason)
 
-        usage: dict[str, int] = {}
-        usage_obj = response.get("usage") or {}
-        if isinstance(usage_obj, dict):
-            input_tokens = int(usage_obj.get("input_tokens") or 0)
-            output_tokens = int(usage_obj.get("output_tokens") or 0)
-            cache_creation = int(usage_obj.get("cache_creation_input_tokens") or 0)
-            cache_read = int(usage_obj.get("cache_read_input_tokens") or 0)
-            total_prompt_tokens = input_tokens + cache_creation + cache_read
-            usage = {
-                "prompt_tokens": total_prompt_tokens,
-                "completion_tokens": output_tokens,
-                "total_tokens": total_prompt_tokens + output_tokens,
-            }
-            for attr in ("cache_creation_input_tokens", "cache_read_input_tokens"):
-                val = usage_obj.get(attr)
-                if val:
-                    usage[attr] = int(val)
-            if cache_read:
-                usage["cached_tokens"] = cache_read
+        usage = normalize_usage(response.get("usage") or {})
 
         return LLMResponse(
             content="".join(content_parts) or None,
@@ -401,7 +384,7 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
         tool_blocks: dict[str, dict[str, Any]] = {}
         thinking_buffers: dict[str, dict[str, Any]] = {}
         finish_reason = "stop"
-        usage: dict[str, int] = {}
+        raw_usage: dict[str, Any] = {}
 
         try:
             async with self._http_client.stream("POST", "/v1/messages", json=kwargs) as response:
@@ -497,17 +480,19 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
                                         "name": str(buf.get("name") if buf else ""),
                                         "arguments_delta": partial,
                                     })
+                    elif event_type == "message_start":
+                        # Gli input token e le voci di cache arrivano SOLO qui:
+                        # ``message_delta`` porta gli output. Leggendo solo
+                        # quello, ``prompt_tokens`` restava a zero e il
+                        # risparmio del prompt caching era invisibile.
+                        message = event.get("message")
+                        if isinstance(message, dict):
+                            merge_raw_usage(raw_usage, message.get("usage"))
                     elif event_type == "message_delta":
                         delta = event.get("delta") or {}
                         if delta.get("stop_reason"):
                             finish_reason = delta["stop_reason"]
-                        usage_obj = event.get("usage") or {}
-                        if usage_obj:
-                            usage = {
-                                "prompt_tokens": int(usage_obj.get("input_tokens") or 0),
-                                "completion_tokens": int(usage_obj.get("output_tokens") or 0),
-                                "total_tokens": int(usage_obj.get("total_tokens") or 0),
-                            }
+                        merge_raw_usage(raw_usage, event.get("usage"))
 
         except asyncio.TimeoutError:
             waited_s = idle_timeout_s if saw_output else first_output_timeout_s
@@ -560,7 +545,7 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
             content="".join(content_parts) or None,
             tool_calls=tool_calls,
             finish_reason=stop_map.get(finish_reason, finish_reason),
-            usage=usage,
+            usage=normalize_usage(raw_usage),
             reasoning_content="".join(reasoning_parts) or None,
             thinking_blocks=replayable_thinking_blocks(thinking_buffers.values()) or None,
         )
