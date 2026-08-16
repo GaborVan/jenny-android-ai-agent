@@ -33,7 +33,7 @@ class FileStates:
     not leak across sessions sharing this process.
     """
 
-    __slots__ = ("_state", "writes_ok", "writes_attempted")
+    __slots__ = ("_state", "writes_ok", "writes_attempted", "writes_refused_budget")
 
     def __init__(self) -> None:
         self._state: dict[str, ReadState] = {}
@@ -45,6 +45,13 @@ class FileStates:
         # ``MemoryStore.dream_should_advance_cursor``.
         self.writes_ok: int = 0
         self.writes_attempted: int = 0
+        # Solo diagnostica: distingue nei log "bloccato da policy" da "rifiutato
+        # perché il risultato sfora il budget". Deliberatamente *non* letto da
+        # ``MemoryStore.internal_run_should_commit``: un rifiuto di budget resta
+        # un ``writes_attempted`` che non è diventato ``writes_ok``, quindi il
+        # cursore non avanza — che è esattamente il comportamento voluto, un
+        # fatto che Dream voleva scrivere e non ha scritto va riproposto.
+        self.writes_refused_budget: int = 0
 
     def record_write_attempt(self) -> None:
         """Registra un intento di scrittura, prima della risoluzione del path.
@@ -122,6 +129,7 @@ class FileStates:
         self._state.clear()
         self.writes_ok = 0
         self.writes_attempted = 0
+        self.writes_refused_budget = 0
 
 
 class FileStateStore:

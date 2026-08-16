@@ -130,6 +130,132 @@ class TestBuildDreamPrompt:
         assert "Always strip these bracketed tags from saved memory content" in prompt
 
 
+class TestDreamPromptBudgetGauge:
+    def test_default_prompt_is_byte_identical_to_the_pre_budget_one(self, store):
+        """Rete di sicurezza della wave: senza gauge il prompt non cambia di un byte.
+
+        La sezione Budget è dietro un condizionale Jinja proprio per questo — se
+        un giorno l'intestazione dovesse comparire anche con gauge vuoto, ogni
+        run di Dream pagherebbe la modifica prima ancora che qualcuno decida di
+        attivare il budget. Il confronto è contro il template renderizzato senza
+        la variabile, cioè esattamente ciò che il codice produceva prima.
+        """
+        store.append_history("hello")
+        result = store.build_dream_prompt()
+        assert result is not None
+        prompt, _ = result
+
+        legacy_template = render_template(
+            "agent/dream.md",
+            strip=True,
+            skill_creator_path=str(
+                store.workspace / "skills" / "skill-creator" / "SKILL.md"
+            ),
+        )
+        # Nemmeno una riga vuota in più fra il template e la history.
+        assert prompt.startswith(f"{legacy_template}\n\n## Conversation History\n")
+        assert "## Budget" not in prompt
+
+    def test_gauge_injects_budget_section(self, store):
+        store.append_history("hello")
+        result = store.build_dream_prompt(gauge="MEMORY.md [67% - 1474/2200 chars]")
+        assert result is not None
+        prompt, _ = result
+
+        assert "## Budget" in prompt
+        assert "MEMORY.md [67% - 1474/2200 chars]" in prompt
+
+    def test_budget_section_sits_after_the_call_frugality_rule(self, store):
+        """La prosa più vicina alla fine è quella che vince la contraddizione.
+
+        ``## Editing`` dice di battere insieme le modifiche in meno chiamate
+        possibili, ed è la ragione per cui potare perde contro aggiungere. La
+        regola del budget la contraddice di proposito, quindi deve stare dopo.
+        """
+        store.append_history("hello")
+        result = store.build_dream_prompt(gauge="MEMORY.md [91%]")
+        assert result is not None
+        prompt, _ = result
+
+        assert prompt.index("## Editing") < prompt.index("## Budget")
+        assert prompt.index("## Budget") < prompt.index("## Conversation History")
+
+    def test_empty_gauge_behaves_like_no_gauge(self, store):
+        store.append_history("hello")
+        explicit = store.build_dream_prompt(gauge="")
+        default = store.build_dream_prompt()
+        assert explicit is not None and default is not None
+        assert explicit[0] == default[0]
+
+
+class TestDreamReviewState:
+    def test_missing_file_reads_as_zero(self, store):
+        assert not store._review_state_file.exists()
+        assert store.get_review_state() == (0, 0)
+
+    def test_round_trip(self, store):
+        store.set_review_state(runs_since_review=7, stuck_runs=2)
+        assert store.get_review_state() == (7, 2)
+
+    def test_overwrite_replaces_previous_state(self, store):
+        store.set_review_state(runs_since_review=7, stuck_runs=2)
+        store.set_review_state(runs_since_review=0, stuck_runs=0)
+        assert store.get_review_state() == (0, 0)
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            "",                                    # troncato a zero byte da un kill
+            '{"runs_since_review": 3',             # JSON tagliato a metà
+            "not json at all",
+            "[1, 2]",                              # JSON valido, radice non-dict
+            '"3"',                                 # JSON valido, scalare
+            '{"runs_since_review": "3", "stuck_runs": null}',   # tipi sbagliati
+            '{"runs_since_review": true, "stuck_runs": 1.5}',   # bool e float
+            "{}",                                  # chiavi assenti
+        ],
+    )
+    def test_corrupted_state_reads_as_zero_without_raising(self, store, payload):
+        store._review_state_file.write_text(payload, encoding="utf-8")
+        assert store.get_review_state() == (0, 0)
+
+    def test_partial_state_keeps_the_readable_half(self, store):
+        store._review_state_file.write_text(
+            '{"runs_since_review": 4, "stuck_runs": "x"}', encoding="utf-8"
+        )
+        assert store.get_review_state() == (4, 0)
+
+    def test_negative_values_on_disk_are_normalized(self, store):
+        store._review_state_file.write_text(
+            '{"runs_since_review": -5, "stuck_runs": -1}', encoding="utf-8"
+        )
+        assert store.get_review_state() == (0, 0)
+
+    def test_negative_values_never_reach_disk(self, store):
+        store.set_review_state(runs_since_review=-5, stuck_runs=-1)
+        assert store.get_review_state() == (0, 0)
+
+    def test_state_lives_next_to_the_dream_cursor(self, store):
+        store.set_review_state(runs_since_review=1, stuck_runs=0)
+        assert store._review_state_file.parent == store._dream_cursor_file.parent
+        assert store._review_state_file.name == ".dream_review"
+
+    @pytest.mark.asyncio
+    async def test_dream_cannot_edit_its_own_review_state(self, store):
+        """Come ``.dream_cursor``: Dream non deve poter azzerare il contatore
+        che decide quando gli tocca il review pass."""
+        store.set_review_state(runs_since_review=9, stuck_runs=0)
+        tools = store.build_dream_tools()
+
+        result = await tools.execute(
+            "write_file",
+            {"path": "memory/.dream_review", "content": '{"runs_since_review": 0}'},
+        )
+
+        assert "outside allowed directory" in result
+        assert store.get_review_state() == (9, 0)
+
+
 class TestDreamTools:
     def test_dream_tools_are_restricted_to_file_edits(self, store):
         tools = store.build_dream_tools()
@@ -436,6 +562,48 @@ class TestDreamToolsWriteTracking:
         assert isinstance(tools.file_states, FileStates)
         assert tools.file_states.writes_ok == 0
         assert tools.file_states.writes_attempted == 0
+
+    def test_no_guard_keeps_todays_registry(self, store):
+        """Senza guard il registry è quello di sempre: stessi tool, file_states esposto."""
+        tools = store.build_dream_tools()
+        assert set(tools.tool_names) == {
+            "apply_patch",
+            "edit_file",
+            "read_file",
+            "write_file",
+        }
+        assert isinstance(tools.file_states, FileStates)
+
+    def test_guard_reaches_every_tool_including_read_file(self, store):
+        """Il guard va a tutti e quattro, anche a ``read_file`` dove oggi non fa nulla.
+
+        È il costruttore a decidere chi lo riceve: se un tool ne restasse fuori,
+        basterebbe che domani diventi write-capable perché sfugga al budget
+        senza che nessun test lo noti.
+        """
+        def guard(path, content):
+            return None
+
+        tools = store.build_dream_tools(write_size_guard=guard)
+        for name in ("read_file", "edit_file", "apply_patch", "write_file"):
+            tool = tools.get(name)
+            assert tool is not None
+            assert tool._write_size_guard is guard, name
+
+    @pytest.mark.asyncio
+    async def test_guard_refusal_blocks_the_write(self, store):
+        """Un guard che rifiuta deve fermare la scrittura, non solo commentarla."""
+        def guard(path, content):
+            return "MEMORY.md is full; consolidate before adding."
+
+        tools = store.build_dream_tools(write_size_guard=guard)
+        result = await tools.execute(
+            "edit_file",
+            {"path": "SOUL.md", "old_text": "Helpful", "new_text": "Precise"},
+        )
+
+        assert "consolidate before adding" in result
+        assert "Helpful" in store.soul_file.read_text(encoding="utf-8")
 
     def test_each_run_gets_its_own_file_states(self, store):
         """Per-run: due Dream concorrenti non devono condividere i contatori."""

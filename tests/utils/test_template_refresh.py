@@ -314,6 +314,63 @@ def test_a_failed_retire_does_not_stop_the_prompt_refresh(
     assert prompt.read_text(encoding="utf-8") == original
 
 
+# -- il prompt del review pass ----------------------------------------------
+#
+# ``agent/dream_review.md`` è un prompt di sistema come gli altri, ma con una
+# variabile che nessun altro prompt di Dream ha: la misura corrente dei file.
+# Il guard che ogni voce del manifest esista su disco vive già in
+# ``tests/utils/test_asset_manifests.py`` (``_TEMPLATES_MANIFEST`` è l'unione
+# delle due liste, e ``test_the_two_lists_cover_the_manifest_exactly`` qui sopra
+# tiene ``_SYSTEM_PROMPT_TEMPLATES`` dentro quell'unione); qui si copre il
+# rendering, che quel guard non tocca.
+
+
+@pytest.fixture
+def rendered_from(workspace: Path, monkeypatch: pytest.MonkeyPatch):
+    """Rende un template *dalla copia estratta nel workspace*.
+
+    ``render_template`` carica da ``get_workspace_path()``, non dal package: un
+    prompt che non arriva nel workspace non si rende affatto, quindi renderlo di
+    lì prova le due cose insieme. L'ambiente Jinja è memoizzato a livello di
+    processo (``lru_cache``), perciò va invalidato prima **e** dopo — la prima
+    chiamata della suite fisserebbe altrimenti la root per tutti.
+    """
+    from jenny.runtime.context import get_runtime_context
+    from jenny.utils import prompt_templates
+
+    monkeypatch.setattr(get_runtime_context(), "workspace_dir", workspace)
+    prompt_templates._environment.cache_clear()
+    yield prompt_templates.render_template
+    prompt_templates._environment.cache_clear()
+
+
+def test_the_review_prompt_renders_with_the_budget_gauge(rendered_from) -> None:
+    """La misura è l'unica cosa che il review pass sa e Dream no: deve arrivare."""
+    gauge = "MEMORY.md [50% — 3,000/6,000 chars]"
+
+    text = rendered_from("agent/dream_review.md", budget_gauge=gauge)
+
+    assert gauge in text
+    # Il nome della variabile è congelato: chi lo cambia qui lo deve cambiare
+    # anche in chi la inietta, e un mismatch renderebbe silenziosamente vuoto.
+    assert "{{" not in text
+
+
+def test_an_empty_gauge_leaves_no_dangling_heading(rendered_from) -> None:
+    """Senza misura da mostrare, la sezione non deve restare come intestazione vuota.
+
+    Un ``## Budget`` seguito dal nulla non è un dettaglio estetico: al modello
+    dice che una misura c'era e non è arrivata, che è peggio del non averla mai
+    promessa.
+    """
+    text = rendered_from("agent/dream_review.md", budget_gauge="")
+
+    assert "## Budget" not in text
+    assert "\n\n\n" not in text, "riga vuota di troppo dove stava la sezione"
+    # Il resto del prompt è intatto: sparisce la misura, non il mestiere.
+    assert "## Scope" in text
+
+
 def test_the_retired_digest_registry_has_exactly_one_definition() -> None:
     """Due copie di un insieme che deve restare allineato è il guasto che questo
     repo continua a dover riparare.

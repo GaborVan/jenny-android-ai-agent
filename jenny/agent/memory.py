@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+from collections.abc import Callable
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
@@ -51,6 +52,7 @@ class MemoryStore:
         self.user_file = workspace / "USER.md"
         self._cursor_file = self.memory_dir / ".cursor"
         self._dream_cursor_file = self.memory_dir / ".dream_cursor"
+        self._review_state_file = self.memory_dir / ".dream_review"
         self._corruption_logged = False  # rate-limit non-int cursor warning
         self._malformed_entry_logged = False  # rate-limit bad history shape warning
         self._oversize_logged = False  # rate-limit oversized-entry warning
@@ -349,10 +351,85 @@ class MemoryStore:
         # legge come 0 e Dream ricomincia da capo su tutta la storia.
         atomic_write(self._dream_cursor_file, str(cursor))
 
-    def build_dream_prompt(self, *, max_entries: int = 20) -> tuple[str, int] | None:
+    # -- review pass state ---------------------------------------------------
+
+    @classmethod
+    def _review_counter(cls, value: Any) -> int:
+        """Normalizza un contatore del review state: qualunque cosa strana → 0.
+
+        Il rifiuto di ``bool`` viene da ``_valid_cursor`` (``isinstance(True,
+        int)`` è True, e un ``true`` finito nel JSON conterebbe come 1). I
+        negativi vanno a 0 e non passano così come sono: un contatore negativo
+        letto dal disco rimanderebbe il review pass indietro nel tempo invece
+        che avanti, cioè lo spegnerebbe in silenzio per N cicli.
+        """
+        counter = cls._valid_cursor(value)
+        if counter is None or counter < 0:
+            return 0
+        return counter
+
+    def get_review_state(self) -> tuple[int, int]:
+        """Return ``(runs_since_review, stuck_runs)`` for the Dream review pass.
+
+        Lettura tollerante quanto ``get_last_dream_cursor``: file assente, JSON
+        troncato, radice non-dict, chiavi mancanti o di tipo sbagliato danno
+        tutti ``(0, 0)`` e mai un'eccezione. Su Android il processo può essere
+        ucciso in qualsiasi momento e questo file resta a metà: se la lettura
+        sollevasse, il run di Dream che la chiama morirebbe prima di consolidare
+        nulla — molto peggio del ripartire da zero, che al più ritarda un review
+        pass di N cicli.
+
+        ``runs_since_review`` conta i cicli dall'ultimo review pass;
+        ``stuck_runs`` i run consecutivi in cui Dream ha tentato scritture senza
+        riuscirne nessuna (v. ``dream_should_advance_cursor``: quei run non
+        avanzano il cursore, e se si ripetono serve forzare un review invece di
+        rimacinare per sempre lo stesso batch). Entrambi i contatori li consuma
+        il chiamante: qui c'è solo lo stato su disco.
+        """
+        try:
+            raw = self._review_state_file.read_text(encoding="utf-8")
+        except OSError:
+            return (0, 0)
+        try:
+            data = json.loads(raw)
+        except ValueError:  # include JSONDecodeError
+            return (0, 0)
+        if not isinstance(data, dict):
+            return (0, 0)
+        return (
+            self._review_counter(data.get("runs_since_review")),
+            self._review_counter(data.get("stuck_runs")),
+        )
+
+    def set_review_state(self, *, runs_since_review: int, stuck_runs: int) -> None:
+        """Persist the review-pass counters to ``.dream_review``."""
+        # Stesso helper del cursore di Dream (v. ``set_last_dream_cursor``): un
+        # write_text nudo lascerebbe, se il processo muore a metà, un JSON
+        # troncato — che ``get_review_state`` legge come (0, 0), cioè un review
+        # pass appena fatto anche se non è mai partito. Con ``atomic_write`` il
+        # file o è quello vecchio o è quello nuovo, mai una via di mezzo.
+        # I valori si normalizzano anche in scrittura: un contatore negativo
+        # arrivato da un chiamante non deve nemmeno toccare il disco.
+        payload = json.dumps({
+            "runs_since_review": self._review_counter(runs_since_review),
+            "stuck_runs": self._review_counter(stuck_runs),
+        })
+        atomic_write(self._review_state_file, payload)
+
+    def build_dream_prompt(
+        self, *, max_entries: int = 20, gauge: str = "",
+    ) -> tuple[str, int] | None:
         """Build the Dream prompt with unprocessed history context.
 
         Returns ``(prompt, last_cursor)`` or ``None`` if nothing to process.
+
+        *gauge* è la riga di riempimento dei file di memoria (es.
+        ``MEMORY.md [67% — 1.474/2.200 char]``) da rendere nel prompt come
+        ``budget_gauge``; con la stringa vuota — il default — la sezione Budget
+        del template sparisce e il prompt resta identico a prima. Il calcolo
+        sta nel chiamante di proposito: ``MemoryStore`` è uno strato di I/O
+        puro e dargli qui la config per misurare il budget lo legherebbe al
+        modulo che quel budget lo impone.
         """
         last_cursor = self.get_last_dream_cursor()
         entries = self.read_unprocessed_history(since_cursor=last_cursor)
@@ -366,12 +443,17 @@ class MemoryStore:
         )
         skill_creator_path = str(self.workspace / "skills" / "skill-creator" / "SKILL.md")
         template = render_template(
-            "agent/dream.md", strip=True, skill_creator_path=skill_creator_path,
+            "agent/dream.md",
+            strip=True,
+            skill_creator_path=skill_creator_path,
+            budget_gauge=gauge,
         )
         prompt = f"{template}\n\n## Conversation History\n{history_text}"
         return (prompt, batch[-1]["cursor"])
 
-    def build_dream_tools(self):
+    def build_dream_tools(
+        self, *, write_size_guard: Callable[[Path, str], str | None] | None = None,
+    ):
         """Build the restricted tool registry used by Dream runs.
 
         Il ``FileStates`` creato per il run viene esposto come attributo
@@ -379,6 +461,13 @@ class MemoryStore:
         tra Dream concorrenti) e traccia scritture tentate/riuscite, così il
         chiamante può decidere via :meth:`dream_should_advance_cursor` se
         avanzare il cursore.
+
+        *write_size_guard* è il gancio pre-scrittura che impone il budget dei
+        file di memoria: riceve il path risolto e il testo che finirebbe su
+        disco, ritorna ``None`` per lasciar passare o il messaggio di rifiuto
+        da restituire al modello. Il tipo è dichiarato per struttura e non
+        importato da chi lo costruisce: questo modulo è I/O puro e non deve
+        dipendere dal modulo che misura il budget.
         """
         from jenny.agent.tools.apply_patch import ApplyPatchTool
         from jenny.agent.tools.file_state import FileStates
@@ -407,28 +496,37 @@ class MemoryStore:
             self.user_file.resolve(),
         ]
 
+        # Il guard va a tutti e quattro, ``ReadFileTool`` compreso, dove oggi
+        # non fa nulla: è il costruttore che decide cosa passa, non un elenco
+        # di tool "scrivibili" tenuto a mano. Un tool che domani diventasse
+        # write-capable — o un ``read_file`` con un ``--write-back`` — sfuggirebbe
+        # al budget solo perché nessuno si è ricordato di aggiungerlo qui.
         tools.register(ReadFileTool(
             workspace=workspace,
             allowed_dir=workspace,
             extra_read_allowed_dirs=extra_read,
             file_states=file_states,
+            write_size_guard=write_size_guard,
         ))
         tools.register(EditFileTool(
             workspace=workspace,
             allowed_dir=skills_dir,
             extra_write_allowed_files=editable_files,
             file_states=file_states,
+            write_size_guard=write_size_guard,
         ))
         tools.register(ApplyPatchTool(
             workspace=workspace,
             allowed_dir=skills_dir,
             extra_write_allowed_files=editable_files,
             file_states=file_states,
+            write_size_guard=write_size_guard,
         ))
         tools.register(WriteFileTool(
             workspace=workspace,
             allowed_dir=skills_dir,
             file_states=file_states,
+            write_size_guard=write_size_guard,
         ))
         # Esposto per ``dream_should_advance_cursor``: stesso oggetto usato da
         # tutti i tool sopra (passato esplicitamente ai costruttori), quindi

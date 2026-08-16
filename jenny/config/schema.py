@@ -29,12 +29,65 @@ from jenny.snapshot.engine import DEFAULT_EXCLUDE_GLOBS
 
 
 class DreamConfig(Base):
-    """Dream memory consolidation configuration."""
+    """Dream memory consolidation configuration.
+
+    Qui vivono anche i budget dei file di memoria lunga, perché Dream è l'unico
+    processo che li scrive: ``memory/MEMORY.md``, ``USER.md`` e ``SOUL.md``.
+    Nessuno, oggi, chiede mai a quei file se sono diventati troppo grandi, ed è
+    per questo che le regole di pruning già scritte nel prompt non scattano mai.
+    """
 
     _HOUR_MS = 3_600_000
 
     enabled: bool = True  # Register the periodic Dream consolidation job on startup
     interval_h: int = Field(default=2, ge=1)  # Every 2 hours by default
+
+    # I tre budget qui sotto partono a 0 di proposito: 0 = "misurato ma non
+    # applicato". Il gauge compare comunque nel prompt di Dream e nei log, ma
+    # nessuna scrittura viene mai rifiutata. La feature si spedisce così, inerte:
+    # prima si leggono per qualche giorno le dimensioni reali sul device, poi si
+    # sceglie il tetto **cambiando la config, non il codice**.
+    #
+    # Da qui il vincolo ``ge=0`` e non ``gt=0``. La distinzione è la stessa di
+    # ``_positive_float_env`` in ``config/runtime_env.py``, ma con il segno
+    # opposto: lì zero non disabilitava niente (un ``wait_for(0)`` fa fallire
+    # ogni send) e quindi il valore andava rifiutato; qui zero disabilita davvero
+    # l'enforcement ed è il default di spedizione. Non "correggerlo" in ``gt=0``:
+    # renderebbe impossibile esprimere lo stato in cui la feature nasce.
+    memory_budget_chars: int = Field(
+        default=0,
+        ge=0,
+        validation_alias=AliasChoices("memoryBudgetChars", "memory_budget_chars"),
+        serialization_alias="memoryBudgetChars",
+    )
+    user_budget_chars: int = Field(
+        default=0,
+        ge=0,
+        validation_alias=AliasChoices("userBudgetChars", "user_budget_chars"),
+        serialization_alias="userBudgetChars",
+    )
+    # ``SOUL.md`` resta a 0 anche dopo la taratura degli altri due, ed è una
+    # decisione, non una dimenticanza: è sano (45 righe sul device) e contiene
+    # l'identità dell'agente, l'unica cosa che il system prompt non riscrive da
+    # nessun'altra parte. Perderne un pezzo per un rifiuto di scrittura costa più
+    # di quanto costi qualche centinaio di caratteri in più. Gauge sì, rifiuto no.
+    soul_budget_chars: int = Field(
+        default=0,
+        ge=0,
+        validation_alias=AliasChoices("soulBudgetChars", "soul_budget_chars"),
+        serialization_alias="soulBudgetChars",
+    )
+    # Ogni quanti run di Dream gira il review pass, quello il cui unico compito è
+    # rimpicciolire il file invece di aggiungerci roba. Con ``interval_h`` al
+    # default (2) dodici run vogliono dire al massimo un review pass al giorno.
+    # ``ge=1`` e non ``ge=0``: un review pass ogni zero run non è una
+    # configurazione, è una divisione per zero scritta a parole.
+    review_every_runs: int = Field(
+        default=12,
+        ge=1,
+        validation_alias=AliasChoices("reviewEveryRuns", "review_every_runs"),
+        serialization_alias="reviewEveryRuns",
+    )
 
     def build_schedule(self) -> CronSchedule:
         """Build the runtime schedule from the configured interval."""

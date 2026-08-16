@@ -255,9 +255,21 @@ class ApplyPatchTool(_FsTool):
                     raise _PatchError(f"unknown action: {action}")
 
             if dry_run:
+                # Il dry-run non passa dal gancio: non scrive niente, quindi non
+                # c'è niente da rifiutare, e rifiutarlo nasconderebbe proprio il
+                # riepilogo che serve a capire di quanto si sta sforando.
                 return "Patch dry-run succeeded:\n" + "\n".join(
                     _format_summary(summary) for summary in summaries
                 )
+
+            # Tutto-o-niente: il gancio si pronuncia su *tutti* i file prima che
+            # parta la prima scrittura. Il rollback qui sotto esiste perché una
+            # patch applicata a metà è peggio di una rifiutata, e un rifiuto a
+            # metà ciclo la produrrebbe senza nemmeno un'eccezione a innescarlo.
+            for target, pending_text in writes.items():
+                refusal = self._check_write_size(target, pending_text)
+                if refusal is not None:
+                    return refusal
 
             backups: dict[Path, bytes | None] = {}
             for path in writes:

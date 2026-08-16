@@ -105,3 +105,10 @@ For [SKILL] entries:
 - Batch changes into as few calls as possible. Surgical edits only.
 
 Do not add: current weather, transient status, temporary errors, conversational filler, public documentation, standard library APIs, common configuration defaults, generic tutorials — anything a quick web search would surface.
+{% if budget_gauge %}
+
+## Budget
+{{ budget_gauge }}
+
+Past 80% on a file, consolidate **before** adding to it: merge or delete first in the same turn, then write the new fact. This overrides the call-frugality rule above — a run that only prunes is a run well spent.
+{% endif %}

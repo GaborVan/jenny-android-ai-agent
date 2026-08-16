@@ -3,6 +3,7 @@
 import difflib
 import mimetypes
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,13 @@ from jenny.config.tool_schemas import FileToolsConfig  # re-export (def in confi
 from jenny.security.workspace_access import current_tool_workspace
 from jenny.security.workspace_policy import _safe_expanduser
 from jenny.utils.helpers import build_image_content_blocks, detect_image_mime
+
+# Gancio pre-scrittura: riceve il path risolto e il testo esatto che finirebbe su
+# disco, ritorna ``None`` per lasciar passare o un messaggio di rifiuto da
+# restituire al modello al posto della scrittura. Il tipo è dichiarato qui e non
+# importato da chi impone il budget: i tool sui file sono usati da tutto l'agente
+# e non devono dipendere dal modulo che ne limita uno solo.
+WriteSizeGuard = Callable[[Path, str], str | None]
 
 
 class _FsTool(Tool):
@@ -67,6 +75,7 @@ class _FsTool(Tool):
         file_states: FileStates | None = None,
         restrict_to_workspace: bool | None = None,
         write_files_only: bool = False,
+        write_size_guard: WriteSizeGuard | None = None,
     ):
         self._workspace = workspace
         self._allowed_dir = allowed_dir
@@ -94,6 +103,9 @@ class _FsTool(Tool):
         # current async task, which keeps shared tool instances session-safe.
         self._explicit_file_states = file_states
         self._fallback_file_states = FileStates()
+        # Assente per default: l'agente principale non deve pagare nulla per un
+        # limite che riguarda solo i runner isolati che lo passano.
+        self._write_size_guard = write_size_guard
 
     @classmethod
     def create(cls, ctx: Any) -> Tool:
@@ -192,6 +204,26 @@ class _FsTool(Tool):
             self._extra_write_allowed_files,
             include_media_dir=False,
         )
+
+    def _check_write_size(self, path: Path, text: str) -> str | None:
+        """Chiede al gancio se questo esatto contenuto può andare su disco.
+
+        Va chiamato con il testo *finale* (conversione CRLF inclusa): il gancio
+        misura quello che al giro dopo rileggerà dal file, e un conteggio fatto
+        sulla stringa pre-conversione non corrisponderebbe.
+
+        Il rifiuto non passa da ``record_write``: la scrittura non è avvenuta,
+        quindi resta un ``writes_attempted`` senza ``writes_ok`` — vedi il
+        commento su ``FileStates.writes_refused_budget``.
+        """
+        guard = self._write_size_guard
+        if guard is None:
+            return None
+        refusal = guard(path, text)
+        if refusal is None:
+            return None
+        self._file_states.writes_refused_budget += 1
+        return refusal
 
     def _resolve(self, path: str) -> Path:
         return self._resolve_read(path)
@@ -498,6 +530,11 @@ class WriteFileTool(_FsTool):
             if content is None:
                 raise ValueError("Unknown content")
             fp = self._resolve_write(path)
+            # Prima della mkdir: una scrittura rifiutata non deve nemmeno
+            # lasciare in giro la directory che avrebbe dovuto contenerla.
+            refusal = self._check_write_size(fp, content)
+            if refusal is not None:
+                return refusal
             fp.parent.mkdir(parents=True, exist_ok=True)
             fp.write_text(content, encoding="utf-8")
             self._file_states.record_write(fp)
@@ -596,6 +633,9 @@ class EditFileTool(_FsTool):
             # Create-file semantics: old_text='' + file doesn't exist → create
             if not fp.exists():
                 if old_text == "":
+                    refusal = self._check_write_size(fp, new_text)
+                    if refusal is not None:
+                        return refusal
                     fp.parent.mkdir(parents=True, exist_ok=True)
                     fp.write_text(new_text, encoding="utf-8")
                     self._file_states.record_write(fp)
@@ -616,6 +656,9 @@ class EditFileTool(_FsTool):
                 content = raw.decode("utf-8")
                 if content.strip():
                     return f"Error: Cannot create file — {path} already exists and is not empty."
+                refusal = self._check_write_size(fp, new_text)
+                if refusal is not None:
+                    return refusal
                 fp.write_text(new_text, encoding="utf-8")
                 self._file_states.record_write(fp)
                 return f"Successfully edited {fp}"
@@ -702,6 +745,11 @@ class EditFileTool(_FsTool):
             if uses_crlf:
                 new_content = new_content.replace("\n", "\r\n")
 
+            # Dopo la conversione CRLF: il gancio deve pesare la stringa che
+            # finisce davvero su disco, non quella normalizzata a LF.
+            refusal = self._check_write_size(fp, new_content)
+            if refusal is not None:
+                return refusal
             fp.write_bytes(new_content.encode("utf-8"))
             self._file_states.record_write(fp)
             msg = f"Successfully edited {fp}"
