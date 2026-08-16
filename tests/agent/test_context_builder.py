@@ -1,5 +1,6 @@
 """Tests for ContextBuilder — system prompt and message assembly."""
 
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -170,12 +171,26 @@ def _bundled(name: str) -> str:
     return tpl.read_text(encoding="utf-8")
 
 
+def _retired_user_template() -> str:
+    """``jenny/templates/USER.md`` come spediva da 0.3.0 (8833b94) a 0.7.1.
+
+    Sta in un file e non in una stringa qui dentro perché tre righe di
+    ``## Topics of Interest`` finiscono con uno spazio: trascritte in un
+    sorgente Python le toglierebbe ``ruff`` (W291), il digest non combacerebbe
+    più e il test proverebbe qualcosa di diverso da quello che c'è sui telefoni.
+    """
+    return (Path(__file__).parent / "fixtures" / "user_md_retired_0.3.0.md").read_text(
+        encoding="utf-8"
+    )
+
+
 class TestBootstrapTemplateGuard:
     """Un file di bootstrap mai toccato non è contenuto scritto dall'utente.
 
-    ``USER.md`` intatto è un modulo vuoto e viene omesso (stessa risposta che
-    ``MEMORY.md`` riceve in ``build_system_prompt``); ``AGENTS.md`` e ``SOUL.md``
-    intatti sono il comportamento di serie e restano, ma etichettati.
+    ``USER.md`` intatto non dice niente sull'utente e viene omesso (stessa
+    risposta che ``MEMORY.md`` riceve in ``build_system_prompt``); ``AGENTS.md``
+    e ``SOUL.md`` intatti sono il comportamento di serie e restano, ma
+    etichettati.
     """
 
     def test_untouched_user_md_is_skipped(self, tmp_path):
@@ -220,6 +235,45 @@ class TestBootstrapTemplateGuard:
         assert "## AGENTS.md" in result
         assert "## SOUL.md" in result
         assert "## USER.md" not in result
+
+
+class TestRetiredTemplates:
+    """Riscrivere un template non deve promuovere i vecchi a scrittura dell'utente.
+
+    Il riconoscimento confronta con la copia bundled *corrente*, quindi ogni
+    riscrittura scollegherebbe le installazioni seedate con la precedente e mai
+    toccate da Dream: il modulo a caselle tornerebbe nel prompt, per giunta senza
+    etichetta perché prenderebbe il ramo "modificato dall'utente".
+    """
+
+    def test_retired_user_template_is_still_recognised(self, tmp_path):
+        (tmp_path / "USER.md").write_text(_retired_user_template(), encoding="utf-8")
+        builder = _builder(tmp_path)
+        assert builder._load_bootstrap_files() == ""
+
+    def test_retired_digest_does_not_swallow_real_user_content(self, tmp_path):
+        (tmp_path / "USER.md").write_text(
+            _retired_user_template() + "\n- **Name**: Luca\n", encoding="utf-8"
+        )
+        builder = _builder(tmp_path)
+        result = builder._load_bootstrap_files()
+        assert "Luca" in result
+        assert ContextBuilder._BOOTSTRAP_TEMPLATE_NOTICE not in result
+
+    def test_current_user_template_digest_is_pinned(self):
+        """Chi riscrive ``USER.md`` deve ritirare esplicitamente la versione uscente.
+
+        Senza questo, il prossimo rewrite reintroduce il difetto in silenzio: si
+        accorgerebbe solo un'installazione vergine aggiornata mesi dopo. Se questo
+        test fallisce, aggiungi il digest qui atteso a
+        ``ContextBuilder._RETIRED_TEMPLATE_DIGESTS["USER.md"]`` e sostituiscilo
+        con quello nuovo.
+        """
+        current = hashlib.sha256(
+            _bundled("USER.md").strip().encode("utf-8")
+        ).hexdigest()
+        assert current == "89c4ab4bfcdafea11e59b1856c31e08f16ba80960d68596f6fb631386a93c609"
+        assert current not in ContextBuilder._RETIRED_TEMPLATE_DIGESTS["USER.md"]
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 """Context builder for assembling agent prompts."""
 
 import base64
+import hashlib
 import mimetypes
 import platform
 from pathlib import Path
@@ -46,10 +47,11 @@ class ContextBuilder:
 
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md"]
     # File di bootstrap da omettere del tutto quando sono ancora il template
-    # intatto. L'elenco è corto apposta: ``USER.md`` intatto è un modulo vuoto —
-    # "(your name)", caselle non spuntate, sezioni fra parentesi — cioè zero
-    # informazione e un invito a rispondere a caselle. È lo stesso caso di
-    # ``MEMORY.md`` e riceve la stessa risposta: si salta.
+    # intatto. L'elenco è corto apposta: ``USER.md`` intatto non dice niente
+    # sull'utente — è l'impalcatura che spiega a Dream cosa scriverci, e le
+    # versioni ritirate erano perfino peggio (un modulo a caselle, che invitava
+    # il modello a rispondere alle caselle). È lo stesso caso di ``MEMORY.md``
+    # e riceve la stessa risposta: si salta.
     #
     # ``AGENTS.md`` e ``SOUL.md`` no. I loro template non sono segnaposto: sono
     # il comportamento di serie (le regole di cron/heartbeat; l'identità di
@@ -64,6 +66,29 @@ class ContextBuilder:
     # sarà un segnaposto come USER.md e basterà aggiungerlo qui (è la domanda
     # aperta 1 di quel documento).
     _BOOTSTRAP_SKIP_IF_TEMPLATE = frozenset({"USER.md"})
+    # Le versioni *ritirate* di un template, per digest sha256 del testo
+    # strippato. Servono perché il riconoscimento qui sopra è un confronto con
+    # la copia bundled **corrente**: riscrivere un template scollega ogni
+    # installazione seedata con quella precedente e mai toccata da Dream, che
+    # da un momento all'altro smette di essere "il modulo vuoto di serie" e
+    # diventa "roba scritta dall'utente" — modulo a caselle compreso, e senza
+    # nemmeno l'etichetta, perché quel ramo non la mette. Sarebbe disfare
+    # ``5bc4d9e`` per chi non ha aggiornato in tempo.
+    #
+    # Non è una finestra breve: Dream scrive ``USER.md`` solo quando ha un
+    # fatto personale da instradare, quindi su un'installazione usata per
+    # lavoro di progetto quel file può restare vergine a tempo indeterminato.
+    #
+    # Chi riscrive un template qui elencato deve aggiungere il digest della
+    # versione uscente. Non è un promemoria: ``test_current_user_template_digest_is_pinned``
+    # fallisce finché non lo si fa.
+    _RETIRED_TEMPLATE_DIGESTS: dict[str, frozenset[str]] = {
+        # 0.3.0 (8833b94) → 0.7.1: "# User Profile" con i tre blocchi di
+        # caselle, "(your name)" e le sezioni fra parentesi.
+        "USER.md": frozenset({
+            "db2c6d63e0b43e5ac414da85f86454e2614f6524d4ef92a291f11476e6e03deb",
+        }),
+    }
     _BOOTSTRAP_TEMPLATE_NOTICE = (
         "[Unmodified default — this file still matches the template shipped with the app; "
         "the user has not written any of it. Nothing below states a user preference.]"
@@ -307,11 +332,21 @@ class ContextBuilder:
 
     @staticmethod
     def _is_template_content(content: str, template_path: str) -> bool:
-        """Check if *content* is identical to the bundled template (user hasn't customized it)."""
+        """Check if *content* is identical to a bundled template (user hasn't customized it).
+
+        "Bundled" include le versioni ritirate: quello che si vuole sapere qui
+        è se il file l'ha scritto l'utente, e un template che spediva una
+        release fa non l'ha scritto più di quello di oggi (v.
+        ``_RETIRED_TEMPLATE_DIGESTS``).
+        """
+        stripped = content.strip()
         tpl = load_bundled_template(template_path)
-        if tpl is not None:
-            return content.strip() == tpl.strip()
-        return False
+        if tpl is not None and stripped == tpl.strip():
+            return True
+        retired = ContextBuilder._RETIRED_TEMPLATE_DIGESTS.get(template_path)
+        if not retired:
+            return False
+        return hashlib.sha256(stripped.encode("utf-8")).hexdigest() in retired
 
     def build_messages(
         self,
