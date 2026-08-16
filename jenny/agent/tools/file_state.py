@@ -45,12 +45,19 @@ class FileStates:
         # ``MemoryStore.dream_should_advance_cursor``.
         self.writes_ok: int = 0
         self.writes_attempted: int = 0
-        # Solo diagnostica: distingue nei log "bloccato da policy" da "rifiutato
-        # perché il risultato sfora il budget". Deliberatamente *non* letto da
-        # ``MemoryStore.internal_run_should_commit``: un rifiuto di budget resta
-        # un ``writes_attempted`` che non è diventato ``writes_ok``, quindi il
-        # cursore non avanza — che è esattamente il comportamento voluto, un
-        # fatto che Dream voleva scrivere e non ha scritto va riproposto.
+        # Rifiuti dovuti al budget dei file di memoria (``write_size_guard``),
+        # distinti nei log dai blocchi di policy. **Letto da
+        # ``MemoryStore.internal_run_should_commit``**, che non commette il run
+        # se questo contatore è > 0.
+        #
+        # Perché serve un contatore a sé: qui si conta *per run*, non per file.
+        # È vero che un rifiuto resta un ``writes_attempted`` che non è
+        # diventato ``writes_ok``, ma la regola di commit guarda gli aggregati
+        # del run intero: un run che scrive con successo una skill e si vede
+        # rifiutare ``MEMORY.md`` arriva a ``ok=1, attempted=2`` e passerebbe
+        # per riuscito. Il cursore avanzerebbe e il fatto rifiutato non
+        # tornerebbe in nessun batch successivo. Il ragionamento "basta
+        # attempted/ok" regge solo se il rifiuto è l'unica scrittura del run.
         self.writes_refused_budget: int = 0
 
     def record_write_attempt(self) -> None:

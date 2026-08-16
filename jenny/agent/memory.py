@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Iterator
 
 from loguru import logger
 
+from jenny.session.keys import DREAM_SESSION_PREFIX, is_internal_session_key
 from jenny.utils.helpers import (
     ensure_dir,
     strip_think,
@@ -34,8 +35,6 @@ class MemoryStore:
     """Pure file I/O for memory files: MEMORY.md, history.jsonl, SOUL.md, USER.md."""
 
     _DEFAULT_MAX_HISTORY = 1000
-    _INTERNAL_HISTORY_SESSION_PREFIXES = ("cron:", "dream:", "atlas:")
-    _INTERNAL_HISTORY_SESSION_KEYS = {"heartbeat"}
 
     def __init__(self, workspace: Path, max_history_entries: int = _DEFAULT_MAX_HISTORY):
         self.workspace = workspace
@@ -244,12 +243,16 @@ class MemoryStore:
 
     @classmethod
     def _is_internal_history_session(cls, session_key: str | None) -> bool:
+        """True se la voce di history viene da lavoro interno, non dall'utente.
+
+        Il vocabolario e' quello unico di :mod:`jenny.session.keys`: qui resta
+        solo la guardia su ``None``/stringa vuota, che il predicato canonico non
+        ha perche' lavora su chiavi di sessione sempre presenti, mentre il
+        ``session_key`` di una voce di history e' opzionale.
+        """
         if not session_key:
             return False
-        return (
-            session_key in cls._INTERNAL_HISTORY_SESSION_KEYS
-            or session_key.startswith(cls._INTERNAL_HISTORY_SESSION_PREFIXES)
-        )
+        return is_internal_session_key(session_key)
 
     def read_recent_history_for_prompt(
         self,
@@ -560,6 +563,8 @@ class MemoryStore:
         run:
 
         - è completato pulito (``internal_run_completed``), **e**
+        - nessuna scrittura è stata rifiutata dal budget
+          (``writes_refused_budget == 0``), **e**
         - ha scritto almeno un file (``writes_ok > 0``), **oppure** non ha mai
           tentato una scrittura (``writes_attempted == 0``) — il caso legittimo
           "non c'era niente da cambiare".
@@ -567,15 +572,30 @@ class MemoryStore:
         Se ha tentato scritture e nessuna è riuscita NON si registra: l'input va
         riprocessato al run seguente.
 
-        ``file_states`` è tollerante a ``None`` / oggetti senza i contatori
-        (fallback conservativo: nessun avanzamento) per non far esplodere il
-        chiamante se il registry non è quello costruito qui.
+        Il rifiuto di budget va guardato a parte perché i contatori sono **per
+        run, non per file**: un run che scrive con successo una skill e si vede
+        rifiutare ``MEMORY.md`` ha comunque ``writes_ok > 0``, e sui soli due
+        contatori aggregati passerebbe per riuscito. Il fatto rifiutato non è su
+        disco e, registrato il progresso, non tornerebbe in nessun batch
+        successivo: perso. Basta quindi un rifiuto perché il run non commetta.
+        La via d'uscita dal livelock che ne consegue è il review forzato
+        (v. ``agent/dream_cycle.py``), non un commit più permissivo.
+
+        ``file_states`` è tollerante a ``None`` / oggetti senza i contatori di
+        scrittura (fallback conservativo: nessun avanzamento) per non far
+        esplodere il chiamante se il registry non è quello costruito qui. Un
+        ``writes_refused_budget`` assente vale invece zero: chi non ha il
+        contatore non ha nemmeno il gancio che lo incrementa
+        (``_FsTool._check_write_size``), quindi non può aver rifiutato nulla.
         """
         if not MemoryStore.internal_run_completed(resp):
             return False
         writes_ok = getattr(file_states, "writes_ok", None)
         writes_attempted = getattr(file_states, "writes_attempted", None)
         if not isinstance(writes_ok, int) or not isinstance(writes_attempted, int):
+            return False
+        refused_budget = getattr(file_states, "writes_refused_budget", 0)
+        if isinstance(refused_budget, int) and refused_budget > 0:
             return False
         if writes_ok > 0:
             return True
@@ -594,12 +614,15 @@ class MemoryStore:
         silenziosamente saltato). Perciò si avanza solo quando il run:
 
         - è completato pulito (``dream_run_completed``), **e**
+        - non si è visto rifiutare nessuna scrittura dal budget, **e**
         - ha scritto almeno un file (``writes_ok > 0``), **oppure** non ha mai
           tentato una scrittura (``writes_attempted == 0``) — il caso legittimo
           "nulla da consolidare".
 
         Se invece ha tentato scritture ma nessuna è riuscita (tutte bloccate o
         fallite) NON si avanza: quelle voci vanno riprocessate al run seguente.
+        Lo stesso vale se *una parte* delle scritture è passata e una è stata
+        rifiutata dal budget — v. :meth:`internal_run_should_commit`.
 
         ``file_states`` è tollerante a ``None`` / oggetti senza i contatori
         (fallback conservativo: nessun avanzamento) per non far esplodere il
@@ -647,7 +670,7 @@ class MemoryStore:
     @staticmethod
     def dream_session_key() -> str:
         """Return a unique session key for a Dream run, e.g. ``dream:20260528-100000``."""
-        return f"dream:{datetime.now():%Y%m%d-%H%M%S}"
+        return f"{DREAM_SESSION_PREFIX}{datetime.now():%Y%m%d-%H%M%S}"
 
     @staticmethod
     def prune_internal_sessions(
