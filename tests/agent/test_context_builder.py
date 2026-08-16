@@ -294,7 +294,7 @@ class TestRetiredTemplates:
         current = hashlib.sha256(
             _bundled("USER.md").strip().encode("utf-8")
         ).hexdigest()
-        assert current == "89c4ab4bfcdafea11e59b1856c31e08f16ba80960d68596f6fb631386a93c609"
+        assert current == "e23a60be0336c5220d3d0dbd256907f66b590156459422a244dcd24685eb49b7"
         assert current not in _RETIRED_TEMPLATE_DIGESTS["USER.md"]
 
     @pytest.mark.parametrize("fixture", _RETIRED_AGENTS_FIXTURES)

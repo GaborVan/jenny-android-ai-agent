@@ -67,10 +67,20 @@ class DreamConfig(Base):
         serialization_alias="userBudgetChars",
     )
     # ``SOUL.md`` resta a 0 anche dopo la taratura degli altri due, ed è una
-    # decisione, non una dimenticanza: è sano (45 righe sul device) e contiene
-    # l'identità dell'agente, l'unica cosa che il system prompt non riscrive da
-    # nessun'altra parte. Perderne un pezzo per un rifiuto di scrittura costa più
-    # di quanto costi qualche centinaio di caratteri in più. Gauge sì, rifiuto no.
+    # decisione, non una dimenticanza — ma non per la ragione che stava scritta
+    # qui. La prima stesura diceva "è sano, 45 righe": misurato sul device il
+    # 2026-08-16 è 6.342 caratteri su 55 righe, cioè **il più grande dei tre**
+    # (MEMORY.md 3.943, USER.md 3.524). La roadmap lo dava per sano e nessuno
+    # aveva più guardato.
+    #
+    # La decisione regge lo stesso, con l'argomento vero: il file mescola due
+    # popolazioni che un tetto di dimensione non sa distinguere. C'è l'identità
+    # dell'agente, che il system prompt non riscrive da nessun'altra parte e che
+    # non va potata mai; e c'è un blocco ``## Execution Rules`` di vincoli di
+    # piattaforma che è esattamente la stessa deriva per cui questo budget
+    # esiste. Un rifiuto di scrittura non sa su quale delle due sta premendo, e
+    # premerebbe su entrambe. Lo strumento giusto lì è il review pass, che legge
+    # e sceglie; il guard no. Gauge sì, rifiuto no.
     soul_budget_chars: int = Field(
         default=0,
         ge=0,

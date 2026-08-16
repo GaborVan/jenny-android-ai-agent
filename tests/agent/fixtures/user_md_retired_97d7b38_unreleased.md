@@ -7,9 +7,3 @@ and a heading with nothing under it does not belong in this file.
 Not here: project context and infrastructure (`memory/MEMORY.md`), agent
 behaviour rules (`SOUL.md`), reusable procedures with concrete steps and output
 formats (`skills/<name>/SKILL.md`).
-
-Not here either: whatever the runtime measures on its own and puts in the
-Runtime Context of every turn — the current time, the timezone, where the device
-is. Those arrive dated, and they follow the user when they change. A copy
-written down here carries no date, nobody refreshes it, and it is out of date
-from the moment it is saved.

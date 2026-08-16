@@ -179,7 +179,14 @@ def _config(
     dream = config.agents.defaults.dream
     dream.memory_budget_chars = memory_budget
     dream.review_every_runs = review_every_runs
+    _ACTIVE_CONFIG["config"] = config
     return config
+
+
+# Popolato da ``_config()`` e letto dal finto ``load_config`` della fixture
+# autouse: è ciò che tiene i test scritti in termini di "questa è la config"
+# invece che di "questo è il file su disco".
+_ACTIVE_CONFIG: dict[str, Config] = {}
 
 
 def _dispatcher(
@@ -192,6 +199,24 @@ def _dispatcher(
         heartbeat_cfg=SimpleNamespace(),
         snapshot_before_dream=snapshot_cb,
     )
+
+
+@pytest.fixture(autouse=True)
+def _dream_knobs_come_from_disk(monkeypatch: pytest.MonkeyPatch):
+    """``_run_dream`` rilegge i knob di Dream da disco a ogni run.
+
+    Non è un dettaglio implementativo da aggirare nel test: è il comportamento,
+    ed esiste perché il ``Config`` catturato dal container non viene aggiornato
+    da nessuno quando ``/dream budget`` riscrive ``config.json``. Il fake sostituisce
+    quindi la lettura, non la scavalca — i test continuano a controllare i knob
+    passando il loro ``Config`` a ``_config()``, che questo redirige.
+    """
+    _ACTIVE_CONFIG.clear()
+
+    def _load() -> Config:
+        return _ACTIVE_CONFIG.get("config") or Config()
+
+    monkeypatch.setattr("jenny.config.loader.load_config", _load)
 
 
 def _install_review(monkeypatch: pytest.MonkeyPatch, spy: _ReviewSpy) -> None:
@@ -482,3 +507,45 @@ async def test_default_budgets_leave_the_flow_unchanged(
     guard = memory.guards[-1]
     assert guard is not None
     assert guard(memory.memory_file, "y" * 1_000_000) is None
+
+
+async def test_a_budget_set_after_startup_reaches_the_cron_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """I knob di Dream si rileggono da disco, e senza questo la taratura e' inerte.
+
+    ``/dream budget memory 6000`` scrive ``config.json``. Il run manuale lo
+    applica subito perche' fa un ``load_config()`` fresco; questo run —- quello
+    che gira ogni due ore ed e' il consumatore vero -— userebbe il ``Config``
+    catturato quando il container si e' costruito, che **nessuno aggiorna**:
+    ``_on_settings_changed`` ricarica modello e provider, non questo. L'utente
+    vedrebbe il budget confermato in chat e nessun effetto fino al riavvio.
+
+    Il test simula esattamente quella sequenza: dispatcher costruito con budget
+    a 0, poi il file cambia, poi il run parte.
+    """
+    memory = _FakeMemory(tmp_path / "ws", memory_text="x" * 200)
+    spy = _ReviewSpy(memory.events)
+    _install_review(monkeypatch, spy)
+    agent = _FakeAgent(tmp_path, memory, "completed")
+
+    startup_config = _config(memory_budget=0)
+    dispatcher = _dispatcher(agent, startup_config)
+
+    # Dopo la costruzione qualcuno scrive un budget: e' cio' che fa `/dream budget`.
+    tuned = Config()
+    tuned.agents.defaults.dream.memory_budget_chars = 50
+    tuned.agents.defaults.dream.review_every_runs = 12
+    _ACTIVE_CONFIG["config"] = tuned
+
+    await dispatcher.dispatch(_DREAM_JOB)
+
+    # Il gauge del turno incrementale porta il numero nuovo, non lo zero di
+    # avvio: con lo zero MEMORY.md sarebbe reso come "no budget" come gli altri
+    # due, che restano a 0 e sono infatti la controprova nella stessa riga.
+    gauge = memory.gauges[-1]
+    assert "MEMORY.md [400% — 200/50 chars]" in gauge, gauge
+    assert "MEMORY.md [200 chars — no budget]" not in gauge, gauge
+    # E il Config di avvio e' rimasto quello che era: non lo stiamo mutando,
+    # lo stiamo scavalcando con la lettura da disco.
+    assert startup_config.agents.defaults.dream.memory_budget_chars == 0

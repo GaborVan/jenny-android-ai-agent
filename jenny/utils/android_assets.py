@@ -78,10 +78,15 @@ _TEMPLATES_MANIFEST = [*_USER_OWNED_TEMPLATES, *_SYSTEM_PROMPT_TEMPLATES]
 # (e il suo gemello per ``AGENTS.md``) fallisce finché non lo si fa.
 _RETIRED_TEMPLATE_DIGESTS: dict[str, dict[str, str]] = {
     # "# User Profile" con i tre blocchi di caselle, "(your name)" e le sezioni
-    # fra parentesi.
+    # fra parentesi, e — dalla riscrittura dopo — lo scaffold di prosa senza
+    # ancora la riga sui fatti che il runtime già calcola.
     "USER.md": {
         "db2c6d63e0b43e5ac414da85f86454e2614f6524d4ef92a291f11476e6e03deb":
             "v0.3.0 to v0.7.1 (8833b94)",
+        # Mai uscita in una release, ma un'installazione da sorgente sul ramo
+        # 0.8.0 in quella finestra ce l'ha.
+        "89c4ab4bfcdafea11e59b1856c31e08f16ba80960d68596f6fb631386a93c609":
+            "unreleased source builds (97d7b38)",
     },
     # Le tre versioni di "# Agent Instructions", il manuale di cron e heartbeat
     # che si spediva dentro un file dell'utente. Oggi quel testo vive in

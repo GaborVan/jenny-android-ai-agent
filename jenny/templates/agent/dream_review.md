@@ -28,11 +28,19 @@ Shape only. Restructuring means the same facts in a smaller shape, or fewer fact
 
 Output formats, item counts, step lists and "always do it this way" procedures sitting in `USER.md` or `memory/MEMORY.md` are not personal attributes. `USER.md` is loaded into every single turn, including the ones that only ask what time it is, so a task spec parked there is paid for on every turn. Move it to `skills/<name>/SKILL.md` — merging into an existing skill if one overlaps rather than creating a redundant one — and delete it from the source file. Dream's routing table already says this; this run is where it gets applied.
 
+## A fact the runtime reports is not stored memory
+
+Dream's *Always delete* opens with *"same fact at multiple locations — keep canonical copy only"*, and there is one canonical copy that is not in any file: the **Runtime Context** block, rebuilt from scratch for every turn. `Current Time` is always in it, and when the device has a fix so is a `Device location` line naming the place and how old the reading is. Comparing the files against each other will never surface that duplicate, which is why it survives every pass — so it is named here instead.
+
+Read the Runtime Context of *this* prompt, and delete from the files whatever it is already carrying: a `- **Timezone**: Europe/Rome` line, a `- **Location**: Rome, Italy (~41.89, 12.54)` line, a city or a pair of coordinates recorded as a standing fact about the user. The copy that stays is the runtime one — it is dated, and it changes when the user moves, which the copy on disk cannot. If the Runtime Context of this run does *not* carry it, leave it where it is: with no live source there is nothing to defer to.
+
 ## USER.md shrinks by moving, not by forgetting
 
 `USER.md` is the one file where the budget and the criteria can pull against each other, and when they do **the criteria win**. Its weight is facts about a person, and *Never delete* covers those: preferences and personality traits stay, however old they are. Being over budget does not promote a personal fact to deletable.
 
-So there is one route down for this file, and it is the section above. In order: the task specs and procedures that drifted in here go to `skills/<name>/SKILL.md` and are deleted from here; then template residue — leftover checkbox lists, a heading with nothing under it, a field still holding its parenthetical placeholder; then prose that takes six lines to say what it could say in one.
+The runtime duplicates of the section above are not an exception being carved into that rule, and reading them as one would be a mistake. *Never delete* protects a fact this file is the only place to remember; a copied-down location or timezone is the opposite case — the next prompt states it again, measured and dated, so removing it here loses nothing and the user ends up better informed than before. Nothing else in `USER.md` has that property.
+
+So the route down for this file is the two sections above, and nothing beyond them. In order: the runtime duplicates, which are free; then the task specs and procedures that drifted in here go to `skills/<name>/SKILL.md` and are deleted from here; then template residue — leftover checkbox lists, a heading with nothing under it, a field still holding its parenthetical placeholder; then prose that takes six lines to say what it could say in one.
 
 When those are done, stop. **A `USER.md` still over budget after the migration is a finished job, not a failed one.** Do not start ranking the user's own preferences by how much they look like they matter. You cannot tell, and neither can they: a personal fact you drop is one they have no way to notice is missing, and the only way it comes back is if they happen to say it again.
 

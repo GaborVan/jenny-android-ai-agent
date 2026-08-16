@@ -6,7 +6,7 @@ Do NOT guess paths. Route each fact to its canonical file:
 | File | Path | Content |
 |------|------|---------|
 | SOUL.md | `SOUL.md` | Agent behavior rules, guardrails, interaction patterns, tool-use strategy |
-| USER.md | `USER.md` | Personal attributes: identity, preferences, habits, communication style (language, length, tone) |
+| USER.md | `USER.md` | Personal attributes: identity, preferences, habits, communication style (language, length, tone) — "identity" means who the user is, not where they happen to be right now |
 | MEMORY.md | `memory/MEMORY.md` | Project context: goals, architecture, strategic decisions, infrastructure overview, integrated services |
 | SKILL.md | `skills/<name>/SKILL.md` | Reusable workflow templates with concrete steps, commands, and examples ([SKILL] entries only) |
 
@@ -21,13 +21,14 @@ Do NOT guess paths. Route each fact to its canonical file:
 - "Reverse proxy on port 8080 with user deploy" → MEMORY.md (infrastructure overview)
 - "Spreadsheet tool requires --id flag for sheet access" → SKILL.md (not MEMORY.md)
 - "API base URL is https://api.example.com" → SKILL.md (not MEMORY.md)
+- "User is in Rome, Italy" → nowhere: the runtime puts a dated `Device location` line in every prompt, and a copy in a file is never told when the user moves
 
 **Communication boundary:** Language, length, and tone preferences go to USER.md. Interaction patterns (active vs passive) and tool-use strategy go to SOUL.md.
 
 Cross-boundary rule: no technical configs in USER.md, no user facts in SOUL.md, no operational details in MEMORY.md. If a fact fits multiple files, keep the most specific copy and remove the rest.
 
 ## MECE enforcement
-- USER.md: personal attributes (identity, preferences, habits, communication style) — no technical configs, no project context
+- USER.md: personal attributes (identity, preferences, habits, communication style) — no technical configs, no project context, nothing the runtime already reports
 - SOUL.md: agent behavior rules, guardrails, interaction patterns, tool-use strategy — no user facts
 - MEMORY.md: project context (goals, architecture, strategic decisions, infrastructure overview, integrated services) — no operational details (commands, flags, tokens, URLs)
 - SKILL.md: reusable workflow templates with concrete steps, commands, and examples
@@ -105,6 +106,8 @@ For [SKILL] entries:
 - Batch changes into as few calls as possible. Surgical edits only.
 
 Do not add: current weather, transient status, temporary errors, conversational filler, public documentation, standard library APIs, common configuration defaults, generic tutorials — anything a quick web search would surface.
+
+Do not add what the runtime already reports either: the current time, the timezone, the device location — the user's city, their coordinates, where they live *as of today*. The reason is not that it does not matter; it is that a live source already exists. Every prompt carries a Runtime Context block with `Current Time` and, when the device has a fix, a `Device location` line with the place and how old the reading is. A copy in a memory file has no date, nothing refreshes it when the user moves, and it is already stale by the next turn — while the live line is right at that same moment.
 {% if budget_gauge %}
 
 ## Budget

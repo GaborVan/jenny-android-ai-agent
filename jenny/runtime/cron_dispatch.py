@@ -346,7 +346,25 @@ class CronDispatcher:
         prune_dream_sessions = MemoryStore.prune_dream_sessions
 
         store = agent.context.memory
-        cfg = self._config.agents.defaults.dream
+        # I knob di Dream si rileggono da disco a ogni run, e non si prendono da
+        # ``self._config``. Quel Config è catturato quando il container si
+        # costruisce, e **niente lo aggiorna**: ``_on_settings_changed``
+        # (``runtime/container.py``) ricarica modello e provider, non questo.
+        #
+        # Senza la rilettura la superficie di taratura non funziona.
+        # ``/dream budget memory 6000`` scrive ``config.json`` e il run manuale
+        # lo applica subito (fa un ``load_config()`` fresco), mentre *questo*
+        # run — quello che gira ogni due ore ed è il consumatore vero —
+        # continuerebbe a usare il numero vecchio fino al riavvio del gateway.
+        # L'utente vedrebbe il budget confermato in chat e nessun effetto per
+        # ore, che è il modo peggiore in cui una manopola può non funzionare.
+        #
+        # Vale solo per i knob di Dream: il resto di ``self._config`` resta com'è
+        # (v. il chip aperto sulla staleness generale del Config del cron), e il
+        # costo è una lettura di un file piccolo ogni due ore.
+        from jenny.config.loader import load_config
+
+        cfg = load_config().agents.defaults.dream
         resp = None
         try:
             report = budget_report(

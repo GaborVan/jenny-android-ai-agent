@@ -141,6 +141,7 @@ _RETIRED_FIXTURES = [
     ("AGENTS.md", "agents_md_retired_6c5dba8_unreleased.md"),
     ("AGENTS.md", "agents_md_retired_v0.6.6.md"),
     ("USER.md", "user_md_retired_0.3.0.md"),
+    ("USER.md", "user_md_retired_97d7b38_unreleased.md"),
 ]
 
 
@@ -369,6 +370,50 @@ def test_an_empty_gauge_leaves_no_dangling_heading(rendered_from) -> None:
     assert "\n\n\n" not in text, "riga vuota di troppo dove stava la sezione"
     # Il resto del prompt è intatto: sparisce la misura, non il mestiere.
     assert "## Scope" in text
+
+
+# -- i fatti che il runtime calcola da sé --------------------------------------
+#
+# Ora, fuso e posizione del device arrivano già in ogni turno dentro il blocco
+# Runtime Context, misurati e datati. Ricopiarli in un file di memoria produce
+# una fotocopia scaduta nell'istante in cui la si scrive, e per giunta l'unica
+# delle due che il modello legge come un fatto stabile. Il template dice che qui
+# non ci vanno; ``agent/dream.md`` dice a Dream di non scriverli.
+
+
+def test_the_user_template_puts_runtime_facts_out_of_scope() -> None:
+    """Il difetto osservato: ``- **Location**: Rome, Italy (~41.89, 12.54)``.
+
+    Non era ereditata dal template — Dream l'ha inventata, perché niente le
+    diceva che quel fatto ha già una fonte viva. È lo stesso caso di
+    ``- **Timezone**:``, tolta da ``97d7b38`` proprio perché duplicava la riga
+    ``Current Time``; qui si chiude la classe invece della singola riga.
+    """
+    text = load_bundled_template("USER.md") or ""
+    # Il template è prosa a capo fisso: una frase ci sta a cavallo di due righe,
+    # e cercarla nel testo grezzo dipenderebbe da dove cade l'a capo.
+    flowed = " ".join(text.split())
+
+    assert "Runtime Context" in flowed
+    for fact in ("current time", "timezone", "where the device is"):
+        assert fact in flowed, f"il template non nomina {fact!r} fra i fatti del runtime"
+    # Resta prosa. Una intestazione in un template è presente per costruzione
+    # finché qualcuno non la cancella, ed è il buco che il rewrite ha chiuso.
+    assert not any(line.startswith("##") for line in text.splitlines())
+
+
+def test_dream_is_told_not_to_write_runtime_facts_and_why() -> None:
+    """Il divieto senza il motivo si legge come "non è importante", che è falso.
+
+    La posizione del device è importante, tanto che il runtime la mette in ogni
+    prompt: quello che non va è la copia, perché nasce vecchia e nessuno la
+    aggiorna quando l'utente si sposta.
+    """
+    text = load_bundled_template("agent/dream.md") or ""
+
+    assert "Do not add what the runtime already reports" in text
+    assert "`Device location`" in text
+    assert "stale" in text, "il divieto arriva senza il motivo che lo regge"
 
 
 def test_the_retired_digest_registry_has_exactly_one_definition() -> None:

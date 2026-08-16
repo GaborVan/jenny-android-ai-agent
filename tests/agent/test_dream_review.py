@@ -546,6 +546,36 @@ class TestTheUserFileIsNotPrunedLikeTheOthers:
         assert "the criteria win" in agent.prompt
         assert "finished job, not a failed one" in agent.prompt
 
+    async def test_a_copied_down_location_goes_and_the_never_delete_rule_stays(
+        self, store: MemoryStore
+    ) -> None:
+        """Le due istruzioni devono convivere, non mangiarsi a vicenda.
+
+        La riga della posizione in ``USER.md`` e' un duplicato, ma di una copia
+        canonica che non e' un altro file: e' una riga costruita a runtime
+        (``Device location``, v. ``jenny/runtime/location.py``). La regola
+        ``Always delete: same fact at multiple locations`` in teoria la copre,
+        ma un modello che cerca il duplicato *fra i file* non lo trova mai —
+        percio' il prompt la nomina esplicitamente.
+
+        Il rischio del rimedio e' l'opposto: una frase che autorizzi a
+        cancellare posizione e fuso puo' leggersi come un'eccezione al
+        *Never delete* sugli attributi personali, e allora il pareggio che la
+        sezione qui sopra esiste per rompere torna com'era. Non e' un'eccezione:
+        il fatto non si perde, perche' il runtime lo rimanda nel prompt
+        successivo, datato. Questo test guarda che ci siano tutte e due.
+        """
+        agent = _FakeAgent()
+        await _run(store, agent)
+
+        # Il duplicato nominato per quello che e': una riga di prompt, non un file.
+        assert "`Device location`" in agent.prompt
+        assert "`- **Location**: Rome, Italy (~41.89, 12.54)`" in agent.prompt
+        # E la regola che protegge gli attributi personali, intatta.
+        assert "USER.md shrinks by moving, not by forgetting" in agent.prompt
+        assert "preferences and personality traits stay" in agent.prompt
+        assert "not an exception" in agent.prompt
+
     async def test_the_gauge_does_not_order_an_unconditional_shrink(
         self, store: MemoryStore
     ) -> None:

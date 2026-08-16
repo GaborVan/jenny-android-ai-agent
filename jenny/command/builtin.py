@@ -16,6 +16,7 @@ from jenny.utils.helpers import build_status_content
 
 if TYPE_CHECKING:
     from jenny.agent.atlas import AtlasOutcome
+    from jenny.agent.dream_review import ReviewOutcome
     from jenny.agent.memory_budget import FileBudget
 
 
@@ -283,27 +284,103 @@ async def cmd_dream(ctx: CommandContext) -> OutboundMessage:
         async def _silent(*_args, **_kwargs):
             pass
 
+        from jenny.agent.dream_review import run_dream_review
         from jenny.agent.memory import MemoryStore
+        from jenny.agent.memory_budget import (
+            budget_report,
+            make_write_size_guard,
+            render_gauge,
+        )
+        from jenny.config.loader import load_config
+
+        # Costante importata dal dispatcher cron invece che ricopiata qui. È il
+        # *secondo* posto in cui gira un run di Dream, e due implementazioni
+        # dello stesso trigger sono già il motivo per cui questo percorso era
+        # rimasto indietro: un 2 scritto a mano qui diventerebbe la prossima
+        # divergenza il giorno in cui quello di là cambia.
+        from jenny.runtime.cron_dispatch import _STUCK_FORCES_REVIEW
 
         dream_session_key = MemoryStore.dream_session_key
         prune_dream_sessions = MemoryStore.prune_dream_sessions
 
         store = loop.context.memory
         content = ""
+        review_note = ""
         resp = None
         t0 = time.monotonic()
         try:
-            result = store.build_dream_prompt()
+            # Le due metà di `/dream` devono raccontare la stessa cosa, e per
+            # tre commit non lo facevano. `/dream budget` legge lo stesso
+            # ``budget_report`` e stampa all'utente dimensioni, tetti e
+            # percentuali: chi li ha appena letti e poi lancia `/dream`
+            # conclude — ragionevolmente — che quel tetto valga per il run che
+            # sta avviando. Senza il guard montato qui non valeva per niente, e
+            # non era "una feature che non gira": era un limite annunciato da
+            # una metà del comando e ignorato dall'altra, cioè la porta di
+            # servizio con cui si aggirava l'enforcement lanciando Dream a
+            # mano. Il gauge segue la stessa logica: il modello non può
+            # rispettare uno spazio di cui non gli si dice la misura.
+            cfg = load_config().agents.defaults.dream
+            report = budget_report(
+                store,
+                memory_chars=cfg.memory_budget_chars,
+                user_chars=cfg.user_budget_chars,
+                soul_chars=cfg.soul_budget_chars,
+            )
+            guard = make_write_size_guard(report)
+            runs_since_review, stuck = store.get_review_state()
+
+            # Stesso trigger del percorso cron (v. ``CronDispatcher._run_dream``):
+            # la cadenza periodica, più ``stuck`` come uscita di emergenza dal
+            # livelock. Senza questo blocco un'installazione in cui Dream viene
+            # lanciato solo a mano non vedrebbe mai un review pass, perché
+            # ``runs_since_review`` non avanzerebbe mai.
+            if runs_since_review >= cfg.review_every_runs or stuck >= _STUCK_FORCES_REVIEW:
+                # ``snapshotted=False`` è la verità, non una scorciatoia. Il
+                # checkpoint pre-Dream lo prende il container e lo passa al
+                # dispatcher cron; da un comando non c'è nessun gancio per
+                # chiederlo, quindi qui il review pass gira senza rete. Il suo
+                # prompt ha due rami e dichiarare ``True`` sceglierebbe quello
+                # che promette al modello modifiche reversibili — attaccato
+                # proprio alla frase il cui unico scopo è fargli cancellare di
+                # più. Nel dubbio si mente al ribasso, mai al rialzo: con
+                # ``False`` il modello legge che le cancellazioni sono
+                # definitive e nel dubbio tiene.
+                outcome = await run_dream_review(
+                    loop,
+                    store=store,
+                    report=report,
+                    snapshotted=False,
+                    write_size_guard=guard,
+                )
+                runs_since_review, stuck = 0, 0
+                store.set_review_state(runs_since_review=0, stuck_runs=0)
+                review_note = _format_dream_review_note(outcome)
+                # Report e guard si RICOSTRUISCONO: il review ha appena
+                # riscritto quei file, e il gauge del turno incrementale
+                # mostrerebbe altrimenti un riempimento già smontato — cioè
+                # chiederebbe al modello di far spazio che è già stato fatto.
+                report = budget_report(
+                    store,
+                    memory_chars=cfg.memory_budget_chars,
+                    user_chars=cfg.user_budget_chars,
+                    soul_chars=cfg.soul_budget_chars,
+                )
+                guard = make_write_size_guard(report)
+
+            result = store.build_dream_prompt(gauge=render_gauge(report))
             if result is None:
                 await loop.bus.publish_outbound(OutboundMessage(
                     channel=msg.channel, chat_id=msg.chat_id,
-                    content=_format_dream_no_input_message(),
+                    content=_prefix_review_note(
+                        review_note, _format_dream_no_input_message()
+                    ),
                     metadata={"render_as": "text"},
                 ))
                 return
             prompt, last_cursor = result
             key = dream_session_key()
-            dream_tools = store.build_dream_tools()
+            dream_tools = store.build_dream_tools(write_size_guard=guard)
             resp = await loop.process_direct(
                 prompt,
                 session_key=key,
@@ -315,7 +392,8 @@ async def cmd_dream(ctx: CommandContext) -> OutboundMessage:
             # ``getattr``: il registry Dream espone ``file_states``, ma il
             # contratto resta tollerante verso registry di altra provenienza.
             dream_file_states = getattr(dream_tools, "file_states", None)
-            if MemoryStore.dream_should_advance_cursor(resp, dream_file_states):
+            advanced = MemoryStore.dream_should_advance_cursor(resp, dream_file_states)
+            if advanced:
                 store.set_last_dream_cursor(last_cursor)
                 content = f"Dream completed in {elapsed:.1f}s."
             elif MemoryStore.dream_run_completed(resp):
@@ -328,9 +406,22 @@ async def cmd_dream(ctx: CommandContext) -> OutboundMessage:
                     f"Dream did not complete after {elapsed:.1f}s; "
                     "memory cursor was not advanced."
                 )
+
+            # Anti-livelock, con la stessa regola del percorso cron: un run che
+            # non avanza il cursore incrementa ``stuck``, e due di fila forzano
+            # il review al giro dopo. Contarli anche qui è ciò che impedisce a
+            # un utente che lancia Dream a mano di restare fuori dal
+            # meccanismo — un batch rifiutato dal budget tornerebbe altrimenti
+            # identico a ogni `/dream`, per sempre.
+            stuck = 0 if advanced else stuck + 1
+            runs_since_review += 1
+            store.set_review_state(runs_since_review=runs_since_review, stuck_runs=stuck)
+            content = _prefix_review_note(review_note, content)
         except Exception as e:
             elapsed = time.monotonic() - t0
-            content = f"Dream failed after {elapsed:.1f}s: {e}"
+            content = _prefix_review_note(
+                review_note, f"Dream failed after {elapsed:.1f}s: {e}"
+            )
         finally:
             from jenny.agent.token_usage import record_response_token_usage
 
@@ -351,6 +442,45 @@ async def cmd_dream(ctx: CommandContext) -> OutboundMessage:
     return OutboundMessage(
         channel=msg.channel, chat_id=msg.chat_id, content="Dreaming...",
     )
+
+
+def _prefix_review_note(note: str, content: str) -> str:
+    """Antepone la riga sul review pass alla risposta, se c'è stato un review."""
+    return f"{note}\n\n{content}" if note else content
+
+
+def _format_dream_review_note(outcome: "ReviewOutcome") -> str:
+    """Riga sul review pass, da anteporre alla risposta di `/dream`.
+
+    Il review è un turno LLM in più, partito dentro un comando che l'utente ha
+    lanciato a mano e che gli ha risposto "Dreaming...": tacerlo gli farebbe
+    pagare token e attesa senza dirgli per cosa, e un turno in più partito in
+    silenzio è una sorpresa, non una feature. Il percorso cron lo scrive solo
+    nel log perché lì non c'è nessuno in ascolto; qui c'è.
+
+    ``freed`` è il delta dei **tre file misurati**, non del workspace: un review
+    che sposta una task spec da USER.md a una ``skills/<name>/SKILL.md`` — cosa
+    che il suo prompt chiede esplicitamente — la conta come liberata. La frase
+    lo dice, perché quel numero serve a tarare quei tre tetti e non a stimare
+    quanto è dimagrito il disco.
+    """
+    from jenny.agent.dream_review import STATUS_FAILED
+
+    files = "MEMORY.md, USER.md, SOUL.md"
+    if outcome.status == STATUS_FAILED:
+        return (
+            "A memory review pass ran first but did not complete cleanly; "
+            f"{outcome.freed:,} chars freed across {files}."
+        )
+    if outcome.freed > 0:
+        return (
+            f"A memory review pass ran first and freed {outcome.freed:,} chars "
+            f"across {files}."
+        )
+    # Zero o negativo. Un review che non trova niente da potare è un esito
+    # valido — il suo prompt lo dice al modello — e il negativo è il caso in cui
+    # ha ristrutturato spostando testo *fra* i tre file misurati.
+    return f"A memory review pass ran first; nothing was freed across {files}."
 
 
 def _format_dream_no_input_message() -> str:
