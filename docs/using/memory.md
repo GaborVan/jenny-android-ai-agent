@@ -131,11 +131,16 @@ So a brand-new chat isn't a blank slate: it inherits your durable profile and pr
 | Command | What it does |
 |---------|--------------|
 | `/dream` | Runs Dream immediately instead of waiting for the next scheduled pass. Replies "Dreaming..." right away, then follows up with the outcome once it finishes (completed and how long it took, completed-but-wrote-nothing, failed, or nothing to process). |
+| `/dream budget` | Shows the current size of each memory file against its budget, and how often the review pass runs. |
+| `/dream budget <memory\|user\|soul> <n>` | Sets that file's budget to `n` characters. `0` disables enforcement for that file — the size is still shown, nothing is refused. |
+| `/dream budget review <n>` | Runs the review pass every `n` Dream runs. `1` runs it every time, which is the way to watch one happen instead of waiting a day for it. |
 | `/atlas` | Rebuilds the wiki directory now. If nothing in your wikis changed since the last run it says so and spends nothing; `/atlas force` rebuilds anyway. |
+
+`/dream budget` writes to `config.json` and takes effect on the next run — no restart. It exists because raising a default in a new version of the app does **not** reach a `config.json` that has already been written: the file wins. If you are on an install from before these settings existed, the command is the only way to change them.
 
 ## Configuration
 
-Dream's configuration lives under `agents.defaults.dream` in `config.json`, and it is much smaller than older documentation for this project suggested — there is no `cron`, `modelOverride`, or `maxBatchSize` field. Only two fields actually exist:
+Dream's configuration lives under `agents.defaults.dream` in `config.json`, and it is much smaller than older documentation for this project suggested — there is no `cron`, `modelOverride`, or `maxBatchSize` field. Six fields exist: two for scheduling, and four that give the memory files a size to aim at.
 
 ```json
 {
@@ -143,7 +148,11 @@ Dream's configuration lives under `agents.defaults.dream` in `config.json`, and 
     "defaults": {
       "dream": {
         "enabled": true,
-        "intervalH": 2
+        "intervalH": 2,
+        "memoryBudgetChars": 2000,
+        "userBudgetChars": 2000,
+        "soulBudgetChars": 0,
+        "reviewEveryRuns": 12
       }
     }
   }
@@ -154,6 +163,14 @@ Dream's configuration lives under `agents.defaults.dream` in `config.json`, and 
 |-------|---------|---------|
 | `enabled` | Whether the periodic Dream job is registered at all. | `true` |
 | `intervalH` | How often Dream runs automatically, in hours. Internally this becomes an "every N hours" schedule. | `2` |
+| `memoryBudgetChars` | Target size for `memory/MEMORY.md`, in characters. Dream sees how full the file is in every prompt, and a write that would push it further over the line is refused — a write that *shrinks* it is always allowed, or an over-budget file could never be pruned. `0` means "measure, don't enforce". | `2000` |
+| `userBudgetChars` | The same for `USER.md`. | `2000` |
+| `soulBudgetChars` | The same for `SOUL.md` — and it ships at `0` on purpose. That file mixes Jenny's identity, which must never be pruned, with notes that belong elsewhere, and a size limit cannot tell the two apart. The review pass reads before it decides; the limit does not. | `0` |
+| `reviewEveryRuns` | Every how many Dream runs the **review pass** runs: a pass whose only job is to make the files smaller, rather than to add to them. At the default interval, twelve runs is about once a day. | `12` |
+
+The budgets are counted in **characters**, not tokens, because that is the only unit the model can count while it is writing.
+
+**Being over budget is not an error.** It means the next thing Dream wants to add has to wait for the review pass to make room — usually by *moving* something to where it belongs (a task specification to a skill file, project context to `MEMORY.md`) rather than by forgetting it.
 
 Atlas has its own block, `agents.defaults.atlas`, with the same shape plus a size cap:
 
@@ -181,7 +198,7 @@ Which wiki supplies the entity list follows `wiki.defaultWiki` (default `main`);
 
 Related settings that shape *when* material reaches Dream in the first place (not Dream-specific, but relevant here) live under `agents.defaults` too: `idleCompactAfterMinutes` (idle-triggered compaction, default 15 minutes), `maxMessages` (default 120), and the consolidation ratio that controls how aggressively old messages are summarized (default 0.5). See [Configuration](../reference/configuration.md) for the full reference.
 
-None of this is exposed in the Settings UI today — Dream's interval and the compaction thresholds can currently only be changed by editing `config.json` directly. The memory files themselves need no special mode to see: `SOUL.md`, `USER.md`, `memory/MEMORY.md`, and `memory/history.jsonl` are all visible from the Workspace file browser by default. The only things the file browser hides by default are dotfiles and a handful of runtime-internal paths (`config.json`, `agent/`, `cron/`, `sessions/`, `ui/`) — including the `memory/.cursor` and `memory/.dream_cursor` cursor files, which are dotfiles. Turning on **Developer mode** in Settings → System reveals those too, but it has no effect on the memory files themselves, which were never hidden.
+None of this is exposed in the Settings UI today. The four budget and cadence fields have a chat surface — `/dream budget`, in the table above — and everything else, including Dream's interval and the compaction thresholds, can currently only be changed by editing `config.json` directly. The memory files themselves need no special mode to see: `SOUL.md`, `USER.md`, `memory/MEMORY.md`, and `memory/history.jsonl` are all visible from the Workspace file browser by default. The only things the file browser hides by default are dotfiles and a handful of runtime-internal paths (`config.json`, `agent/`, `cron/`, `sessions/`, `ui/`) — including the `memory/.cursor` and `memory/.dream_cursor` cursor files, which are dotfiles. Turning on **Developer mode** in Settings → System reveals those too, but it has no effect on the memory files themselves, which were never hidden.
 
 ## Gotchas worth knowing
 

@@ -5,11 +5,23 @@ Owner: unassigned.
 Written: 2026-08-11.
 
 > Not under `docs/` on purpose: `docs/**` is published by `flagdizero/jenny-site`.
-> Companion roadmap notes already exist for the architectural items:
-> [`roadmap/agents-md-ownership.md`](roadmap/agents-md-ownership.md),
-> [`roadmap/memory-budget.md`](roadmap/memory-budget.md),
-> [`roadmap/workspace-scratch-dir.md`](roadmap/workspace-scratch-dir.md),
-> [`roadmap/user-md-drift.md`](roadmap/user-md-drift.md).
+> `roadmap/` is gitignored and local-only, by design.
+
+## The roadmap index
+
+Companion notes for the architectural items. **All of them**, with their real status — this
+list used to carry four of seven, and a reader triaging by header was skipping live work.
+
+| File | Status |
+| --- | --- |
+| [`roadmap/audit-0.8.0-corrections.md`](roadmap/audit-0.8.0-corrections.md) | **The 2026-08-16 re-audit of everything below**, and the plan the 0.8.0 correction pass executed. Start here: it carries corrections C1–C8 to the other six documents, and its *Open decisions* section is the only short list of what is genuinely unanswered |
+| [`roadmap/agents-md-ownership.md`](roadmap/agents-md-ownership.md) | **Done** — three stages shipped and validated on the device. The write permission (open question 5) is decided in principle and **blocked** on a budget and a routing rule |
+| [`roadmap/memory-budget.md`](roadmap/memory-budget.md) | **Partially done** — gauge and refusal shipped and now enforced by default; day log and promote-by-use deferred. Owns the unanswered `AGENTS.md` budget |
+| [`roadmap/user-md-drift.md`](roadmap/user-md-drift.md) | **Done in code**; one open decision (whether refusal on `USER.md` is wanted) |
+| [`roadmap/heartbeat-escalation-amnesia.md`](roadmap/heartbeat-escalation-amnesia.md) | **Done**, in two waves, both measured. A delegating cron monitor is reported and unbuilt |
+| [`roadmap/workspace-scratch-dir.md`](roadmap/workspace-scratch-dir.md) | **Split**: the scratch directory is superseded, its *original subject* is still live, and two items have no owner |
+| [`roadmap/inbound-webhooks.md`](roadmap/inbound-webhooks.md) | **Split**: Phase 1 is not planned, but **Phase 0 is endorsed and unbuilt** and there is a costed one-commit alternative |
+| [`roadmap/project-sessions.md`](roadmap/project-sessions.md) | **Proposed**, not started. Work item 7 was rewritten after T5.4 — as originally written it would have opened a real leak |
 
 ---
 

@@ -131,6 +131,29 @@ grep -rn --include="*.js" -E "(^|[^.[:alnum:]_])(confirm|alert|prompt)\(" \
   jenny/templates/ui/assets/ | grep -vE "confirmDialog|promptDialog"
 ```
 
+## Alzare un default nello schema non raggiunge un'installazione esistente
+
+`config/loader.py` serializza con `model_dump(by_alias=True)` e **senza**
+`exclude_defaults`, quindi il primo salvataggio di `config.json` — per qualunque
+motivo, anche uno scritto da un'altra parte dello schema — **congela nel file il
+valore di default di ogni knob esistente in quel momento**. Da lì in poi il file
+vince sulla riga Python, per sempre: alzare il default nello schema non arriva
+più su quel device.
+
+Vale per **ogni** knob mai aggiunto a questo schema, non per quelli su cui è
+capitato di accorgersene. Due volte finora:
+
+- `AGENTS.md` fermo alla 0.3.0 sul Titan 2 — stessa forma, un layer sopra.
+- `agents.defaults.dream.memoryBudgetChars: 0` congelato nel `config.json` del
+  device. Quando il default Python è passato da 0 a 2000 (2026-08-16) il device
+  è rimasto a 0, e l'unica via è `/dream budget memory 2000`.
+
+Conseguenza pratica: **se un valore deve raggiungere un'installazione già viva,
+serve una superficie che lo scriva** — un comando, una route, un
+`_migrate_by_version` — non un default più alto. Quando ne aggiungi uno, decidi
+subito quale delle due cose stai facendo; il default nuovo serve solo alle
+installazioni nuove.
+
 ## La config che l'agente vede non è quella su disco
 
 `store.mutate()` scrive `config.json`; **non** aggiorna l'oggetto `Config` che il
