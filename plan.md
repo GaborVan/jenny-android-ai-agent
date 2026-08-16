@@ -491,14 +491,17 @@ message; a subsequent `ok` resets the counter; a single failure produces none.
 
 # Phase F — already-filed, listed for completeness
 
-## B11 — no template guard on the bootstrap files
+## B11 — no template guard on the bootstrap files — **DONE**
 
 `jenny/agent/context.py:236-247` injects `AGENTS.md`, `SOUL.md` and `USER.md` into every
 system prompt with no checks, while `MEMORY.md` is guarded by `_is_template_content` at
 line 106. An untouched template is therefore injected as if it were content.
 
-Small, and it belongs with the `AGENTS.md` ownership work rather than on its own — see
-[`roadmap/agents-md-ownership.md`](roadmap/agents-md-ownership.md), open question 1.
+Closed by `5bc4d9e` (the guard, and the decision to skip `USER.md` but merely label
+`SOUL.md`), `97d7b38` (`_RETIRED_TEMPLATE_DIGESTS`, so rewriting a template does not
+silently promote every untouched copy to user prose) and `007c60d` (`AGENTS.md` joins the
+skipped set once its system half moved to `agent/scheduling.md`). Open question 1 of
+[`roadmap/agents-md-ownership.md`](roadmap/agents-md-ownership.md) is answered there.
 
 The other four architectural items already have their own files and are **not** duplicated
 here: AGENTS.md ownership, the memory budget, the scratch directory, and the USER.md drift.
