@@ -500,10 +500,27 @@ def _count_failure(
     entry.pending_since_ms = None
     if entry.since_ms is None:
         entry.since_ms = now_ms
-    if task.id in escalating_ids and spoke:
+    if spoke:
         # L'avviso è "dato" solo se è davvero uscito: un modello che ignora
-        # l'istruzione deve ritrovarsela al giro dopo.
+        # l'istruzione deve ritrovarsela al giro dopo. Ma **non** conta solo
+        # l'avviso che abbiamo chiesto noi: ``escalated`` è il verbale di aver
+        # parlato all'utente, e per chi lo riceve un messaggio spontaneo e uno
+        # richiesto sono lo stesso messaggio.
+        #
+        # Misurato sul Titan 2 il 2026-08-16, e non è un caso di scuola: al
+        # secondo ciclo di guasto, con il blocco di escalation ancora assente
+        # dal prompt, il modello ha chiamato ``message`` di propria iniziativa
+        # ("il server WaterBot non si raggiunge…"). Con la condizione di prima
+        # quel messaggio non veniva registrato da nessuna parte, quindi un
+        # ciclo dopo la soglia scattava e all'utente arrivava **lo stesso
+        # avviso una seconda volta**. Nessuna riga di prompt lo impediva: qui
+        # il modello stava già ignorando sia la nostra istruzione di tacere sia
+        # quella scritta dall'utente nel proprio ``HEARTBEAT.md``.
         entry.escalated = True
+    if task.id in escalating_ids and spoke:
+        # Distinto da sopra: questo dice "l'escalation che il run aveva chiesto
+        # è davvero uscita", ed è ciò che il dispatcher riporta nella run
+        # record. Un avviso spontaneo non è un'escalation richiesta.
         outcome.escalated = True
     outcome.failed.append(task)
     outcome.reasons[task.id] = reason

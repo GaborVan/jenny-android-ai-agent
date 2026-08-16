@@ -503,6 +503,32 @@ class TestOneFaultIsOneWarning:
         assert outcome.recovered == []
         assert state.task_checks[tasks[0].id].consecutive_could_not_check == 1
 
+    def test_an_unrequested_message_still_counts_as_having_spoken(self) -> None:
+        """Misurato sul device il 2026-08-16. Al secondo ciclo di guasto, senza
+        che il prompt lo chiedesse, il modello ha chiamato ``message``. Se quel
+        messaggio non viene registrato, un ciclo dopo la soglia scatta e
+        l'utente riceve lo stesso avviso una seconda volta — e nessuna riga di
+        prompt lo impedisce, visto che lì il modello stava già ignorando sia la
+        nostra istruzione sia quella scritta dall'utente."""
+        tasks = parse_heartbeat_tasks(_file(_WATERBOT))
+        state = CronJobState(
+            task_checks={tasks[0].id: CronTaskCheckState(pending_since_ms=11)}
+        )
+
+        outcome = record_followup_outcomes(
+            state, tasks, [CouldNotCheckMark("1", "hps irraggiungibile")],
+            now_ms=12,
+            escalating=[],  # nessuno gli aveva chiesto di parlare
+            spoke=True,
+        )
+
+        assert state.task_checks[tasks[0].id].escalated is True
+        # Ma non è l'escalation richiesta, che è quel che finisce nella run record.
+        assert outcome.escalated is False
+        # E al ciclo dopo non si riparla.
+        assert tasks_due_for_escalation(state, tasks) == []
+        assert tasks_already_warned(state, tasks) == [tasks[0]]
+
     def test_a_second_fault_after_a_recovery_warns_again(self) -> None:
         """Il test che vale tutti gli altri: il ciclo intero, dall'avviso al successivo."""
         tasks = parse_heartbeat_tasks(_file(_WATERBOT))
