@@ -7,7 +7,7 @@ import pytest
 
 from jenny.agent.context import ContextBuilder
 from jenny.session.goal_state import GOAL_STATE_KEY
-from jenny.utils.android_assets import _USER_OWNED_TEMPLATES
+from jenny.utils.android_assets import _RETIRED_TEMPLATE_DIGESTS, _USER_OWNED_TEMPLATES
 from jenny.utils.helpers import merge_message_content
 
 pytestmark = pytest.mark.usefixtures("_configure_jenny_workspace")
@@ -287,14 +287,15 @@ class TestRetiredTemplates:
         Senza questo, il prossimo rewrite reintroduce il difetto in silenzio: si
         accorgerebbe solo un'installazione vergine aggiornata mesi dopo. Se questo
         test fallisce, aggiungi il digest qui atteso a
-        ``ContextBuilder._RETIRED_TEMPLATE_DIGESTS["USER.md"]`` e sostituiscilo
-        con quello nuovo.
+        ``_RETIRED_TEMPLATE_DIGESTS["USER.md"]`` (in
+        ``jenny/utils/android_assets.py``) con l'etichetta della sua finestra di
+        release, e sostituiscilo con quello nuovo.
         """
         current = hashlib.sha256(
             _bundled("USER.md").strip().encode("utf-8")
         ).hexdigest()
         assert current == "89c4ab4bfcdafea11e59b1856c31e08f16ba80960d68596f6fb631386a93c609"
-        assert current not in ContextBuilder._RETIRED_TEMPLATE_DIGESTS["USER.md"]
+        assert current not in _RETIRED_TEMPLATE_DIGESTS["USER.md"]
 
     @pytest.mark.parametrize("fixture", _RETIRED_AGENTS_FIXTURES)
     def test_every_retired_agents_digest_is_recognised(self, tmp_path, fixture):
@@ -325,14 +326,14 @@ class TestRetiredTemplates:
         il prossimo rewrite rimette il testo uscente nel prompt di ogni
         installazione vergine, per giunta senza etichetta. Se questo test
         fallisce, sposta il digest qui atteso dentro
-        ``ContextBuilder._RETIRED_TEMPLATE_DIGESTS["AGENTS.md"]`` e mettine
-        qui quello nuovo.
+        ``_RETIRED_TEMPLATE_DIGESTS["AGENTS.md"]`` (in
+        ``jenny/utils/android_assets.py``) e mettine qui quello nuovo.
         """
         current = hashlib.sha256(
             _bundled("AGENTS.md").strip().encode("utf-8")
         ).hexdigest()
         assert current == "f7168ac0aacf6424203c6173e46ed333981f57c3d491f055fe1358c9b9614569"
-        assert current not in ContextBuilder._RETIRED_TEMPLATE_DIGESTS["AGENTS.md"]
+        assert current not in _RETIRED_TEMPLATE_DIGESTS["AGENTS.md"]
 
 
 # ---------------------------------------------------------------------------

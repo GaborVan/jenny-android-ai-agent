@@ -12,6 +12,7 @@ from jenny.agent.memory import MemoryStore
 from jenny.agent.skills import SkillsLoader
 from jenny.config.paths import get_output_path
 from jenny.session.goal_state import goal_state_runtime_lines
+from jenny.utils.android_assets import _RETIRED_TEMPLATE_DIGESTS
 from jenny.utils.helpers import (
     current_time_str,
     detect_image_mime,
@@ -74,43 +75,13 @@ class ContextBuilder:
     # prompt, etichettata per quello che è, così che il modello non la citi
     # come preferenza dell'utente.
     _BOOTSTRAP_SKIP_IF_TEMPLATE = frozenset({"USER.md", "AGENTS.md"})
-    # Le versioni *ritirate* di un template, per digest sha256 del testo
-    # strippato. Servono perché il riconoscimento qui sopra è un confronto con
-    # la copia bundled **corrente**: riscrivere un template scollega ogni
-    # installazione seedata con quella precedente e mai toccata da Dream, che
-    # da un momento all'altro smette di essere "il modulo vuoto di serie" e
-    # diventa "roba scritta dall'utente" — modulo a caselle compreso, e senza
-    # nemmeno l'etichetta, perché quel ramo non la mette. Sarebbe disfare
-    # ``5bc4d9e`` per chi non ha aggiornato in tempo.
+    # Le versioni ritirate di quei template le elenca
+    # ``_RETIRED_TEMPLATE_DIGESTS`` (``jenny/utils/android_assets.py``), accanto
+    # alle due liste che dicono quali template esistono e che politica riceve
+    # ciascuno. Definizione una sola: i consumatori sono due, questo e la
+    # riscrittura al boot, e tenerne due copie allineate è esattamente il guasto
+    # che quel registro esiste per evitare.
     #
-    # Non è una finestra breve: Dream scrive ``USER.md`` solo quando ha un
-    # fatto personale da instradare, quindi su un'installazione usata per
-    # lavoro di progetto quel file può restare vergine a tempo indeterminato.
-    #
-    # Chi riscrive un template qui elencato deve aggiungere il digest della
-    # versione uscente. Non è un promemoria: ``test_current_user_template_digest_is_pinned``
-    # (e il suo gemello per ``AGENTS.md``) fallisce finché non lo si fa.
-    _RETIRED_TEMPLATE_DIGESTS: dict[str, frozenset[str]] = {
-        # 0.3.0 (8833b94) → 0.7.1: "# User Profile" con i tre blocchi di
-        # caselle, "(your name)" e le sezioni fra parentesi.
-        "USER.md": frozenset({
-            "db2c6d63e0b43e5ac414da85f86454e2614f6524d4ef92a291f11476e6e03deb",
-        }),
-        # Le tre versioni di "# Agent Instructions", il manuale di cron e
-        # heartbeat che si spediva dentro un file dell'utente. Sono tutte e tre
-        # candidate vive: un telefono porta per sempre quella che era bundled al
-        # *suo* primo avvio, indipendentemente da quanti aggiornamenti ha preso
-        # dopo — quel file si crea una volta sola e non si tocca più.
-        "AGENTS.md": frozenset({
-            # 0.3.0 (8833b94) → 0.6.0. È quella sul Titan 2.
-            "a7883c61338446966621d481f996d7585987142461f716f64e04e4d692a6b341",
-            # 6c5dba8: + il blocco reminder/monitor. Mai uscita in una release,
-            # ma un'installazione da sorgente in quella finestra ce l'ha.
-            "7573b397f15350b683bb6e87392d27a479e62bf1894a53fe2a60d29d813106c6",
-            # 1f23ef3 (0.6.6) → 0.7.1: + il contratto di silenzio.
-            "72d4bd718e70e16b9e6b7f5f9a0dc73a5b34d4a972bb43c0b6ebec5072d280c3",
-        }),
-    }
     # La formula "still matches the template shipped with the app" è falsa per
     # una versione ritirata, ed è il motivo per cui ``97d7b38`` aveva lasciato
     # fuori ``AGENTS.md``. Il problema non è stato risolto: è sparito. Un file in
@@ -399,7 +370,7 @@ class ContextBuilder:
         tpl = load_bundled_template(template_path)
         if tpl is not None and stripped == tpl.strip():
             return True
-        retired = ContextBuilder._RETIRED_TEMPLATE_DIGESTS.get(template_path)
+        retired = _RETIRED_TEMPLATE_DIGESTS.get(template_path)
         if not retired:
             return False
         return hashlib.sha256(stripped.encode("utf-8")).hexdigest() in retired

@@ -9,21 +9,29 @@ arrivava, un file *corretto* no.
 
 Verificato sul dispositivo il 2026-08-06: dopo un aggiornamento con tre prompt
 modificati e uno aggiunto, il log diceva `Extracted 1 files`.
+
+Le politiche sono tre e questo file le documenta tutte: il file dell'utente che
+si crea una volta sola, il prompt di sistema che si riscrive a ogni avvio, e in
+mezzo il ritiro sul posto — l'unica scrittura dentro un file dell'utente, e solo
+quando quel file è ancora, byte per byte, una versione nostra ritirata.
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
 from jenny.utils.android_assets import (
+    _RETIRED_TEMPLATE_DIGESTS,
     _SYSTEM_PROMPT_TEMPLATES,
     _TEMPLATES_MANIFEST,
     _USER_OWNED_TEMPLATES,
     extract_package_dir,
+    retire_withdrawn_templates,
 )
-from jenny.utils.helpers import sync_workspace_templates
+from jenny.utils.helpers import load_bundled_template, sync_workspace_templates
 
 MARKER = "MODIFICATO A MANO — non deve sopravvivere a un aggiornamento\n"
 
@@ -100,3 +108,139 @@ def test_extracting_a_file_outside_the_manifest_is_an_error(tmp_path: Path) -> N
         extract_package_dir(
             "jenny.templates", tmp_path, only=["agent/does_not_exist.md"],
         )
+
+
+# -- la terza politica: ritiro sul posto ------------------------------------
+#
+# Riconoscere una versione ritirata la tiene fuori dal prompt ma la lascia sul
+# disco, e lì resta a un tasto dall'essere peggio di prima: la prima riga che
+# l'utente ci aggiunge promuove tutto il manuale ritirato a "scritto
+# dall'utente", per sempre e senza etichetta. Qui quel testo se ne va davvero —
+# ma solo quando è, byte per byte, ancora nostro.
+
+
+def _retired_fixture(name: str) -> str:
+    """Un template ritirato, letto da ``tests/agent/fixtures/``.
+
+    Stesso motivo per cui li legge di lì ``test_context_builder``: alcune di
+    quelle righe finiscono con uno spazio, e trascritte in un sorgente Python
+    ``ruff`` (W291) le pulirebbe. Il digest non combacerebbe più con quello che
+    c'è sui telefoni e il test proverebbe qualcos'altro.
+    """
+    return (Path(__file__).resolve().parents[1] / "agent" / "fixtures" / name).read_text(
+        encoding="utf-8"
+    )
+
+
+# Ogni versione ritirata elencata nel registro, con il file che la contiene.
+# Sono tutte candidate vive: un telefono porta per sempre quella che era bundled
+# al *suo* primo avvio, indipendentemente da quanti aggiornamenti ha preso dopo.
+_RETIRED_FIXTURES = [
+    ("AGENTS.md", "agents_md_retired_v0.3.0.md"),
+    ("AGENTS.md", "agents_md_retired_6c5dba8_unreleased.md"),
+    ("AGENTS.md", "agents_md_retired_v0.6.6.md"),
+    ("USER.md", "user_md_retired_0.3.0.md"),
+]
+
+
+@pytest.mark.parametrize(("name", "fixture"), _RETIRED_FIXTURES)
+def test_a_withdrawn_version_of_ours_is_rewritten(
+    workspace: Path, name: str, fixture: str
+) -> None:
+    """Il caso del Titan 2: un file dell'utente che è ancora roba nostra, ritirata."""
+    target = workspace / name
+    target.write_text(_retired_fixture(fixture), encoding="utf-8")
+
+    sync_workspace_templates(workspace, silent=True)
+
+    assert target.read_text(encoding="utf-8") == load_bundled_template(name)
+
+
+@pytest.mark.parametrize(("name", "fixture"), _RETIRED_FIXTURES)
+def test_one_line_of_the_users_own_is_enough_to_stop_it(
+    workspace: Path, name: str, fixture: str
+) -> None:
+    """Questo è il test che protegge l'utente, ed è il motivo per cui il ritiro
+    non chiede né uno snapshot né un consenso.
+
+    La condizione è un digest esatto: una riga aggiunta in fondo e il file non è
+    più nostro, quindi non si tocca. Non è prudenza applicata bene, è
+    impossibilità per costruzione — chi allentasse il confronto (match
+    approssimato, "quasi uguale", prefisso) cancellerebbe testo che l'utente ha
+    scritto e non ha altrove.
+    """
+    target = workspace / name
+    edited = _retired_fixture(fixture) + "\n- Deploy con `./gradlew`.\n"
+    target.write_text(edited, encoding="utf-8")
+
+    sync_workspace_templates(workspace, silent=True)
+
+    assert target.read_text(encoding="utf-8") == edited
+
+
+@pytest.mark.parametrize("name", sorted(_RETIRED_TEMPLATE_DIGESTS))
+def test_a_file_already_current_is_not_written_at_all(workspace: Path, name: str) -> None:
+    """Non "riscritto uguale": proprio non toccato.
+
+    L'asserzione è sulla mtime e non sul contenuto perché una riscrittura con
+    byte identici passerebbe un controllo sul contenuto ed è comunque un difetto:
+    fa I/O inutile su ogni boot e stampa una riga di log che dichiara una
+    migrazione mai avvenuta.
+    """
+    target = workspace / name
+    os.utime(target, (1_000_000, 1_000_000))
+    before = target.stat().st_mtime_ns
+
+    sync_workspace_templates(workspace, silent=True)
+
+    assert target.stat().st_mtime_ns == before
+
+
+def test_a_missing_file_is_not_an_error(tmp_path: Path) -> None:
+    """Un workspace vuoto non ha niente da ritirare: il seeding lo crea dopo."""
+    assert retire_withdrawn_templates(tmp_path) == []
+    assert not (tmp_path / "AGENTS.md").exists()
+
+
+def test_an_unreadable_bundle_leaves_the_file_alone(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Prima si leggono i byte nuovi, poi si scrive.
+
+    L'ordine è ciò che garantisce che non esista un istante in cui il file
+    dell'utente non c'è: senza il contenuto da mettere, non si cancella niente.
+    """
+    retired = _retired_fixture("agents_md_retired_v0.3.0.md")
+    (workspace / "AGENTS.md").write_text(retired, encoding="utf-8")
+    monkeypatch.setattr(
+        "jenny.utils.android_assets.read_asset", lambda *args, **kwargs: None
+    )
+
+    assert retire_withdrawn_templates(workspace) == []
+
+    assert (workspace / "AGENTS.md").read_text(encoding="utf-8") == retired
+
+
+def test_the_retired_digest_registry_has_exactly_one_definition() -> None:
+    """Due copie di un insieme che deve restare allineato è il guasto che questo
+    repo continua a dover riparare.
+
+    I consumatori sono due — il riconoscimento nel prompt e la riscrittura al
+    boot — e stanno in package diversi, che è esattamente la condizione in cui la
+    seconda copia nasce. ``session/keys.py``, ``agent/memory.py`` e
+    ``agent/autocompact.py`` sono tre copie divergenti della regola sui prefissi
+    interni, e ``roadmap/project-sessions.md`` la chiama "a data-loss bug no test
+    will catch". Questo è il test che la prende.
+    """
+    sources = list((Path(__file__).resolve().parents[2] / "jenny").rglob("*.py"))
+    assert sources, "nessun sorgente trovato: il path del package è cambiato"
+
+    for name, retired in _RETIRED_TEMPLATE_DIGESTS.items():
+        for digest in retired:
+            holders = [
+                path.name for path in sources if digest in path.read_text(encoding="utf-8")
+            ]
+            assert holders == ["android_assets.py"], (
+                f"il digest ritirato di {name} è scritto in {holders}: "
+                "la definizione deve restare una sola"
+            )

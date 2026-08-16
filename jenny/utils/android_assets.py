@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from loguru import logger
+
+from jenny.utils.path import atomic_write
 
 if TYPE_CHECKING:
     pass
@@ -41,6 +44,59 @@ _SYSTEM_PROMPT_TEMPLATES = [
 ]
 
 _TEMPLATES_MANIFEST = [*_USER_OWNED_TEMPLATES, *_SYSTEM_PROMPT_TEMPLATES]
+
+# Le versioni *ritirate* dei template dell'utente: digest sha256 del testo
+# strippato → etichetta della finestra di release che le spediva.
+#
+# Stanno qui, accanto alle due liste sopra, perché rispondono alla stessa
+# domanda — quali template esistono e che politica riceve ciascuno — e perché i
+# consumatori sono due: ``ContextBuilder._is_template_content``, che con questi
+# digest riconosce un file che l'utente non ha mai scritto, e
+# ``retire_withdrawn_templates`` qui sotto, che quel file lo riscrive. Due copie
+# di un insieme che deve restare allineato è il guasto che questo repo continua
+# a dover riparare (tre copie della regola sui prefissi interni fra
+# ``session/keys.py``, ``agent/memory.py`` e ``agent/autocompact.py`; v.
+# ``roadmap/project-sessions.md``), quindi la definizione è una sola e chi la
+# vuole la importa.
+#
+# Servono perché il riconoscimento del template è un confronto con la copia
+# bundled **corrente**: riscrivere un template scollega ogni installazione
+# seedata con quella precedente e mai toccata da Dream, che da un momento
+# all'altro smette di essere "il modulo vuoto di serie" e diventa "roba scritta
+# dall'utente" — modulo a caselle compreso, e senza nemmeno l'etichetta, perché
+# quel ramo non la mette.
+#
+# Non è una finestra breve: un file dell'utente si crea una volta sola e non si
+# tocca più, quindi un telefono porta per sempre la versione che era bundled al
+# *suo* primo avvio, indipendentemente da quanti aggiornamenti ha preso dopo.
+# Sono tutte candidate vive.
+#
+# Chi riscrive un template qui elencato deve aggiungere il digest della versione
+# uscente. Non è un promemoria: ``test_current_user_template_digest_is_pinned``
+# (e il suo gemello per ``AGENTS.md``) fallisce finché non lo si fa.
+_RETIRED_TEMPLATE_DIGESTS: dict[str, dict[str, str]] = {
+    # "# User Profile" con i tre blocchi di caselle, "(your name)" e le sezioni
+    # fra parentesi.
+    "USER.md": {
+        "db2c6d63e0b43e5ac414da85f86454e2614f6524d4ef92a291f11476e6e03deb":
+            "v0.3.0 to v0.7.1 (8833b94)",
+    },
+    # Le tre versioni di "# Agent Instructions", il manuale di cron e heartbeat
+    # che si spediva dentro un file dell'utente. Oggi quel testo vive in
+    # ``agent/scheduling.md``, dove un aggiornamento arriva davvero.
+    "AGENTS.md": {
+        # È quella sul Titan 2.
+        "a7883c61338446966621d481f996d7585987142461f716f64e04e4d692a6b341":
+            "v0.3.0 to v0.6.0 (8833b94)",
+        # + il blocco reminder/monitor. Mai uscita in una release, ma
+        # un'installazione da sorgente in quella finestra ce l'ha.
+        "7573b397f15350b683bb6e87392d27a479e62bf1894a53fe2a60d29d813106c6":
+            "unreleased source builds (6c5dba8)",
+        # + il contratto di silenzio.
+        "72d4bd718e70e16b9e6b7f5f9a0dc73a5b34d4a972bb43c0b6ebec5072d280c3":
+            "v0.6.6 to v0.7.1 (1f23ef3)",
+    },
+}
 
 _SKILLS_MANIFEST = [
     "cron/SKILL.md",
@@ -416,6 +472,64 @@ def extract_package_dir(
 
     logger.info("Extracted {} files from {} to {}", count, package, dest)
     return count
+
+
+def retire_withdrawn_templates(dest: Path) -> list[str]:
+    """Riscrive i file dell'utente rimasti a una *nostra* versione ritirata.
+
+    La terza politica della sync, e l'unica che scrive dentro un file
+    dell'utente. Riconoscere una versione ritirata (che è quel che fa
+    ``ContextBuilder._is_template_content``) tiene quel testo fuori dal prompt,
+    ma lo lascia sul disco: basta che l'utente ci aggiunga una riga sua perché
+    l'intero manuale ritirato diventi "scritto dall'utente", per sempre e senza
+    etichetta. Il riconoscimento è al sicuro oggi ed è a un tasto dall'essere
+    peggio di prima; l'unico modo di chiuderla è che quel testo se ne vada.
+
+    La condizione è un digest **esatto** del testo strippato, e non è una
+    prudenza: è ciò che rende impossibile per costruzione calpestare una riga
+    dell'utente, ed è per questo che qui non serve né uno snapshot né un
+    consenso. Non allargarla — niente match approssimati, niente "quasi uguale".
+
+    Un file già allineato al bundle corrente non ha nulla da migrare e non viene
+    toccato: nemmeno riscritto con gli stessi byte, perché una riscrittura
+    identica è comunque una mtime nuova e una riga di log che mente.
+    """
+    rewritten: list[str] = []
+    for name, retired in _RETIRED_TEMPLATE_DIGESTS.items():
+        target = dest / name
+        try:
+            content = target.read_text(encoding="utf-8")
+        except (OSError, ValueError):
+            # Assente, illeggibile o non testuale. Nessuno dei tre è un guasto
+            # qui: il file assente lo crea l'estrazione subito dopo, e su un
+            # file che non sappiamo leggere l'unica mossa sicura è non toccarlo.
+            continue
+        label = retired.get(hashlib.sha256(content.strip().encode("utf-8")).hexdigest())
+        if label is None:
+            continue
+        data = read_asset("jenny.templates", name)
+        if data is None:
+            # Prima si legge, poi si scrive: senza i byte nuovi si lascia stare.
+            # L'ordine è il motivo per cui non esiste un istante in cui il file
+            # dell'utente non c'è.
+            logger.warning(
+                "Cannot retire {}: the bundled template is unreadable, "
+                "leaving the withdrawn {} copy in place",
+                name, label,
+            )
+            continue
+        atomic_write(target, data)
+        rewritten.append(name)
+        # Su un dispositivo questa riga è l'unica traccia che la migrazione è
+        # avvenuta, quindi nomina il file e *quale* versione è stata riconosciuta:
+        # senza l'etichetta, un domani, non si saprebbe dire da dove veniva quel
+        # workspace. Resta una riga di diagnostica — logcat non lo legge l'utente.
+        logger.info(
+            "Retired template {}: matched our withdrawn {} copy byte for byte, "
+            "rewritten to the current bundled version (no user content to lose)",
+            name, label,
+        )
+    return rewritten
 
 
 _JENNY_SRC_KEY = "jenny_src"

@@ -693,7 +693,7 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
 
     added: list[str] = []
 
-    # I template si dividono in due, e le due metà hanno politiche opposte.
+    # I template si dividono per proprietario, e ogni metà ha la sua politica.
     #
     # Quelli dell'utente (AGENTS.md, SOUL.md, USER.md, HEARTBEAT.md, MEMORY.md)
     # si creano una volta e non si toccano più: SOUL e USER li riscrive Dream,
@@ -705,11 +705,21 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
     # telefono aggiornato per mesi girava ancora con i prompt della versione in
     # cui era stato installato, perché un file nuovo veniva estratto e uno
     # corretto no.
+    #
+    # In mezzo c'è un terzo caso, l'unico in cui si scrive dentro un file
+    # dell'utente: un file che è ancora, byte per byte, una versione *nostra*
+    # ritirata. Lì dentro non c'è niente dell'utente da salvare, e lasciarcelo
+    # significa aspettare che ci aggiunga una riga sua — a quel punto il testo
+    # ritirato diventa suo, per sempre. Gira per prima perché l'estrazione
+    # ``skip_existing`` qui sotto vedrebbe comunque un file esistente e passerebbe
+    # oltre: le tre politiche si leggono nell'ordine in cui sono descritte.
     from jenny.utils.android_assets import (
         _SYSTEM_PROMPT_TEMPLATES,
         _USER_OWNED_TEMPLATES,
+        retire_withdrawn_templates,
     )
 
+    retire_withdrawn_templates(workspace)
     extract_package_dir(
         "jenny.templates", workspace, skip_existing=True, only=_USER_OWNED_TEMPLATES,
     )
