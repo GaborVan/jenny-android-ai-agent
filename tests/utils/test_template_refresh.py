@@ -142,20 +142,71 @@ _RETIRED_FIXTURES = [
     ("AGENTS.md", "agents_md_retired_v0.6.6.md"),
     ("USER.md", "user_md_retired_0.3.0.md"),
     ("USER.md", "user_md_retired_97d7b38_unreleased.md"),
+    ("memory/MEMORY.md", "memory_md_retired_v0.3.0.md"),
 ]
 
 
 @pytest.mark.parametrize(("name", "fixture"), _RETIRED_FIXTURES)
-def test_a_withdrawn_version_of_ours_is_rewritten(
+def test_a_withdrawn_version_is_left_in_place_now_that_the_bundle_is_empty(
     workspace: Path, name: str, fixture: str
 ) -> None:
-    """Il caso del Titan 2: un file dell'utente che è ancora roba nostra, ritirata."""
+    """Il caso del Titan 2, e la sua fine: il ritiro non ha più niente da scrivere.
+
+    Questo test asseriva l'opposto — che una copia ritirata venisse riscritta
+    alla versione bundled corrente. Da 0.8.0 quella versione è **zero byte**:
+    ``AGENTS.md``, ``USER.md`` e ``memory/MEMORY.md`` spediscono vuoti apposta,
+    e la guardia ``if not data`` in ``retire_withdrawn_templates`` tratta un
+    asset vuoto come illeggibile, perché non sa distinguerlo da uno troncato in
+    lettura e scriverlo azzererebbe il file dell'utente per sempre.
+
+    Quindi la migrazione non avviene, e il testo ritirato resta sul disco. Non è
+    una regressione di correttezza: ``ContextBuilder._is_template_content``
+    riconosce ancora quei digest e tiene quel testo fuori dal prompt — è per
+    questo che i digest uscenti sono stati aggiunti al registro invece di essere
+    lasciati cadere. Quello che si perde è l'igiene sul disco, cioè la
+    protezione contro l'utente che aggiunge una riga sua a un manuale ritirato e
+    se lo ritrova promosso a "scritto dall'utente".
+
+    **Se questo test inizia a fallire**, il ritiro ha ripreso a scrivere: o
+    qualcuno ha rimesso del testo in un template dell'utente (allora il posto
+    giusto per questa asserzione è di nuovo il rewrite, e va rimessa quella di
+    prima — ``target.read_text() == load_bundled_template(name)``), oppure ha
+    allentato la guardia ``if not data``, che invece è quella che impedisce di
+    azzerare il file di qualcuno.
+    """
     target = workspace / name
-    target.write_text(_retired_fixture(fixture), encoding="utf-8")
+    retired = _retired_fixture(fixture)
+    target.write_text(retired, encoding="utf-8")
 
     sync_workspace_templates(workspace, silent=True)
 
-    assert target.read_text(encoding="utf-8") == load_bundled_template(name)
+    assert (load_bundled_template(name) or "") == "", (
+        f"{name} non è più un template vuoto: v. il docstring"
+    )
+    assert target.read_text(encoding="utf-8") == retired
+
+
+@pytest.mark.parametrize(("name", "fixture"), _RETIRED_FIXTURES)
+def test_the_rewrite_still_works_when_there_is_something_to_write(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, name: str, fixture: str
+) -> None:
+    """Il ramo che scrive, tenuto vivo con un bundle finto.
+
+    Oggi nessun template dell'utente ha byte da spedire, quindi il rewrite non
+    si esercita più da solo: senza questo test il ritiro diventerebbe codice mai
+    percorso, e il giorno in cui un template torna non vuoto si scoprirebbe rotto
+    su un telefono. Il bundle è iniettato qui invece di essere letto dal package
+    proprio perché il package non ne ha uno.
+    """
+    target = workspace / name
+    target.write_text(_retired_fixture(fixture), encoding="utf-8")
+    monkeypatch.setattr(
+        "jenny.utils.android_assets.read_asset", lambda *args, **kwargs: b"# Nuovo\n"
+    )
+
+    assert retire_withdrawn_templates(workspace) == [name]
+
+    assert target.read_text(encoding="utf-8") == "# Nuovo\n"
 
 
 @pytest.mark.parametrize(("name", "fixture"), _RETIRED_FIXTURES)
@@ -246,7 +297,9 @@ def test_an_empty_bundle_leaves_the_file_alone(
     assert (workspace / "AGENTS.md").read_text(encoding="utf-8") == retired
 
 
-def test_the_retired_file_keeps_its_permissions(workspace: Path) -> None:
+def test_the_retired_file_keeps_its_permissions(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Il ritiro porta via del testo nostro, non i permessi dell'utente.
 
     ``atomic_write`` scrive un file nuovo e lo mette al posto del vecchio: nasce
@@ -254,10 +307,18 @@ def test_the_retired_file_keeps_its_permissions(workspace: Path) -> None:
     Allargare i permessi di un file dell'utente è un secondo effetto che nessuno
     ha chiesto — ``config/store.py`` rimette il chmod a mano per lo stesso
     motivo.
+
+    Il bundle è finto per lo stesso motivo di
+    ``test_the_rewrite_still_works_when_there_is_something_to_write``: i template
+    dell'utente spediscono vuoti, e senza byte da scrivere questo ramo non lo
+    percorre più nessuno.
     """
     target = workspace / "AGENTS.md"
     target.write_text(_retired_fixture("agents_md_retired_v0.3.0.md"), encoding="utf-8")
     target.chmod(0o600)
+    monkeypatch.setattr(
+        "jenny.utils.android_assets.read_asset", lambda *args, **kwargs: b"# Nuovo\n"
+    )
 
     assert retire_withdrawn_templates(workspace) == ["AGENTS.md"]
 
@@ -377,29 +438,55 @@ def test_an_empty_gauge_leaves_no_dangling_heading(rendered_from) -> None:
 # Ora, fuso e posizione del device arrivano già in ogni turno dentro il blocco
 # Runtime Context, misurati e datati. Ricopiarli in un file di memoria produce
 # una fotocopia scaduta nell'istante in cui la si scrive, e per giunta l'unica
-# delle due che il modello legge come un fatto stabile. Il template dice che qui
-# non ci vanno; ``agent/dream.md`` dice a Dream di non scriverli.
+# delle due che il modello legge come un fatto stabile.
+#
+# Il pin su ``USER.md`` che stava qui (``test_the_user_template_puts_runtime_facts
+# _out_of_scope``) è stato rimosso, non spostato: il template è vuoto, e un
+# template vuoto non può mettere niente "fuori scope". Quella regola aveva due
+# copie — il template e ``agent/dream.md`` — e delle due il template era quella
+# che *non* arrivava mai, perché ``USER.md`` si crea al primo avvio e non si
+# aggiorna più. Resta la copia buona, coperta dal test qui sotto, che è anche
+# l'unica che parla a chi scrive davvero in quel file.
 
 
-def test_the_user_template_puts_runtime_facts_out_of_scope() -> None:
-    """Il difetto osservato: ``- **Location**: Rome, Italy (~41.89, 12.54)``.
+def test_the_user_owned_templates_ship_no_prose() -> None:
+    """La decisione di 0.8.0: nei file dell'utente non spediamo testo nostro.
 
-    Non era ereditata dal template — Dream l'ha inventata, perché niente le
-    diceva che quel fatto ha già una fonte viva. È lo stesso caso di
-    ``- **Timezone**:``, tolta da ``97d7b38`` proprio perché duplicava la riga
-    ``Current Time``; qui si chiude la classe invece della singola riga.
+    Un file di ``_USER_OWNED_TEMPLATES`` si estrae con ``skip_existing=True``:
+    si crea una volta e non lo raggiunge nessun aggiornamento. La prosa che ci
+    stava dentro si pagava in ogni prompt appena il file smetteva di combaciare
+    col bundle, non la leggeva nessuno (nessuno apre un editor markdown sul
+    telefono), e nel caso di ``memory/MEMORY.md`` insegnava il contrario delle
+    regole di sistema: ``## User Information`` e ``## Preferences`` contro
+    ``agent/dream.md``, che i fatti sull'utente li manda in ``USER.md``.
+
+    Il lettore è la persona, e la persona sta nella WebUI.
+
+    Le due eccezioni sono esplicite:
+
+    * ``SOUL.md`` è la personalità di serie, cioè contenuto che *deve* stare nel
+      prompt — è l'unico che riceve ``_BOOTSTRAP_TEMPLATE_NOTICE``.
+    * ``HEARTBEAT.md`` tiene ``## Active Tasks`` perché non è prosa ma il
+      delimitatore su cui si orienta il parser (``jenny/cron/heartbeat_tasks.py``:
+      la scansione parte con ``in_active_section = False``). Svuotato il file, il
+      primo task dell'utente non verrebbe letto e ``_run_heartbeat`` uscirebbe in
+      silenzio dicendo "no active tasks": un controllo schedulato che non gira e
+      non alza niente da nessuna parte.
     """
-    text = load_bundled_template("USER.md") or ""
-    # Il template è prosa a capo fisso: una frase ci sta a cavallo di due righe,
-    # e cercarla nel testo grezzo dipenderebbe da dove cade l'a capo.
-    flowed = " ".join(text.split())
+    for name in ("AGENTS.md", "USER.md", "memory/MEMORY.md"):
+        assert (load_bundled_template(name) or "") == "", (
+            f"{name} è tornato a spedire del testo: quel testo non raggiunge mai "
+            "un'installazione esistente, e su una nuova si paga in ogni turno. "
+            "Va sotto `jenny/templates/agent/`, in una skill, o nella WebUI."
+        )
 
-    assert "Runtime Context" in flowed
-    for fact in ("current time", "timezone", "where the device is"):
-        assert fact in flowed, f"il template non nomina {fact!r} fra i fatti del runtime"
-    # Resta prosa. Una intestazione in un template è presente per costruzione
-    # finché qualcuno non la cancella, ed è il buco che il rewrite ha chiuso.
-    assert not any(line.startswith("##") for line in text.splitlines())
+    heartbeat = [
+        line for line in (load_bundled_template("HEARTBEAT.md") or "").splitlines() if line.strip()
+    ]
+    assert heartbeat == ["# Heartbeat Tasks", "## Active Tasks"], (
+        "HEARTBEAT.md deve restare le due sole intestazioni: `## Active Tasks` è il "
+        f"delimitatore del parser, il resto è prosa. Trovato: {heartbeat}"
+    )
 
 
 def test_dream_is_told_not_to_write_runtime_facts_and_why() -> None:

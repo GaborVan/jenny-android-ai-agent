@@ -76,6 +76,13 @@ _TEMPLATES_MANIFEST = [*_USER_OWNED_TEMPLATES, *_SYSTEM_PROMPT_TEMPLATES]
 # Chi riscrive un template qui elencato deve aggiungere il digest della versione
 # uscente. Non è un promemoria: ``test_current_user_template_digest_is_pinned``
 # (e il suo gemello per ``AGENTS.md``) fallisce finché non lo si fa.
+#
+# Da 0.8.0 tre di questi template sono spediti **vuoti**, e il ritiro delle
+# versioni con la prosa è ciò che tiene fuori dal prompt le installazioni già
+# esistenti: senza, un ``USER.md`` mai toccato smetterebbe di combaciare con il
+# bundle corrente e rientrerebbe in ogni turno come "scritto dall'utente", senza
+# nemmeno l'etichetta. Il riconoscimento continua a funzionare; la riscrittura
+# no — v. la guardia ``if not data`` in ``retire_withdrawn_templates``.
 _RETIRED_TEMPLATE_DIGESTS: dict[str, dict[str, str]] = {
     # "# User Profile" con i tre blocchi di caselle, "(your name)" e le sezioni
     # fra parentesi, e — dalla riscrittura dopo — lo scaffold di prosa senza
@@ -87,6 +94,10 @@ _RETIRED_TEMPLATE_DIGESTS: dict[str, dict[str, str]] = {
         # 0.8.0 in quella finestra ce l'ha.
         "89c4ab4bfcdafea11e59b1856c31e08f16ba80960d68596f6fb631386a93c609":
             "unreleased source builds (97d7b38)",
+        # Lo scaffold completo, riga sui fatti del runtime inclusa: l'ultima
+        # versione con del testo dentro, prima che il file passasse a zero byte.
+        "e23a60be0336c5220d3d0dbd256907f66b590156459422a244dcd24685eb49b7":
+            "unreleased source builds (04de3cc)",
     },
     # Le tre versioni di "# Agent Instructions", il manuale di cron e heartbeat
     # che si spediva dentro un file dell'utente. Oggi quel testo vive in
@@ -102,6 +113,23 @@ _RETIRED_TEMPLATE_DIGESTS: dict[str, dict[str, str]] = {
         # + il contratto di silenzio.
         "72d4bd718e70e16b9e6b7f5f9a0dc73a5b34d4a972bb43c0b6ebec5072d280c3":
             "v0.6.6 to v0.7.1 (1f23ef3)",
+        # "# Workspace Conventions": il manuale se n'era già andato, restava la
+        # prosa che spiegava il file a sé stesso. Ultima versione con del testo.
+        "f7168ac0aacf6424203c6173e46ed333981f57c3d491f055fe1358c9b9614569":
+            "unreleased source builds (007c60d)",
+    },
+    # Lo scaffold di ``memory/MEMORY.md``, invariato dalla 0.3.0. Le sue
+    # intestazioni ``## User Information`` e ``## Preferences`` contraddicono il
+    # routing di ``agent/dream.md``, che i fatti sull'utente li manda in
+    # ``USER.md``: finché il file resta intatto ``_is_template_content`` lo
+    # sopprime, ma se smettesse di combaciare col bundle entrerebbe in ogni
+    # prompt a insegnare il contrario delle regole di sistema.
+    #
+    # Non è un file di bootstrap (v. ``ContextBuilder.BOOTSTRAP_FILES``): il suo
+    # unico consumatore qui è il riconoscimento in ``build_system_prompt``.
+    "memory/MEMORY.md": {
+        "d7d84cc166a24465a19ad90da2aefc4cb579b3278a893c4adbd36c368aab427d":
+            "v0.3.0 to v0.7.1 (8833b94)",
     },
 }
 
@@ -545,6 +573,26 @@ def retire_withdrawn_templates(dest: Path) -> list[str]:
             # combacia più con nessun digest, quindi il ritiro non lo riprova; e
             # siccome esiste, l'estrazione ``skip_existing`` gli passa accanto a
             # ogni boot. Nessun avvio successivo lo rimette a posto.
+            #
+            # **Da 0.8.0 un template bundled vuoto è la normalità, non un
+            # guasto**: ``AGENTS.md``, ``USER.md`` e ``memory/MEMORY.md``
+            # spediscono zero byte apposta (la prosa che si spiegava da sola si
+            # pagava a ogni turno, non la leggeva nessuno, e nel caso di
+            # ``MEMORY.md`` insegnava il contrario del routing di
+            # ``agent/dream.md``). Questo ramo quindi *si prende* tutti e tre i
+            # digest ritirati qui sopra, e la migrazione non avviene più: la
+            # copia con la prosa resta sul disco dell'utente.
+            #
+            # Non "aggiustare" la guardia lasciando passare il vuoto. Il ritiro
+            # non sa distinguere un asset spedito vuoto da uno troncato in
+            # lettura, e sbagliando dalla parte opposta azzererebbe un file che
+            # l'utente potrebbe aver riempito nel frattempo — perdita di dati
+            # senza appello, contro un file che intanto ``_is_template_content``
+            # continua a tenere fuori dal prompt. Il testo resta sul disco ed è
+            # innocuo lì; è una questione di igiene, non di correttezza.
+            #
+            # Il costo residuo è questo ``logger.warning`` a ogni boot su ogni
+            # installazione con una copia ritirata. Rumore, non un allarme.
             logger.warning(
                 "Cannot retire {}: the bundled template is unreadable or empty, "
                 "leaving the withdrawn {} copy in place",
