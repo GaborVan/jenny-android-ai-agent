@@ -591,3 +591,40 @@ class TestTheUserFileIsNotPrunedLikeTheOthers:
 
         assert "Shrink what the criteria allow" in agent.prompt
         assert "Bring each file at or under" not in agent.prompt
+
+
+class TestTheRouteDownNamesWhatTheDeviceLeftBehind:
+    """Le due lacune che un run vero ha rivelato, e che nessun test aveva visto.
+
+    Sul Titan 2 il 2026-08-16 il review pass ha fatto **esattamente** quello che
+    la lista gli diceva — task spec migrate, timezone rimossa — e ha lasciato
+    quello che non c'era: il contesto di progetto (che ``agent/dream.md``
+    instrada a MEMORY.md, ma la lista qui non nominava) e il boilerplate del
+    template (lead-in, riga di chiusura, separatore), che "residuo di template"
+    lasciava intendere significasse solo caselle e segnaposti vuoti.
+
+    Non era un difetto del modello: era prosa mancante.
+    """
+
+    async def test_project_context_is_routed_to_memory(self, store: MemoryStore) -> None:
+        agent = _FakeAgent()
+        await _run(store, agent)
+
+        assert "**Project context**" in agent.prompt
+        assert "memory/MEMORY.md`, deleted from here" in agent.prompt
+        # E la distinzione che rende la regola applicabile invece che vaga:
+        # il tratto della persona resta, il progetto va.
+        assert "Keep the trait, move the project" in agent.prompt
+
+    async def test_shipped_boilerplate_counts_as_residue(
+        self, store: MemoryStore
+    ) -> None:
+        agent = _FakeAgent()
+        await _run(store, agent)
+
+        assert "boilerplate the template shipped with" in agent.prompt
+        # I tre pezzi concreti rimasti sul device, nominati uno per uno.
+        for fragment in ("explanatory lead-in", "edit the file to customise", "horizontal rule"):
+            assert fragment in agent.prompt, fragment
+        # La ragione, che e' quella che rende la regola difendibile.
+        assert "no reader at all" in agent.prompt

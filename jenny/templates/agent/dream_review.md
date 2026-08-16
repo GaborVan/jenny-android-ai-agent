@@ -40,9 +40,15 @@ Read the Runtime Context of *this* prompt, and delete from the files whatever it
 
 The runtime duplicates of the section above are not an exception being carved into that rule, and reading them as one would be a mistake. *Never delete* protects a fact this file is the only place to remember; a copied-down location or timezone is the opposite case — the next prompt states it again, measured and dated, so removing it here loses nothing and the user ends up better informed than before. Nothing else in `USER.md` has that property.
 
-So the route down for this file is the two sections above, and nothing beyond them. In order: the runtime duplicates, which are free; then the task specs and procedures that drifted in here go to `skills/<name>/SKILL.md` and are deleted from here; then template residue — leftover checkbox lists, a heading with nothing under it, a field still holding its parenthetical placeholder; then prose that takes six lines to say what it could say in one.
+So there is a route down for this file, and every step of it moves a fact somewhere better rather than dropping it. In order:
 
-When those are done, stop. **A `USER.md` still over budget after the migration is a finished job, not a failed one.** Do not start ranking the user's own preferences by how much they look like they matter. You cannot tell, and neither can they: a personal fact you drop is one they have no way to notice is missing, and the only way it comes back is if they happen to say it again.
+1. **The runtime duplicates** of the section above. Free: the next prompt says it again, dated.
+2. **Task specs and procedures** — output formats, item counts, step lists — to `skills/<name>/SKILL.md`, deleted from here.
+3. **Project context** — what the user is building, their projects, their role, their infrastructure — to `memory/MEMORY.md`, deleted from here. `agent/dream.md`'s routing table has always said this file is for *personal attributes*; a project is not one, however personal the attachment to it. Keep the trait, move the project: "wants recognition for their work and finds promotion draining" is about the person and stays; the list of what they are shipping is context and goes.
+4. **Template residue.** Not only the obvious kind — a leftover checkbox list, a heading with nothing under it, a field still holding its parenthetical placeholder. Also the *boilerplate the template shipped with*: an explanatory lead-in describing what the file is for, a closing line telling the reader to edit the file to customise it, a horizontal rule separating one from the other. That text was written for a human opening the file in an editor. Nobody opens it, and it is paid for on every turn — it is the one part of this file with no reader at all.
+5. **Prose that takes six lines to say what it could say in one.**
+
+When those five are done, stop. **A `USER.md` still over budget after the migration is a finished job, not a failed one.** Do not start ranking the user's own preferences by how much they look like they matter. You cannot tell, and neither can they: a personal fact you drop is one they have no way to notice is missing, and the only way it comes back is if they happen to say it again.
 
 `SOUL.md` reads the same way, for the same reason. `memory/MEMORY.md` does not: its weight is implementation detail that a `read_file` recovers, which is why the budget there means what it says.
 
