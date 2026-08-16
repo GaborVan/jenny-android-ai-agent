@@ -335,6 +335,37 @@ class TestRetiredTemplates:
         assert current == "f7168ac0aacf6424203c6173e46ed333981f57c3d491f055fe1358c9b9614569"
         assert current not in _RETIRED_TEMPLATE_DIGESTS["AGENTS.md"]
 
+    def test_a_template_with_retired_versions_is_never_labelled(self):
+        """L'etichetta dice "questo file è ancora il template spedito con l'app",
+        e su una versione ritirata sarebbe una bugia: spedita lo era, ma un'altra
+        volta e da un'altra versione.
+
+        Che oggi non possa succedere è vero e sta scritto in un commento in
+        ``context.py``: chi ha digest ritirati sta in ``_BOOTSTRAP_SKIP_IF_TEMPLATE``,
+        quindi non arriva mai al ramo che etichetta. Un commento però non è una
+        guardia — basta ritirare una versione di ``SOUL.md`` (l'unico file che
+        l'etichetta la riceve davvero) perché la frase inizi a mentire, in
+        silenzio e su ogni installazione seedata in quella finestra. Vale qui la
+        stessa regola dei digest un file più in là: non è un promemoria, il test
+        fallisce finché non lo si fa.
+
+        Le due uscite sono entrambe buone: aggiungere il nome a
+        ``_BOOTSTRAP_SKIP_IF_TEMPLATE``, oppure dare a quel ramo una seconda
+        etichetta che dica la verità su una versione ritirata.
+        """
+        for name in _RETIRED_TEMPLATE_DIGESTS:
+            if name not in ContextBuilder.BOOTSTRAP_FILES:
+                # Non è un file di bootstrap: quel ramo non lo vede proprio.
+                # ``memory/MEMORY.md`` ha una guardia sua (``_is_template_content``
+                # in ``build_system_prompt``), che omette e non etichetta.
+                continue
+            assert name in ContextBuilder._BOOTSTRAP_SKIP_IF_TEMPLATE, (
+                f"{name} ha versioni ritirate e può ricevere "
+                "_BOOTSTRAP_TEMPLATE_NOTICE, che su una versione ritirata è falsa: "
+                "aggiungilo a _BOOTSTRAP_SKIP_IF_TEMPLATE o dai a quel ramo "
+                "un'etichetta che dica la verità"
+            )
+
 
 # ---------------------------------------------------------------------------
 # agent/scheduling.md — dove va un lavoro ricorrente
@@ -403,15 +434,49 @@ class TestSchedulingBlock:
         """
         from jenny.utils.prompt_templates import render_template
 
-        # 1300 e non 1600: il testo attuale ne occupa 1135, e un tetto che lascia
-        # il 40% di margine non dice mai di no — cioè non fa il suo mestiere. Chi
-        # ha bisogno di sforarlo ha quasi sempre bisogno della skill.
+        # 1300 e non 1600: il testo reso ne occupa 1134, e un tetto che lascia il
+        # 40% di margine non dice mai di no — cioè non fa il suo mestiere. Chi ha
+        # bisogno di sforarlo ha quasi sempre bisogno della skill.
         rendered = render_template("agent/scheduling.md")
         assert len(rendered) <= 1300, (
             f"agent/scheduling.md è {len(rendered)} caratteri: sta tornando un manuale. "
             "La profondità — sintassi, fusi orari, esempi, semantica di `list` — va in "
             "`skills/cron/SKILL.md`, che si legge su richiesta invece che a ogni turno."
         )
+
+    def test_no_other_system_prompt_teaches_scheduling(self):
+        """Un solo posto nel prompt di sistema, altrimenti la guardia non serve.
+
+        Trovato da una rilettura: ``agent/tool_contract.md`` portava una sezione
+        "Scheduling and Background Work" che diceva le stesse tre cose — usa
+        ``cron``, aggiorna ``HEARTBEAT.md``, non scrivere il promemoria in
+        memoria — e la portava **sempre**, perché quel template non è gated.
+        Quindi Dream continuava a ricevere l'istruzione di schedulare con un
+        tool che il suo registry non contiene: la guardia di ``scheduling.md``
+        copriva una copia su due, che è come non averla.
+
+        La regola sta in ``agent/scheduling.md`` (dietro il tool) e in
+        ``skills/cron/SKILL.md`` (su richiesta). Nessun altro template di
+        sistema la ripete.
+        """
+        from jenny.utils.android_assets import _SYSTEM_PROMPT_TEMPLATES
+        from jenny.utils.helpers import load_bundled_template
+
+        # Frasi che *insegnano a schedulare*. Nominare `HEARTBEAT.md` come file
+        # del workspace resta legittimo (lo fa "Where Produced Files Go"), quindi
+        # si cercano le istruzioni, non il nome.
+        teaching = ("use the cron tool", "mode='reminder'", "mode='monitor'",
+                    "for heartbeat tasks", "recurring jobs")
+        for name in _SYSTEM_PROMPT_TEMPLATES:
+            if name == "agent/scheduling.md":
+                continue
+            body = (load_bundled_template(name) or "").lower()
+            for phrase in teaching:
+                assert phrase not in body, (
+                    f"{name} insegna a schedulare ({phrase!r}). Quella regola ha una casa "
+                    "sola nel prompt di sistema, `agent/scheduling.md`, perché è l'unica "
+                    "resa solo quando il tool `cron` esiste davvero nel turno."
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -493,8 +558,12 @@ class TestBundledToolContract:
         assert "apply_patch" in content
         assert "## Web and External Information" in content
         assert "## Messaging and Media" in content
-        assert "## Scheduling and Background Work" in content
         assert "pure coding" not in content.lower()
+        # "Scheduling and Background Work" è uscita di qui: diceva le stesse tre
+        # cose di ``agent/scheduling.md`` ma senza la sua guardia, quindi Dream
+        # continuava a leggere di un tool che non ha. V.
+        # ``test_no_other_system_prompt_teaches_scheduling``.
+        assert "## Scheduling and Background Work" not in content
 
     def test_tool_contract_is_injected_without_workspace_file(self, tmp_path):
         builder = _builder(tmp_path)
@@ -534,8 +603,12 @@ class TestOutputDestinationRule:
         contract_end = prompt.find("\n\n---\n\n", contract_start)
         contract = prompt[contract_start:] if contract_end < 0 else prompt[contract_start:contract_end]
 
+        # L'ancora era "## Scheduling and Background Work", uscita dal contratto
+        # insieme alla regola che duplicava. "Messaging and Media" la sostituisce
+        # nello stesso ruolo: una sezione che sta prima, così l'asserzione parla
+        # ancora dell'ordine e non della presenza di un titolo.
         assert contract.index(str(tmp_path.resolve() / "output")) > contract.index(
-            "## Scheduling and Background Work"
+            "## Messaging and Media"
         )
 
     def test_download_precedent_is_kept(self, tmp_path):

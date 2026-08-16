@@ -93,12 +93,6 @@ This platform has no shell, subprocess, or CLI tools. The only code-execution to
 - For binary attachments you cannot interpret (archives, unknown formats), say so plainly rather than guessing at their contents.
 
 
-## Scheduling and Background Work
-
-- Use the cron tool for scheduled reminders or recurring jobs.
-- For heartbeat tasks, update `HEARTBEAT.md`; the default gateway heartbeat cron job handles periodic checks when enabled.
-- Do not write reminders only to memory files when the user expects an actual notification.
-
 ## Where Produced Files Go
 
 - Files you produce go under `{{ output_path }}` — create a topic subfolder when a job produces several.

@@ -19,6 +19,7 @@ quando quel file è ancora, byte per byte, una versione nostra ritirata.
 from __future__ import annotations
 
 import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -219,6 +220,98 @@ def test_an_unreadable_bundle_leaves_the_file_alone(
     assert retire_withdrawn_templates(workspace) == []
 
     assert (workspace / "AGENTS.md").read_text(encoding="utf-8") == retired
+
+
+def test_an_empty_bundle_leaves_the_file_alone(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Vuoto è illeggibile, e sbagliarlo è irreversibile.
+
+    ``read_asset`` ritorna ``b""`` per un asset presente ma troncato. Con una
+    guardia sul solo ``None`` quei zero byte finivano nel file dell'utente, e da
+    lì non tornava indietro: a zero byte non combacia con nessun digest ritirato
+    (quindi nessun boot successivo lo riprova) e continua a esistere (quindi
+    l'estrazione ``skip_existing`` gli passa accanto). Il file resta vuoto finché
+    non se ne accorge una persona.
+    """
+    retired = _retired_fixture("agents_md_retired_v0.3.0.md")
+    (workspace / "AGENTS.md").write_text(retired, encoding="utf-8")
+    monkeypatch.setattr(
+        "jenny.utils.android_assets.read_asset", lambda *args, **kwargs: b""
+    )
+
+    assert retire_withdrawn_templates(workspace) == []
+
+    assert (workspace / "AGENTS.md").read_text(encoding="utf-8") == retired
+
+
+def test_the_retired_file_keeps_its_permissions(workspace: Path) -> None:
+    """Il ritiro porta via del testo nostro, non i permessi dell'utente.
+
+    ``atomic_write`` scrive un file nuovo e lo mette al posto del vecchio: nasce
+    col umask del processo, quindi un file tenuto a 0600 si ritroverebbe a 0644.
+    Allargare i permessi di un file dell'utente è un secondo effetto che nessuno
+    ha chiesto — ``config/store.py`` rimette il chmod a mano per lo stesso
+    motivo.
+    """
+    target = workspace / "AGENTS.md"
+    target.write_text(_retired_fixture("agents_md_retired_v0.3.0.md"), encoding="utf-8")
+    target.chmod(0o600)
+
+    assert retire_withdrawn_templates(workspace) == ["AGENTS.md"]
+
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+def test_a_symlinked_file_is_not_retired(workspace: Path, tmp_path: Path) -> None:
+    """Un symlink è una decisione, e il ritiro non la ribalta.
+
+    ``atomic_write`` fa ``os.replace`` sul path: al posto del link resterebbe un
+    file regolare, l'utente perderebbe il collegamento che aveva scelto e le due
+    copie divergerebbero senza dirlo a nessuno. Rinunciare è la mossa giusta —
+    il ritiro è un'ottimizzazione, il link no.
+    """
+    real = tmp_path / "AGENTS-condiviso.md"
+    retired = _retired_fixture("agents_md_retired_v0.3.0.md")
+    real.write_text(retired, encoding="utf-8")
+    target = workspace / "AGENTS.md"
+    target.unlink()
+    target.symlink_to(real)
+
+    assert retire_withdrawn_templates(workspace) == []
+
+    assert target.is_symlink()
+    assert real.read_text(encoding="utf-8") == retired
+
+
+def test_a_failed_retire_does_not_stop_the_prompt_refresh(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ritirare è un'ottimizzazione; aggiornare i prompt di sistema no.
+
+    Il ritiro gira per primo e scrive con ``atomic_write``, che non ha le difese
+    di ``_write_bytes_force`` (nato perché una scrittura fallita al boot manda in
+    crash-loop il gateway). Un ``AGENTS.md`` non scrivibile alza da lì, e
+    ``runtime/container.py`` — a differenza di ``android_entry.py`` — non
+    raccoglie niente: quell'eccezione porterebbe via l'estrazione di ``agent/**``,
+    cioè l'unico modo in cui una correzione a un prompt raggiunge un telefono già
+    installato.
+    """
+    (workspace / "AGENTS.md").write_text(
+        _retired_fixture("agents_md_retired_v0.3.0.md"), encoding="utf-8"
+    )
+    prompt = workspace / "agent" / "identity.md"
+    original = prompt.read_text(encoding="utf-8")
+    prompt.write_text(MARKER, encoding="utf-8")
+
+    def _refuse(*args: object, **kwargs: object) -> None:
+        raise PermissionError("workspace is read-only")
+
+    monkeypatch.setattr("jenny.utils.android_assets.atomic_write", _refuse)
+
+    sync_workspace_templates(workspace, silent=True)
+
+    assert prompt.read_text(encoding="utf-8") == original
 
 
 def test_the_retired_digest_registry_has_exactly_one_definition() -> None:

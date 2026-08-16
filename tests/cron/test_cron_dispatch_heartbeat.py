@@ -18,13 +18,15 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from loguru import logger as loguru_logger
 
 from jenny.agent.turn_types import TurnOutcome
-from jenny.cron.heartbeat_tasks import parse_heartbeat_tasks
+from jenny.cron.heartbeat_tasks import active_section_text, parse_heartbeat_tasks
 from jenny.cron.types import CronJob, CronPayload
 from jenny.runtime.cron_dispatch import _HEARTBEAT_PREAMBLE, CronDispatcher
 from jenny.session.keys import HEARTBEAT_SESSION_KEY
 from jenny.session.turn_visibility import TurnVisibility
+from jenny.utils.helpers import load_bundled_template
 
 
 def _heartbeat_job() -> CronJob:
@@ -289,6 +291,125 @@ class TestThePromptCarriesTheTasksAndNotTheFile:
         precedente a questo lavoro.
         """
         assert [t.id for t in parse_heartbeat_tasks(_TITAN2)] == _TITAN2_TASK_IDS
+
+
+class TestWhereTheSectionEndsAndWhatSurvivesIt:
+    """I confini della sezione, che è l'unica cosa che il prompt porta.
+
+    Tre modi in cui una riga che non è di nessun task le è finita accanto — o
+    poteva finirci alla prima riscrittura — e uno in cui un task sparisce senza
+    dire niente.
+    """
+
+    def test_a_heading_that_closes_the_section_stays_out(self) -> None:
+        """L'intestazione che **chiude** l'elenco non appartiene all'elenco.
+
+        Lo stato di sezione si aggiorna prima dello ``yield``, quindi ``## Archive``
+        esce già fuori sezione. Spostare quell'aggiornamento dopo lo ``yield``
+        passa l'intera suite senza fare una piega — nessun task cambia, perché
+        una sezione che finisce non ne contiene — e intanto attacca in coda al
+        prompt il titolo di ciò che l'utente ha messo *via*.
+        """
+        content = "## Active Tasks\n- check the disk\n## Archive\n- old stuff\n"
+
+        assert active_section_text(content) == "- check the disk"
+
+    def test_the_section_can_be_opened_twice(self) -> None:
+        """Un file che riapre ``## Active Tasks`` più avanti.
+
+        L'intestazione è nostra — è il delimitatore del parser — a qualunque
+        altezza del file compaia. Toglierla solo quando capitava per prima
+        lasciava la seconda in mezzo al prompt, in mezzo ai task dell'utente.
+        """
+        content = "## Active Tasks\n- a\n\n## Notes\nx\n\n## Active Tasks\n- b\n"
+
+        assert active_section_text(content) == "- a\n\n- b"
+
+    def test_whitespace_only_lines_at_the_edges_go_too(self) -> None:
+        """"Righe vuote agli estremi" comprende quelle di soli spazi.
+
+        Sono proprio quelle che restano dove stava un commento indentato, cioè
+        il caso per cui la potatura esiste; ``strip("\\n")`` le lasciava passare
+        intatte e il docstring prometteva il contrario.
+        """
+        assert active_section_text("## Active Tasks\n   \n- a\n   \n") == "- a"
+
+    async def test_an_unclosed_comment_is_reported(self, tmp_path: Path) -> None:
+        """Un ``<!--`` mai chiuso si mangia in silenzio il resto dell'elenco.
+
+        Il conteggio faceva già così, ma finché il prompt portava il file grezzo
+        il modello quei task li vedeva lo stesso e li eseguiva. Ora non li vede
+        nessuno: senza questa riga di log, un ``HEARTBEAT.md`` malformato è un
+        task che smette di girare e non lo dice a nessuno.
+        """
+        records: list[str] = []
+        handler_id = loguru_logger.add(lambda m: records.append(str(m)), level="WARNING")
+        try:
+            prompt = await _prompt_for(
+                tmp_path / "unclosed", "## Active Tasks\n- a\n<!-- oops\n- b\n"
+            )
+        finally:
+            loguru_logger.remove(handler_id)
+
+        assert "- b" not in prompt
+        assert any("HEARTBEAT.md" in r and "never closed" in r for r in records), records
+
+    async def test_a_well_formed_file_says_nothing(self, dispatcher) -> None:
+        """E il file sano non lo segnala: un avviso a ogni run non è un avviso."""
+        disp, _agent = dispatcher
+        records: list[str] = []
+        handler_id = loguru_logger.add(lambda m: records.append(str(m)), level="WARNING")
+        try:
+            await disp.dispatch(_heartbeat_job())
+        finally:
+            loguru_logger.remove(handler_id)
+
+        assert not [r for r in records if "never closed" in r], records
+
+
+_CRON_SKILL = (
+    Path(__file__).resolve().parents[2] / "jenny" / "skills" / "cron" / "SKILL.md"
+).read_text(encoding="utf-8")
+
+
+class TestTheSkillDescribesThisParser:
+    """``skills/cron/SKILL.md`` va **al modello**, ed è il modello che scrive
+    ``HEARTBEAT.md``.
+
+    Una frase falsa lì non è un'imprecisione da manuale: è un'istruzione
+    sbagliata data a chi tiene la penna, e produce un file che si comporta in un
+    modo che il suo autore non si aspetta.
+    """
+
+    def test_an_inline_comment_does_reach_the_model(self) -> None:
+        """La skill diceva che i commenti HTML "anywhere in the file" spariscono.
+
+        Sparisce il commento che **apre la riga** — quello sì, anche su più
+        righe. Un commento in coda a un task resta lì, verbatim, e il modello se
+        lo legge come parte del task. Chi si fidasse della frase assoluta ci
+        scriverebbe dentro una nota per sé.
+        """
+        content = "## Active Tasks\n- a <!-- perché lo faccio -->\n<!-- una nota -->\n- b\n"
+
+        assert active_section_text(content) == "- a <!-- perché lo faccio -->\n- b"
+        assert "comments anywhere in the file" not in _CRON_SKILL
+        assert "stays with the line" in _CRON_SKILL
+
+    def test_the_second_heartbeat_job_still_has_its_exception(self) -> None:
+        """L'eccezione che ``agent/scheduling.md`` non ha più spazio per dire.
+
+        Il vecchio ``AGENTS.md`` la portava ("unless the user has disabled the
+        built-in one and explicitly wants a custom schedule"); spostando la
+        regola nel prompt di sistema è diventata assoluta, e l'eccezione non è
+        rimasta in nessuno dei due posti. Un divieto senza la sua uscita fa
+        rispondere di no all'utente che ha spento l'heartbeat di serie ed è
+        l'unico a poter chiedere quel job.
+        """
+        # Il divieto è nel prompt di sistema, a capo compreso: si confronta il
+        # testo a spazi normalizzati, non le sue righe.
+        scheduling = " ".join((load_bundled_template("agent/scheduling.md") or "").split())
+        assert "never create a second heartbeat job" in scheduling
+        assert "unless the user has disabled the built-in one" in " ".join(_CRON_SKILL.split())
 
 
 class TestThePreambleContract:

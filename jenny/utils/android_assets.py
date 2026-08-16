@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import stat
+from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -493,6 +495,12 @@ def retire_withdrawn_templates(dest: Path) -> list[str]:
     Un file già allineato al bundle corrente non ha nulla da migrare e non viene
     toccato: nemmeno riscritto con gli stessi byte, perché una riscrittura
     identica è comunque una mtime nuova e una riga di log che mente.
+
+    Ciò che il file **è** non lo cambia nessuna migrazione: i permessi
+    sopravvivono alla riscrittura, e su un symlink il ritiro rinuncia. Il ritiro
+    porta via del testo nostro; trasformare un link in un file regolare, o
+    riaprire a tutti un file che l'utente teneva a 0600, sarebbe un secondo
+    effetto che nessuno ha chiesto.
     """
     rewritten: list[str] = []
     for name, retired in _RETIRED_TEMPLATE_DIGESTS.items():
@@ -507,18 +515,46 @@ def retire_withdrawn_templates(dest: Path) -> list[str]:
         label = retired.get(hashlib.sha256(content.strip().encode("utf-8")).hexdigest())
         if label is None:
             continue
+        if target.is_symlink():
+            # ``atomic_write`` finisce in un ``os.replace`` sul path, quindi al
+            # posto del link ci resterebbe un file regolare: l'utente perde il
+            # collegamento che aveva scelto e le due copie divergono in silenzio.
+            # Qui si rinuncia — il ritiro è un'ottimizzazione, il link è una
+            # decisione esplicita — invece di risolverlo e scrivere dall'altra
+            # parte, che farebbe scrivere questa funzione fuori dal workspace.
+            logger.warning(
+                "Not retiring {}: it is a symlink, and rewriting it would replace "
+                "the link with a regular file; leaving the withdrawn {} copy in place",
+                name, label,
+            )
+            continue
         data = read_asset("jenny.templates", name)
-        if data is None:
+        if not data:
             # Prima si legge, poi si scrive: senza i byte nuovi si lascia stare.
             # L'ordine è il motivo per cui non esiste un istante in cui il file
             # dell'utente non c'è.
+            #
+            # Vuoto conta come illeggibile, e non è pignoleria: ``read_asset``
+            # ritorna ``b""`` per un asset presente ma troncato, e scriverlo
+            # azzererebbe il file dell'utente **per sempre**. A zero byte non
+            # combacia più con nessun digest, quindi il ritiro non lo riprova; e
+            # siccome esiste, l'estrazione ``skip_existing`` gli passa accanto a
+            # ogni boot. Nessun avvio successivo lo rimette a posto.
             logger.warning(
-                "Cannot retire {}: the bundled template is unreadable, "
+                "Cannot retire {}: the bundled template is unreadable or empty, "
                 "leaving the withdrawn {} copy in place",
                 name, label,
             )
             continue
+        # ``atomic_write`` sostituisce il file con uno nuovo, e un file nuovo
+        # nasce con il umask del processo: un ``AGENTS.md`` a 0600 tornerebbe
+        # 0644, cioè il ritiro allargherebbe i permessi di un file dell'utente
+        # senza che nessuno l'abbia chiesto. Stesso motivo per cui
+        # ``config/store.py`` rimette il chmod a mano dopo ogni scrittura.
+        previous_mode = stat.S_IMODE(target.stat().st_mode)
         atomic_write(target, data)
+        with suppress(OSError):
+            target.chmod(previous_mode)
         rewritten.append(name)
         # Su un dispositivo questa riga è l'unica traccia che la migrazione è
         # avvenuta, quindi nomina il file e *quale* versione è stata riconosciuta:

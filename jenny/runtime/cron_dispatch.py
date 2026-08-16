@@ -543,7 +543,11 @@ class CronDispatcher:
         # di prima. E il determinismo: con nessun task in sequenza di guasto il
         # prompt di un run sano è byte-identico a quello del run precedente, che
         # è ciò su cui si regge la cache di prefisso del provider.
-        listed_tasks = active_section_text(content)
+        #
+        # Il path passa perché è l'unico posto che ce l'ha: un commento HTML mai
+        # chiuso nasconde tutto ciò che gli sta sotto, e un avviso che non nomina
+        # il file non serve a nessuno.
+        listed_tasks = active_section_text(content, str(heartbeat_file))
 
         prompt = (
             _HEARTBEAT_PREAMBLE

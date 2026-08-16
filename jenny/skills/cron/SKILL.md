@@ -87,10 +87,19 @@ heartbeat line must say what the condition is, and must not report a normal
 result.
 
 Only the lines under `## Active Tasks` are read: a heading inside that section is
-kept as context for the lines below it, everything outside it — including HTML
-comments anywhere in the file — never reaches the model. A file with no task
-lines is skipped without running a turn, so a finished task should be deleted
-rather than crossed out or left in place.
+kept as context for the lines below it, and everything outside that section never
+reaches the model. An HTML comment is dropped when it *starts its own line* (a
+multi-line one is dropped whole); a comment written at the end of a task line
+stays with the line and is read as part of the task, so put a note you don't want
+read on a line of its own. Leaving a comment unclosed hides every line after it,
+in the section and outside it, and those tasks stop running.
+
+The gateway registers the heartbeat job itself and protects it: never add a second
+cron job that reads `HEARTBEAT.md`, unless the user has disabled the built-in one
+and explicitly wants a custom schedule for it.
+
+A file with no task lines is skipped without running a turn, so a finished task
+should be deleted rather than crossed out or left in place.
 
 ## Time Expressions
 

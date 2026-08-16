@@ -719,7 +719,26 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
         retire_withdrawn_templates,
     )
 
-    retire_withdrawn_templates(workspace)
+    # Non fatale, ed è l'unica delle tre politiche che possa permetterselo. È
+    # anche la sola che scriva con ``atomic_write``, cioè senza le difese che
+    # ``extract_package_dir`` si è dovuto dare (``_write_bytes_force``, nato
+    # perché una scrittura fallita al boot "manderebbe in crash-loop il gateway"):
+    # un ``AGENTS.md`` non scrivibile alzerebbe ``PermissionError`` da qui.
+    #
+    # Su un solo dei due percorsi di avvio quell'eccezione è raccolta
+    # (``android_entry``, non ``runtime/container``), e lì porterebbe via con sé
+    # tutto il resto della sync — compreso il refresh di ``agent/**``, cioè
+    # l'unico meccanismo per cui una correzione a un prompt di sistema arriva su
+    # un telefono già installato. La gerarchia è quella: ritirare del testo
+    # vecchio è un'ottimizzazione, aggiornare i prompt no.
+    try:
+        retire_withdrawn_templates(workspace)
+    except Exception:
+        logger.opt(exception=True).error(
+            "Could not retire withdrawn templates in {} — the withdrawn text stays "
+            "on disk; continuing with the rest of the sync",
+            workspace,
+        )
     extract_package_dir(
         "jenny.templates", workspace, skip_existing=True, only=_USER_OWNED_TEMPLATES,
     )
