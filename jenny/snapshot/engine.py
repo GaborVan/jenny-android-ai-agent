@@ -45,6 +45,36 @@ DEFAULT_EXCLUDE_GLOBS: tuple[str, ...] = (
     "*.tmp.*",
 )
 
+# ``output/`` NON è in quella lista, ed è una scelta, non una dimenticanza.
+#
+# È la cartella dove il system prompt manda ogni file che l'agente produce, e
+# nessuno la spazza: non esiste sweep, da nessuna parte (``OUTPUT_SUBDIR`` è
+# citato solo da ``config/paths.py`` e da ``sync_workspace_templates``). Quindi
+# cresce e basta — che è esattamente l'argomento a favore di escluderla, e il
+# motivo per cui va misurato invece che intuito.
+#
+# Il costo vero. I blob sono content-addressed: un deliverable che non cambia
+# viene pagato una volta sola e poi condiviso da tutti gli snapshot successivi.
+# A ripetersi per snapshot è la sola voce di manifest — path + sha256 esadecimale
+# + size + mtime_ns, circa 150 byte serializzati. Con N file in ``output/``,
+# ``output/`` costa ~150·N byte per manifest conservato, più i byte dei
+# contenuti *distinti* una volta ciascuno. È un termine lineare in quanto
+# l'utente ha effettivamente prodotto, non nel tempo di accensione del device:
+# la differenza con ``logs/`` o ``__pycache__``, che crescono da soli e sono la
+# ragione per cui questa lista esiste.
+#
+# Il costo dell'esclusione, invece. Questa stessa lista governa anche l'export
+# cifrato: ``backup.py::_build_zip`` costruisce l'albero del ``.jbk`` da
+# ``iter_tracked_files()``. Escludere ``output/`` non toglierebbe solo la storia
+# locale — toglierebbe il lavoro finito dell'utente dall'unico artefatto che
+# lascia il telefono. Un backup che contiene i file di sistema e non i risultati
+# è il rovescio esatto di quello che serve.
+#
+# Se un giorno la storia pesasse troppo, la leva è ``retention_max_age_days``
+# (default 0 = per sempre), che accorcia la storia lasciando intatto lo stato
+# corrente. Perdere snapshot vecchi si sopporta; scoprire a restore fatto che
+# l'unica copia di un deliverable non c'era, no.
+
 
 class SnapshotEngine:
     """Storia di snapshot content-addressed di una directory radice."""

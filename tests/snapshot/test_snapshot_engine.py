@@ -100,6 +100,49 @@ def test_exclusions(tmp_path: Path) -> None:
     assert not any("__pycache__" in p or p.endswith(".tmp") for p in paths)
 
 
+def test_output_dir_is_tracked(tmp_path: Path) -> None:
+    """``output/`` resta DENTRO gli snapshot: contiene lavoro finito, non scarti.
+
+    La stessa lista di esclusioni governa l'albero del ``.jbk`` esportato
+    (``backup.py::_build_zip`` itera ``iter_tracked_files``), quindi escluderla
+    toglierebbe i deliverable dell'utente dall'unico artefatto che lascia il
+    dispositivo. Vedi il commento esteso sotto ``DEFAULT_EXCLUDE_GLOBS``.
+    """
+    _make_workspace(tmp_path)
+    (tmp_path / "output").mkdir()
+    (tmp_path / "output" / "ricerca.md").write_text("# risultato", encoding="utf-8")
+
+    engine = _engine(tmp_path)
+    manifest = engine.create_snapshot(trigger="pre_dream", now_ms=1000)
+    assert manifest is not None
+    assert "output/ricerca.md" in {e.path for e in manifest.files}
+
+
+def test_output_dedups_across_snapshots(tmp_path: Path) -> None:
+    """Un deliverable immutato non ripaga i propri byte a ogni snapshot.
+
+    È la metà quantitativa della decisione di tenere ``output/``: il contenuto
+    è content-addressed e quindi pagato una volta, mentre a ripetersi è la sola
+    voce di manifest.
+    """
+    _make_workspace(tmp_path)
+    (tmp_path / "output").mkdir()
+    (tmp_path / "output" / "grosso.md").write_text("x" * 5000, encoding="utf-8")
+
+    engine = _engine(tmp_path)
+    assert engine.create_snapshot(trigger="pre_dream", now_ms=1000) is not None
+    blobs_after_first = set(iter_blob_hashes(engine.objects_dir))
+
+    # Un file *diverso* forza un secondo snapshot senza toccare il deliverable.
+    (tmp_path / "memory" / "MEMORY.md").write_text("# memoria 2", encoding="utf-8")
+    second = engine.create_snapshot(trigger="pre_dream", now_ms=2000)
+    assert second is not None
+    assert "output/grosso.md" in {e.path for e in second.files}
+
+    added = set(iter_blob_hashes(engine.objects_dir)) - blobs_after_first
+    assert len(added) == 1  # solo MEMORY.md: il deliverable è stato riusato
+
+
 def test_store_self_exclusion_with_legacy_runtime_dir(tmp_path: Path) -> None:
     """Lo store non si auto-include nemmeno col runtime dir legacy .minijenny."""
     _make_workspace(tmp_path)
