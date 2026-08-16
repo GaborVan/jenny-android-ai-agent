@@ -148,10 +148,27 @@ def render_gauge(report: Sequence[FileBudget], *, for_review: bool = False) -> s
     niente per definizione, e "consolida prima di aggiungere" lì è un'istruzione
     che non descrive nessuna azione disponibile. Le misure sono le stesse: è il
     consiglio sopra a non poter essere lo stesso.
+
+    Se **nessun** file del report è enforced — lo stato di ogni installazione coi
+    default, dove i tre budget valgono 0 — la testa cambia di nuovo. Le due
+    versioni sopra parlano di una soglia che non esiste: una promette un rifiuto
+    che il guard non emetterà mai, l'altra nomina "già sotto il proprio budget"
+    come predicato di stop, e il modello non può valutarlo su un file che un
+    budget non ce l'ha. La testa resta comunque (le misure senza etichetta non si
+    capiscono, e il prompt manuale la cerca), ma dice solo ciò che è vero:
+    misurato, non applicato.
     """
     if not report:
         return ""
-    if for_review:
+    if not any(item.enforced for item in report):
+        tail = (
+            "so let the criteria alone decide what goes." if for_review else "nothing is enforced."
+        )
+        head = (
+            "Long-term memory budget (characters). "
+            f"Sizes are measured only — no budget is set, {tail}"
+        )
+    elif for_review:
         # "Shrink what the criteria allow" e non "porta ogni file sotto il
         # budget". La seconda formulazione è un ordine senza eccezioni, e su
         # USER.md contraddice frontalmente le regole che il review pass applica:

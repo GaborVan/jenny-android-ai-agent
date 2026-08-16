@@ -9,6 +9,7 @@ from jenny.agent.memory_budget import (
     make_write_size_guard,
     render_gauge,
 )
+from jenny.config.schema import DreamConfig
 
 
 @pytest.fixture
@@ -78,6 +79,45 @@ class TestRenderGauge:
 
     def test_empty_report_renders_empty_string(self):
         assert render_gauge([]) == ""
+
+    def test_head_promises_no_refusal_when_nothing_is_enforced(self, store):
+        # I default di produzione hanno i tre budget a 0: con questo report
+        # nessuna scrittura può essere rifiutata, e la testa non deve insegnare
+        # una regola che il runtime non applicherà mai.
+        head = render_gauge(_report(store)).splitlines()[0]
+        assert "refused" not in head
+        assert "80%" not in head
+
+    def test_head_promises_a_refusal_as_soon_as_one_budget_is_set(self, store):
+        # Basta un file enforced perché il rifiuto sia una cosa che può davvero
+        # succedere: da lì in poi la regola va detta.
+        head = render_gauge(_report(store, memory=6000)).splitlines()[0]
+        assert "refused" in head
+
+    def test_review_head_drops_the_budget_stop_signal_when_nothing_is_enforced(self, store):
+        # "già sotto il proprio budget" è l'unico segnale di stop del review
+        # pass: senza budget non è valutabile, e va sostituito da uno che lo sia.
+        head = render_gauge(_report(store), for_review=True).splitlines()[0]
+        assert "does not need to shrink further" not in head
+        assert "criteria" in head
+
+    def test_review_head_keeps_the_budget_stop_signal_when_one_is_set(self, store):
+        head = render_gauge(_report(store, user=3000), for_review=True).splitlines()[0]
+        assert "does not need to shrink further" in head
+
+    @pytest.mark.parametrize("for_review", [False, True])
+    def test_the_per_file_lines_do_not_depend_on_the_head(self, store, for_review):
+        # La testa cambia; le misure no, in nessuna delle due varianti.
+        unenforced = render_gauge(_report(store), for_review=for_review).splitlines()[1:]
+        assert unenforced == [
+            f"{item.label} [{item.chars:,} chars — no budget]" for item in _report(store)
+        ]
+        mixed = _report(store, memory=6000)
+        assert render_gauge(mixed, for_review=for_review).splitlines()[1:] == [
+            f"MEMORY.md [{mixed[0].pct}% — {mixed[0].chars:,}/6,000 chars]",
+            f"USER.md [{mixed[1].chars:,} chars — no budget]",
+            f"SOUL.md [{mixed[2].chars:,} chars — no budget]",
+        ]
 
     def test_mentions_the_80_percent_rule(self, store):
         gauge = render_gauge(_report(store, memory=6000))
@@ -157,3 +197,45 @@ class TestWriteSizeGuard:
         assert "same turn" in lowered
         assert "delete" in lowered
         assert "smaller" in lowered
+
+
+class TestTheShippedCapOnTheFileItWillMeet:
+    """Il tetto di spedizione contro la dimensione vera del file, non contro numeri finti.
+
+    ``DreamConfig.memory_budget_chars`` vale 2.000 e sul Titan 2 ``MEMORY.md``
+    misura 3.019 caratteri: il tetto è vincolante dal primo run, il 151% della
+    soglia. Su questa combinazione l'unica cosa che tiene la feature viva è la
+    clausola "sta rimpicciolendo" del guard — senza, il file non potrebbe più
+    essere potato e nessuna scrittura passerebbe mai più. Gli altri test di
+    questa classe la provano su numeri di comodo; qui si prova sui due che
+    esistono davvero.
+    """
+
+    _DEVICE_CHARS = 3019
+
+    @pytest.fixture
+    def over_budget(self, store):
+        store.memory_file.write_text("z" * self._DEVICE_CHARS, encoding="utf-8")
+        return make_write_size_guard(_report(store, memory=DreamConfig().memory_budget_chars))
+
+    def test_the_shipped_cap_is_binding_on_the_measured_file(self, store, over_budget):
+        assert DreamConfig().memory_budget_chars == 2000
+        assert self._DEVICE_CHARS > 2000
+
+    def test_a_growing_write_is_refused(self, store, over_budget):
+        assert over_budget(store.memory_file, "z" * (self._DEVICE_CHARS + 40)) is not None
+
+    def test_a_write_of_the_same_size_is_refused(self, store, over_budget):
+        # Riscrivere altrettanti caratteri non fa progresso: se passasse, un run
+        # potrebbe rimpiazzare il contenuto all'infinito senza mai rientrare.
+        assert over_budget(store.memory_file, "w" * self._DEVICE_CHARS) is not None
+
+    def test_a_shrinking_write_passes_while_still_over_budget(self, store, over_budget):
+        # La via d'uscita, e l'unica: 2.400 caratteri sono ancora il 120% del
+        # tetto e la scrittura passa lo stesso, perché è potatura. Questa è la
+        # regola che T1.1 non ha toccato — il commit del run è cambiato, il
+        # guard no — ed è ciò che impedisce al livelock di essere definitivo.
+        assert over_budget(store.memory_file, "z" * 2400) is None
+
+    def test_a_write_that_lands_under_the_cap_passes(self, store, over_budget):
+        assert over_budget(store.memory_file, "z" * 1999) is None
