@@ -611,6 +611,27 @@ class TestThePositiveMarker:
         assert "CHECK_FAILED <number>:" in block
         assert "CHECK_OK <number>" in block
 
+    def test_an_unreachable_target_is_a_failure_even_when_told_to_give_up_quietly(
+        self,
+    ) -> None:
+        """Misurato sul device il 2026-08-16, ed è il motivo per cui questa
+        frase esiste. Il task WaterBot dice "se hps è irraggiungibile non
+        ritentare, riporta UNREACHABLE e fermati"; il subagent ha riportato
+        correttamente ``UNREACHABLE``; e il turno d'annuncio ha scritto
+        ``CHECK_OK``. Una versione precedente di questo blocco diceva che un
+        controllo saltato per istruzione propria valeva un verdetto positivo —
+        una frase innocua finché significava "non scrivere niente", ma che
+        trasformata in un'affermazione di salute copriva esattamente il guasto.
+        """
+        tasks = parse_heartbeat_tasks(_file(_WATERBOT))
+
+        block = followup_block([tasks[0]], [])
+
+        assert "could not reach what it needed did NOT produce an answer" in block
+        assert "give up quietly" in block
+        # E il dubbio si risolve verso il guasto, non verso la salute.
+        assert "If you are unsure which of the two a result is, it is CHECK_FAILED" in block
+
 
 class TestThePromptFragments:
     def test_the_index_block_names_every_task_by_number(self) -> None:
