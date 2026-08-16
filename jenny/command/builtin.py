@@ -339,6 +339,15 @@ async def cmd_dream(ctx: CommandContext) -> OutboundMessage:
 
             result = store.build_dream_prompt(gauge=render_gauge(prologue.report))
             if result is None:
+                # Stesso ramo del percorso cron, stessa ragione: il ciclo si
+                # chiude con ``advanced=None``, che fa avanzare la cadenza del
+                # review senza toccare ``stuck``. V. ``finish_dream_cycle``.
+                finish_dream_cycle(
+                    store,
+                    advanced=None,
+                    runs_since_review=prologue.runs_since_review,
+                    stuck=prologue.stuck,
+                )
                 await loop.bus.publish_outbound(OutboundMessage(
                     channel=msg.channel, chat_id=msg.chat_id,
                     content=_prefix_review_note(

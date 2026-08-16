@@ -332,6 +332,16 @@ class CronDispatcher:
 
             result = store.build_dream_prompt(gauge=render_gauge(prologue.report))
             if result is None:
+                # Il ciclo si chiude comunque: ``advanced=None`` fa avanzare la
+                # cadenza del review senza toccare ``stuck``. Senza questa riga
+                # un'installazione in pari con la storia non arrivava mai a un
+                # review pass — v. la docstring di ``finish_dream_cycle``.
+                finish_dream_cycle(
+                    store,
+                    advanced=None,
+                    runs_since_review=prologue.runs_since_review,
+                    stuck=prologue.stuck,
+                )
                 logger.info("Dream: nothing to process")
                 return None
             prompt, last_cursor = result

@@ -825,3 +825,50 @@ class TestTheAlarmCanActuallySound:
             assert reviews == 2, reviews
             assert any("no longer consolidating" in line or "ERROR" in line
                        for line in logs), logs
+
+
+class TestACycleWithNothingToConsolidate:
+    """Un run senza storia da processare non e' un run fallito, ma e' un run.
+
+    Prima, il ramo "nothing to process" usciva prima di ``finish_dream_cycle``,
+    quindi ``runs_since_review`` non avanzava. Su un'installazione in pari con
+    la storia — Dream ha digerito tutto, i file stanno fermi — il contatore
+    restava a zero e il review pass non partiva **mai**, da nessuno dei due
+    percorsi. Il review e' manutenzione sui file: legarlo all'arrivo di nuova
+    storia lega due cose scorrelate, e le lega male proprio nel caso in cui la
+    manutenzione avrebbe piu' senso.
+
+    Misurato sul Titan 2 il 2026-08-16: cursore a 88, ``history.jsonl`` a 23
+    voci, `.dream_review` inesistente dopo un `/dream` andato a buon fine.
+    """
+
+    async def test_the_cadence_advances_without_history(self, tmp_path: Path) -> None:
+        memory = _FakeMemory(tmp_path / "ws", review_state=(3, 1))
+
+        runs, stuck = finish_dream_cycle(
+            memory, advanced=None, runs_since_review=3, stuck=1
+        )
+
+        assert (runs, stuck) == (4, 1)
+        assert memory.get_review_state() == (4, 1)
+
+    async def test_it_does_not_count_as_a_failure_to_advance(
+        self, tmp_path: Path
+    ) -> None:
+        """``stuck`` conta i run in cui Dream *non e' riuscito* a consolidare.
+
+        Un run che non aveva niente da fare non ha fallito niente: contarlo
+        farebbe scattare il review — e a soglia 4 l'allarme — su
+        un'installazione perfettamente sana che semplicemente non chatta.
+        """
+        memory = _FakeMemory(tmp_path / "ws", review_state=(0, 0))
+
+        for _ in range(6):
+            runs, stuck = memory.get_review_state()
+            finish_dream_cycle(
+                memory, advanced=None, runs_since_review=runs, stuck=stuck
+            )
+
+        runs, stuck = memory.get_review_state()
+        assert stuck == 0, "sei run a vuoto non sono sei fallimenti"
+        assert runs == 6, "ma la cadenza del review e' avanzata di sei"

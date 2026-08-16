@@ -266,15 +266,30 @@ async def begin_dream_cycle(
 def finish_dream_cycle(
     store: "MemoryStore",
     *,
-    advanced: bool,
+    advanced: bool | None,
     runs_since_review: int,
     stuck: int,
 ) -> tuple[int, int]:
     """Aggiorna i contatori del review dopo il turno incrementale.
 
-    *advanced* è l'esito di ``dream_should_advance_cursor``, cioè l'unica
-    domanda a cui l'aritmetica qui sotto risponde. Ritorna i contatori scritti,
-    perché il chiamante possa dirne qualcosa senza rileggere il disco.
+    *advanced* è l'esito di ``dream_should_advance_cursor``, con un terzo stato:
+    ``None`` significa **non c'era storia da consolidare**, quindi il turno
+    incrementale non è nemmeno partito. È diverso da ``False`` e va tenuto
+    distinto, perché ``stuck`` conta i run in cui Dream *non è riuscito* a
+    consolidare — e un run che non aveva niente da fare non ha fallito niente.
+
+    ``runs_since_review`` invece avanza in tutti e tre i casi, ed è la ragione
+    per cui questo terzo stato esiste. Il review pass è manutenzione sui *file*;
+    farlo dipendere dall'arrivo di nuova *storia* lega due cose scorrelate, e
+    sulla combinazione peggiore le lega male: su un'installazione in pari — dove
+    Dream ha già digerito tutto e i file stanno fermi — il contatore non saliva
+    mai e il review non partiva **mai**, che è esattamente lo stato in cui la
+    manutenzione periodica avrebbe più senso. Misurato sul Titan 2 il
+    2026-08-16: cursore a 88, storia a 23 voci, `.dream_review` inesistente
+    dopo un `/dream` completo.
+
+    Ritorna i contatori scritti, perché il chiamante possa dirne qualcosa senza
+    rileggere il disco.
     """
     # Anti-livelock, ed è la ragione per cui ``stuck`` esiste.
     # ``_resolve_write`` conta il tentativo PRIMA di risolvere il path
@@ -295,7 +310,8 @@ def finish_dream_cycle(
     # SENZA guardare il cursore (``agent/memory.py``): un livelock abbastanza
     # lungo non spreca soltanto chiamate, perde storia che non è mai stata
     # consolidata.
-    stuck = 0 if advanced else stuck + 1
+    if advanced is not None:
+        stuck = 0 if advanced else stuck + 1
     runs_since_review += 1
     store.set_review_state(runs_since_review=runs_since_review, stuck_runs=stuck)
     if stuck >= STUCK_IS_ALARMING:
