@@ -276,6 +276,50 @@ class TestBundledToolContract:
         assert "## General Tool Contract" in prompt
 
 
+class TestOutputDestinationRule:
+    """Dove finiscono i file prodotti — regola valida in *entrambi* i rami.
+
+    Il doppio caso non è ridondanza: l'orchestratore non scrive file, ma è lui
+    a scrivere i prompt dei subagenti con ``spawn``, quindi senza la regola
+    detta loro la destinazione sbagliata. Una guardia
+    ``{% if not orchestrator %}`` aggiunta per distrazione deve far fallire
+    questo test.
+    """
+
+    @pytest.mark.parametrize("orchestrator", [True, False])
+    def test_absolute_output_path_and_root_ban_in_prompt(self, tmp_path, orchestrator):
+        prompt = _builder(tmp_path).build_system_prompt(orchestrator=orchestrator)
+        expected = str(tmp_path.resolve() / "output")
+
+        assert expected in prompt
+        assert "Never create a new file in the workspace root" in prompt
+        # Senza "you may edit but never add to" l'agente smette di aggiornare
+        # HEARTBEAT.md, che invece deve continuare a fare.
+        assert "you may edit but never add to" in prompt
+
+    def test_rule_sits_at_the_end_of_the_tool_contract(self, tmp_path):
+        """In fondo apposta: fra due istruzioni in conflitto vince l'ultima."""
+        prompt = _builder(tmp_path).build_system_prompt()
+        contract_start = prompt.index("# Tool Usage Notes")
+        # Il contratto è l'ultima sezione quando non c'è altro dopo (workspace
+        # nudo): niente separatore da cercare, si arriva in fondo.
+        contract_end = prompt.find("\n\n---\n\n", contract_start)
+        contract = prompt[contract_start:] if contract_end < 0 else prompt[contract_start:contract_end]
+
+        assert contract.index(str(tmp_path.resolve() / "output")) > contract.index(
+            "## Scheduling and Background Work"
+        )
+
+    def test_download_precedent_is_kept(self, tmp_path):
+        """La regola nuova generalizza quella sui download, non la sostituisce."""
+        prompt = _builder(tmp_path).build_system_prompt(orchestrator=False)
+        assert "Save downloaded files under `downloads/` only, never in the workspace root" in prompt
+
+    def test_output_dir_is_not_created_just_by_building_a_prompt(self, tmp_path):
+        _builder(tmp_path).build_system_prompt()
+        assert not (tmp_path / "output").exists()
+
+
 # ---------------------------------------------------------------------------
 # _build_user_content
 # ---------------------------------------------------------------------------

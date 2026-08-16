@@ -94,6 +94,32 @@ def get_uploads_dir() -> Path:
     return ensure_dir(get_workspace_path() / "uploads")
 
 
+OUTPUT_SUBDIR = "output"
+
+
+def get_output_path(workspace: Path | None = None, *, create: bool = False) -> Path:
+    """Cartella dei file che l'agente *produce* (``workspace/output``).
+
+    Esiste per togliere di mezzo l'unica destinazione che l'agente sceglieva
+    quando non ne aveva una: la radice del workspace. Lì vivono i documenti di
+    bootstrap (``AGENTS.md``, ``SOUL.md``, ``USER.md``, ``HEARTBEAT.md``), che
+    l'agente deve poter *modificare* ma mai affiancare — un risultato di lavoro
+    lasciato accanto a loro non si distingue più da un file di sistema, e
+    l'unico modo di riconoscerlo diventa aprirlo.
+
+    Sorella di ``get_uploads_dir``: dentro il workspace, quindi leggibile dai
+    tool filesystem e visibile nel browser file. Nessuno la spazza a tempo —
+    contiene lavoro finito, non scarti.
+
+    ``create=False`` di default perché i chiamanti che compongono un prompt la
+    citano soltanto: la directory la crea ``sync_workspace_templates`` una volta
+    per avvio, non un ``mkdir`` per ogni prompt costruito.
+    """
+    base = workspace if workspace is not None else get_workspace_path()
+    target = base / OUTPUT_SUBDIR
+    return ensure_dir(target) if create else target
+
+
 def get_ssh_dir() -> Path:
     """Chiave privata SSH e ``known_hosts``, **fuori dal workspace**.
 

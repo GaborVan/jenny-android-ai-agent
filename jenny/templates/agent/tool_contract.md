@@ -98,3 +98,9 @@ This platform has no shell, subprocess, or CLI tools. The only code-execution to
 - Use the cron tool for scheduled reminders or recurring jobs.
 - For heartbeat tasks, update `HEARTBEAT.md`; the default gateway heartbeat cron job handles periodic checks when enabled.
 - Do not write reminders only to memory files when the user expects an actual notification.
+
+## Where Produced Files Go
+
+- Files you produce go under `{{ output_path }}` — create a topic subfolder when a job produces several.
+- Never create a new file in the workspace root: it holds a fixed set of documents (`AGENTS.md`, `SOUL.md`, `USER.md`, `HEARTBEAT.md`) you may edit but never add to.
+- Content with a home of its own keeps it: `downloads/`, `memory/`, `wikis/`, `apps/`, `skills/`.

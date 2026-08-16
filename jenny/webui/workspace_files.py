@@ -24,11 +24,29 @@ from jenny.utils.path import atomic_write
 # di una scrittura, ma un processo ucciso in quel momento lo lascia lì per
 # sempre. È un residuo del runtime, non un file dell'utente, e mostrarlo
 # accanto all'originale invita solo ad aprire quello sbagliato.
+#
+# ``update_state.json``: lo scrive il controllo aggiornamenti nella radice del
+# workspace (``runtime/update_check.py``, ``STATE_FILENAME``). È il diario di
+# bordo dell'updater — ultima verifica, versione vista, esito — non qualcosa
+# che l'utente abbia creato o debba modificare: editarlo a mano confonde
+# soltanto la logica di controllo.
+#
+# ``__pycache__``: la genera l'interprete Python ovunque l'agente importi un
+# modulo del workspace (oggi sotto ``skills/``, domani altrove), quindi non
+# basta coprirla nella radice. Il nome secco funziona a **qualsiasi** profondità
+# perché ``_is_internal`` prova il glob anche sul solo nome dell'item; le due
+# varianti con ``/**`` servono per il contenuto della cartella, che ha nomi
+# arbitrari (``*.pyc``, e la sottodirectory che i writer di bytecode possono
+# aggiungere) e che si vede solo entrandoci in modalità avanzata. Sono pattern
+# ancorati su ``__pycache__/`` e non su ``*__pycache__*``: una cartella
+# dell'utente che contenga quella parola nel nome resta visibile.
 _DEFAULT_INTERNAL_PATTERNS = [
     ".*",
     "*.tmp",
     "config.json*",
     "config.corrupt-*.json",
+    "update_state.json",
+    "__pycache__", "__pycache__/**", "*/__pycache__/**",
     "agent", "agent/**",
     "cron", "cron/**",
     "sessions", "sessions/**",

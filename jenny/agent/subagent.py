@@ -1580,6 +1580,7 @@ class SubagentManager:
         """
         from jenny.agent.context import ContextBuilder
         from jenny.agent.skills import SkillsLoader
+        from jenny.config.paths import get_output_path
 
         time_ctx = ContextBuilder._build_runtime_context(None, None)
         root = workspace or self.workspace
@@ -1591,6 +1592,12 @@ class SubagentManager:
             "agent/subagent_system.md",
             time_ctx=time_ctx,
             workspace=str(root),
+            # Assoluto come ``workspace`` qui accanto: il subagent scrive con
+            # ``write_file``, e un path relativo lo lascerebbe a indovinare
+            # rispetto a cosa — la radice che il prompt gli vieta di sporcare.
+            # ``create=False``: qui il prompt la nomina soltanto, la directory
+            # la crea ``sync_workspace_templates`` una volta per avvio.
+            output_dir=str(get_output_path(root)),
             skills_summary=skills_summary or "",
             role_section=self._render_role_section(agent_type),
         )

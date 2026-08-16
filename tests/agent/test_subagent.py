@@ -9,6 +9,7 @@ from jenny.agent.agent_types import AGENT_TYPES
 from jenny.agent.subagent import SubagentManager
 from jenny.agent.tools.filesystem import FileToolsConfig
 from jenny.bus.queue import MessageBus
+from jenny.config.paths import get_output_path
 from jenny.config.schema import ToolsConfig
 from jenny.config.tool_schemas import SshConfig, SshHostConfig
 from jenny.providers.base import LLMProvider
@@ -81,6 +82,42 @@ def test_subagent_respects_file_tool_toggle(tmp_path):
         "write_file",
     }
     assert file_tools.isdisjoint(tools.tool_names)
+
+
+def test_subagent_prompt_names_the_output_dir_and_forbids_the_root(tmp_path):
+    """Guardiano della regola di destinazione nel prompt DEI SUBAGENTI.
+
+    I subagenti non ricevono ``agent/tool_contract.md``: il loro prompt lo
+    compone ``_build_subagent_prompt`` da ``agent/subagent_system.md``, un
+    percorso separato da ``ContextBuilder.build_system_prompt`` del loop
+    principale. Quindi la regola "scrivi sotto output/, mai nella radice" deve
+    essere ribadita qui, e chi un domani rifà la composizione del prompt deve
+    vedere fallire *questo* test invece di far sparire la regola in silenzio:
+    senza, i subagenti tornano a depositare i file accanto ai documenti di
+    bootstrap.
+    """
+    provider = MagicMock(spec=LLMProvider)
+    provider.get_default_model.return_value = "test"
+    sm = SubagentManager(
+        provider=provider,
+        workspace=tmp_path,
+        bus=MessageBus(),
+        model="test",
+        max_tool_result_chars=16_000,
+    )
+
+    # Spazi normalizzati: il testo del template e giustificato a mano, e un
+    # semplice ricapo delle righe non deve far fallire un test che difende il
+    # *contenuto* della regola.
+    prompt = " ".join(sm._build_subagent_prompt().split())
+
+    # Percorso ASSOLUTO: un "output/" relativo lascerebbe il subagent a
+    # indovinare rispetto a quale radice.
+    assert str(get_output_path(tmp_path)) in prompt
+    assert "Never create a new file in the workspace root" in prompt
+    # I documenti di bootstrap restano modificabili: senza questa clausola un
+    # subagent smetterebbe di aggiornare HEARTBEAT.md, che deve continuare a fare.
+    assert "you may edit but never add to" in prompt
 
 
 def _sysadmin_manager(workspace: Path, *, ssh_enabled: bool, hosts: bool) -> SubagentManager:

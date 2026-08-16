@@ -735,6 +735,18 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
         history.write_text("", encoding="utf-8")
         added.append("memory/history.jsonl")
 
+    # La cartella dei risultati dell'agente deve esistere *prima* del primo
+    # turno: se la trova già lì la usa, se deve crearla sceglie la radice del
+    # workspace e ci lascia il file accanto ai documenti di bootstrap.
+    # Import locale obbligato: jenny.config.paths importa questo modulo a
+    # livello di modulo (ensure_dir), quindi in testa al file sarebbe un ciclo.
+    from jenny.config.paths import OUTPUT_SUBDIR, get_output_path
+
+    output_existed = (workspace / OUTPUT_SUBDIR).is_dir()
+    get_output_path(workspace, create=True)
+    if not output_existed:
+        added.append(f"{OUTPUT_SUBDIR}/")
+
     if added and not silent:
         for name in added:
             logger.info("Created {}", name)

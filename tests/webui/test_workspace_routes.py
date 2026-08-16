@@ -174,6 +174,82 @@ async def test_list_marks_default_runtime_dirs_internal_without_manifest(
     }
 
 
+async def test_list_marks_update_state_internal(
+    routes: WorkspaceRoutes, workspace_root: Path, config_path: Path
+) -> None:
+    # update_state.json è il diario dell'updater (runtime/update_check.py), non
+    # contenuto dell'utente. Un file dell'utente con nome vicino resta visibile:
+    # il pattern è il nome esatto, non un prefisso.
+    (workspace_root / "update_state.json").write_text("{}", encoding="utf-8")
+    (workspace_root / "update_states.json").write_text("{}", encoding="utf-8")
+    (workspace_root / "note.txt").write_text("hi", encoding="utf-8")
+    response = await routes.dispatch(_request("/api/workspace/list"), "/api/workspace/list")
+    assert response.status_code == 200
+    by_name = {item["name"]: item["internal"] for item in _json(response)["items"]}
+    assert by_name == {
+        "update_state.json": True,
+        "update_states.json": False,
+        "note.txt": False,
+    }
+
+
+async def test_list_marks_nested_pycache_internal(
+    routes: WorkspaceRoutes, workspace_root: Path, config_path: Path
+) -> None:
+    # __pycache__ nasce ovunque l'agente importi un modulo del workspace, non
+    # solo nella radice: il pattern deve reggere a qualsiasi profondità, senza
+    # nascondere gli script che l'utente ha scritto lì accanto.
+    scripts = workspace_root / "skills" / "waterbot" / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "__pycache__").mkdir()
+    (scripts / "bot.py").write_text("print(1)\n", encoding="utf-8")
+
+    response = await routes.dispatch(
+        _request("/api/workspace/list?path=skills/waterbot/scripts"), "/api/workspace/list"
+    )
+    assert response.status_code == 200
+    by_name = {item["name"]: item["internal"] for item in _json(response)["items"]}
+    assert by_name == {"__pycache__": True, "bot.py": False}
+
+
+async def test_list_marks_pycache_contents_internal(
+    routes: WorkspaceRoutes, workspace_root: Path, config_path: Path
+) -> None:
+    # Entrandoci in modalità avanzata, anche il contenuto va marcato: i nomi dei
+    # bytecode sono arbitrari, quindi il match è sul path relativo.
+    cache = workspace_root / "skills" / "waterbot" / "scripts" / "__pycache__"
+    cache.mkdir(parents=True)
+    (cache / "bot.cpython-311.pyc").write_bytes(b"\x00fake")
+    response = await routes.dispatch(
+        _request("/api/workspace/list?path=skills/waterbot/scripts/__pycache__"),
+        "/api/workspace/list",
+    )
+    assert response.status_code == 200
+    by_name = {item["name"]: item["internal"] for item in _json(response)["items"]}
+    assert by_name == {"bot.cpython-311.pyc": True}
+
+
+async def test_list_keeps_user_content_visible_with_default_patterns(
+    routes: WorkspaceRoutes, workspace_root: Path, config_path: Path
+) -> None:
+    # La metà che conta: nessuno dei default deve nascondere qualcosa che
+    # l'utente abbia scritto, nemmeno quando il nome ci somiglia.
+    (workspace_root / "my__pycache__notes").mkdir()
+    (workspace_root / "my__pycache__notes" / "appunti.md").write_text("x", encoding="utf-8")
+    for name in ("note.txt", "update.json", "agenti.md", "cronaca.txt", "uistyle.css"):
+        (workspace_root / name).write_text("x", encoding="utf-8")
+
+    response = await routes.dispatch(_request("/api/workspace/list"), "/api/workspace/list")
+    assert response.status_code == 200
+    assert all(item["internal"] is False for item in _json(response)["items"])
+
+    nested = await routes.dispatch(
+        _request("/api/workspace/list?path=my__pycache__notes"), "/api/workspace/list"
+    )
+    assert nested.status_code == 200
+    assert all(item["internal"] is False for item in _json(nested)["items"])
+
+
 async def test_list_uses_internal_manifest_patterns(
     routes: WorkspaceRoutes, workspace_root: Path, config_path: Path
 ) -> None:
@@ -183,11 +259,15 @@ async def test_list_uses_internal_manifest_patterns(
     )
     (workspace_root / "secret.txt").write_text("shh", encoding="utf-8")
     (workspace_root / "normal.txt").write_text("hi", encoding="utf-8")
+    # Il manifest *sostituisce* i default, non ci si somma: update_state.json
+    # torna visibile. È il contratto storico, che i nuovi pattern non cambiano.
+    (workspace_root / "update_state.json").write_text("{}", encoding="utf-8")
     response = await routes.dispatch(_request("/api/workspace/list"), "/api/workspace/list")
     assert response.status_code == 200
     by_name = {item["name"]: item["internal"] for item in _json(response)["items"]}
     assert by_name["secret.txt"] is True
     assert by_name["normal.txt"] is False
+    assert by_name["update_state.json"] is False
 
 
 async def test_list_works_when_workspace_root_is_a_symlink(

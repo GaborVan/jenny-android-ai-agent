@@ -8,6 +8,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from jenny.agent.memory import MemoryStore
 from jenny.agent.skills import SkillsLoader
+from jenny.config.paths import get_output_path
 from jenny.session.goal_state import goal_state_runtime_lines
 from jenny.utils.helpers import (
     current_time_str,
@@ -21,6 +22,23 @@ from jenny.utils.prompt_templates import render_template
 # Fallback quando ContextBuilder è costruito senza config (test, tool isolati):
 # stesso valore del default di ``AtlasConfig.max_context_tokens``.
 _DEFAULT_WIKI_DIRECTORY_TOKENS = 1200
+
+
+def _absolute_workspace(root: Path) -> Path:
+    """La radice del workspace in forma assoluta e normalizzata.
+
+    Ogni path che finisce nel prompt passa di qui, perché un percorso relativo
+    o non espanso è un percorso che il modello detta a un tool (o a un
+    subagente) e che poi non esiste. ``expanduser()`` sta dentro un try perché
+    su Android può sollevare — ``HOME`` non è garantito e ``pwd`` non conosce
+    l'uid dell'app: in quel caso si tiene il path com'è, che è comunque
+    migliore di un prompt senza percorso.
+    """
+    try:
+        expanded = root.expanduser()
+    except (RuntimeError, OSError):
+        expanded = root
+    return expanded.resolve()
 
 
 class ContextBuilder:
@@ -113,7 +131,15 @@ class ContextBuilder:
         if bootstrap:
             parts.append(bootstrap)
 
-        parts.append(render_template("agent/tool_contract.md", orchestrator=orchestrating))
+        # ``output_path`` serve anche in modalità orchestratore, dove l'agente
+        # non scrive file: è lui a scrivere i prompt dei subagenti con
+        # ``spawn``, quindi è lui a dettare loro la destinazione sbagliata se
+        # non la conosce. Da qui l'assenza di guardia sul flag.
+        parts.append(render_template(
+            "agent/tool_contract.md",
+            orchestrator=orchestrating,
+            output_path=str(get_output_path(_absolute_workspace(root))),
+        ))
         if orchestrating:
             parts.append(render_template("agent/orchestrator.md"))
 
@@ -222,11 +248,7 @@ class ContextBuilder:
     ) -> str:
         """Get the core identity section."""
         root = workspace or self.workspace
-        try:
-            expanded_root = root.expanduser()
-        except (RuntimeError, OSError):
-            expanded_root = root
-        workspace_path = str(expanded_root.resolve())
+        workspace_path = str(_absolute_workspace(root))
         runtime = f"Android, Python {platform.python_version()}"
 
         return render_template(

@@ -64,6 +64,38 @@ class TestSyncWorkspaceTemplates:
 
         assert (workspace / "memory").exists() or (workspace / "skills").exists()
 
+    def test_creates_output_directory(self, tmp_path):
+        """La cartella dei risultati esiste dopo il primo sync, ed è segnalata."""
+        workspace = tmp_path / "workspace"
+
+        added = sync_workspace_templates(workspace, silent=True)
+
+        assert (workspace / "output").is_dir()
+        assert "output/" in added
+
+    def test_output_directory_is_idempotent(self, tmp_path):
+        """Un secondo avvio non la ricrea né la riporta di nuovo fra gli aggiunti."""
+        workspace = tmp_path / "workspace"
+        sync_workspace_templates(workspace, silent=True)
+
+        added = sync_workspace_templates(workspace, silent=True)
+
+        assert (workspace / "output").is_dir()
+        assert "output/" not in added
+
+    def test_preserves_existing_output_contents(self, tmp_path):
+        """Contiene lavoro finito dell'utente: il sync non deve mai spazzarla."""
+        workspace = tmp_path / "workspace"
+        output_dir = workspace / "output"
+        output_dir.mkdir(parents=True)
+        report = output_dir / "report.md"
+        report.write_text("risultato precedente", encoding="utf-8")
+
+        added = sync_workspace_templates(workspace, silent=True)
+
+        assert report.read_text(encoding="utf-8") == "risultato precedente"
+        assert "output/" not in added
+
     def test_returns_list_of_added_files(self, tmp_path):
         """Should return list of relative paths for added files."""
         workspace = tmp_path / "workspace"
