@@ -73,6 +73,8 @@ import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
+from loguru import logger
+
 from jenny.cron.could_not_check import (
     COULD_NOT_CHECK_MARKER,
     DELEGATED_MARKER,
@@ -141,7 +143,25 @@ class HeartbeatCheckOutcome:
         return "; ".join(parts)[:REASON_MAX_CHARS]
 
 
-def _uncommented_lines(content: str) -> Iterator[tuple[str, bool]]:
+def _is_section_heading(stripped: str) -> bool:
+    """``## Titolo``, e non ``### Titolo``: il livello che delimita una sezione."""
+    return stripped.startswith("##") and not stripped.startswith("###")
+
+
+def _opens_active_tasks(stripped: str) -> bool:
+    """La riga che apre la sezione dei task, a qualunque punto del file compaia.
+
+    È il delimitatore su cui il parser si orienta, cioè roba nostra: chi la
+    incontra la tratta come struttura, mai come una riga che l'utente ha scritto
+    per dire qualcosa.
+    """
+    return (
+        _is_section_heading(stripped)
+        and stripped.lstrip("#").strip().lower().startswith("active tasks")
+    )
+
+
+def _uncommented_lines(content: str, source: str | None = None) -> Iterator[tuple[str, bool]]:
     """Le righe del file senza i commenti HTML, ognuna con "sono in Active Tasks".
 
     La macchina a stati dei commenti — quelli su una riga sola e quelli su più
@@ -152,8 +172,17 @@ def _uncommented_lines(content: str) -> Iterator[tuple[str, bool]]:
     non ha una scansione propria.
 
     Le righe di intestazione escono da qui come tutte le altre — è chi chiama a
-    decidere se sono contenuto o solo struttura — e ``## Active Tasks`` esce già
-    con lo stato aggiornato, quindi appartiene alla sezione che apre.
+    decidere se sono contenuto o solo struttura — e lo stato si aggiorna **prima**
+    dello ``yield``, quindi ``## Active Tasks`` appartiene alla sezione che apre
+    e ``## Archive`` a quella che apre lui, non a quella che chiude. Invertire le
+    due righe non rompe nessun test di attribuzione dei task (una sezione che
+    finisce non ne contiene) ma fa colare nel prompt l'intestazione che chiude
+    l'elenco: v. ``test_a_heading_that_closes_the_section_stays_out``.
+
+    ``source`` è il nome del file da cui viene *content*, e serve solo a poterlo
+    nominare in un avviso: un commento HTML mai chiuso si mangia in silenzio
+    tutto ciò che gli sta sotto. Lo passa il chiamante che costruisce il prompt —
+    uno solo, altrimenti lo stesso file rotto produrrebbe due avvisi per run.
     """
     in_comment = False
     in_active_section = False
@@ -167,9 +196,21 @@ def _uncommented_lines(content: str) -> Iterator[tuple[str, bool]]:
             if "-->" not in stripped[4:]:
                 in_comment = True
             continue
-        if stripped.startswith("##") and not stripped.startswith("###"):
-            in_active_section = stripped.lstrip("#").strip().lower().startswith("active tasks")
+        if _is_section_heading(stripped):
+            in_active_section = _opens_active_tasks(stripped)
         yield line, in_active_section
+    if in_comment and source is not None:
+        # Il file è malformato, non lo è il parser: da un ``<!--`` senza chiusura
+        # in poi non arriva più niente né al conteggio né al prompt. Il conteggio
+        # faceva già così, ma finché il prompt portava il file grezzo il modello
+        # quei task li vedeva lo stesso e li eseguiva; ora non li vede nessuno.
+        # Non si indovina dove l'utente voleva chiudere il commento — si dice
+        # quale file guardare.
+        logger.warning(
+            "{}: an HTML comment is never closed, so everything after it is "
+            "ignored — any task written below that point will not run",
+            source,
+        )
 
 
 def _active_task_lines(content: str) -> Iterator[str]:
@@ -189,7 +230,7 @@ def _active_task_lines(content: str) -> Iterator[str]:
         yield line if stripped else ""
 
 
-def active_section_text(content: str) -> str:
+def active_section_text(content: str, source: str | None = None) -> str:
     """La sezione "Active Tasks" com'è scritta, meno i commenti HTML.
 
     Serve al prompt dell'heartbeat, e la differenza da :func:`_active_task_lines`
@@ -204,18 +245,34 @@ def active_section_text(content: str) -> str:
     Quindi qui esce tutto il resto verbatim — intestazioni, righe vuote,
     rientri — e la sola cosa che ci si aggiunge è togliere le righe vuote agli
     estremi, che dopo la rimozione di un commento sono quasi sempre le sue.
+    "Vuote" include quelle di soli spazi: un ``strip("\\n")`` sul testo unito ne
+    lasciava passare una intatta, e sono esattamente quelle che restano dove
+    stava un commento indentato — cioè il caso per cui questa potatura esiste.
+    Fra le due letture della frase si è scelta quella che la rende vera, invece
+    di riscrivere la frase: il costo è nullo e il risultato resta deterministico.
 
     Cosa **non** fa: decidere che cos'è un task. Quello resta di
     :func:`parse_heartbeat_tasks`, che non è cambiata e non deve cambiare —
     l'identità di un task è l'hash del suo testo, e con essa è indicizzato lo
     stato dell'escalation già scritto sul dispositivo dell'utente.
+
+    ``source`` viaggia fino a :func:`_uncommented_lines` e serve solo a nominare
+    il file in un avviso: v. lì.
     """
-    lines = [line for line, in_active_section in _uncommented_lines(content) if in_active_section]
-    # Via l'intestazione ``## Active Tasks``: è il delimitatore su cui il parser
-    # si orienta, non una riga che l'utente ha scritto per dire qualcosa.
-    if lines and lines[0].strip().lstrip("#").strip().lower().startswith("active tasks"):
-        lines = lines[1:]
-    return "\n".join(lines).strip("\n")
+    # Via l'intestazione ``## Active Tasks`` — ogni sua occorrenza, non solo la
+    # prima. È il delimitatore su cui il parser si orienta, non una riga che
+    # l'utente ha scritto per dire qualcosa, e un file che riapre la sezione più
+    # avanti (dopo ``## Notes``, tipicamente) se la ritrovava in mezzo al prompt.
+    lines = [
+        line
+        for line, in_active_section in _uncommented_lines(content, source)
+        if in_active_section and not _opens_active_tasks(line.strip())
+    ]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return "\n".join(lines)
 
 
 def _strip_markers(line: str) -> str:
@@ -536,6 +593,7 @@ def _count_failure(
     now_ms: int,
     escalating_ids: set[str],
     spoke: bool,
+    sole_failure: bool,
     outcome: HeartbeatCheckOutcome,
 ) -> None:
     """Un controllo mancato in più per ``task``. Condiviso dai due registratori."""
@@ -545,22 +603,28 @@ def _count_failure(
     entry.pending_since_ms = None
     if entry.since_ms is None:
         entry.since_ms = now_ms
-    if spoke:
+    if spoke and (task.id in escalating_ids or sole_failure):
         # L'avviso è "dato" solo se è davvero uscito: un modello che ignora
-        # l'istruzione deve ritrovarsela al giro dopo. Ma **non** conta solo
-        # l'avviso che abbiamo chiesto noi: ``escalated`` è il verbale di aver
-        # parlato all'utente, e per chi lo riceve un messaggio spontaneo e uno
-        # richiesto sono lo stesso messaggio.
+        # l'istruzione deve ritrovarsela al giro dopo. E non conta solo l'avviso
+        # che abbiamo chiesto noi — ``escalated`` è il verbale di aver parlato
+        # all'utente, e per chi lo riceve un messaggio spontaneo e uno richiesto
+        # sono lo stesso messaggio.
         #
-        # Misurato sul Titan 2 il 2026-08-16, e non è un caso di scuola: al
-        # secondo ciclo di guasto, con il blocco di escalation ancora assente
-        # dal prompt, il modello ha chiamato ``message`` di propria iniziativa
-        # ("il server WaterBot non si raggiunge…"). Con la condizione di prima
-        # quel messaggio non veniva registrato da nessuna parte, quindi un
-        # ciclo dopo la soglia scattava e all'utente arrivava **lo stesso
-        # avviso una seconda volta**. Nessuna riga di prompt lo impediva: qui
-        # il modello stava già ignorando sia la nostra istruzione di tacere sia
-        # quella scritta dall'utente nel proprio ``HEARTBEAT.md``.
+        # Misurato sul Titan 2 il 2026-08-16: al secondo ciclo di guasto, con il
+        # blocco di escalation ancora assente dal prompt, il modello ha chiamato
+        # ``message`` di propria iniziativa ("il server WaterBot non si
+        # raggiunge…"). Senza registrarlo, un ciclo dopo la soglia scattava e
+        # all'utente arrivava lo stesso avviso una seconda volta.
+        #
+        # ``sole_failure`` è ciò che rende attribuibile quel messaggio, ed è la
+        # stessa regola che ``attribute_marks`` applica a un marcatore anonimo:
+        # ``spoke`` riguarda il TURNO, non il task, quindi con due controlli
+        # rotti nello stesso turno non si sa di quale il modello abbia parlato.
+        # Timbrarli entrambi zittirebbe per sempre quello di cui NON ha parlato
+        # — un guasto reale che non verrebbe annunciato mai, che è l'errore
+        # peggiore dei due. Con più di un guasto resta quindi solo
+        # l'attribuzione esplicita: il run ha chiesto di avvisare per QUESTI
+        # task, e il blocco chiede un messaggio solo per tutti quanti.
         entry.escalated = True
     if task.id in escalating_ids and spoke:
         # Distinto da sopra: questo dice "l'escalation che il run aveva chiesto
@@ -603,6 +667,11 @@ def record_task_outcomes(
     # modello ci scrive accanto è per il log, non per lo stato.
     delegated_by_id, _ = attribute_marks(tasks, delegated or [])
     escalating_ids = {t.id for t in escalating}
+    # V. ``_count_failure``: un messaggio spontaneo è attribuibile a un task solo
+    # quando quel task è l'unico ad aver fallito nel turno. Un marcatore che non
+    # si è saputo attribuire conta come un secondo guasto possibile, e quindi
+    # toglie l'attribuzione anche all'altro.
+    sole_failure = len(reasons) == 1 and not unattributed
     outcome = HeartbeatCheckOutcome(unattributed=unattributed)
 
     updated: dict[str, CronTaskCheckState] = {}
@@ -612,7 +681,8 @@ def record_task_outcomes(
             entry = entry or CronTaskCheckState()
             _count_failure(
                 entry, task, reasons[task.id],
-                now_ms=now_ms, escalating_ids=escalating_ids, spoke=spoke, outcome=outcome,
+                now_ms=now_ms, escalating_ids=escalating_ids, spoke=spoke,
+                sole_failure=sole_failure, outcome=outcome,
             )
             updated[task.id] = entry
             continue
@@ -684,6 +754,7 @@ def record_followup_outcomes(
     # sicura anche qui — al massimo si aspetta un ciclo in più.
     ok_by_id, _ = attribute_marks(tasks, ok or [], default=default)
     escalating_ids = {t.id for t in escalating}
+    sole_failure = len(reasons) == 1 and not unattributed
     outcome = HeartbeatCheckOutcome(unattributed=unattributed)
     pending_ids = {t.id for t in pending}
     for task in tasks:
@@ -691,7 +762,8 @@ def record_followup_outcomes(
             entry = state.task_checks.get(task.id) or CronTaskCheckState()
             _count_failure(
                 entry, task, reasons[task.id],
-                now_ms=now_ms, escalating_ids=escalating_ids, spoke=spoke, outcome=outcome,
+                now_ms=now_ms, escalating_ids=escalating_ids, spoke=spoke,
+                sole_failure=sole_failure, outcome=outcome,
             )
             state.task_checks[task.id] = entry
             continue

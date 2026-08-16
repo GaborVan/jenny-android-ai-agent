@@ -10,6 +10,7 @@ zero, mai una sequenza ereditata dal task sbagliato).
 from __future__ import annotations
 
 from jenny.cron.could_not_check import (
+    ESCALATE_AFTER_FAILURES,
     CouldNotCheckMark,
     could_not_check_reason,
     parse_could_not_check_marks,
@@ -528,6 +529,57 @@ class TestOneFaultIsOneWarning:
         # E al ciclo dopo non si riparla.
         assert tasks_due_for_escalation(state, tasks) == []
         assert tasks_already_warned(state, tasks) == [tasks[0]]
+
+    def test_an_unrequested_message_does_not_silence_the_other_broken_task(self) -> None:
+        """``spoke`` è del TURNO, non del task, e questa è la trappola.
+
+        Con due controlli rotti nello stesso turno e un messaggio spontaneo,
+        timbrare ``escalated`` su entrambi zittisce per sempre quello di cui il
+        modello NON ha parlato: rotto da sei cicli, mai annunciato, e mai più
+        annunciabile. È l'errore peggiore dei due — lo stesso che rende
+        inaccettabile la fix minima da cui è partito tutto questo.
+
+        Con più di un guasto resta quindi solo l'attribuzione esplicita, che è
+        la stessa regola con cui ``attribute_marks`` tratta un marcatore
+        anonimo: attribuibile solo se il candidato è uno.
+        """
+        tasks = parse_heartbeat_tasks(_file(_WATERBOT, _VITAMINE))
+        state = CronJobState()
+
+        record_task_outcomes(
+            state,
+            tasks,
+            [CouldNotCheckMark("1", "hps giù"), CouldNotCheckMark("2", "backup giù")],
+            now_ms=10,
+            escalating=[],  # nessuno ha chiesto di parlare
+            spoke=True,  # ma il modello ha parlato, di uno solo dei due
+        )
+
+        assert [e.escalated for e in state.task_checks.values()] == [False, False]
+
+        # E infatti entrambi restano annunciabili quando la soglia arriva.
+        for run in range(1, ESCALATE_AFTER_FAILURES):
+            record_task_outcomes(
+                state, tasks,
+                [CouldNotCheckMark("1", "hps giù"), CouldNotCheckMark("2", "backup giù")],
+                now_ms=10 + run, escalating=[], spoke=False,
+            )
+        assert tasks_due_for_escalation(state, tasks) == tasks
+
+    def test_an_explicit_escalation_still_covers_every_task_it_named(self) -> None:
+        """Il blocco di escalation chiede **un** messaggio per tutti i task che
+        elenca, quindi un solo ``message`` li copre tutti: lì l'attribuzione è
+        esplicita e non serve indovinarla."""
+        tasks = parse_heartbeat_tasks(_file(_WATERBOT, _VITAMINE))
+        state = CronJobState()
+
+        record_task_outcomes(
+            state, tasks,
+            [CouldNotCheckMark("1", "hps giù"), CouldNotCheckMark("2", "backup giù")],
+            now_ms=10, escalating=tasks, spoke=True,
+        )
+
+        assert [e.escalated for e in state.task_checks.values()] == [True, True]
 
     def test_a_second_fault_after_a_recovery_warns_again(self) -> None:
         """Il test che vale tutti gli altri: il ciclo intero, dall'avviso al successivo."""
