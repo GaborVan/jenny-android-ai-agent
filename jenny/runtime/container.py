@@ -37,6 +37,8 @@ class GatewayContainer:
         self._agent: Any = None
         self._message_tool: Any = None
         self.onboarding_event = asyncio.Event()
+        # Ultimo errore della sync dei template, se c'è stato (vedi _sync_templates).
+        self.template_sync_error: Exception | None = None
 
         # Collaboratori popolati da build().
         self.bus: Any = None
@@ -158,6 +160,45 @@ class GatewayContainer:
 
     # -- costruzione del grafo ----------------------------------------------
 
+    def _sync_templates(self) -> None:
+        """Estrae template, prompt di sistema, skill e UI nel workspace.
+
+        L'estrazione dei prompt ``agent/**`` **non è opzionale**: sono codice, e
+        riscriverli a ogni avvio è l'unico modo in cui una loro correzione arriva
+        su un telefono già installato. Sembrerebbe quindi il posto sbagliato per
+        un ``except``. Ma il ramo che si sta scegliendo qui non è "prompt freschi
+        contro prompt stantii": è "prompt stantii contro **nessun gateway**", e un
+        processo che muore non aggiorna niente. Fallire chiuso non protegge la
+        politica, la sospende insieme a tutto il resto — e siccome il servizio
+        viene riavviato dal watchdog, la sospende in loop.
+
+        L'altro entry point (``android_entry``) faceva già questa scelta; qui non
+        era stata fatta, e la stessa identica rottura aveva due esiti diversi a
+        seconda di come Jenny era stata avviata. Un'asimmetria che nessuno aveva
+        deciso.
+
+        Il prezzo è che un refresh fallito diventa invisibile, quindi si paga con
+        un log a ERROR (non warning: non è un dettaglio) che nomina la conseguenza
+        vera — i prompt possono essere quelli della versione precedente — e con
+        ``template_sync_error``, così chi vorrà mostrarlo in UI ha da dove
+        leggerlo. Il fallimento *noto* di questo passo (la cartella dei risultati
+        occupata da un file) è già gestito alla fonte in ``config/paths.py``:
+        questo è la rete, non il rimedio.
+        """
+        from jenny.utils.helpers import sync_workspace_templates
+
+        try:
+            sync_workspace_templates(self.config.workspace_path)
+            self.template_sync_error = None
+        except Exception as exc:
+            self.template_sync_error = exc
+            logger.opt(exception=True).error(
+                "Estrazione degli asset di pacchetto in {} fallita — i prompt di sistema "
+                "potrebbero essere quelli della versione precedente e la WebUI potrebbe "
+                "essere incompleta; il gateway parte comunque",
+                self.config.workspace_path,
+            )
+
     def build(self) -> None:
         """Costruisce l'intero grafo di oggetti (composition point)."""
         from jenny.bus.queue import MessageBus
@@ -170,14 +211,13 @@ class GatewayContainer:
         from jenny.runtime.cron_dispatch import CronDispatcher
         from jenny.runtime.delivery import ChannelDeliverer
         from jenny.session.manager import SessionManager
-        from jenny.utils.helpers import sync_workspace_templates
 
         config = self.config
         logger.info(
             "{} Starting jenny gateway version {} on port {}...",
             __logo__, __version__, self.port,
         )
-        sync_workspace_templates(config.workspace_path)
+        self._sync_templates()
 
         # Backpressure su dispositivi memory-constrained (Android): code limitate.
         # I delta di streaming/progress usano try_publish_outbound (scartabili),

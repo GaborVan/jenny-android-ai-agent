@@ -96,6 +96,71 @@ def get_uploads_dir() -> Path:
 
 OUTPUT_SUBDIR = "output"
 
+_DISPLACED_SUFFIX = "displaced"
+_MAX_DISPLACED = 100
+
+
+def _displace_output_obstruction(target: Path) -> None:
+    """Toglie di mezzo ciò che occupa il nome ``output`` senza essere una cartella.
+
+    ``mkdir(exist_ok=True)`` perdona solo una directory: un file regolare — o un
+    symlink rotto, che esiste per il filesystem ma per nessun altro — solleva
+    ``FileExistsError``. Quella eccezione risaliva fino a ``build()`` del
+    container e il gateway non partiva più: watchdog, riavvio, di nuovo lì. E il
+    punto in cui cadeva è dopo l'estrazione di prompt, skill e UI, quindi il log
+    finiva su una riga che diceva "estratti 198 file" e nient'altro.
+
+    Chi lo mette lì, quel file, è l'agente stesso: la cartella ``output/`` nasce
+    per togliergli di mano la radice del workspace come destinazione di default,
+    e finché non c'era ci lasciava i risultati — uno dei quali può benissimo
+    chiamarsi ``output``.
+
+    **Si sposta, non si cancella.** È lavoro prodotto, e distruggerlo per fare
+    posto a una cartella vuota sarebbe il rimedio peggiore del male. Le altre due
+    strade valutate: proseguire senza la cartella rimette l'agente a scrivere
+    nella radice, cioè riapre esattamente il problema che ``output/`` chiude;
+    ripiegare su un nome diverso (``output-1/``) fa mentire il prompt, che la
+    cita per nome in ``agent/context.py``. Rinominare di lato è l'unica che
+    lascia il sistema nello stato che tutti gli altri pezzi si aspettano.
+
+    Se persino la rinomina fallisce non si solleva: il boot vale più della
+    cartella. Il chiamante ritorna un path che non esiste, e la prima scrittura
+    fallirà con un errore suo — leggibile, e non in crash-loop.
+    """
+    if target.is_dir():
+        # Anche un symlink a una directory *è* una directory per mkdir: non si tocca.
+        return
+    if not target.exists() and not target.is_symlink():
+        return
+
+    for n in range(_MAX_DISPLACED):
+        suffix = _DISPLACED_SUFFIX if n == 0 else f"{_DISPLACED_SUFFIX}.{n}"
+        candidate = target.with_name(f"{target.name}.{suffix}")
+        if candidate.exists() or candidate.is_symlink():
+            continue
+        try:
+            target.rename(candidate)
+        except OSError as exc:
+            logger.error(
+                "Il nome {} è occupato da un file e spostarlo in {} non è riuscito ({}): "
+                "la cartella dei risultati non esiste per questo avvio",
+                target, candidate.name, exc,
+            )
+            return
+        logger.error(
+            "Trovato un file (non una cartella) chiamato {}: spostato in {} per liberare "
+            "la cartella dei risultati dell'agente. È lavoro prodotto, non è stato "
+            "cancellato — spostalo dentro {}/ o rinominalo.",
+            target, candidate.name, OUTPUT_SUBDIR,
+        )
+        return
+
+    logger.error(
+        "Il nome {} è occupato e i {} nomi di ripiego sono già tutti presi: "
+        "la cartella dei risultati non esiste per questo avvio",
+        target, _MAX_DISPLACED,
+    )
+
 
 def get_output_path(workspace: Path | None = None, *, create: bool = False) -> Path:
     """Cartella dei file che l'agente *produce* (``workspace/output``).
@@ -114,10 +179,24 @@ def get_output_path(workspace: Path | None = None, *, create: bool = False) -> P
     ``create=False`` di default perché i chiamanti che compongono un prompt la
     citano soltanto: la directory la crea ``sync_workspace_templates`` una volta
     per avvio, non un ``mkdir`` per ogni prompt costruito.
+
+    Con ``create=True`` la creazione **non solleva mai**: l'unico chiamante è la
+    sync all'avvio, e nessun ostacolo su questo path vale un gateway che non
+    parte (vedi ``_displace_output_obstruction``).
     """
     base = workspace if workspace is not None else get_workspace_path()
     target = base / OUTPUT_SUBDIR
-    return ensure_dir(target) if create else target
+    if not create:
+        return target
+    _displace_output_obstruction(target)
+    try:
+        return ensure_dir(target)
+    except OSError as exc:
+        logger.error(
+            "Impossibile creare la cartella dei risultati {} ({}): l'avvio prosegue senza",
+            target, exc,
+        )
+        return target
 
 
 def get_ssh_dir() -> Path:
