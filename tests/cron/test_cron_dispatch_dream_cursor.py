@@ -22,6 +22,19 @@ _DREAM_JOB = SimpleNamespace(name="dream", id="job-dream")
 class _FakeMemory:
     """Memory store minimale: espone il registry Dream con i suoi ``file_states``."""
 
+    # ``budget_report`` misura questi tre file: non esistono, e va bene —
+    # ``count_chars`` legge 0 su file assente, e con i budget a 0 del default
+    # nessuno puo' risultare oltre soglia.
+    memory_file = Path("no-such-MEMORY.md")
+    user_file = Path("no-such-USER.md")
+    soul_file = Path("no-such-SOUL.md")
+
+    def get_review_state(self) -> tuple[int, int]:
+        return (0, 0)
+
+    def set_review_state(self, **_kwargs) -> None:
+        pass
+
     def __init__(self, file_states: FileStates | None) -> None:
         self.cursor: int | None = None
         self.tools = SimpleNamespace(file_states=file_states)
@@ -29,7 +42,7 @@ class _FakeMemory:
     def build_dream_prompt(self, **_kwargs):
         return ("prompt di consolidamento", 42)
 
-    def build_dream_tools(self):
+    def build_dream_tools(self, **_kwargs):
         return self.tools
 
     def set_last_dream_cursor(self, cursor: int) -> None:

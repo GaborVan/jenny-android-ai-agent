@@ -19,6 +19,19 @@ _DREAM_JOB = SimpleNamespace(name="dream", id="job-dream")
 
 
 class _FakeMemory:
+    # ``budget_report`` misura questi tre file: non esistono, e va bene —
+    # ``count_chars`` legge 0 su file assente, e con i budget a 0 del default
+    # nessuno puo' risultare oltre soglia.
+    memory_file = Path("no-such-MEMORY.md")
+    user_file = Path("no-such-USER.md")
+    soul_file = Path("no-such-SOUL.md")
+
+    def get_review_state(self) -> tuple[int, int]:
+        return (0, 0)
+
+    def set_review_state(self, **_kwargs) -> None:
+        pass
+
     def __init__(self, *, has_work: bool = True) -> None:
         self._has_work = has_work
         self.cursor: int | None = None
@@ -26,7 +39,7 @@ class _FakeMemory:
     def build_dream_prompt(self, **_kwargs):
         return ("prompt di consolidamento", 42) if self._has_work else None
 
-    def build_dream_tools(self):
+    def build_dream_tools(self, **_kwargs):
         return []
 
     def set_last_dream_cursor(self, cursor: int) -> None:

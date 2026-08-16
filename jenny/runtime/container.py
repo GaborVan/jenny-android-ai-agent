@@ -135,10 +135,26 @@ class GatewayContainer:
         agent = self._agent
         return getattr(agent, "record_channel_delivery", None) if agent is not None else None
 
-    async def _snapshot_before_dream(self) -> None:
-        """Checkpoint del workspace prima che Dream riscriva la memoria."""
-        if self.snapshot:
-            await self.snapshot.snapshot_now("pre_dream")
+    async def _snapshot_before_dream(self) -> bool:
+        """Checkpoint del workspace prima che Dream riscriva la memoria.
+
+        Ritorna ``True`` solo se il checkpoint è stato **davvero** scattato, e
+        il booleano non è una comodità: il prompt del review pass ha due rami
+        (``agent/dream_review.md``) e quello "le tue modifiche sono reversibili"
+        esiste per far potare di più. Con gli snapshot spenti questo metodo non
+        fa nulla, e passare comunque ``snapshotted=True`` attaccherebbe una
+        rassicurazione falsa proprio alla frase il cui unico scopo è far
+        cancellare. Nel dubbio si mente al ribasso, mai al rialzo.
+
+        Le eccezioni **si propagano**: il fail-open sta nel chiamante
+        (``CronDispatcher._take_dream_snapshot``), che le trasforma in ``False``
+        e lascia proseguire il consolidamento. Qui inghiottirle vorrebbe dire
+        decidere due cose in un posto solo.
+        """
+        if not self.snapshot:
+            return False
+        await self.snapshot.snapshot_now("pre_dream")
+        return True
 
     # -- costruzione del grafo ----------------------------------------------
 

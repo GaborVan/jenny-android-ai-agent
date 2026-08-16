@@ -72,7 +72,7 @@ class FileBudget:
         return self.chars * 100 // self.budget
 
 
-def _count_chars(path: Path) -> int:
+def count_chars(path: Path) -> int:
     """Caratteri del file, ``0`` se manca o non è leggibile.
 
     ``errors="ignore"`` perché la misura non deve mai diventare il motivo per
@@ -130,7 +130,7 @@ def budget_report(
         ("SOUL.md", store.soul_file, soul_chars),
     )
     return [
-        FileBudget(label=label, path=path, chars=_count_chars(path), budget=max(0, budget))
+        FileBudget(label=label, path=path, chars=count_chars(path), budget=max(0, budget))
         for label, path, budget in specs
     ]
 
@@ -197,7 +197,7 @@ def make_write_size_guard(report: Sequence[FileBudget]) -> WriteSizeGuard:
         size = len(new)
         if size <= item.budget:
             return None
-        old_size = _count_chars(path)
+        old_size = count_chars(path)
         # La clausola "non sta rimpicciolendo" non è un di più. Anche la potatura
         # passa da una scrittura: senza di essa un file già oltre budget non
         # potrebbe più essere accorciato — il primo tentativo di potarlo verrebbe
