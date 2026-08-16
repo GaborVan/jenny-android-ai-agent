@@ -12,6 +12,33 @@ import { setupLongPress } from './shared/longpress.js';
 
 const CM_THEMES = { dark: 'darcula', light: 'eclipse' };
 
+// ── Spiegazione dei file che l'utente possiede ──
+// Quasi tutti questi file nascono vuoti e il loro nome non dice a cosa servono
+// né cosa *non* ci va scritto. Quella prosa stava nel template, dove non la
+// leggeva nessuno (sul telefono non si apre un editor markdown) e la pagava il
+// modello in ogni prompt finché il file restava uguale al template. Vive qui:
+// path relativo al workspace → chiave i18n del testo.
+// `SOUL.md` fa eccezione: nasce pieno, ma tre degli altri quattro testi lo
+// indicano come destinazione — senza una voce sua, chi segue l'indicazione
+// arriva sull'unico file del gruppo che non si spiega.
+const FILE_HELP_KEYS = {
+  'AGENTS.md': 'workspace.fileHelp.agents',
+  'USER.md': 'workspace.fileHelp.user',
+  'SOUL.md': 'workspace.fileHelp.soul',
+  'HEARTBEAT.md': 'workspace.fileHelp.heartbeat',
+  'memory/MEMORY.md': 'workspace.fileHelp.memory',
+};
+
+/** Testo di aiuto per un path del workspace, o '' se quel file non ne ha. */
+function fileHelpText(path) {
+  const key = FILE_HELP_KEYS[path];
+  if (!key) return '';
+  const text = i18n.t(key);
+  // i18n.t() ritorna la chiave grezza quando manca la traduzione: meglio
+  // niente sheet che "workspace.fileHelp.agents" stampato addosso all'utente.
+  return text === key ? '' : text;
+}
+
 // ── Apple-style SVG icons for grid view ──
 // Gradients defined once in a hidden SVG container injected on first use.
 
@@ -559,20 +586,33 @@ export class WorkspaceController {
     const sheet = document.getElementById('ws-context-sheet');
     document.getElementById('ws-context-title').textContent = info.name;
 
+    // Lo sheet è uno solo e viene riusato: senza azzerare, il testo del file
+    // precedente resterebbe attaccato al prossimo che ne è privo (la regola
+    // `.oc-sheet-desc:empty` lo nasconde solo se è davvero vuoto).
+    const descEl = document.getElementById('ws-context-desc');
+    if (descEl) descEl.textContent = info.kind === 'file' ? fileHelpText(info.path) : '';
+
     const actions = [];
 
-    if (info.kind === 'dir') {
-      actions.push({ icon: 'ti-file-plus', label: i18n.t('workspace.newFile'), action: 'newFile' });
-      actions.push({ icon: 'ti-folder-plus', label: i18n.t('workspace.newFolder'), action: 'newFolder' });
+    // Tap su un file "spiegato": lo sheet è lì per il testo, non per il menu
+    // completo. Una sola azione, che prosegue nell'editor — il file resta
+    // raggiungibile, la spiegazione non è un muro.
+    if (info.mode === 'help') {
+      actions.push({ icon: 'ti-edit', label: i18n.t('workspace.fileHelp.open'), action: 'openEditor' });
+    } else {
+      if (info.kind === 'dir') {
+        actions.push({ icon: 'ti-file-plus', label: i18n.t('workspace.newFile'), action: 'newFile' });
+        actions.push({ icon: 'ti-folder-plus', label: i18n.t('workspace.newFolder'), action: 'newFolder' });
+      }
+      if (info.kind === 'file') {
+        actions.push({ icon: 'ti-external-link', label: i18n.t('workspace.openWithSystemApp'), action: 'openExternal' });
+        actions.push({ icon: 'ti-share', label: i18n.t('workspace.share'), action: 'share' });
+        actions.push({ icon: 'ti-download', label: i18n.t('workspace.saveToDownloads'), action: 'saveDownloads' });
+      }
+      actions.push({ icon: 'ti-edit', label: i18n.t('workspace.rename'), action: 'rename' });
+      actions.push({ icon: 'ti-copy', label: i18n.t('workspace.clone'), action: 'clone' });
+      actions.push({ icon: 'ti-trash', label: i18n.t('workspace.delete'), action: 'delete', danger: true });
     }
-    if (info.kind === 'file') {
-      actions.push({ icon: 'ti-external-link', label: i18n.t('workspace.openWithSystemApp'), action: 'openExternal' });
-      actions.push({ icon: 'ti-share', label: i18n.t('workspace.share'), action: 'share' });
-      actions.push({ icon: 'ti-download', label: i18n.t('workspace.saveToDownloads'), action: 'saveDownloads' });
-    }
-    actions.push({ icon: 'ti-edit', label: i18n.t('workspace.rename'), action: 'rename' });
-    actions.push({ icon: 'ti-copy', label: i18n.t('workspace.clone'), action: 'clone' });
-    actions.push({ icon: 'ti-trash', label: i18n.t('workspace.delete'), action: 'delete', danger: true });
 
     const actionsEl = document.getElementById('ws-context-actions');
     actionsEl.innerHTML = actions.map(a =>
@@ -610,6 +650,10 @@ export class WorkspaceController {
     const path = info.path;
 
     switch (action) {
+      case 'openEditor': {
+        this.openFile(path, null, { skipHelp: true });
+        break;
+      }
       case 'openExternal': {
         this.openWithSystemApp(path, info.name);
         break;
@@ -680,9 +724,18 @@ export class WorkspaceController {
 
   // ── File editor ──
 
-  async openFile(fullPath, ext) {
+  async openFile(fullPath, ext, opts = {}) {
     ext = ext || getFileExtension(fullPath);
     const name = fullPath.split('/').pop();
+
+    // I file spiegati mostrano prima a cosa servono: chi apre AGENTS.md senza
+    // saperlo trova un editor vuoto e nessun indizio. L'azione dello sheet
+    // richiama questo stesso metodo con skipHelp, quindi l'editor non diventa
+    // irraggiungibile.
+    if (!opts.skipHelp && fileHelpText(fullPath)) {
+      this.showContextSheet({ path: fullPath, kind: 'file', name, mode: 'help' });
+      return;
+    }
 
     // Immagini: lightbox interno (la vista corrente non cambia).
     if (IMAGE_EXTS.has(ext)) {

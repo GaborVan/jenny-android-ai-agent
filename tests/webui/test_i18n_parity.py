@@ -92,6 +92,52 @@ def test_subagent_panel_strings_exist_in_both_locales() -> None:
         assert expected <= keys, f"chiavi mancanti in {locale}.json: {sorted(expected - keys)}"
 
 
+def test_workspace_file_help_strings_exist_in_both_locales() -> None:
+    """La spiegazione dei file del workspace non vive più dentro i file.
+
+    ``AGENTS.md``, ``USER.md``, ``memory/MEMORY.md`` e ``HEARTBEAT.md`` nascono
+    vuoti: a cosa servono — e cosa *non* ci va scritto — lo dice lo sheet della
+    WebUI. ``SOUL.md`` nasce pieno, ma è la destinazione indicata da tre di
+    quei quattro testi, quindi la sua voce non è meno obbligatoria delle altre.
+    La parità fra le due lingue non basta a proteggerlo: una chiave
+    cancellata in tutt'e due resta simmetrica, e l'unico segno sarebbe uno
+    sheet che non compare più. Qui l'elenco è esplicito.
+    """
+    expected = {
+        # Azione primaria: lo sheet spiega, ma l'editor deve restare raggiungibile.
+        "workspace.fileHelp.open",
+        "workspace.fileHelp.agents",
+        "workspace.fileHelp.user",
+        "workspace.fileHelp.soul",
+        "workspace.fileHelp.memory",
+        "workspace.fileHelp.heartbeat",
+    }
+    for locale in ("it", "en"):
+        keys = _flatten(_load(locale))
+        assert expected <= keys, f"chiavi mancanti in {locale}.json: {sorted(expected - keys)}"
+
+
+def test_workspace_file_help_map_points_at_existing_keys() -> None:
+    """Il mapping path→chiave nel JS e i due JSON devono dire la stessa cosa.
+
+    ``fileHelpText()`` ripiega su stringa vuota quando la chiave non esiste, e
+    una chiave sbagliata quindi non rompe niente: fa sparire lo sheet in
+    silenzio. Questo test la vede.
+    """
+    import re
+
+    js = (_I18N_DIR.parent / "mobile-workspace.js").read_text(encoding="utf-8")
+    block = re.search(r"const FILE_HELP_KEYS = \{(.*?)\n\};", js, re.S)
+    assert block is not None, "FILE_HELP_KEYS non trovato in mobile-workspace.js"
+    mapping = dict(re.findall(r"'([^']+)':\s*'([^']+)'", block.group(1)))
+
+    assert set(mapping) == {"AGENTS.md", "USER.md", "SOUL.md", "HEARTBEAT.md", "memory/MEMORY.md"}
+    for locale in ("it", "en"):
+        keys = _flatten(_load(locale))
+        missing = set(mapping.values()) - keys
+        assert missing == set(), f"chiavi referenziate dal JS ma assenti in {locale}.json: {sorted(missing)}"
+
+
 def test_dead_subagent_keys_are_gone_from_both_locales() -> None:
     """Una chiave che nessuno legge più è debito: la parità la terrebbe in vita.
 

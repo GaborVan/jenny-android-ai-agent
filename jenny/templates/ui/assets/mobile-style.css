@@ -3837,8 +3837,28 @@ body {
 .oc-sheet-desc {
   font-size: 13px;
   line-height: 1.5;
-  color: var(--text-faint);
+  /* Questo non è più un sottotitolo decorativo: è prosa che l'utente deve
+     leggere per intero (la spiegazione dei file del workspace, il riassunto
+     di una skill bloccata). Misurato su --surface-2: --text-faint sta fra
+     1.7:1 (pietra) e 3.4:1 (sticker), cioè sotto il 4.5:1 che WCAG chiede
+     per il testo corrente in tutti e sette i temi; --text-muted regge sui
+     quattro scuri ma crolla sui chiari (2.6:1 pietra, 2.9:1 y2k, 4.2:1
+     fumetto). Non tocchiamo i due token — li usano ~80 e ~40
+     altre regole dove il grigio *è* la gerarchia voluta (icone, meta, tag) e
+     dove il testo è corto o ridondante. Qui deriviamo da --text, che ogni
+     tema garantisce leggibile: 0.78 tiene il minimo a 5.1:1 (pietra) e
+     lascia comunque uno stacco visibile dal titolo e dalle azioni, che sono
+     a piena opacità. */
+  color: var(--text);
+  opacity: 0.78;
   padding: 4px 8px 14px;
+  /* I testi lunghi (la spiegazione dei file del workspace) sono scritti a
+     paragrafi con "\n": senza pre-line collasserebbero in un muro unico. */
+  white-space: pre-line;
+  /* Lo sheet ha overflow:hidden, quindi un testo alto taglierebbe le azioni
+     sotto invece di scorrere. */
+  max-height: 44vh;
+  overflow-y: auto;
 }
 .oc-sheet-desc:empty {
   display: none;

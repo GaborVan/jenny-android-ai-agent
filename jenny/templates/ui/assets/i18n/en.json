@@ -412,7 +412,15 @@
     "savedToDownloads": "Saved to Downloads",
     "actionFailed": "Action failed",
     "noFiles": "No Files",
-    "folderEmpty": "This folder is empty"
+    "folderEmpty": "This folder is empty",
+    "fileHelp": {
+      "open": "Open in the editor anyway",
+      "agents": "The working conventions of this workspace: project preferences and the ways of doing things that keep coming back. Sections show up as you agree them with Jenny; a heading with nothing under it does not belong here.\n\nNot here: facts about you (USER.md), personality and behaviour rules (SOUL.md), project context (memory/MEMORY.md), procedures with concrete steps and output formats (Skills, in the Apps section).",
+      "user": "What Jenny knows about you: identity, language, communication style, habits and interests. It fills in as she learns, so there is nothing to pre-write.\n\nNot here: project context (memory/MEMORY.md), behaviour rules (SOUL.md), repeatable procedures (Skills). Nor the time, the timezone or where you are: the runtime measures those on its own every turn, while a copy written here has nobody to refresh it and is out of date the moment it is saved.",
+      "soul": "Who Jenny is and how she behaves: her character, the way she talks, what she does and what she will never do. Plus the standing rules you have given her — how to address you, what to steer clear of, where to tread carefully.\n\nDream, the consolidation pass that runs after conversations, is what maintains it: a correction you make in passing ends up here. You can read it and fix it, but you rarely need to write here by hand.\n\nNot here: facts about you (USER.md), working conventions (AGENTS.md), repeatable procedures (Skills). Nor how the app itself behaves: what a tool accepts, what the sandbox refuses, where a limit sits — that is the same on every install, and the system prompt already tells her.",
+      "memory": "Long-term memory: what has to survive from one session to the next — project context, useful facts, notes worth keeping.\n\nDream, the consolidation pass that runs after conversations, is what maintains it. You can read it and correct it, but you rarely need to write here by hand.\n\nNot here: facts about you (USER.md), working conventions (AGENTS.md), repeatable procedures (Skills).",
+      "heartbeat": "The recurring checks Jenny goes through on every heartbeat.\n\nWrite them under \"## Active Tasks\": that is the only section that gets read. When a task is done, delete it instead of leaving it there — a list of finished work is re-read on every beat.\n\nNot here: one-off requests (just ask in chat) and repeatable procedures (Skills)."
+    }
   },
   "apps": {
     "jennyApps": "Jenny Apps",

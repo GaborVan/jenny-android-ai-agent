@@ -412,7 +412,15 @@
     "savedToDownloads": "Salvato in Download",
     "actionFailed": "Operazione non riuscita",
     "noFiles": "Nessun file",
-    "folderEmpty": "Questa cartella è vuota"
+    "folderEmpty": "Questa cartella è vuota",
+    "fileHelp": {
+      "open": "Apri comunque nell'editor",
+      "agents": "Le convenzioni di lavoro di questo workspace: preferenze di progetto e modi di procedere che si ripetono. Le sezioni compaiono man mano che le concordi con Jenny; un titolo senza niente sotto non ci sta bene.\n\nNon qui: i fatti su di te (USER.md), il carattere e le regole di comportamento (SOUL.md), il contesto dei progetti (memory/MEMORY.md), le procedure con passi e formati precisi (le Skill, nella sezione App).",
+      "user": "Quello che Jenny sa di te: identità, lingua, stile di comunicazione, abitudini e interessi. Si riempie man mano che ti conosce, non c'è niente da precompilare.\n\nNon qui: il contesto dei progetti (memory/MEMORY.md), le regole di comportamento (SOUL.md), le procedure ripetibili (le Skill). E nemmeno ora, fuso orario o posizione: il runtime li misura da sé a ogni turno, mentre una copia scritta qui non la aggiorna nessuno ed è già vecchia appena salvata.",
+      "soul": "Chi è Jenny e come si comporta: il carattere, il modo di parlare, quello che fa e quello che non fa mai. E le regole fisse che le hai dato tu — come rivolgersi a te, cosa evitare, dove andarci piano.\n\nLo mantiene Dream, la consolidazione che gira dopo le conversazioni: una correzione che le fai a voce finisce qui. Puoi leggerlo e sistemarlo, ma di solito non serve scriverci a mano.\n\nNon qui: i fatti su di te (USER.md), le convenzioni di lavoro (AGENTS.md), le procedure ripetibili (le Skill). E nemmeno come si comporta l'app: cosa accetta uno strumento, cosa rifiuta la sandbox, dov'è un limite — è uguale su ogni installazione e glielo dice già il prompt di sistema.",
+      "memory": "La memoria a lungo termine: quello che deve restare da una sessione all'altra — contesto dei progetti, fatti utili, note da ricordare.\n\nLa mantiene Dream, la consolidazione che gira dopo le conversazioni. Puoi leggerla e correggerla, ma di solito non serve scriverci a mano.\n\nNon qui: i fatti su di te (USER.md), le convenzioni di lavoro (AGENTS.md), le procedure ripetibili (le Skill).",
+      "heartbeat": "I controlli ricorrenti che Jenny ripassa a ogni battito.\n\nVanno scritti sotto «## Active Tasks»: è l'unica sezione che viene letta. Quando un'attività è finita, cancellala invece di lasciarla lì — un elenco di cose già fatte viene riletto a ogni battito.\n\nNon qui: le richieste una tantum (basta chiederle in chat) e le procedure ripetibili (le Skill)."
+    }
   },
   "apps": {
     "jennyApps": "Jenny Apps",
