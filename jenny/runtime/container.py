@@ -147,9 +147,9 @@ class GatewayContainer:
         cancellare. Nel dubbio si mente al ribasso, mai al rialzo.
 
         Le eccezioni **si propagano**: il fail-open sta nel chiamante
-        (``CronDispatcher._take_dream_snapshot``), che le trasforma in ``False``
-        e lascia proseguire il consolidamento. Qui inghiottirle vorrebbe dire
-        decidere due cose in un posto solo.
+        (``jenny.agent.dream_cycle.take_dream_snapshot``), che le trasforma in
+        ``False`` e lascia proseguire il consolidamento. Qui inghiottirle
+        vorrebbe dire decidere due cose in un posto solo.
         """
         if not self.snapshot:
             return False
@@ -347,8 +347,8 @@ class GatewayContainer:
         """Costruisce e cabla un ``AgentLoop`` (wiring condiviso build/onboarding).
 
         Crea l'agente via ``AgentLoop.from_config``, iscrive il
-        ``WebuiTurnCoordinator`` e collega la callback di consegna al tool
-        ``message``. Non registra l'agente: i chiamanti restano responsabili di
+        ``WebuiTurnCoordinator``, collega la callback di consegna al tool
+        ``message`` e il checkpoint pre-Dream al loop. Non registra l'agente: i chiamanti restano responsabili di
         pubblicarlo (assegnazione diretta in ``build`` vs ``set_agent`` nel ramo
         onboarding) e di avviarne il run loop. Richiede che
         ``self._deliver_to_channel`` sia già impostato.
@@ -376,6 +376,13 @@ class GatewayContainer:
         if isinstance(message_tool, MessageTool):
             message_tool.set_send_callback(self._deliver_to_channel)
             self.set_message_tool(message_tool)
+        # Lo stesso callback passato al ``CronDispatcher``, non un secondo: i due
+        # percorsi di Dream — il job periodico e lo slash command ``/dream`` —
+        # devono checkpointare la stessa cosa. Il cablaggio sta qui e non accanto
+        # al dispatcher perché l'agente può nascere dopo il gateway (onboarding
+        # con provider mancante), e questo è il punto che entrambe le nascite
+        # attraversano.
+        agent.snapshot_before_dream = self._snapshot_before_dream
         return agent
 
     # -- onboarding: creazione differita dell'agent (DeferredAgentActivator) --

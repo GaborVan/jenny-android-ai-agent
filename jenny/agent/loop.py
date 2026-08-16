@@ -247,6 +247,16 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             else defaults.orchestrator_mode
         )
         self.cron_service = cron_service
+        # Checkpoint del workspace da prendere prima di un run di Dream, iniettato
+        # dal ``GatewayContainer`` (che possiede il ``SnapshotService``) accanto al
+        # callback omonimo del ``CronDispatcher``: stesso servizio, un consumatore
+        # in più. Serve allo slash command ``/dream``, che è l'altro posto da cui
+        # un run di Dream parte e che da ``04de3cc`` può far partire un review
+        # pass — un turno autorizzato a ristrutturare e cancellare, che senza
+        # questo girerebbe senza rete. Resta ``None`` per chi costruisce un loop
+        # senza gateway: ``dream_cycle.take_dream_snapshot`` lo traduce in
+        # ``snapshotted=False``, cioè nel ramo conservativo del prompt.
+        self.snapshot_before_dream: Callable[[], Awaitable[bool]] | None = None
         self.restrict_to_workspace = restrict_to_workspace
         self.extract_document_text = extract_document_text
         self.workspace_scopes = WorkspaceScopeResolver(

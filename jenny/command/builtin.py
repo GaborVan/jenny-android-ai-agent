@@ -284,26 +284,36 @@ async def cmd_dream(ctx: CommandContext) -> OutboundMessage:
         async def _silent(*_args, **_kwargs):
             pass
 
-        from jenny.agent.dream_review import run_dream_review
-        from jenny.agent.memory import MemoryStore
-        from jenny.agent.memory_budget import (
-            budget_report,
-            make_write_size_guard,
-            render_gauge,
+        # Prologo ed epilogo del ciclo sono gli stessi del job cron, e stanno in
+        # un modulo solo: erano due copie della stessa sequenza, e ogni volta che
+        # una cresceva l'altra restava indietro in silenzio — il guard del budget,
+        # il gauge, i contatori del review sono arrivati qui tre commit dopo che
+        # erano di là. Qui resta ciò che è davvero di questo percorso: il turno
+        # incrementale e la frase da dire a chi ha lanciato il comando.
+        from jenny.agent.dream_cycle import (
+            begin_dream_cycle,
+            finish_dream_cycle,
+            take_dream_snapshot,
         )
+        from jenny.agent.memory import MemoryStore
+        from jenny.agent.memory_budget import render_gauge
         from jenny.config.loader import load_config
-
-        # Costante importata dal dispatcher cron invece che ricopiata qui. È il
-        # *secondo* posto in cui gira un run di Dream, e due implementazioni
-        # dello stesso trigger sono già il motivo per cui questo percorso era
-        # rimasto indietro: un 2 scritto a mano qui diventerebbe la prossima
-        # divergenza il giorno in cui quello di là cambia.
-        from jenny.runtime.cron_dispatch import _STUCK_FORCES_REVIEW
 
         dream_session_key = MemoryStore.dream_session_key
         prune_dream_sessions = MemoryStore.prune_dream_sessions
 
         store = loop.context.memory
+        # Il checkpoint pre-Dream lo possiede il container, che lo appende al
+        # loop accanto al dispatcher cron. ``getattr`` perché il loop può non
+        # averlo — un test, un percorso che costruisce l'agente da sé — e la sua
+        # assenza ha già una traduzione sola e giusta in ``take_dream_snapshot``:
+        # ``snapshotted=False``, cioè "le tue cancellazioni sono definitive".
+        #
+        # Prima di ``04de3cc`` questo run faceva solo consolidamento
+        # incrementale, e girare senza rete era già un buco. Ora può far partire
+        # un review pass, che è esplicitamente autorizzato a ristrutturare e
+        # cancellare (``agent/dream_review.md``): è un'altra cosa.
+        snapshot_cb = getattr(loop, "snapshot_before_dream", None)
         content = ""
         review_note = ""
         resp = None
@@ -321,54 +331,13 @@ async def cmd_dream(ctx: CommandContext) -> OutboundMessage:
             # mano. Il gauge segue la stessa logica: il modello non può
             # rispettare uno spazio di cui non gli si dice la misura.
             cfg = load_config().agents.defaults.dream
-            report = budget_report(
-                store,
-                memory_chars=cfg.memory_budget_chars,
-                user_chars=cfg.user_budget_chars,
-                soul_chars=cfg.soul_budget_chars,
+            prologue = await begin_dream_cycle(
+                loop, store=store, cfg=cfg, take_snapshot=snapshot_cb,
             )
-            guard = make_write_size_guard(report)
-            runs_since_review, stuck = store.get_review_state()
+            if prologue.review is not None:
+                review_note = _format_dream_review_note(prologue.review)
 
-            # Stesso trigger del percorso cron (v. ``CronDispatcher._run_dream``):
-            # la cadenza periodica, più ``stuck`` come uscita di emergenza dal
-            # livelock. Senza questo blocco un'installazione in cui Dream viene
-            # lanciato solo a mano non vedrebbe mai un review pass, perché
-            # ``runs_since_review`` non avanzerebbe mai.
-            if runs_since_review >= cfg.review_every_runs or stuck >= _STUCK_FORCES_REVIEW:
-                # ``snapshotted=False`` è la verità, non una scorciatoia. Il
-                # checkpoint pre-Dream lo prende il container e lo passa al
-                # dispatcher cron; da un comando non c'è nessun gancio per
-                # chiederlo, quindi qui il review pass gira senza rete. Il suo
-                # prompt ha due rami e dichiarare ``True`` sceglierebbe quello
-                # che promette al modello modifiche reversibili — attaccato
-                # proprio alla frase il cui unico scopo è fargli cancellare di
-                # più. Nel dubbio si mente al ribasso, mai al rialzo: con
-                # ``False`` il modello legge che le cancellazioni sono
-                # definitive e nel dubbio tiene.
-                outcome = await run_dream_review(
-                    loop,
-                    store=store,
-                    report=report,
-                    snapshotted=False,
-                    write_size_guard=guard,
-                )
-                runs_since_review, stuck = 0, 0
-                store.set_review_state(runs_since_review=0, stuck_runs=0)
-                review_note = _format_dream_review_note(outcome)
-                # Report e guard si RICOSTRUISCONO: il review ha appena
-                # riscritto quei file, e il gauge del turno incrementale
-                # mostrerebbe altrimenti un riempimento già smontato — cioè
-                # chiederebbe al modello di far spazio che è già stato fatto.
-                report = budget_report(
-                    store,
-                    memory_chars=cfg.memory_budget_chars,
-                    user_chars=cfg.user_budget_chars,
-                    soul_chars=cfg.soul_budget_chars,
-                )
-                guard = make_write_size_guard(report)
-
-            result = store.build_dream_prompt(gauge=render_gauge(report))
+            result = store.build_dream_prompt(gauge=render_gauge(prologue.report))
             if result is None:
                 await loop.bus.publish_outbound(OutboundMessage(
                     channel=msg.channel, chat_id=msg.chat_id,
@@ -379,8 +348,14 @@ async def cmd_dream(ctx: CommandContext) -> OutboundMessage:
                 ))
                 return
             prompt, last_cursor = result
+            if prologue.review is None:
+                # Un solo checkpoint per ciclo: se il review è appena girato lo
+                # snapshot è già stato preso e copre anche il turno incrementale
+                # che segue, mentre un secondo "pre_dream" archiviato dopo il
+                # review non sarebbe pre-niente.
+                await take_dream_snapshot(snapshot_cb)
             key = dream_session_key()
-            dream_tools = store.build_dream_tools(write_size_guard=guard)
+            dream_tools = store.build_dream_tools(write_size_guard=prologue.guard)
             resp = await loop.process_direct(
                 prompt,
                 session_key=key,
@@ -407,15 +382,17 @@ async def cmd_dream(ctx: CommandContext) -> OutboundMessage:
                     "memory cursor was not advanced."
                 )
 
-            # Anti-livelock, con la stessa regola del percorso cron: un run che
-            # non avanza il cursore incrementa ``stuck``, e due di fila forzano
-            # il review al giro dopo. Contarli anche qui è ciò che impedisce a
-            # un utente che lancia Dream a mano di restare fuori dal
-            # meccanismo — un batch rifiutato dal budget tornerebbe altrimenti
+            # Anti-livelock, con la stessa regola del percorso cron perché è la
+            # stessa funzione (la spiegazione sta lì). Contare anche da qui è ciò
+            # che impedisce a un utente che lancia Dream a mano di restare fuori
+            # dal meccanismo: un batch rifiutato dal budget tornerebbe altrimenti
             # identico a ogni `/dream`, per sempre.
-            stuck = 0 if advanced else stuck + 1
-            runs_since_review += 1
-            store.set_review_state(runs_since_review=runs_since_review, stuck_runs=stuck)
+            finish_dream_cycle(
+                store,
+                advanced=advanced,
+                runs_since_review=prologue.runs_since_review,
+                stuck=prologue.stuck,
+            )
             content = _prefix_review_note(review_note, content)
         except Exception as e:
             elapsed = time.monotonic() - t0

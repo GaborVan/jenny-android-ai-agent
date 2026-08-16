@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, Protocol
 
 from loguru import logger
@@ -53,7 +53,6 @@ from jenny.session.turn_visibility import TurnVisibility
 
 if TYPE_CHECKING:
     from jenny.agent.context import ContextBuilder
-    from jenny.agent.memory_budget import FileBudget
     from jenny.agent.tools.registry import ToolRegistry
     from jenny.agent.turn_types import TurnOutcome
     from jenny.config.schema import Config
@@ -203,37 +202,6 @@ async def _silent(*_args: Any, **_kwargs: Any) -> None:
     pass
 
 
-# Numero di run consecutivi senza avanzamento del cursore oltre il quale il
-# review pass viene forzato. Due e non uno: un singolo run che non avanza è
-# ordinario (una scrittura bloccata dalla policy, un turno andato storto) e
-# pagare un review pass ogni volta costerebbe più del problema. Due di fila
-# invece è una configurazione che si ripete, ed è quella che si autoalimenta.
-_STUCK_FORCES_REVIEW = 2
-
-# Oltre questa soglia il livelock non è più un'ipotesi: il review è già stato
-# forzato (a 2) e non è bastato. Log a ERROR, perché da qui in poi ogni run è
-# un turno LLM che non consolida nulla.
-_STUCK_IS_ALARMING = 4
-
-
-def _format_budget(report: Sequence["FileBudget"]) -> str:
-    """Riassumi il report di budget in una riga sola di log.
-
-    Non riusa ``render_gauge``: quello è multiriga e scritto per il modello
-    (con l'istruzione su cosa fare al 80%), qui serve una riga grezza che stia
-    in logcat e si possa grep-are nel tempo per tarare i tetti.
-    """
-    if not report:
-        return "no files"
-    parts = []
-    for item in report:
-        if item.enforced:
-            parts.append(f"{item.label} {item.chars}/{item.budget} ({item.pct}%)")
-        else:
-            parts.append(f"{item.label} {item.chars} (no budget)")
-    return ", ".join(parts)
-
-
 class CronDispatcher:
     """Instrada un ``CronJob`` al gestore giusto (dream / heartbeat / bound)."""
 
@@ -315,32 +283,20 @@ class CronDispatcher:
         logger.debug("Atlas cron job: {}", outcome.status)
         return None
 
-    async def _take_dream_snapshot(self) -> bool:
-        """Checkpoint pre-Dream, fail-open, che dichiara se è davvero avvenuto.
-
-        Dream può riscrivere MEMORY/SOUL/USER e le skill: uno snapshot prima
-        rende ogni sua modifica reversibile. Fail-open perché un checkpoint
-        guasto non deve impedire il consolidamento — ma l'esito **non** si
-        perde: ritorna ``False``, e il review pass ne fa una frase diversa nel
-        proprio prompt invece di promettere al modello una rete che non c'è.
-        """
-        if self._snapshot_before_dream is None:
-            return False
-        try:
-            return bool(await self._snapshot_before_dream())
-        except Exception:
-            logger.exception("Pre-dream snapshot failed")
-            return False
-
     async def _run_dream(self, agent: "CronCapableAgent") -> str | None:
         # Dream is an internal job — run directly, not through the agent loop.
-        from jenny.agent.dream_review import run_dream_review
-        from jenny.agent.memory import MemoryStore
-        from jenny.agent.memory_budget import (
-            budget_report,
-            make_write_size_guard,
-            render_gauge,
+        #
+        # Il prologo e l'epilogo del ciclo stanno in ``jenny/agent/dream_cycle.py``,
+        # condivisi con lo slash command ``/dream``: erano due copie della stessa
+        # sequenza e divergevano una divergenza alla volta. Qui resta il mestiere
+        # di questo percorso — il turno incrementale, i log, la pulizia.
+        from jenny.agent.dream_cycle import (
+            begin_dream_cycle,
+            finish_dream_cycle,
+            take_dream_snapshot,
         )
+        from jenny.agent.memory import MemoryStore
+        from jenny.agent.memory_budget import render_gauge
 
         dream_session_key = MemoryStore.dream_session_key
         prune_dream_sessions = MemoryStore.prune_dream_sessions
@@ -367,108 +323,27 @@ class CronDispatcher:
         cfg = load_config().agents.defaults.dream
         resp = None
         try:
-            report = budget_report(
-                store,
-                memory_chars=cfg.memory_budget_chars,
-                user_chars=cfg.user_budget_chars,
-                soul_chars=cfg.soul_budget_chars,
-            )
-            guard = make_write_size_guard(report)
-            runs_since_review, stuck = store.get_review_state()
-            # Loggato a OGNI run, non solo quando qualcosa scatta. Con i tre
-            # budget a 0 — il default di spedizione — questa riga è letteralmente
-            # l'unica cosa che la feature produce, e sono i numeri da cui si
-            # sceglieranno i tetti veri (la roadmap propone 4-6 kB, che è una
-            # proposta, non una misura). Toglierla renderebbe la taratura una
-            # stima a occhio, cioè lo stato da cui si è partiti.
-            logger.info(
-                "Dream memory budget: {} | runs since review: {}, stuck runs: {}",
-                _format_budget(report), runs_since_review, stuck,
+            prologue = await begin_dream_cycle(
+                agent,
+                store=store,
+                cfg=cfg,
+                take_snapshot=self._snapshot_before_dream,
             )
 
-            # Due modi di arrivare al review pass. ``review_every_runs`` è la
-            # manutenzione periodica, che deve girare anche su file sani: è
-            # l'unico momento in cui qualcuno guarda il file *intero* invece
-            # della voce di storia del momento. ``stuck`` è l'uscita di
-            # emergenza dal livelock (v. il commento più in basso).
-            #
-            # Un terzo trigger — "un file ha sforato il budget" — è stato tolto
-            # di proposito, ed è la parte che vale spiegare. Sembra il più
-            # ovvio dei tre e invece è l'unico che non sa fermarsi: un file può
-            # restare sopra la soglia dopo un review che ha già fatto tutto il
-            # possibile (il resto è roba che le regole marcano "never delete"),
-            # e il prompt del review dichiara *valido* un run che non cambia
-            # niente. La condizione resterebbe quindi vera per sempre e
-            # farebbe partire un turno LLM ogni due ore, a vuoto, senza che
-            # nessun contatore lo limiti — lo specchio esatto del livelock che
-            # tutto questo lavoro esiste per chiudere, e per giunta su una
-            # feature il cui scopo è contenere i costi.
-            #
-            # Non si perde niente di importante, perché ``stuck`` copre già il
-            # caso in cui essere sopra budget fa *danno*: se il tetto blocca una
-            # scrittura, il cursore non avanza, ``stuck`` sale e due cicli dopo
-            # il review parte. Ed è un bersaglio migliore — un file sopra
-            # soglia che non sta bloccando nessuna scrittura non è un'urgenza,
-            # e può aspettare il giro periodico.
-            review_due = (
-                runs_since_review >= cfg.review_every_runs
-                or stuck >= _STUCK_FORCES_REVIEW
-            )
-            review_ran = False
-            if review_due:
-                snapshotted = await self._take_dream_snapshot()
-                outcome = await run_dream_review(
-                    agent,
-                    store=store,
-                    report=report,
-                    snapshotted=snapshotted,
-                    write_size_guard=guard,
-                )
-                review_ran = True
-                runs_since_review, stuck = 0, 0
-                store.set_review_state(runs_since_review=0, stuck_runs=0)
-                # ``freed`` è il delta dei **tre file misurati**, non del
-                # workspace. Un review che sposta una task spec da USER.md a una
-                # ``skills/<name>/SKILL.md`` — cosa che il suo prompt chiede
-                # esplicitamente — la conta come liberata, perché le skill non
-                # stanno nel report. È il numero giusto per tarare i budget (sono
-                # quei tre file ad averne uno) e quello sbagliato per dire di
-                # quanto è dimagrito il disco.
-                logger.info(
-                    "Dream review pass: {} (snapshotted={}), {} chars freed across the "
-                    "budgeted files",
-                    outcome.status, snapshotted, outcome.freed,
-                )
-                # Report e guard si RICOSTRUISCONO, non si riusano: il review ha
-                # appena riscritto quei file. Il gauge del turno incrementale
-                # mostrerebbe altrimenti al modello un riempimento che il review
-                # ha già smontato — cioè gli chiederebbe di far spazio che è già
-                # stato fatto. Il guard rilegge comunque la dimensione da disco a
-                # ogni scrittura, ma va rifatto insieme al report perché i due
-                # restino derivati dalla stessa misura invece che da due momenti
-                # diversi.
-                report = budget_report(
-                    store,
-                    memory_chars=cfg.memory_budget_chars,
-                    user_chars=cfg.user_budget_chars,
-                    soul_chars=cfg.soul_budget_chars,
-                )
-                guard = make_write_size_guard(report)
-
-            result = store.build_dream_prompt(gauge=render_gauge(report))
+            result = store.build_dream_prompt(gauge=render_gauge(prologue.report))
             if result is None:
                 logger.info("Dream: nothing to process")
                 return None
             prompt, last_cursor = result
-            if not review_ran:
+            if prologue.review is None:
                 # Un solo checkpoint per ciclo. Se il review è appena girato lo
                 # snapshot è già stato preso pochi secondi fa e copre anche il
                 # turno incrementale che segue; rifarlo qui archivierebbe lo
                 # stato *dopo* il review sotto la stessa etichetta "pre_dream",
                 # cioè un secondo checkpoint che non è pre-niente.
-                await self._take_dream_snapshot()
+                await take_dream_snapshot(self._snapshot_before_dream)
             key = dream_session_key()
-            dream_tools = store.build_dream_tools(write_size_guard=guard)
+            dream_tools = store.build_dream_tools(write_size_guard=prologue.guard)
             resp = await agent.process_direct(
                 prompt,
                 session_key=key,
@@ -498,34 +373,12 @@ class CronDispatcher:
                     store.get_last_dream_cursor(),
                 )
 
-            # Anti-livelock, ed è la ragione per cui ``stuck`` esiste.
-            # ``_resolve_write`` conta il tentativo PRIMA di risolvere il path
-            # (``agent/tools/filesystem.py``, ``record_write_attempt``) e
-            # ``internal_run_should_commit`` avanza solo con ``writes_ok > 0``
-            # oppure ``writes_attempted == 0``. Un run in cui il budget rifiuta
-            # ogni scrittura ha quindi ``attempted > 0, ok == 0``: il cursore non
-            # avanza, al run dopo torna lo stesso batch, che viene rifiutato di
-            # nuovo. Un turno LLM completo ogni due ore, per sempre.
-            #
-            # Non avanzare È la semantica corretta — il fatto non è stato scritto
-            # e avanzare lo perderebbe — quindi la via d'uscita è forzare il
-            # review, non allentare il commit: ``internal_run_should_commit`` e i
-            # contatori di ``FileStates`` non si toccano.
-            #
-            # E il conto non è solo in token. ``compact_history`` gira comunque a
-            # fine run, poche righe più in basso, e tiene le ultime
-            # ``max_history_entries`` voci SENZA guardare il cursore
-            # (``agent/memory.py``): un livelock abbastanza lungo non spreca
-            # soltanto chiamate, perde storia che non è mai stata consolidata.
-            stuck = 0 if advanced else stuck + 1
-            runs_since_review += 1
-            store.set_review_state(runs_since_review=runs_since_review, stuck_runs=stuck)
-            if stuck >= _STUCK_IS_ALARMING:
-                logger.error(
-                    "Dream has not advanced its cursor for {} consecutive runs; the forced "
-                    "review pass is not freeing enough space (cursor still at {})",
-                    stuck, store.get_last_dream_cursor(),
-                )
+            finish_dream_cycle(
+                store,
+                advanced=advanced,
+                runs_since_review=prologue.runs_since_review,
+                stuck=prologue.stuck,
+            )
         except Exception:
             logger.exception("Dream cron job failed")
         finally:
