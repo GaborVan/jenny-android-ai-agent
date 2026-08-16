@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -15,6 +16,7 @@ from jenny.utils.helpers import build_status_content
 
 if TYPE_CHECKING:
     from jenny.agent.atlas import AtlasOutcome
+    from jenny.agent.memory_budget import FileBudget
 
 
 @dataclass(frozen=True)
@@ -78,8 +80,12 @@ BUILTIN_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
     BuiltinCommandSpec(
         "/dream",
         "Run Dream",
-        "Manually trigger memory consolidation.",
+        (
+            "Manually trigger memory consolidation. Add 'budget' to read the memory file "
+            "sizes, or 'budget <name> <n>' to set one."
+        ),
         "sparkles",
+        "[budget [name n]]",
     ),
     BuiltinCommandSpec(
         "/atlas",
@@ -262,9 +268,16 @@ async def cmd_model(ctx: CommandContext) -> OutboundMessage:
 
 
 async def cmd_dream(ctx: CommandContext) -> OutboundMessage:
-    """Manually trigger a Dream consolidation run."""
+    """Manually trigger a Dream consolidation run, or read/tune the memory budgets."""
     loop = ctx.loop
     msg = ctx.msg
+
+    args = ctx.args.strip()
+    if args:
+        # Il ramo con argomento risponde nello stesso turno invece di accodare
+        # un task: legge tre file piccoli e al più riscrive `config.json`, non
+        # chiama il provider. Il ramo senza argomento resta intatto sotto.
+        return await _dream_budget_command(ctx, args)
 
     async def _run_dream():
         async def _silent(*_args, **_kwargs):
@@ -355,6 +368,305 @@ def _format_dream_no_input_message() -> str:
         "- Compact the current chat into memory once that manual action is available.",
         "- If you expected history to exist, check whether `memory/history.jsonl` has new entries after the Dream cursor.",
     ])
+
+
+# ---------------------------------------------------------------------------
+# /dream budget — leggere le misure e tarare i budget della memoria lunga
+# ---------------------------------------------------------------------------
+#
+# I budget nascono a 0 ("misurato ma non applicato") e i numeri veri si scelgono
+# dalle dimensioni che il device riporta davvero. Ma `loader.py` serializza senza
+# `exclude_defaults`, quindi alla prima scrittura di config lo 0 finisce *dentro*
+# `config.json` sul telefono: alzare il default in Python da lì in poi non lo
+# raggiunge più. Senza questo comando l'unico modo di leggere le misure e
+# scrivere i tetti sarebbe una shell di root sul dispositivo.
+
+
+@dataclass(frozen=True)
+class _DreamBudgetField:
+    """Un campo tarabile di ``DreamConfig``, con il vincolo che lo schema gli impone.
+
+    ``minimum`` rispecchia il ``ge=`` dello schema e ``too_low`` è la frase che
+    l'utente legge quando lo sfora. Duplicare qui il vincolo non è ridondanza:
+    assegnare un valore fuori range dentro la callback di ``mutate`` alzerebbe un
+    ``ValidationError`` che risale come guasto di scrittura, indistinguibile da
+    un `config.json` non scrivibile, per quello che è solo un errore di battitura.
+    """
+
+    attr: str
+    label: str
+    unit: str
+    minimum: int
+    too_low: str
+    # True se ``label`` è anche il nome di un file nel report di budget: solo
+    # per quelli ha senso confrontare il valore appena scritto con una misura.
+    measured: bool
+
+
+_DREAM_BUDGET_FIELDS: dict[str, _DreamBudgetField] = {
+    "memory": _DreamBudgetField(
+        attr="memory_budget_chars",
+        label="MEMORY.md",
+        unit="chars",
+        minimum=0,
+        too_low=(
+            "A character budget cannot be negative. Use `0` to keep MEMORY.md measured "
+            "without enforcing anything."
+        ),
+        measured=True,
+    ),
+    "user": _DreamBudgetField(
+        attr="user_budget_chars",
+        label="USER.md",
+        unit="chars",
+        minimum=0,
+        too_low=(
+            "A character budget cannot be negative. Use `0` to keep USER.md measured "
+            "without enforcing anything."
+        ),
+        measured=True,
+    ),
+    "soul": _DreamBudgetField(
+        attr="soul_budget_chars",
+        label="SOUL.md",
+        unit="chars",
+        minimum=0,
+        too_low=(
+            "A character budget cannot be negative. Use `0` to keep SOUL.md measured "
+            "without enforcing anything."
+        ),
+        measured=True,
+    ),
+    "review": _DreamBudgetField(
+        attr="review_every_runs",
+        label="Dream review pass",
+        unit="runs",
+        minimum=1,
+        too_low=(
+            "The review cadence must be at least 1 run: a review pass every zero runs "
+            "is not a schedule."
+        ),
+        measured=False,
+    ),
+}
+
+
+def _dream_usage() -> str:
+    """Le forme valide del comando.
+
+    Va in coda alla vista di lettura e a ogni risposta d'errore, non alle
+    conferme: la lista dei quattro nomi è l'unico posto in cui si scopre che
+    `soul` e `review` esistono, e chi sta leggendo o ha appena sbagliato la
+    sintassi ne ha bisogno. Chi ha appena scritto un valore no — lì sarebbe solo
+    rumore addosso alla frase che conta.
+    """
+    return "\n".join([
+        "Valid forms:",
+        "- `/dream` — run memory consolidation now",
+        "- `/dream budget` — show the current sizes, budgets, and review state",
+        "- `/dream budget <memory|user|soul> <chars>` — set a size budget (`0` = measure only)",
+        "- `/dream budget review <runs>` — Dream runs between review passes (minimum 1)",
+    ])
+
+
+def _format_dream_budget_report(
+    report: Sequence[FileBudget],
+    *,
+    review_every_runs: int,
+    runs_since_review: int,
+    stuck_runs: int,
+) -> str:
+    """Vista utente del report di budget.
+
+    Non riusa ``render_gauge``: quel testo è scritto *per il modello* ("over
+    budget the write is refused, so free space in the same turn"), cioè
+    un'istruzione su cosa fare mentre Dream gira. Qui chi legge è la persona che
+    deve scegliere i numeri, e la domanda è un'altra — quanto è grande il file,
+    quanto gli è concesso, quanto manca.
+
+    Lo stato del review pass sta nella stessa risposta perché fa parte della
+    stessa domanda: "cosa sta facendo questa cosa adesso" non si risponde con i
+    soli tetti, visto che è il review pass a farli rispettare nel tempo.
+    """
+    lines = ["## Long-term memory budget", ""]
+    for item in report:
+        if item.enforced:
+            over = f" — **over budget by {item.chars - item.budget:,}**" if item.over else ""
+            lines.append(
+                f"- `{item.label}` — {item.chars:,} / {item.budget:,} chars "
+                f"({item.pct}%){over}"
+            )
+        else:
+            # Un file senza budget si mostra, non si omette: `0` è lo stato di
+            # default di tutti e tre ed è precisamente il numero che chi lancia
+            # questo comando è venuto a leggere.
+            lines.append(
+                f"- `{item.label}` — {item.chars:,} chars, no budget "
+                "(measured, not enforced)"
+            )
+    lines.extend([
+        "",
+        (
+            f"Review pass: every {review_every_runs} Dream runs. "
+            f"{runs_since_review} runs since the last one, {stuck_runs} stuck runs."
+        ),
+        "",
+        _dream_usage(),
+    ])
+    return "\n".join(lines)
+
+
+def _parse_dream_budget_value(
+    raw: str, name: str, field: _DreamBudgetField
+) -> tuple[int | None, str]:
+    """Interpreta il valore richiesto, o spiega perché non si può.
+
+    Ritorna ``(valore, "")`` oppure ``(None, messaggio)``. Nel secondo caso il
+    chiamante non deve entrare in ``mutate``: un input sbagliato non tocca il
+    file, non ruota il `.bak` e non alza niente.
+    """
+    try:
+        value = int(raw)
+    except ValueError:
+        return None, (
+            f"`{raw}` is not a whole number.\n\n"
+            f"Usage: `/dream budget {name} <{field.unit}>`\n\n"
+            f"{_dream_usage()}"
+        )
+    if value < field.minimum:
+        return None, f"{field.too_low}\n\n{_dream_usage()}"
+    return value, ""
+
+
+def _format_dream_budget_change(
+    field: _DreamBudgetField,
+    *,
+    before: int,
+    after: int,
+    report: Sequence[FileBudget],
+) -> str:
+    """Conferma di una scrittura, con il prima e il dopo."""
+    if not field.measured:
+        return f"{field.label}: every {before} → every {after} {field.unit}."
+    lines = [f"`{field.label}` budget: {before:,} → {after:,} {field.unit}."]
+    if after == 0:
+        lines.append(
+            "Enforcement is off: the file is still measured and still shown in Dream's "
+            "gauge, but no write to it will be refused. Nothing on disk changed."
+        )
+    else:
+        current = next((item.chars for item in report if item.label == field.label), None)
+        if current is not None and current > after:
+            # Il caso normale sul device, non un errore: MEMORY.md è già fuori
+            # misura oggi, e un tetto scelto dalle misure reali nasce quasi
+            # sempre sotto la dimensione attuale. Dirlo subito evita di far
+            # scoprire all'utente ore dopo, da un log, che il review pass ha
+            # lavoro arretrato.
+            lines.append(
+                f"Note: the file is {current:,} chars today, already {current - after:,} "
+                "over the new budget. Nothing was deleted — the next Dream review pass "
+                "will work it down, and a write that shrinks the file is always accepted "
+                "in the meantime."
+            )
+    return "\n".join(lines)
+
+
+async def _dream_budget_command(ctx: CommandContext, args: str) -> OutboundMessage:
+    """Gestisci `/dream budget [...]`: mostra le misure o scrive un tetto."""
+    metadata = {**dict(ctx.msg.metadata or {}), "render_as": "text"}
+
+    def reply(content: str) -> OutboundMessage:
+        return OutboundMessage(
+            channel=ctx.msg.channel,
+            chat_id=ctx.msg.chat_id,
+            content=content,
+            metadata=metadata,
+        )
+
+    parts = args.split()
+    if parts[0].lower() != "budget":
+        return reply(f"Unknown `/dream` argument `{parts[0]}`.\n\n{_dream_usage()}")
+    rest = parts[1:]
+    if len(rest) == 1:
+        return reply(f"`/dream budget {rest[0]}` is missing a value.\n\n{_dream_usage()}")
+    if len(rest) > 2:
+        return reply(
+            "`/dream budget` takes at most a name and a value.\n\n" + _dream_usage()
+        )
+
+    try:
+        from jenny.agent.memory_budget import budget_report
+        from jenny.config import store as config_store
+        from jenny.config.loader import load_config
+
+        memory = ctx.loop.context.memory
+        dream = load_config().agents.defaults.dream
+        # Le misure si leggono **prima** di entrare in ``mutate``: quel lock
+        # resta preso per tutta la durata della callback, e tre letture di file
+        # là dentro lo terrebbero fermo su I/O che non riguarda la scrittura.
+        report = budget_report(
+            memory,
+            memory_chars=dream.memory_budget_chars,
+            user_chars=dream.user_budget_chars,
+            soul_chars=dream.soul_budget_chars,
+        )
+
+        if not rest:
+            runs_since_review, stuck_runs = memory.get_review_state()
+            return reply(_format_dream_budget_report(
+                report,
+                review_every_runs=dream.review_every_runs,
+                runs_since_review=runs_since_review,
+                stuck_runs=stuck_runs,
+            ))
+
+        name = rest[0].lower()
+        field = _DREAM_BUDGET_FIELDS.get(name)
+        if field is None:
+            valid = ", ".join(f"`{key}`" for key in _DREAM_BUDGET_FIELDS)
+            return reply(
+                f"Unknown budget `{rest[0]}`. Valid names: {valid}.\n\n{_dream_usage()}"
+            )
+        value, error = _parse_dream_budget_value(rest[1], name, field)
+        if value is None:
+            return reply(error)
+
+        # ``before`` lo cattura la callback e non la config letta qui sopra:
+        # ``mutate`` rilegge il file dentro il proprio lock, quindi solo lì il
+        # valore corrente è quello vero al momento della scrittura.
+        seen: dict[str, int] = {}
+
+        def _apply(config) -> bool:
+            target = config.agents.defaults.dream
+            before = int(getattr(target, field.attr))
+            seen["before"] = before
+            if before == value:
+                # Niente da cambiare: ``False`` lascia il file intatto, così un
+                # `/dream budget memory 6000` ribattuto non riscrive
+                # `config.json` né ruota il `.bak` per nulla.
+                return False
+            setattr(target, field.attr, value)
+            return True
+
+        await config_store.mutate(_apply)
+        before = seen.get("before", value)
+        if before == value:
+            # Backtick solo sui tre nomi di file: "`Dream review pass`" farebbe
+            # sembrare un identificatore quello che è una frase.
+            subject = f"`{field.label}`" if field.measured else field.label
+            return reply(
+                f"{subject} is already set to {value:,} {field.unit}; "
+                "`config.json` was not rewritten."
+            )
+        return reply(_format_dream_budget_change(
+            field, before=before, after=value, report=report
+        ))
+    except Exception as e:
+        # Come ``cmd_atlas``: un comando che muore in silenzio lascia la chat
+        # senza risposta e l'utente senza idea del perché. Il motivo va nel
+        # messaggio. Se a sollevare è stata ``mutate``, il file non è stato
+        # scritto — la sua callback o completa o non salva.
+        return reply(f"Could not read or write the memory budget: {e}")
 
 
 async def cmd_atlas(ctx: CommandContext) -> OutboundMessage:
@@ -570,6 +882,7 @@ def register_builtin_commands(router: CommandRouter) -> None:
     router.exact("/goal", cmd_goal)
     router.prefix("/goal ", cmd_goal)
     router.exact("/dream", cmd_dream)
+    router.prefix("/dream ", cmd_dream)
     router.exact("/atlas", cmd_atlas)
     router.prefix("/atlas ", cmd_atlas)
     router.exact("/skill", cmd_skill)
