@@ -947,7 +947,7 @@ class SubagentManager:
         return ToolContext(
             config=cfg,
             workspace=str(root.resolve()),
-            file_state_store=FileStates(),
+            file_states=FileStates(),
             workspace_sandbox=workspace_sandbox_status(
                 restrict_to_workspace=cfg.restrict_to_workspace,
                 workspace=root,

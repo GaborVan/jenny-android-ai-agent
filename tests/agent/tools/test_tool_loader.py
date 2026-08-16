@@ -63,7 +63,7 @@ def test_tool_context_has_required_fields():
     field_names = {f.name for f in fields(ToolContext)}
     required = {
         "config", "workspace", "bus", "subagent_manager",
-        "cron_service", "file_state_store",
+        "cron_service", "file_states",
         "timezone",
     }
     assert required <= field_names

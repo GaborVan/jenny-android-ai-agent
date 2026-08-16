@@ -3,7 +3,10 @@ from __future__ import annotations
 
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from jenny.agent.tools.file_state import FileStates
 
 _CURRENT_REQUEST_CONTEXT: ContextVar["RequestContext | None"] = ContextVar(
     "jenny_tool_request_context",
@@ -95,7 +98,13 @@ class ToolContext:
     subagent_manager: Any | None = None
     cron_service: Any | None = None
     sessions: Any | None = None
-    file_state_store: Any = field(default=None)
+    # Lo stato file di *una* sessione, non il ``FileStateStore`` che le contiene
+    # tutte: chi lo legge (``_FsTool``) chiama ``record_write``/``check_read``,
+    # che il contenitore non ha. Lo valorizzano solo i runner isolati (subagent);
+    # l'agente principale lo lascia a ``None`` e i tool risolvono la sessione
+    # corrente dal ContextVar legato in ``AgentLoop`` — vedi
+    # ``file_state.current_file_states``.
+    file_states: FileStates | None = field(default=None)
     timezone: str = "UTC"
     workspace_sandbox: Any | None = None
     runtime_events: Any | None = None

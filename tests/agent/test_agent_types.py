@@ -70,7 +70,7 @@ def _ctx(tmp_path: Path, *, ssh: bool = False) -> ToolContext:
     return ToolContext(
         config=_tools_config(ssh=ssh),
         workspace=str(tmp_path),
-        file_state_store=FileStates(),
+        file_states=FileStates(),
         # Contesto Android finto: senza, i tool web sono disabilitati
         # dall'ambiente e il set del researcher non sarebbe verificabile.
         android_context=object(),
@@ -129,7 +129,7 @@ def test_allow_none_is_todays_behaviour(tmp_path: Path) -> None:
     ctx = ToolContext(
         config=ToolsConfig(),
         workspace=str(tmp_path),
-        file_state_store=FileStates(),
+        file_states=FileStates(),
         android_context=object(),
     )
     without_kwarg = set(ToolLoader().load(ctx, registry, scope="subagent"))
@@ -257,7 +257,7 @@ def test_config_disabled_tool_is_not_a_typo(tmp_path: Path) -> None:
     ctx = ToolContext(
         config=ToolsConfig(),
         workspace=str(tmp_path),
-        file_state_store=FileStates(),
+        file_states=FileStates(),
         android_context=None,  # tool web disabilitati
     )
     loaded = set(ToolLoader().load(

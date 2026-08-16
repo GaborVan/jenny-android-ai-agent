@@ -50,7 +50,7 @@ def _ctx(tmp_path: Path, **kw: Any) -> ToolContext:
     defaults: dict[str, Any] = dict(
         config=ToolsConfig(),
         workspace=str(tmp_path),
-        file_state_store=FileStates(),
+        file_states=FileStates(),
         bus=MessageBus(),
         subagent_manager=MagicMock(),
         cron_service=MagicMock(),

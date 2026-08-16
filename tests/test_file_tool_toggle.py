@@ -35,7 +35,7 @@ def test_file_tool_loader_skips_all_builtin_file_tools_when_disabled(tmp_path):
     ctx = ToolContext(
         config=cfg,
         workspace=str(tmp_path),
-        file_state_store=FileStates(),
+        file_states=FileStates(),
     )
     registry = ToolRegistry()
 

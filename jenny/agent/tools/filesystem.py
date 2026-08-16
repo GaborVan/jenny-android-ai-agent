@@ -122,7 +122,7 @@ class _FsTool(Tool):
             workspace=Path(ctx.workspace),
             allowed_dir=allowed_dir,
             extra_read_allowed_dirs=extra_read,
-            file_states=ctx.file_state_store,
+            file_states=ctx.file_states,
             restrict_to_workspace=ctx.config.restrict_to_workspace,
         )
 
