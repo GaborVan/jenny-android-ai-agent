@@ -124,11 +124,20 @@ class CronTaskCheckState:
         escalated: l'utente è già stato avvisato. **Non** è un'affermazione
             sulla sequenza qui accanto, ed è la ragione per cui sopravvive al
             suo azzeramento: è il verbale di aver parlato, un fatto su di noi e
-            non sul controllo. Si cancella solo insieme alla voce, cioè quando
-            il controllo torna a funzionare — dichiarandolo (``CHECK_OK`` da un
-            turno d'annuncio) o semplicemente girando senza marcatori in un run.
+            non sul controllo. Si cancella insieme alla voce, cioè quando il
+            controllo torna a funzionare — dichiarandolo (``CHECK_OK`` da un
+            turno d'annuncio) o semplicemente girando senza marcatori in un run
+            — oppure quando l'utente si rifà vivo (v. ``escalated_at_ms``).
             Finché resta ``True`` nessun avviso parte per questo task, che è il
             punto: un guasto, un avviso.
+        escalated_at_ms: *quando* gli si è parlato. Esiste per una domanda sola:
+            l'utente ha scritto **dopo** l'avviso? Se sì l'avviso l'ha letto, e
+            un guasto ancora aperto torna a essere una notizia (v.
+            ``rearm_after_user_message``). ``None`` vuol dire "gli si è parlato,
+            non si sa quando", ed è ciò che leggono le voci scritte prima che
+            questo campo esistesse: non riarmabili, apposta — l'alternativa
+            sarebbe un avviso su un guasto vecchio di ore nel momento esatto in
+            cui l'aggiornamento atterra sul telefono.
         label: prima riga del task, per nominarlo in un log o nella WebUI senza
             dover rileggere il file.
         pending_since_ms: il run che ha appena girato ha **delegato** questo
@@ -144,6 +153,7 @@ class CronTaskCheckState:
     consecutive_could_not_check: int = 0
     since_ms: int | None = None
     escalated: bool = False
+    escalated_at_ms: int | None = None
     label: str = ""
     pending_since_ms: int | None = None
 

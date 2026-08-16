@@ -43,8 +43,21 @@ from jenny.utils.prompt_templates import render_template
 
 _MESSAGE = "controlla l'umidità delle piante e avvisami solo sotto il 15%"
 
+# Il caso della frase più ordinaria che ci sia: l'utente chiede il controllo e
+# nella stessa riga chiede di non essere disturbato quando l'host è giù.
+_QUIET_MESSAGE = "controlla il server hps, e se è irraggiungibile non dire niente"
+
+# Le due frasi del prompt su cui gli agenti finti decidono. Stanno qui, in un
+# posto solo, perché sono l'unico punto in cui questi test conoscono la prosa
+# del template: se la riscrivi, si aggiornano qui e i test di contratto qui
+# sotto ti dicono subito che l'hai fatto.
+_SILENCE_OVERRIDE = "still write the line"
+_ALREADY_WARNED = "ALREADY been told"
+_MUST_WARN = "must find out"
+
+
 @cache
-def _base_prompt() -> str:
+def _base_prompt(message: str = _MESSAGE) -> str:
     """Il prompt di un monitor sano.
 
     L'agente finto distingue i giri di escalation confrontandosi con questo
@@ -53,7 +66,7 @@ def _base_prompt() -> str:
     normale cambia — che è l'invariante da difendere. Pigro perché il workspace
     dei template lo configura una fixture, non l'import.
     """
-    return render_template("agent/cron_monitor.md", strip=True, message=_MESSAGE)
+    return render_template("agent/cron_monitor.md", strip=True, message=message)
 
 
 class _FakeSession:
@@ -83,8 +96,11 @@ class _FakeMonitorAgent:
     - ``healthy=False``: il controllo non parte → marcatore nel testo finale,
       che non raggiunge nessuno.
     - Parla (tool ``message``) **solo** se il prompt di questo giro contiene
-      l'istruzione di avvisare. È la sola cosa che il modello vero decide.
+      l'istruzione di avvisare, e mai se contiene quella di tacere. Sono le sole
+      due cose che il modello vero decide.
     """
+
+    message = _MESSAGE
 
     def __init__(self) -> None:
         self.tools = ToolRegistry()
@@ -93,19 +109,29 @@ class _FakeMonitorAgent:
         self.messages: list[str] = []
         self.prompts: list[str] = []
 
+    def _asked_to_warn(self, prompt: str) -> bool:
+        # Il blocco "gliel'hai già detto" è l'altra cosa che cambia il prompt
+        # rispetto a un giro sano: senza distinguerlo, "diverso dal base" vorrebbe
+        # dire "avvisa" anche quando il prompt chiede l'opposto.
+        return _ALREADY_WARNED not in prompt and prompt != _base_prompt(self.message)
+
     async def submit_cron_turn(self, msg: InboundMessage) -> TurnOutcome:
         self.prompts.append(msg.content)
         if self.healthy:
             return TurnOutcome.silent(final_text="Tutte le piante sopra il 15%.")
-        escalating = msg.content != _base_prompt()
-        if not escalating:
+        if not self._asked_to_warn(msg.content):
             return TurnOutcome.silent(final_text="CHECK_FAILED: hps non raggiungibile")
         self.messages.append("Il controllo delle piante non riesce a partire da un po'.")
         return TurnOutcome.spoke_via_tool(final_text="CHECK_FAILED: hps non raggiungibile")
 
 
-def _monitor(tmp_path: Path) -> tuple[CronService, str, _FakeMonitorAgent]:
-    agent = _FakeMonitorAgent()
+def _monitor(
+    tmp_path: Path,
+    *,
+    agent: _FakeMonitorAgent | None = None,
+    message: str = _MESSAGE,
+) -> tuple[CronService, str, _FakeMonitorAgent]:
+    agent = agent or _FakeMonitorAgent()
     service = CronService(tmp_path / "cron" / "jobs.json")
 
     async def on_job(job: Any) -> str | None:
@@ -115,7 +141,7 @@ def _monitor(tmp_path: Path) -> tuple[CronService, str, _FakeMonitorAgent]:
     job = service.add_job(
         name="piante",
         schedule=CronSchedule(kind="every", every_ms=1_800_000),
-        message=_MESSAGE,
+        message=message,
         mode="monitor",
         session_key="unified:default",
         origin_channel="websocket",
@@ -204,6 +230,24 @@ class TestTheStreakSpeaksOnce:
         assert state.consecutive_could_not_check == 12
         assert state.could_not_check_escalated is True
 
+    async def test_the_prompt_counts_the_runs_that_have_actually_happened(
+        self, tmp_path: Path
+    ) -> None:
+        """Il numero nel prompt è quello vero, non la soglia.
+
+        Al giro dell'escalation i run mancati sono ``K - 1``: il terzo è questo,
+        e se il controllo riesce adesso non ci sarà nessun terzo guasto. Dire
+        ``K`` sarebbe una cosa non ancora successa, e il modello quel numero lo
+        può riferire all'utente. (È ciò che fa ``escalation_block`` sul ramo
+        heartbeat, che la costante la scrive a mano.)
+        """
+        service, job_id, agent = _monitor(tmp_path)
+
+        await _cycles(service, job_id, MONITOR_ESCALATE_AFTER_FAILURES)
+
+        escalation_prompt = agent.prompts[MONITOR_ESCALATE_AFTER_FAILURES - 1]
+        assert f" {MONITOR_ESCALATE_AFTER_FAILURES - 1} times in a row" in escalation_prompt
+
     async def test_the_run_that_alerted_still_counts_as_a_missed_check(
         self, tmp_path: Path
     ) -> None:
@@ -249,6 +293,214 @@ class TestTheStreakSpeaksOnce:
         assert job is not None
         assert job.enabled is True
         assert job.state.next_run_at_ms is not None
+
+
+class _ObedientlySilentAgent(_FakeMonitorAgent):
+    """Il modello che applica "non dire niente" anche al marcatore.
+
+    Non è un capriccio del finto: è il run delle 09:18 del 2026-08-16 sul Titan
+    2, sul ramo heartbeat (v. ``ea70015``). L'utente ha scritto "se è
+    irraggiungibile non dire niente", il prompt non diceva da nessuna parte che
+    il marcatore è un'altra cosa, e il turno è finito muto — nessun messaggio e
+    nessuna riga. Il run è stato archiviato come riuscito.
+
+    Finché il prompt non lo smentisce, questo agente fa esattamente quello.
+    """
+
+    message = _QUIET_MESSAGE
+
+    async def submit_cron_turn(self, msg: InboundMessage) -> TurnOutcome:
+        self.prompts.append(msg.content)
+        if self.healthy:
+            return TurnOutcome.silent(final_text="hps risponde, nulla da segnalare.")
+        if _SILENCE_OVERRIDE not in msg.content:
+            # "Non dire niente" applicato alla lettera: niente messaggio e
+            # niente marcatore.
+            return TurnOutcome.silent(final_text="")
+        if not self._asked_to_warn(msg.content):
+            return TurnOutcome.silent(final_text="CHECK_FAILED: hps irraggiungibile")
+        self.messages.append("Il controllo del server non riesce a partire da un po'.")
+        return TurnOutcome.spoke_via_tool(final_text="CHECK_FAILED: hps irraggiungibile")
+
+
+class TestAnInstructedSilenceIsAboutTheMessage:
+    """Il guasto perfettamente mimetizzato, e la frase che lo produce.
+
+    "Controlla il server, e se è irraggiungibile non dire niente" è il modo più
+    ordinario che ci sia di scrivere un monitor. Senza l'override nel prompt il
+    turno tace del tutto, il run viene archiviato come ``silenced`` — cioè come
+    un successo — la sequenza non parte e l'escalation non arriva mai:
+    indistinguibile da un monitor sano, per sempre.
+    """
+
+    async def test_a_check_told_to_stay_quiet_still_records_a_failure(
+        self, tmp_path: Path
+    ) -> None:
+        service, job_id, agent = _monitor(
+            tmp_path, agent=_ObedientlySilentAgent(), message=_QUIET_MESSAGE
+        )
+
+        await _cycles(service, job_id, 1)
+
+        assert agent.messages == []  # l'utente non va disturbato: quello vale
+        state = _state(service, job_id)
+        assert state.last_status == "could_not_check"
+        assert state.consecutive_could_not_check == 1
+
+    async def test_a_check_told_to_stay_quiet_still_reaches_escalation(
+        self, tmp_path: Path
+    ) -> None:
+        """Il punto di tutta la contabilità: un guasto muto deve venire fuori."""
+        service, job_id, agent = _monitor(
+            tmp_path, agent=_ObedientlySilentAgent(), message=_QUIET_MESSAGE
+        )
+
+        await _cycles(service, job_id, MONITOR_ESCALATE_AFTER_FAILURES)
+
+        assert len(agent.messages) == 1
+        assert _state(service, job_id).could_not_check_escalated is True
+
+    async def test_the_prompt_says_the_line_is_written_anyway(self) -> None:
+        """Il contratto, in chiaro: obbedisci sul messaggio, scrivi la riga."""
+        prompt = _base_prompt()
+        assert _SILENCE_OVERRIDE in prompt
+        assert "reaches nobody" in prompt
+
+    async def test_the_legitimate_silent_case_survives(self) -> None:
+        """Un controllo che gira e non trova niente resta un successo muto."""
+        prompt = _base_prompt()
+        assert "ran and found nothing is a success" in prompt
+
+
+class _RepeatsItsOwnWarning(_FakeMonitorAgent):
+    """Parla quando glielo si chiede, e poi ne riparla da sola.
+
+    Misurato sul device (v. ``already_warned_block`` in ``heartbeat_tasks``):
+    con l'escalation già data e nessuna riga che chieda di parlare, il modello
+    ha chiamato ``message`` di propria iniziativa. Il guasto ce l'ha davanti e
+    la coda della sessione contiene il suo stesso avviso di due ore prima, e
+    "non ti sto chiedendo di parlare" non è "non parlare".
+    """
+
+    async def submit_cron_turn(self, msg: InboundMessage) -> TurnOutcome:
+        self.prompts.append(msg.content)
+        if self.healthy:
+            return TurnOutcome.silent(final_text="Tutte le piante sopra il 15%.")
+        final = "CHECK_FAILED: hps non raggiungibile"
+        if _ALREADY_WARNED in msg.content:
+            return TurnOutcome.silent(final_text=final)
+        if not self._asked_to_warn(msg.content) and not self.messages:
+            return TurnOutcome.silent(final_text=final)
+        self.messages.append("Il controllo delle piante non riesce a partire da un po'.")
+        return TurnOutcome.spoke_via_tool(final_text=final)
+
+
+class TestTheUserIsNotToldTwice:
+    """L'equivalente di ``already_warned_block`` per il monitor.
+
+    ``should_escalate_could_not_check`` smette di chiedere, e basta: il modello
+    si ritrova il prompt di sempre con il proprio avviso ancora nella coda della
+    sessione. Smettere di chiedere non è chiedere di tacere.
+    """
+
+    async def test_the_alert_is_not_repeated_by_a_model_that_speaks_on_its_own(
+        self, tmp_path: Path
+    ) -> None:
+        service, job_id, agent = _monitor(tmp_path, agent=_RepeatsItsOwnWarning())
+
+        await _cycles(service, job_id, 12)
+
+        assert len(agent.messages) == 1
+
+    async def test_the_prompt_asks_for_silence_once_the_user_knows(
+        self, tmp_path: Path
+    ) -> None:
+        service, job_id, agent = _monitor(tmp_path)
+
+        await _cycles(service, job_id, MONITOR_ESCALATE_AFTER_FAILURES + 1)
+
+        assert _ALREADY_WARNED in agent.prompts[-1]
+        # E resta un prompt di monitor: il marcatore si scrive comunque.
+        assert _state(service, job_id).consecutive_could_not_check == 4
+
+    async def test_a_prompt_never_asks_for_both_at_once(self, tmp_path: Path) -> None:
+        """Parlare e tacere dello stesso controllo, nello stesso prompt."""
+        service, job_id, agent = _monitor(tmp_path)
+
+        await _cycles(service, job_id, 8)
+
+        for prompt in agent.prompts:
+            assert not (_ALREADY_WARNED in prompt and _MUST_WARN in prompt)
+
+    async def test_the_block_is_gone_once_the_check_works_again(
+        self, tmp_path: Path
+    ) -> None:
+        """Nessuna riga in più nel prompt di un monitor tornato sano."""
+        service, job_id, agent = _monitor(tmp_path)
+        await _cycles(service, job_id, MONITOR_ESCALATE_AFTER_FAILURES + 1)
+        agent.healthy = True
+
+        await _cycles(service, job_id, 2)
+
+        assert agent.prompts[-1] == _base_prompt()
+
+
+class _WarnsWithoutBeingAsked(_FakeMonitorAgent):
+    """Avvisa al primo guasto, senza che nessuno glielo abbia chiesto.
+
+    Misurato sul device alle 10:19 del 2026-08-16 (v.
+    ``roadmap/heartbeat-escalation-amnesia.md``, punto 3): il guasto ce l'ha
+    davanti, e il fatto che il prompt non chieda ancora di parlare non gli
+    impedisce di chiamare ``message``. Tace solo quando il prompt glielo chiede
+    esplicitamente, che è l'unica riga che il modello vero rispetta.
+    """
+
+    async def submit_cron_turn(self, msg: InboundMessage) -> TurnOutcome:
+        self.prompts.append(msg.content)
+        if self.healthy:
+            return TurnOutcome.silent(final_text="Tutte le piante sopra il 15%.")
+        final = "CHECK_FAILED: hps non raggiungibile"
+        if _ALREADY_WARNED in msg.content:
+            return TurnOutcome.silent(final_text=final)
+        self.messages.append("Il controllo delle piante non riesce a partire da un po'.")
+        return TurnOutcome.spoke_via_tool(final_text=final)
+
+
+class TestAnUnaskedWarningIsStillAWarning:
+    """Un avviso è un avviso anche se non lo avevamo chiesto.
+
+    ``escalated and spoke`` registrava solo gli avvisi *ordinati*: uno spontaneo
+    lasciava lo stato pulito, la soglia scattava lo stesso due giri dopo e
+    l'utente si sentiva dire la stessa cosa una seconda volta. È il difetto che
+    ``3894351`` ha chiuso sul ramo heartbeat, ed era rimasto vivo qui.
+
+    Sul monitor l'attribuzione non è in dubbio: un controllo per turno, e questo
+    ramo gira solo quando il turno ha scritto ``CHECK_FAILED``, quindi di
+    quell'unico guasto si tratta.
+    """
+
+    async def test_an_unasked_warning_is_recorded_the_moment_it_goes_out(
+        self, tmp_path: Path
+    ) -> None:
+        service, job_id, agent = _monitor(tmp_path, agent=_WarnsWithoutBeingAsked())
+
+        await _cycles(service, job_id, 1)
+
+        assert len(agent.messages) == 1
+        assert _MUST_WARN not in agent.prompts[0]  # nessuno gliel'aveva chiesto
+        state = _state(service, job_id)
+        assert state.consecutive_could_not_check == 1
+        assert state.could_not_check_escalated is True
+
+    async def test_the_threshold_does_not_say_it_a_second_time(self, tmp_path: Path) -> None:
+        service, job_id, agent = _monitor(tmp_path, agent=_WarnsWithoutBeingAsked())
+
+        await _cycles(service, job_id, MONITOR_ESCALATE_AFTER_FAILURES + 3)
+
+        assert len(agent.messages) == 1
+        # E il prompt non glielo chiede mai: l'utente lo sa già dal primo giro.
+        assert not any(_MUST_WARN in p for p in agent.prompts)
+        assert _ALREADY_WARNED in agent.prompts[-1]
 
 
 class TestRecovery:

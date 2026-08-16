@@ -83,6 +83,13 @@ def _escalated_labels(prompt: str) -> list[str]:
 
 
 class _FakeSession:
+    def __init__(self) -> None:
+        # Il ramo heartbeat legge la sessione unificata per sapere se l'utente
+        # si è fatto vivo dopo un avviso (v. ``last_user_message_ms``). In
+        # questo file non parla mai nessuno: il riarmo non c'entra, e una lista
+        # vuota è la risposta giusta.
+        self.messages: list[dict] = []
+
     def retain_recent_legal_suffix(self, keep: int) -> None:
         pass
 

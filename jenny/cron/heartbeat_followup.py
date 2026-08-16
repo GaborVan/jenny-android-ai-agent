@@ -47,6 +47,7 @@ from jenny.cron.heartbeat_tasks import (
     followup_block,
     parse_heartbeat_tasks,
     pending_tasks,
+    rearm_after_user_message,
     record_followup_outcomes,
     tasks_already_warned,
     tasks_due_for_escalation,
@@ -72,10 +73,17 @@ class HeartbeatFollowup:
         cron: "CronService",
         heartbeat_file: Callable[[], Path],
         now_ms: Callable[[], int],
+        # Quando l'utente ha scritto per l'ultima volta, o ``None``. Arriva come
+        # callback e non come ``SessionManager`` per la stessa ragione per cui
+        # l'agente arriva come getter al dispatcher: fino all'onboarding l'agente
+        # — e con lui le sessioni — non esiste ancora, e catturarlo qui
+        # significherebbe catturare quel ``None`` per sempre.
+        user_spoke_at_ms: Callable[[], int | None] = lambda: None,
     ) -> None:
         self._cron = cron
         self._heartbeat_file = heartbeat_file
         self._now_ms = now_ms
+        self._user_spoke_at_ms = user_spoke_at_ms
 
     def _job_and_tasks(self, session_key: str) -> "tuple[CronJob, list[HeartbeatTask]] | None":
         """Job heartbeat + task del file, o ``None`` se qui non c'è niente da fare.
@@ -83,6 +91,12 @@ class HeartbeatFollowup:
         Il controllo sulla session key sta in cima perché questo metodo viene
         chiamato per **ogni** annuncio di subagent, di qualunque sessione: fuori
         dall'heartbeat deve costare un confronto fra stringhe.
+
+        Applica anche il riarmo, ed è il motivo per cui *entrambi* i metodi
+        pubblici passano di qui: il turno d'annuncio è quello che decide per un
+        controllo delegato, quindi se il riarmo non arrivasse anche a lui un
+        utente che scrive fra un run e il suo annuncio si vedrebbe l'avviso
+        subito, saltando la soglia che quel riarmo ha appena azzerato.
         """
         if session_key != HEARTBEAT_SESSION_KEY:
             return None
@@ -96,6 +110,16 @@ class HeartbeatFollowup:
         tasks = parse_heartbeat_tasks(content)
         if not tasks:
             return None
+        rearmed = rearm_after_user_message(
+            job.state, user_spoke_at_ms=self._user_spoke_at_ms()
+        )
+        if rearmed:
+            logger.debug(
+                "Heartbeat follow-up: the user has written since, {} check(s) can be "
+                "reported again: {}",
+                len(rearmed),
+                "; ".join(rearmed),
+            )
         return job, tasks
 
     def prompt_block(self, session_key: str) -> str:

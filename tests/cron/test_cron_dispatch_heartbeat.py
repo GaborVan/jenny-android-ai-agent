@@ -48,6 +48,10 @@ _HEARTBEAT_MD = """# Heartbeat
 class _FakeSession:
     def __init__(self) -> None:
         self.retained: list[int] = []
+        # Il ramo heartbeat legge la sessione unificata per sapere se l'utente
+        # si è fatto vivo dopo un avviso (v. ``last_user_message_ms``): vuota,
+        # qui, che è il caso di ogni test di questo file.
+        self.messages: list[dict] = []
 
     def retain_recent_legal_suffix(self, keep: int) -> None:
         self.retained.append(keep)

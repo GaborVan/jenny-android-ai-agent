@@ -10,6 +10,11 @@ from typing import Any
 
 from loguru import logger
 
+# Importato e non ricopiato come stringa: è la chiave con cui un turno di cron si
+# marca nella storia, e ``last_user_message_ms`` deve saltarla. Nessun ciclo —
+# ``jenny.cron.session_turns`` dipende solo da ``jenny.cron.types``, che non
+# importa niente di nostro.
+from jenny.cron.session_turns import CRON_HISTORY_META
 from jenny.utils.helpers import (
     channel_delivery_aware_user_start,
     ensure_dir,
@@ -305,6 +310,44 @@ class Session:
             len(archive_chunk),
             len(self.messages),
         )
+
+
+def last_user_message_ms(session: Session | None) -> int | None:
+    """Epoch ms dell'ultima riga scritta **dall'utente**. ``None`` se non ce n'è.
+
+    Serve a rispondere a "l'utente si è fatto vivo dopo che gli abbiamo parlato?"
+    (v. ``jenny/cron/heartbeat_tasks.py::rearm_after_user_message``), e le tre
+    scelte che la rendono affidabile sono tutte scelte su cosa NON contare:
+
+    - **non** ``session.updated_at``: si muove anche quando è Jenny a scrivere,
+      compreso il momento in cui scrive l'avviso stesso che si sta cercando di
+      ricordare (``loop.py``, ``record_channel_delivery``). Serve una riga
+      ``role == "user"``, non l'ultima attività della sessione.
+    - **non** i turni di cron. Un job ``reminder`` si persiste nella storia
+      esattamente come un messaggio dell'utente — stessa riga, stesso ruolo
+      (``cron_history_overrides``) — e contarlo vorrebbe dire che un promemoria
+      delle 09:00 "risponde" ogni mattina al posto di chi dorme.
+    - **non** ``timestamp`` presi per buoni: la riga potrebbe non averlo, o
+      averlo illeggibile. Si scorre indietro fino alla prima utilizzabile, che
+      è la direzione sicura — un timbro più vecchio riarma di meno, mai di più.
+
+    Il timbro è una ISO **naive in ora locale** (v. ``Session.add_message``):
+    ``fromisoformat`` + ``timestamp()`` lo interpretano nello stesso fuso in cui
+    è stato scritto, che è l'unica lettura corretta di una stringa senza offset.
+    """
+    if session is None:
+        return None
+    for message in reversed(session.messages):
+        if message.get("role") != "user" or message.get(CRON_HISTORY_META):
+            continue
+        raw = message.get("timestamp")
+        if not isinstance(raw, str):
+            continue
+        try:
+            return int(datetime.fromisoformat(raw).timestamp() * 1000)
+        except (ValueError, OSError, OverflowError):
+            continue
+    return None
 
 
 @dataclass

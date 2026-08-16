@@ -23,6 +23,7 @@ Lo stato passa dal disco, con un ``CronService`` vero.
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -53,6 +54,10 @@ _ESCALATION_HEAD = "These recurring tasks have now failed to run"
 _FOLLOWUP_HEAD = "This subagent was doing the work of a scheduled check"
 _SILENCE_HEAD = "The user has ALREADY been told"
 
+# Un istante fisso e il passo dell'heartbeat sul device.
+_T0_MS = 1_755_000_000_000
+_CYCLE_MS = 1_800_000
+
 
 def _heartbeat_md(*tasks: str) -> str:
     body = "\n".join(tasks)
@@ -72,13 +77,29 @@ def _escalated_labels(prompt: str) -> list[str]:
 
 
 class _FakeSession:
+    def __init__(self) -> None:
+        # La sessione unificata è dove si legge se l'utente si è fatto vivo dopo
+        # un avviso (``last_user_message_ms``): serve una lista vera, perché uno
+        # dei casi qui sotto ce lo scrive dentro.
+        self.messages: list[dict] = []
+
     def retain_recent_legal_suffix(self, keep: int) -> None:
         pass
 
 
 class _FakeSessions:
-    def get_or_create(self, _key: str) -> _FakeSession:
-        return _FakeSession()
+    """Una sessione per chiave, e la stessa a ogni richiesta.
+
+    Restituirne una nuova ogni volta rendeva invisibile tutto ciò che sta nella
+    conversazione dell'utente: chi scrive in ``unified:default`` non lo
+    ritrovava più.
+    """
+
+    def __init__(self) -> None:
+        self.by_key: dict[str, _FakeSession] = {}
+
+    def get_or_create(self, key: str) -> _FakeSession:
+        return self.by_key.setdefault(key, _FakeSession())
 
     def save(self, _session: _FakeSession) -> None:
         pass
@@ -123,11 +144,16 @@ class _Harness:
         self.store_path = tmp_path / "cron" / "jobs.json"
         self.agent = _DelegatingHeartbeatAgent()
         self.service = CronService(self.store_path)
+        # Un orologio che si guida: l'heartbeat confronta l'istante dell'avviso
+        # con quello dell'ultimo messaggio dell'utente, e col tempo vero i due
+        # cadono nello stesso millisecondo.
+        self.now_ms = _T0_MS
         self.service.on_job = CronDispatcher(
             get_agent=lambda: self.agent,
             config=SimpleNamespace(workspace_path=tmp_path),
             cron=self.service,
             heartbeat_cfg=SimpleNamespace(keep_recent_messages=8),
+            now_ms=lambda: self.now_ms,
         ).dispatch
         self.service.register_system_job(
             CronJob(
@@ -161,6 +187,11 @@ class _Harness:
         # comportamento osservato sul device il 2026-08-13, e l'unica cosa che
         # separa un avviso per guasto da uno ogni due ore.
         self.forgets_the_marker = False
+        # E la stessa dimenticanza a intermittenza. Il flag qui sopra è a senso
+        # unico — una volta acceso il modello non dichiara mai più — quindi il
+        # motivo che rende questo difetto vivo, cioè un verdetto sì e uno no,
+        # non era rappresentabile: v. ``forgets_the_next``.
+        self._forgetful_announces = 0
         self.announce_count = 0
         self.loop._run_agent_loop = self._fake_announce_turn  # type: ignore[method-assign]
 
@@ -171,7 +202,10 @@ class _Harness:
         )
         self.announce_prompts.append(prompt)
         text = ""
-        if not self.forgets_the_marker and _FOLLOWUP_HEAD in prompt:
+        forgetful = self.forgets_the_marker or self._forgetful_announces > 0
+        if self._forgetful_announces > 0:
+            self._forgetful_announces -= 1
+        if not forgetful and _FOLLOWUP_HEAD in prompt:
             number, reason = self.subagent_failure or (
                 next(iter(self.agent.delegated), 1), "",
             )
@@ -197,8 +231,29 @@ class _Harness:
     def rewrite(self, content: str) -> None:
         self.file.write_text(content, encoding="utf-8")
 
+    def forgets_the_next(self, announces: int) -> None:
+        """I prossimi *announces* turni d'annuncio non dichiarano niente."""
+        self._forgetful_announces = announces
+
+    def user_says(self, text: str = "ciao", **extra: Any) -> None:
+        """Una riga dell'utente nella conversazione unificata, timbrata adesso.
+
+        L'orologio avanza di un minuto prima: si scrive *dopo* l'avviso, e due
+        timbri identici non direbbero niente né in un senso né nell'altro.
+        """
+        self.now_ms += 60_000
+        self.agent.sessions.get_or_create(UNIFIED_SESSION_KEY).messages.append(
+            {
+                "role": "user",
+                "content": text,
+                "timestamp": datetime.fromtimestamp(self.now_ms / 1000).isoformat(),
+                **extra,
+            }
+        )
+
     async def cycle(self, *, session_key: str = HEARTBEAT_SESSION_KEY) -> None:
         """Un ciclo intero: il turno dell'heartbeat e poi il ritorno del subagent."""
+        self.now_ms += _CYCLE_MS
         await self.service.run_job("heartbeat")
         self.announce_count += 1
         await self.loop._process_message(
@@ -447,6 +502,85 @@ class TestOneFaultIsOneWarning:
         assert len(set(two_tasks.agent.prompts)) == 1
         assert _SILENCE_HEAD not in two_tasks.agent.prompts[0]
         assert _ESCALATION_HEAD not in two_tasks.agent.prompts[0]
+
+
+class TestTheUserComingBack:
+    """Su un controllo delegato il riarmo è l'unica uscita che non dipende dal modello.
+
+    ``CHECK_OK`` chiude la voce, ma è il modello a doverlo scrivere — e sul
+    device del 2026-08-16 lo stato *sano* di un controllo delegato era proprio
+    un follow-up senza marcatori. Se ha scritto, invece, l'avviso l'ha letto:
+    quello lo sappiamo senza chiederlo a nessuno.
+    """
+
+    async def test_a_user_message_costs_exactly_one_new_alert(
+        self, two_tasks: _Harness
+    ) -> None:
+        """Un ciclo intero ha due turni che possono parlare — quello del run e
+        quello d'annuncio — e il riarmo li riguarda entrambi. Uno solo dei due
+        deve consegnare."""
+        two_tasks.subagent_failure = (1, "hps irraggiungibile")
+        await two_tasks.cycles(ESCALATE_AFTER_FAILURES)
+        assert len(two_tasks.agent.messages) == 1
+
+        two_tasks.user_says("ci sei?")
+        await two_tasks.cycles(ESCALATE_AFTER_FAILURES)
+
+        assert len(two_tasks.agent.messages) == 2
+
+    async def test_the_alert_waits_for_the_streak_to_be_rebuilt(
+        self, two_tasks: _Harness
+    ) -> None:
+        two_tasks.subagent_failure = (1, "hps irraggiungibile")
+        await two_tasks.cycles(ESCALATE_AFTER_FAILURES)
+        two_tasks.user_says()
+
+        await two_tasks.cycles(ESCALATE_AFTER_FAILURES - 1)
+
+        assert len(two_tasks.agent.messages) == 1
+
+    async def test_a_markerless_followup_cannot_be_turned_into_an_alert(
+        self, two_tasks: _Harness
+    ) -> None:
+        """Il riarmo dà al modello il diritto di riparlare, non un guasto nuovo.
+
+        Con i verdetti che smettono di arrivare — lo stato sano di un controllo
+        delegato, misurato — la sequenza si azzera a ogni run, quindi non
+        raggiunge mai la soglia e nessun messaggio dell'utente può farla
+        arrivare. La direzione dell'errore del modulo, intatta.
+        """
+        two_tasks.subagent_failure = (1, "hps irraggiungibile")
+        await two_tasks.cycles(ESCALATE_AFTER_FAILURES)
+
+        two_tasks.forgets_the_next(20)
+        for _ in range(6):
+            two_tasks.user_says()
+            await two_tasks.cycles(2)
+
+        assert len(two_tasks.agent.messages) == 1
+
+    async def test_a_verdict_that_comes_back_after_a_silent_one_still_counts(
+        self, two_tasks: _Harness
+    ) -> None:
+        """Il pattern del device: un annuncio dichiara, il successivo no.
+
+        Serve a fissare la manopola a intermittenza, senza la quale il caso non
+        era rappresentabile: ogni verdetto arrivato conta, e quelli saltati
+        azzerano la sequenza senza cancellare il ricordo dell'avviso.
+        """
+        two_tasks.subagent_failure = (1, "hps irraggiungibile")
+        await two_tasks.cycles(ESCALATE_AFTER_FAILURES)
+
+        for _ in range(4):
+            two_tasks.forgets_the_next(1)
+            await two_tasks.cycles(1)
+            await two_tasks.cycles(1)
+
+        entry = two_tasks.entry_for(0)
+        assert entry is not None
+        assert entry.escalated is True
+        assert entry.consecutive_could_not_check == 1
+        assert len(two_tasks.agent.messages) == 1
 
 
 class TestTheOptimismIsPreserved:

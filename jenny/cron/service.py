@@ -328,6 +328,10 @@ class CronService:
                             ) or 0,
                             since_ms=entry.get("sinceMs"),
                             escalated=bool(entry.get("escalated")),
+                            # Assente nelle voci scritte prima di questo campo:
+                            # ``None`` significa "gli si è parlato, non si sa
+                            # quando", cioè non riarmabile. V. ``CronTaskCheckState``.
+                            escalated_at_ms=entry.get("escalatedAtMs"),
                             label=entry.get("label") or "",
                             pending_since_ms=entry.get("pendingSinceMs"),
                         )
@@ -570,6 +574,7 @@ class CronService:
                                 "consecutiveCouldNotCheck": e.consecutive_could_not_check,
                                 "sinceMs": e.since_ms,
                                 "escalated": e.escalated,
+                                "escalatedAtMs": e.escalated_at_ms,
                                 "label": e.label,
                                 "pendingSinceMs": e.pending_since_ms,
                             }

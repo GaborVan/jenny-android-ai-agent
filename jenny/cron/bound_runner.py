@@ -55,6 +55,26 @@ MONITOR_COULD_NOT_CHECK_MARKER = COULD_NOT_CHECK_MARKER
 MONITOR_ESCALATE_AFTER_FAILURES = ESCALATE_AFTER_FAILURES
 
 
+def has_already_warned_could_not_check(state: CronJobState) -> bool:
+    """L'utente sa già che questo controllo non funziona, e nulla è cambiato.
+
+    Serve a *chiedere di tacere*, non solo a smettere di chiedere di parlare:
+    finché c'era il solo ramo di escalation, un monitor già annunciato tornava
+    a ricevere il prompt di sempre con il proprio avviso di due ore prima ancora
+    in coda alla sessione e il guasto ancora davanti — ed è la situazione in cui
+    il modello, misurato sul device, ha richiamato ``message`` di testa sua
+    (v. la docstring di ``already_warned_block`` in
+    :mod:`jenny.cron.heartbeat_tasks`, dove il caso è documentato per esteso).
+
+    Unica lettura di ``could_not_check_escalated``, e :func:`should_escalate_could_not_check`
+    la nega: i due rami finiscono nello stesso prompt e se divergessero di un
+    caso quel prompt chiederebbe insieme di parlare e di tacere dello stesso
+    controllo. Nel template sono comunque ``if``/``elif``, che è la seconda
+    metà della stessa garanzia.
+    """
+    return state.could_not_check_escalated
+
+
 def should_escalate_could_not_check(state: CronJobState) -> bool:
     """True quando è QUESTO run a dover avvisare, se anche lui non controlla.
 
@@ -66,7 +86,7 @@ def should_escalate_could_not_check(state: CronJobState) -> bool:
     scelta (v. la docstring di ``jenny/runtime/cron_dispatch.py``).
     """
     return (
-        not state.could_not_check_escalated
+        not has_already_warned_could_not_check(state)
         and state.consecutive_could_not_check >= MONITOR_ESCALATE_AFTER_FAILURES - 1
     )
 
@@ -183,6 +203,9 @@ async def _run_bound_cron_job(
         # prompt reso resta byte-identico a prima finché non c'è un guasto.
         escalate=escalate,
         failed_runs=job.state.consecutive_could_not_check if escalate else 0,
+        # Mutuamente esclusivo con ``escalate`` per costruzione, e nel template
+        # è l'``elif`` dello stesso ``if``.
+        already_warned=monitor and has_already_warned_could_not_check(job.state),
     )
     prompt_ref = _cron_prompt_ref(prompt, monitor=monitor)
     run_id = f"{job.id}:{int(time.time() * 1000)}:{uuid.uuid4().hex[:8]}"
@@ -274,9 +297,22 @@ async def _run_bound_cron_job(
             raise CronMonitorCouldNotCheckError(
                 f"cron monitor job {job.id} could not run its check",
                 reason=reason or None,
-                # L'avviso è "dato" solo se è davvero uscito: un modello che
-                # ignora l'istruzione deve ritrovarsela al giro dopo.
-                escalated=escalate and outcome.spoke,
+                # L'avviso è "dato" solo se è davvero uscito — un modello che
+                # ignora l'istruzione deve ritrovarsela al giro dopo — ma
+                # *chi* lo abbia chiesto non conta: anche un avviso che non
+                # avevamo ordinato è un avviso già dato, e legarlo a
+                # ``escalate`` lasciava lo stato pulito su un messaggio partito
+                # di iniziativa del modello. La soglia scattava lo stesso due
+                # giri dopo e l'utente si sentiva dire la stessa cosa una
+                # seconda volta (misurato alle 10:19; è il difetto che
+                # ``3894351`` ha chiuso sul ramo heartbeat).
+                #
+                # Qui non c'è il problema di attribuzione che là ha richiesto
+                # ``sole_failure``: un monitor ha UN controllo per turno, e
+                # questo ramo gira solo se il turno ha scritto ``CHECK_FAILED``
+                # — un messaggio uscito da quel turno non può che riguardare
+                # quel guasto.
+                escalated=outcome.spoke,
             )
         # L'esito lo dice da sé: per un monitor l'outbound finale è sempre None,
         # e ``spoke`` distingue "ho parlato col tool ``message``" da "non avevo

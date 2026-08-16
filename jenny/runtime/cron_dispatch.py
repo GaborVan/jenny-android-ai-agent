@@ -38,6 +38,7 @@ from jenny.cron.heartbeat_tasks import (
     already_warned_block,
     escalation_block,
     parse_heartbeat_tasks,
+    rearm_after_user_message,
     record_task_outcomes,
     resolve_pending_delegations,
     task_index_block,
@@ -48,7 +49,8 @@ from jenny.cron.service import CronJobSkippedError
 from jenny.cron.session_turns import is_bound_cron_job
 from jenny.cron.types import CronMonitorCouldNotCheckError
 from jenny.runtime.power import keep_awake
-from jenny.session.keys import HEARTBEAT_SESSION_KEY
+from jenny.session.keys import HEARTBEAT_SESSION_KEY, UNIFIED_SESSION_KEY
+from jenny.session.manager import last_user_message_ms
 from jenny.session.turn_visibility import TurnVisibility
 
 if TYPE_CHECKING:
@@ -218,12 +220,18 @@ class CronDispatcher:
         # callback che con gli snapshot spenti non fa nulla e tace verrebbe
         # letto come uno che ha fatto il suo lavoro.
         snapshot_before_dream: Callable[[], Awaitable[bool]] | None = None,
+        # L'orologio, iniettabile per una ragione sola: da quando l'heartbeat
+        # confronta due istanti — quello dell'avviso e quello dell'ultimo
+        # messaggio dell'utente — un test che non può muoverlo non può provare
+        # niente su quel confronto.
+        now_ms: Callable[[], int] | None = None,
     ) -> None:
         self._get_agent = get_agent
         self._config = config
         self._cron = cron
         self._hb_cfg = heartbeat_cfg
         self._snapshot_before_dream = snapshot_before_dream
+        self._now_ms = now_ms or (lambda: int(time.time() * 1000))
         # Un task delegato con ``spawn`` non ha un esito dentro il turno che lo
         # delega, e il turno che quell'esito ce l'ha — l'annuncio del subagent —
         # arriva dal bus e non passa mai di qui. Il servizio cron è l'aggancio
@@ -231,8 +239,25 @@ class CronDispatcher:
         cron.heartbeat_followup = HeartbeatFollowup(
             cron=cron,
             heartbeat_file=lambda: self._config.workspace_path / "HEARTBEAT.md",
-            now_ms=lambda: int(time.time() * 1000),
+            now_ms=self._now_ms,
+            user_spoke_at_ms=self._user_spoke_at_ms,
         )
+
+    def _user_spoke_at_ms(self) -> int | None:
+        """Quando l'utente ha scritto l'ultima volta, o ``None``.
+
+        L'agente si chiede al getter e non si cattura: prima dell'onboarding non
+        esiste, e senza agente non ci sono sessioni da leggere — che è anche la
+        risposta giusta, "non risulta che abbia scritto", cioè nessun riarmo.
+
+        La conversazione è **una** (``session_key_for_channel`` fa collassare
+        ogni canale su ``unified:default``), quindi questa riga vale anche per
+        Telegram: chi ha letto l'avviso lì l'ha letto lo stesso.
+        """
+        agent = self._get_agent()
+        if agent is None:
+            return None
+        return last_user_message_ms(agent.sessions.get_or_create(UNIFIED_SESSION_KEY))
 
     async def dispatch(self, job: "CronJob") -> str | None:
         """Execute a cron job through the agent.
@@ -570,6 +595,22 @@ class CronDispatcher:
                 ),
             )
 
+        # E l'altra cosa successa fra un run e l'altro: l'utente si è fatto vivo.
+        # Se ha scritto dopo che gli abbiamo parlato, l'avviso l'ha letto, e un
+        # guasto ancora aperto torna a essere una notizia. Prima di leggere lo
+        # stato per gli stessi motivi della riga sopra — dopo, il prompt
+        # porterebbe la domanda di ieri.
+        rearmed = rearm_after_user_message(
+            job.state, user_spoke_at_ms=self._user_spoke_at_ms()
+        )
+        if rearmed:
+            logger.info(
+                "Heartbeat: the user has written since being warned, {} check(s) can be "
+                "reported again: {}",
+                len(rearmed),
+                "; ".join(rearmed),
+            )
+
         # L'escalation si decide PRIMA del turno, perché è una riga di prompt:
         # solo il modello, dentro il turno, sa se il controllo è riuscito adesso,
         # ed è anche l'unico che possa consegnare (tool ``message``). Con nessun
@@ -651,7 +692,7 @@ class CronDispatcher:
             job.state,
             tasks,
             parse_could_not_check_marks(outcome.final_text),
-            now_ms=int(time.time() * 1000),
+            now_ms=self._now_ms(),
             escalating=escalating,
             spoke=outcome.spoke,
             delegated=parse_delegated_marks(outcome.final_text),

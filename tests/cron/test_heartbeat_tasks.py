@@ -18,6 +18,7 @@ from jenny.cron.could_not_check import (
     parse_ok_marks,
 )
 from jenny.cron.heartbeat_tasks import (
+    HeartbeatTask,
     already_warned_block,
     attribute_marks,
     escalation_block,
@@ -566,6 +567,74 @@ class TestOneFaultIsOneWarning:
             )
         assert tasks_due_for_escalation(state, tasks) == tasks
 
+    def test_a_message_about_the_already_warned_task_does_not_stamp_the_new_one(self) -> None:
+        """La forma davvero raggiungibile della stessa trappola, e la peggiore.
+
+        Il task 1 è già stato annunciato, è ancora rotto ed è nel blocco
+        ``already_warned``. Quel blocco esiste proprio perché il modello, con il
+        guasto ancora davanti, ``message`` lo chiama lo stesso: è il
+        comportamento misurato sul device che la sua docstring registra. In
+        quello stesso turno il task 2 si rompe per la **prima** volta ed è
+        l'unica riga ``CHECK_FAILED``.
+
+        Se "unico guasto dichiarato" bastasse ad attribuire il messaggio, il
+        task 2 verrebbe timbrato ``escalated`` alla prima mancanza: da lì entra
+        nel blocco ``already_warned``, non è più dovuto per escalation, e
+        all'utente non arriva mai. Un guasto reale zittito per sempre.
+
+        Il task 1 qui non scrive il suo marcatore — succede, ed è il 02:31 del
+        logcat — quindi la sua voce viene potata in questo stesso turno: la
+        fotografia dei già-avvisati va presa **prima** del ciclo, o il candidato
+        sparisce insieme alla voce.
+        """
+        tasks = parse_heartbeat_tasks(_file(_WATERBOT, _VITAMINE))
+        state = CronJobState(
+            task_checks={
+                tasks[0].id: CronTaskCheckState(
+                    consecutive_could_not_check=5, escalated=True, label="Ogni ciclo"
+                )
+            }
+        )
+
+        record_task_outcomes(
+            state,
+            tasks,
+            [CouldNotCheckMark("2", "sveglia non impostata")],
+            now_ms=10,
+            escalating=[],  # nessuno ha chiesto di parlare: il 1 è già annunciato
+            spoke=True,  # ma il modello ha parlato lo stesso, del 1
+        )
+
+        assert state.task_checks[tasks[1].id].escalated is False
+
+        # E il 2 resta annunciabile quando la sua soglia arriva.
+        for run in range(1, ESCALATE_AFTER_FAILURES):
+            record_task_outcomes(
+                state, tasks, [CouldNotCheckMark("2", "sveglia non impostata")],
+                now_ms=10 + run, escalating=[], spoke=False,
+            )
+        assert tasks_due_for_escalation(state, tasks) == [tasks[1]]
+
+    def test_the_same_shape_on_the_announce_turn(self) -> None:
+        """Il turno d'annuncio porta gli stessi due blocchi condizionali del run,
+        quindi può parlare del task già avvisato esattamente allo stesso modo."""
+        tasks = parse_heartbeat_tasks(_file(_WATERBOT, _VITAMINE))
+        state = CronJobState(
+            task_checks={
+                tasks[0].id: CronTaskCheckState(
+                    consecutive_could_not_check=5, escalated=True, pending_since_ms=11
+                ),
+                tasks[1].id: CronTaskCheckState(pending_since_ms=11),
+            }
+        )
+
+        record_followup_outcomes(
+            state, tasks, [CouldNotCheckMark("2", "sveglia non impostata")],
+            now_ms=12, escalating=[], spoke=True,
+        )
+
+        assert state.task_checks[tasks[1].id].escalated is False
+
     def test_an_explicit_escalation_still_covers_every_task_it_named(self) -> None:
         """Il blocco di escalation chiede **un** messaggio per tutti i task che
         elenca, quindi un solo ``message`` li copre tutti: lì l'attribuzione è
@@ -725,19 +794,64 @@ class TestThePromptFragments:
 
         assert "never in a message to the user" in block
 
-    def test_the_escalation_block_asks_for_one_message_for_all_of_them(self) -> None:
-        tasks = parse_heartbeat_tasks(_file(_WATERBOT, _VITAMINE))
+    @staticmethod
+    def _due(*streaks: int) -> list[HeartbeatTask]:
+        """I task dovuti, con la loro sequenza: come li produce il run vero.
 
-        block = escalation_block(tasks)
+        ``escalation_block`` si costruisce sempre sull'uscita di
+        ``tasks_due_for_escalation``, che è la sola a sapere quanti run sono
+        mancati davvero — passargli dei task grezzi qui vorrebbe dire misurare
+        una chiamata che non esiste.
+        """
+        tasks = parse_heartbeat_tasks(_file(_WATERBOT, _VITAMINE))
+        state = CronJobState(
+            task_checks={
+                task.id: CronTaskCheckState(consecutive_could_not_check=streak)
+                for task, streak in zip(tasks, streaks)
+            }
+        )
+        return tasks_due_for_escalation(state, tasks)
+
+    def test_the_escalation_block_asks_for_one_message_for_all_of_them(self) -> None:
+        block = escalation_block(self._due(2, 2))
 
         assert "EXACTLY ONCE" in block
         assert "never one per task" in block
         assert "no internal file names" in block
 
     def test_the_escalation_block_lists_only_the_tasks_that_are_due(self) -> None:
-        tasks = parse_heartbeat_tasks(_file(_WATERBOT, _VITAMINE))
-
-        block = escalation_block([tasks[1]])
+        block = escalation_block(self._due(0, 2))
 
         assert "Alle 9 ricordami le vitamine." in block
         assert "Ogni ciclo" not in block
+
+    def test_the_escalation_block_counts_the_runs_that_have_actually_happened(self) -> None:
+        """Il numero è quello vero, non la soglia.
+
+        ``tasks_due_for_escalation`` scatta a ``K - 1``: quando il blocco viene
+        costruito i run mancati sono **due**, e il terzo è quello che sta per
+        girare. Il modello quel numero lo riferisce all'utente, che si sentiva
+        dire "tre" di una cosa successa due volte. Il monitor lo fa già giusto
+        (v. ``test_the_prompt_counts_the_runs_that_have_actually_happened`` in
+        ``test_cron_monitor_could_not_check.py``); qui la costante era scritta
+        a mano nel testo.
+        """
+        block = escalation_block(self._due(ESCALATE_AFTER_FAILURES - 1))
+
+        assert f"({ESCALATE_AFTER_FAILURES - 1} runs in a row)" in block
+        assert f"{ESCALATE_AFTER_FAILURES} times in a row" not in block
+        assert f"({ESCALATE_AFTER_FAILURES} runs in a row)" not in block
+
+    def test_each_listed_task_carries_its_own_count(self) -> None:
+        """Un blocco solo può nominarne più d'uno, e le sequenze non coincidono.
+
+        Un task dovuto alla soglia e uno di cui il modello aveva già ignorato
+        l'istruzione arrivano qui con due numeri diversi: una frase sola per
+        entrambi ne direbbe uno sbagliato per uno dei due.
+        """
+        due = self._due(2, 5)
+
+        block = escalation_block(due)
+
+        assert f"- 1. {due[0].label} (2 runs in a row)" in block
+        assert f"- 2. {due[1].label} (5 runs in a row)" in block
