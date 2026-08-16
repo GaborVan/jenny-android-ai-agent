@@ -4,6 +4,7 @@ import base64
 import hashlib
 import mimetypes
 import platform
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -23,6 +24,13 @@ from jenny.utils.prompt_templates import render_template
 # Fallback quando ContextBuilder è costruito senza config (test, tool isolati):
 # stesso valore del default di ``AtlasConfig.max_context_tokens``.
 _DEFAULT_WIKI_DIRECTORY_TOKENS = 1200
+
+# Il nome del tool che fa da interruttore ad ``agent/scheduling.md``. Costante e
+# non ``CronTool.name``: importare il tool qui tirerebbe dentro tutto il package
+# cron, e ``context.py`` lo importa mezzo repo. L'accoppiamento lo tiene fermo un
+# test (``test_cron_tool_name_constant_matches``), che ``CronTool`` lo importa
+# davvero perché lì costa solo tempo di test.
+_CRON_TOOL_NAME = "cron"
 
 
 def _absolute_workspace(root: Path) -> Path:
@@ -47,25 +55,25 @@ class ContextBuilder:
 
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md"]
     # File di bootstrap da omettere del tutto quando sono ancora il template
-    # intatto. L'elenco è corto apposta: ``USER.md`` intatto non dice niente
-    # sull'utente — è l'impalcatura che spiega a Dream cosa scriverci, e le
-    # versioni ritirate erano perfino peggio (un modulo a caselle, che invitava
-    # il modello a rispondere alle caselle). È lo stesso caso di ``MEMORY.md``
-    # e riceve la stessa risposta: si salta.
+    # intatto. ``USER.md`` e ``AGENTS.md`` intatti non dicono niente né
+    # sull'utente né sul workspace: sono l'impalcatura che spiega dove va cosa,
+    # e le versioni ritirate erano perfino peggio (un modulo a caselle il primo,
+    # un manuale di cron scritto da noi il secondo). È lo stesso caso di
+    # ``MEMORY.md`` e riceve la stessa risposta: si salta.
     #
-    # ``AGENTS.md`` e ``SOUL.md`` no. I loro template non sono segnaposto: sono
-    # il comportamento di serie (le regole di cron/heartbeat; l'identità di
-    # Jenny, che non è scritta in nessun altro punto del prompt). Ometterli
-    # perché nessuno li ha ancora modificati toglierebbe personalità e guida
-    # operativa a ogni installazione nuova — una regressione, non una
-    # correzione. Restano nel prompt, etichettati per quello che sono, così che
-    # il modello non li citi come preferenze dell'utente.
+    # ``AGENTS.md`` ci è entrato con ``roadmap/agents-md-ownership.md``, che ha
+    # spostato la sua metà "di sistema" in ``agent/scheduling.md`` — dove un
+    # aggiornamento arriva davvero, perché ``agent/**`` si riscrive a ogni boot
+    # mentre i file dell'utente si creano una volta sola. Quel che resta è un
+    # segnaposto, e un segnaposto nel prompt è solo contesto pagato a vuoto.
     #
-    # Quando il lavoro di ``roadmap/agents-md-ownership.md`` avrà spostato la
-    # metà "di sistema" di AGENTS.md sotto ``templates/agent/``, quel che resta
-    # sarà un segnaposto come USER.md e basterà aggiungerlo qui (è la domanda
-    # aperta 1 di quel documento).
-    _BOOTSTRAP_SKIP_IF_TEMPLATE = frozenset({"USER.md"})
+    # ``SOUL.md`` no: il suo template non è un segnaposto, è l'identità di
+    # Jenny, che non è scritta in nessun altro punto del prompt. Ometterla
+    # perché nessuno l'ha ancora modificata toglierebbe personalità a ogni
+    # installazione nuova — una regressione, non una correzione. Resta nel
+    # prompt, etichettata per quello che è, così che il modello non la citi
+    # come preferenza dell'utente.
+    _BOOTSTRAP_SKIP_IF_TEMPLATE = frozenset({"USER.md", "AGENTS.md"})
     # Le versioni *ritirate* di un template, per digest sha256 del testo
     # strippato. Servono perché il riconoscimento qui sopra è un confronto con
     # la copia bundled **corrente**: riscrivere un template scollega ogni
@@ -81,14 +89,35 @@ class ContextBuilder:
     #
     # Chi riscrive un template qui elencato deve aggiungere il digest della
     # versione uscente. Non è un promemoria: ``test_current_user_template_digest_is_pinned``
-    # fallisce finché non lo si fa.
+    # (e il suo gemello per ``AGENTS.md``) fallisce finché non lo si fa.
     _RETIRED_TEMPLATE_DIGESTS: dict[str, frozenset[str]] = {
         # 0.3.0 (8833b94) → 0.7.1: "# User Profile" con i tre blocchi di
         # caselle, "(your name)" e le sezioni fra parentesi.
         "USER.md": frozenset({
             "db2c6d63e0b43e5ac414da85f86454e2614f6524d4ef92a291f11476e6e03deb",
         }),
+        # Le tre versioni di "# Agent Instructions", il manuale di cron e
+        # heartbeat che si spediva dentro un file dell'utente. Sono tutte e tre
+        # candidate vive: un telefono porta per sempre quella che era bundled al
+        # *suo* primo avvio, indipendentemente da quanti aggiornamenti ha preso
+        # dopo — quel file si crea una volta sola e non si tocca più.
+        "AGENTS.md": frozenset({
+            # 0.3.0 (8833b94) → 0.6.0. È quella sul Titan 2.
+            "a7883c61338446966621d481f996d7585987142461f716f64e04e4d692a6b341",
+            # 6c5dba8: + il blocco reminder/monitor. Mai uscita in una release,
+            # ma un'installazione da sorgente in quella finestra ce l'ha.
+            "7573b397f15350b683bb6e87392d27a479e62bf1894a53fe2a60d29d813106c6",
+            # 1f23ef3 (0.6.6) → 0.7.1: + il contratto di silenzio.
+            "72d4bd718e70e16b9e6b7f5f9a0dc73a5b34d4a972bb43c0b6ebec5072d280c3",
+        }),
     }
+    # La formula "still matches the template shipped with the app" è falsa per
+    # una versione ritirata, ed è il motivo per cui ``97d7b38`` aveva lasciato
+    # fuori ``AGENTS.md``. Il problema non è stato risolto: è sparito. Un file in
+    # ``_BOOTSTRAP_SKIP_IF_TEMPLATE`` non arriva mai a questo ramo, e ``SOUL.md``
+    # — l'unico che può ancora essere etichettato — di digest ritirati non ne ha,
+    # quindi l'avviso esce solo quando è vero alla lettera. Non riscrivere il
+    # testo per un caso che non può presentarsi.
     _BOOTSTRAP_TEMPLATE_NOTICE = (
         "[Unmodified default — this file still matches the template shipped with the app; "
         "the user has not written any of it. Nothing below states a user preference.]"
@@ -165,6 +194,33 @@ class ContextBuilder:
             orchestrator=orchestrating,
             output_path=str(get_output_path(_absolute_workspace(root))),
         ))
+
+        # Dove va un lavoro ricorrente: heartbeat, `reminder` o `monitor`. Era
+        # nel template di ``AGENTS.md``, cioè in un file che si crea al primo
+        # avvio e non si aggiorna mai più — su un telefono aggiornato da mesi
+        # restava il testo della versione in cui era stato installato.
+        #
+        # Guardia sul tool e non sul modo: l'orchestratore `cron` ce l'ha
+        # (``CronTool._scopes``), Dream e Atlas no (``build_dream_tools``), e
+        # fin qui si vedevano recapitare l'istruzione di schedulare con un tool
+        # che il loro registry non contiene — lo stesso difetto che il parametro
+        # `orchestrator` per-turno è nato per chiudere. ``None`` vuol dire "non
+        # lo so" (nessun registry per-turno, nessuna callable), non "il tool non
+        # c'è": si rende, come faceva ``AGENTS.md``.
+        #
+        # La posizione è dopo il blocco di bootstrap, e non è cosmesi: v.
+        # ``_render_tool_inventory``, la prosa più vicina alla fine è quella che
+        # il modello segue quando due istruzioni si contraddicono. Su
+        # un'installazione dove l'utente ha scritto *sopra* il vecchio testo di
+        # sistema — l'unico caso che nessuna migrazione può raggiungere — è la
+        # sola cosa che decide la contraddizione dalla parte giusta.
+        tool_names = self._resolve_tool_names(available_tools)
+        if tool_names is None or _CRON_TOOL_NAME in tool_names:
+            # v. ``_render_tool_inventory``: workspace di una versione
+            # precedente, dove questo template non è ancora stato estratto.
+            with suppress(Exception):
+                parts.append(render_template("agent/scheduling.md"))
+
         if orchestrating:
             parts.append(render_template("agent/orchestrator.md"))
 

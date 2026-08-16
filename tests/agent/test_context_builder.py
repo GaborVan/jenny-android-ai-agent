@@ -7,6 +7,7 @@ import pytest
 
 from jenny.agent.context import ContextBuilder
 from jenny.session.goal_state import GOAL_STATE_KEY
+from jenny.utils.android_assets import _USER_OWNED_TEMPLATES
 from jenny.utils.helpers import merge_message_content
 
 pytestmark = pytest.mark.usefixtures("_configure_jenny_workspace")
@@ -171,26 +172,39 @@ def _bundled(name: str) -> str:
     return tpl.read_text(encoding="utf-8")
 
 
-def _retired_user_template() -> str:
-    """``jenny/templates/USER.md`` come spediva da 0.3.0 (8833b94) a 0.7.1.
+def _fixture(name: str) -> str:
+    """Un template ritirato, letto da ``fixtures/`` e non da una stringa qui dentro.
 
-    Sta in un file e non in una stringa qui dentro perché tre righe di
-    ``## Topics of Interest`` finiscono con uno spazio: trascritte in un
-    sorgente Python le toglierebbe ``ruff`` (W291), il digest non combacerebbe
-    più e il test proverebbe qualcosa di diverso da quello che c'è sui telefoni.
+    È la stessa ragione registrata da ``97d7b38``: alcune di quelle righe
+    finiscono con uno spazio, trascritte in un sorgente Python le toglierebbe
+    ``ruff`` (W291), il digest non combacerebbe più e il test proverebbe
+    qualcosa di diverso da quello che c'è sui telefoni. I file sono estratti con
+    ``git show <sha>:jenny/templates/<nome>``, non ricopiati a mano.
     """
-    return (Path(__file__).parent / "fixtures" / "user_md_retired_0.3.0.md").read_text(
-        encoding="utf-8"
-    )
+    return (Path(__file__).parent / "fixtures" / name).read_text(encoding="utf-8")
+
+
+def _retired_user_template() -> str:
+    """``jenny/templates/USER.md`` come spediva da 0.3.0 (8833b94) a 0.7.1."""
+    return _fixture("user_md_retired_0.3.0.md")
+
+
+# Le tre versioni ritirate di ``AGENTS.md``. Tutte e tre sono candidate vive: un
+# telefono porta quella che era bundled al *suo* primo avvio, per sempre.
+_RETIRED_AGENTS_FIXTURES = [
+    "agents_md_retired_v0.3.0.md",
+    "agents_md_retired_6c5dba8_unreleased.md",
+    "agents_md_retired_v0.6.6.md",
+]
 
 
 class TestBootstrapTemplateGuard:
     """Un file di bootstrap mai toccato non è contenuto scritto dall'utente.
 
-    ``USER.md`` intatto non dice niente sull'utente e viene omesso (stessa
-    risposta che ``MEMORY.md`` riceve in ``build_system_prompt``); ``AGENTS.md``
-    e ``SOUL.md`` intatti sono il comportamento di serie e restano, ma
-    etichettati.
+    ``USER.md`` e ``AGENTS.md`` intatti non dicono niente né sull'utente né sul
+    workspace e vengono omessi (stessa risposta che ``MEMORY.md`` riceve in
+    ``build_system_prompt``); ``SOUL.md`` intatto è l'identità di serie e resta,
+    ma etichettato.
     """
 
     def test_untouched_user_md_is_skipped(self, tmp_path):
@@ -207,7 +221,12 @@ class TestBootstrapTemplateGuard:
         assert "Luca" in result
         assert ContextBuilder._BOOTSTRAP_TEMPLATE_NOTICE not in result
 
-    @pytest.mark.parametrize("filename", ["AGENTS.md", "SOUL.md"])
+    def test_untouched_agents_md_is_skipped(self, tmp_path):
+        (tmp_path / "AGENTS.md").write_text(_bundled("AGENTS.md"), encoding="utf-8")
+        builder = _builder(tmp_path)
+        assert builder._load_bootstrap_files() == ""
+
+    @pytest.mark.parametrize("filename", ["SOUL.md"])
     def test_untouched_default_is_kept_but_labelled(self, tmp_path, filename):
         content = _bundled(filename)
         (tmp_path / filename).write_text(content, encoding="utf-8")
@@ -215,25 +234,27 @@ class TestBootstrapTemplateGuard:
         result = builder._load_bootstrap_files()
         assert f"## {filename}" in result
         assert ContextBuilder._BOOTSTRAP_TEMPLATE_NOTICE in result
-        # Il comportamento di serie non deve sparire: niente regressione di
-        # identità o di guida operativa su un'installazione nuova.
+        # L'identità di serie non deve sparire: niente regressione di
+        # personalità su un'installazione nuova.
         assert content.strip() in result
 
     @pytest.mark.parametrize("filename", ["AGENTS.md", "SOUL.md"])
     def test_edited_file_carries_no_notice(self, tmp_path, filename):
+        # Un file *modificato* entra nel prompt in entrambi i casi: quello che
+        # cambia con lo skip è solo il ramo del template intatto.
         (tmp_path / filename).write_text(_bundled(filename) + "\n\nExtra rule.", encoding="utf-8")
         builder = _builder(tmp_path)
         result = builder._load_bootstrap_files()
         assert "Extra rule." in result
         assert ContextBuilder._BOOTSTRAP_TEMPLATE_NOTICE not in result
 
-    def test_pristine_workspace_omits_only_the_placeholder(self, tmp_path):
+    def test_pristine_workspace_omits_both_placeholders(self, tmp_path):
         for name in ContextBuilder.BOOTSTRAP_FILES:
             (tmp_path / name).write_text(_bundled(name), encoding="utf-8")
         builder = _builder(tmp_path)
         result = builder._load_bootstrap_files()
-        assert "## AGENTS.md" in result
         assert "## SOUL.md" in result
+        assert "## AGENTS.md" not in result
         assert "## USER.md" not in result
 
 
@@ -274,6 +295,158 @@ class TestRetiredTemplates:
         ).hexdigest()
         assert current == "89c4ab4bfcdafea11e59b1856c31e08f16ba80960d68596f6fb631386a93c609"
         assert current not in ContextBuilder._RETIRED_TEMPLATE_DIGESTS["USER.md"]
+
+    @pytest.mark.parametrize("fixture", _RETIRED_AGENTS_FIXTURES)
+    def test_every_retired_agents_digest_is_recognised(self, tmp_path, fixture):
+        """Nessuna delle tre versioni di "# Agent Instructions" torna nel prompt.
+
+        Il manuale di cron che spediva dentro ``AGENTS.md`` ora vive in
+        ``agent/scheduling.md``; la copia rimasta sul disco di un telefono è
+        testo nostro, ritirato e in due casi su tre pure contraddetto.
+        """
+        (tmp_path / "AGENTS.md").write_text(_fixture(fixture), encoding="utf-8")
+        builder = _builder(tmp_path)
+        assert builder._load_bootstrap_files() == ""
+
+    def test_retired_agents_digest_does_not_swallow_real_user_content(self, tmp_path):
+        (tmp_path / "AGENTS.md").write_text(
+            _fixture("agents_md_retired_v0.3.0.md") + "\n- Deploy con `./gradlew`.\n",
+            encoding="utf-8",
+        )
+        builder = _builder(tmp_path)
+        result = builder._load_bootstrap_files()
+        assert "./gradlew" in result
+        assert ContextBuilder._BOOTSTRAP_TEMPLATE_NOTICE not in result
+
+    def test_current_agents_template_digest_is_pinned(self):
+        """Chi riscrive ``AGENTS.md`` deve ritirare esplicitamente la versione uscente.
+
+        Gemello di ``test_current_user_template_digest_is_pinned``: senza,
+        il prossimo rewrite rimette il testo uscente nel prompt di ogni
+        installazione vergine, per giunta senza etichetta. Se questo test
+        fallisce, sposta il digest qui atteso dentro
+        ``ContextBuilder._RETIRED_TEMPLATE_DIGESTS["AGENTS.md"]`` e mettine
+        qui quello nuovo.
+        """
+        current = hashlib.sha256(
+            _bundled("AGENTS.md").strip().encode("utf-8")
+        ).hexdigest()
+        assert current == "f7168ac0aacf6424203c6173e46ed333981f57c3d491f055fe1358c9b9614569"
+        assert current not in ContextBuilder._RETIRED_TEMPLATE_DIGESTS["AGENTS.md"]
+
+
+# ---------------------------------------------------------------------------
+# agent/scheduling.md — dove va un lavoro ricorrente
+# ---------------------------------------------------------------------------
+
+# Il titolo del template. Cercarlo nel prompt è come si distingue "il blocco c'è"
+# da "il prompt nomina cron da qualche altra parte".
+_SCHEDULING_HEADING = "# Recurring Work"
+
+# Il registry che ``build_dream_tools`` costruisce davvero (``memory.py``):
+# lettura e scrittura, nient'altro. Nessun ``cron``.
+_DREAM_TOOLS = ["read_file", "write_file", "edit_file", "apply_patch"]
+
+
+class TestSchedulingBlock:
+    """La guida su cron/heartbeat va solo a chi il tool ce l'ha.
+
+    Stava nel template di ``AGENTS.md``, cioè in un file che si crea al primo
+    avvio e non si aggiorna mai più, e ci andava *sempre*: anche a Dream e ad
+    Atlas, che ``cron`` non l'hanno mai avuto.
+    """
+
+    def test_scheduling_block_is_rendered_when_cron_is_available(self, tmp_path):
+        builder = _builder(tmp_path)
+        prompt = builder.build_system_prompt(available_tools=["cron", "read_file"])
+        assert _SCHEDULING_HEADING in prompt
+        assert "mode='monitor'" in prompt
+
+    def test_scheduling_block_is_absent_without_the_cron_tool(self, tmp_path):
+        """Il difetto che la guardia chiude: Dream riceveva l'istruzione di
+        schedulare con un tool che il suo registry non contiene."""
+        builder = _builder(tmp_path)
+        prompt = builder.build_system_prompt(available_tools=_DREAM_TOOLS)
+        assert _SCHEDULING_HEADING not in prompt
+
+    def test_scheduling_block_renders_when_tools_are_unknown(self, tmp_path):
+        """``None`` vuol dire "non lo so", non "il tool non c'è".
+
+        Nessun registry per-turno e nessuna callable dal costruttore: si rende,
+        come faceva ``AGENTS.md``. Senza questo, un refactor può trasformare la
+        guardia in un silenzio senza che niente se ne accorga.
+        """
+        builder = _builder(tmp_path)
+        prompt = builder.build_system_prompt(available_tools=None)
+        assert _SCHEDULING_HEADING in prompt
+
+    def test_cron_tool_name_constant_matches(self):
+        """``_CRON_TOOL_NAME`` non importa ``CronTool``; questo test sì.
+
+        L'import sta qui e non in ``context.py`` perché lì tirerebbe dentro
+        tutto il package cron in un modulo che importa mezzo repo.
+        """
+        from jenny.agent.context import _CRON_TOOL_NAME
+        from jenny.agent.tools.cron import CronTool
+
+        # ``name`` è una property e non serve un servizio cron per leggerla:
+        # ``None`` basta, il tool non viene usato.
+        assert _CRON_TOOL_NAME == CronTool(cron_service=None).name  # type: ignore[arg-type]
+
+    def test_scheduling_block_stays_small(self):
+        """Un tetto, non un'abitudine.
+
+        Questo blocco si paga a ogni turno in cui il tool esiste, compresi
+        quelli in cui l'utente chiede che ore sono. È l'unico meccanismo che
+        tiene fermo il confine fra i quattro posti in cui questa regola vive.
+        """
+        from jenny.utils.prompt_templates import render_template
+
+        # 1300 e non 1600: il testo attuale ne occupa 1135, e un tetto che lascia
+        # il 40% di margine non dice mai di no — cioè non fa il suo mestiere. Chi
+        # ha bisogno di sforarlo ha quasi sempre bisogno della skill.
+        rendered = render_template("agent/scheduling.md")
+        assert len(rendered) <= 1300, (
+            f"agent/scheduling.md è {len(rendered)} caratteri: sta tornando un manuale. "
+            "La profondità — sintassi, fusi orari, esempi, semantica di `list` — va in "
+            "`skills/cron/SKILL.md`, che si legge su richiesta invece che a ogni turno."
+        )
+
+
+# ---------------------------------------------------------------------------
+# I template dell'utente non contengono guida di sistema
+# ---------------------------------------------------------------------------
+
+
+class TestUserOwnedTemplatesCarryNoSystemGuidance:
+    """Un file che si crea una volta sola non può contenere una regola che cambia.
+
+    È il difetto di ``AGENTS.md`` reso controllabile: ``_USER_OWNED_TEMPLATES``
+    si estrae con ``skip_existing=True``, quindi qualunque cosa ci si scriva
+    dentro non raggiunge mai un'installazione esistente.
+    """
+
+    def test_the_stale_cron_parameters_are_gone(self):
+        """``USER_ID``/``CHANNEL`` e ``web:default`` non esistono.
+
+        Il tool ``cron`` non ha né ``user_id`` né ``channel``
+        (``_CRON_PARAMETERS``) e ``jenny/session/keys.py`` conia
+        ``unified:default``/``websocket:default``: quella riga diceva al modello
+        di procurarsi valori per parametri che non ci sono.
+        """
+        text = _bundled("AGENTS.md")
+        assert "USER_ID" not in text
+        assert "web:default" not in text
+
+    @pytest.mark.parametrize("name", _USER_OWNED_TEMPLATES)
+    def test_no_user_owned_template_documents_the_tools(self, name):
+        text = _bundled(name).lower()
+        for token in ("cron", "mode=", "every_seconds", "apply_patch"):
+            assert token not in text, (
+                f"{name} documenta `{token}`: è guida di sistema in un file che si "
+                "crea al primo avvio e non si aggiorna mai più. Va sotto "
+                "`jenny/templates/agent/` o in una skill."
+            )
 
 
 # ---------------------------------------------------------------------------

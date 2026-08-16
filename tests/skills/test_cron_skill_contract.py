@@ -1,15 +1,21 @@
-"""La skill `cron` è il documento che raggiunge davvero il dispositivo.
+"""La skill `cron` è il manuale: sintassi, fusi orari, esempi, semantica di ``list``.
 
-Le skill vengono ri-estratte a OGNI avvio senza ``skip_existing``
-(``jenny/utils/helpers.py``), mentre ``AGENTS.md`` è in
-``_USER_OWNED_TEMPLATES`` con ``skip_existing=True`` — quindi una regola di
-comportamento scritta solo lì non arriva mai su un'installazione esistente.
-Il pacchetto dice inoltre all'agente di leggere le skill *prima* di schedulare.
+Nasce come rimedio a un'asimmetria — le skill si ri-estraggono a OGNI avvio senza
+``skip_existing`` (``jenny/utils/helpers.py``), ``AGENTS.md`` è in
+``_USER_OWNED_TEMPLATES`` e si crea una volta sola, quindi una regola scritta solo
+lì non raggiungeva mai un'installazione esistente. Il difetto è sopravvissuto
+proprio così: la skill descriveva ancora "Three Modes" (una tassonomia che precede
+il parametro ``mode``) e portava come esempio l'anti-pattern esatto, mentre la
+guida corretta viveva in un file mai aggiornato sul telefono dell'utente.
 
-Questa asimmetria è la ragione per cui il difetto è sopravvissuto: la skill
-descriveva ancora "Three Modes" (una tassonomia che precede il parametro ``mode``)
-e portava come esempio l'anti-pattern esatto, mentre la guida corretta viveva in un
-file che sul telefono dell'utente non è mai stato aggiornato.
+Quel rimedio non serve più. La regola di *instradamento* — quale delle tre
+destinazioni — sta in ``jenny/templates/agent/scheduling.md``, che è codice e si
+riscrive a ogni boot; ``AGENTS.md`` non la contiene più affatto. Le asserzioni qui
+sotto restano, ma cambiano di mestiere: non presidiano più una scorciatoia, tengono
+fermo il posto della skill nel confine descritto in ``roadmap/agents-md-ownership.md``.
+Il manuale sta qui perché lo si legge su richiesta, mentre ``agent/scheduling.md`` si
+paga a ogni turno; ed è ancora questa la pagina che il prompt dice di leggere *prima*
+di schedulare.
 """
 
 from __future__ import annotations
@@ -86,8 +92,15 @@ def test_it_covers_the_heartbeat_alternative() -> None:
 
 
 def test_agents_md_is_not_the_only_home_of_the_rule() -> None:
-    """Guardia sull'asimmetria: ``AGENTS.md`` non si aggiorna, la skill sì."""
+    """La regola non deve tornare a vivere in un file che non si aggiorna.
+
+    Nata come guardia su un'asimmetria — ``AGENTS.md`` fermo, la skill no — e
+    sopravvissuta alla sua causa: la metà di sistema di ``AGENTS.md`` è stata
+    spostata in ``agent/scheduling.md``, che si riscrive a ogni avvio. Resta
+    perché il vincolo che pone è ancora quello giusto: ``AGENTS.md`` è e resta
+    un file dell'utente, quindi la regola operativa non può abitare lì.
+    """
     assert "AGENTS.md" in _USER_OWNED_TEMPLATES
-    # La regola operativa (scegliere il mode) deve esistere nella skill, che è
-    # l'unico dei due a raggiungere un'installazione già esistente.
+    # Scegliere il mode è profondità operativa: vive nella skill, che si legge
+    # su richiesta, non nel prompt che si paga a ogni turno.
     assert 'mode="monitor"' in _skill()

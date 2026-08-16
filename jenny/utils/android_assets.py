@@ -33,7 +33,7 @@ _SYSTEM_PROMPT_TEMPLATES = [
     "agent/subagent_announce.md", "agent/skills_section.md", "agent/apps_section.md",
     "agent/platform_policy.md", "agent/cron_reminder.md", "agent/cron_monitor.md",
     "agent/max_iterations_message.md", "agent/consolidator_archive.md",
-    "agent/dream.md", "agent/atlas.md",
+    "agent/dream.md", "agent/atlas.md", "agent/scheduling.md",
     "agent/orchestrator.md", "agent/tool_inventory.md",
     "agent/_snippets/untrusted_content.md",
     "agent/types/researcher.md", "agent/types/writer.md", "agent/types/coder.md",
