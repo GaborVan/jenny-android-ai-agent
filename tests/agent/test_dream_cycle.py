@@ -754,3 +754,74 @@ class TestTheManualRunTakesTheSnapshot:
         events, _ = await _run_manual(_SCENARIOS["cadence"], tmp_path, monkeypatch)
 
         assert events.count("snapshot") == 1
+
+
+class TestTheAlarmCanActuallySound:
+    """``STUCK_IS_ALARMING`` era codice morto, ed era l'unico allarme che c'e'.
+
+    Il review azzerava ``stuck``, quindi il contatore oscillava 1,2,1,2 e la
+    soglia a 4 non si raggiungeva mai: un Dream livelockato in modo permanente
+    non avrebbe prodotto una sola riga di ERROR, cioe' esattamente il "un
+    controllo rotto resta rotto in silenzio" che questo ramo esiste per chiudere.
+
+    La correzione e' di semantica, non di soglia: ``stuck`` conta i run
+    consecutivi in cui Dream non consolida, e a quella domanda un review appena
+    girato non e' una risposta. Lo azzera solo un cursore che avanza.
+    """
+
+    async def test_a_review_does_not_clear_the_stuck_counter(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        memory = _FakeMemory(tmp_path / "ws", review_state=(0, 2))
+        spy = _ReviewSpy(memory)
+        monkeypatch.setattr(_REVIEW_TARGET, spy)
+
+        prologue = await begin_dream_cycle(
+            _FakeAgent(tmp_path, memory), store=memory, cfg=_dream_cfg()
+        )
+
+        assert spy.ran, "due run bloccati devono forzare il review"
+        # La cadenza periodica riparte; il conteggio dei run bloccati no.
+        assert prologue.runs_since_review == 0
+        assert prologue.stuck == 2
+        assert memory.get_review_state() == (0, 2)
+
+    async def test_a_persistent_livelock_reaches_the_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Il caso vero, simulato per intero: nessun run avanza mai.
+
+        Prima della correzione questa sequenza produceva ``stuck`` massimo 2 e
+        nessun ERROR, per sempre.
+        """
+        memory = _FakeMemory(tmp_path / "ws")
+        spy = _ReviewSpy(memory)
+        monkeypatch.setattr(_REVIEW_TARGET, spy)
+        agent = _FakeAgent(tmp_path, memory)
+
+        seen: list[int] = []
+        reviews = 0
+        with _cycle_logs() as logs:
+            for _ in range(6):
+                runs, stuck = memory.get_review_state()
+                prologue = await begin_dream_cycle(
+                    agent, store=memory, cfg=_dream_cfg()
+                )
+                reviews += prologue.review is not None
+                _, stuck = finish_dream_cycle(
+                    memory,
+                    advanced=False,
+                    runs_since_review=prologue.runs_since_review + 1,
+                    stuck=prologue.stuck,
+                )
+                seen.append(stuck)
+
+            assert seen == [1, 2, 3, 4, 5, 6], seen
+            # Cadenza invariata rispetto a prima: il review parte quando il
+            # contatore *entra* nel run valendo un multiplo di due, cioe' al
+            # terzo e al quinto di questi sei. Uno ogni due run bloccati, che e'
+            # esattamente quello che faceva l'azzeramento — la correzione tocca
+            # cosa il contatore significa, non quanto spesso si spende.
+            assert reviews == 2, reviews
+            assert any("no longer consolidating" in line or "ERROR" in line
+                       for line in logs), logs

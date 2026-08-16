@@ -53,13 +53,14 @@ STUCK_FORCES_REVIEW = 2
 # forzato (a 2) e non è bastato. Log a ERROR, perché da qui in poi ogni run è
 # un turno LLM che non consolida nulla.
 #
-# Oggi però a questa soglia non ci si arriva, ed è un difetto che arriva insieme
-# alla riga, non introdotto spostandola: il review azzera ``stuck``, quindi il
-# contatore oscilla fra 0 e ``STUCK_FORCES_REVIEW`` e non lo supera mai. La
-# domanda che la soglia pone — "il review forzato non sta liberando abbastanza
-# spazio" — è quella giusta; a mancare è un contatore che il review non azzeri.
-# Finché non c'è, questo ERROR non parte: vale saperlo prima di cercarlo in
-# logcat e concludere che il livelock non è mai successo.
+# Perché ``stuck`` NON viene azzerato dal review, che sarebbe la cosa istintiva:
+# azzerandolo il contatore oscillava 1,2,1,2 e questa soglia non si raggiungeva
+# mai — l'allarme era codice morto, e per giunta l'unico allarme che questo
+# meccanismo abbia. Un contatore che il review azzera risponde a "da quanto
+# aspetto il prossimo review", che è una domanda a cui ``runs_since_review``
+# risponde già. Quella a cui deve rispondere ``stuck`` è "da quanti run di fila
+# Dream non consolida", e a quella un review che non ha risolto niente non è una
+# risposta. Lo azzera solo un cursore che avanza, cioè il problema che finisce.
 STUCK_IS_ALARMING = 4
 
 
@@ -198,7 +199,17 @@ async def begin_dream_cycle(
     # il review parte. Ed è un bersaglio migliore — un file sopra
     # soglia che non sta bloccando nessuna scrittura non è un'urgenza,
     # e può aspettare il giro periodico.
-    review_due = runs_since_review >= cfg.review_every_runs or stuck >= STUCK_FORCES_REVIEW
+    #
+    # Il ramo ``stuck`` usa il modulo e non ``>=``: il contatore non viene
+    # azzerato dal review (v. ``STUCK_IS_ALARMING``), quindi senza il modulo un
+    # livelock farebbe partire un review a *ogni* run da lì in poi. Con il
+    # modulo la cadenza è la stessa di prima — un review ogni due run bloccati —
+    # ma il contatore continua a salire, ed è ciò che rende raggiungibile
+    # l'allarme.
+    review_due = (
+        runs_since_review >= cfg.review_every_runs
+        or (stuck > 0 and stuck % STUCK_FORCES_REVIEW == 0)
+    )
     if not review_due:
         return DreamPrologue(
             report=report,
@@ -216,7 +227,12 @@ async def begin_dream_cycle(
         snapshotted=snapshotted,
         write_size_guard=guard,
     )
-    store.set_review_state(runs_since_review=0, stuck_runs=0)
+    # Si azzera solo ``runs_since_review``: il review è avvenuto, la cadenza
+    # periodica riparte. ``stuck`` resta dov'è, perché dice un'altra cosa — da
+    # quanti run di fila Dream non consolida — e un review appena girato non è
+    # una risposta a quella domanda. Lo azzera ``finish_dream_cycle``, e solo
+    # quando il cursore avanza davvero.
+    store.set_review_state(runs_since_review=0, stuck_runs=stuck)
     # ``freed`` è il delta dei **tre file misurati**, non del
     # workspace. Un review che sposta una task spec da USER.md a una
     # ``skills/<name>/SKILL.md`` — cosa che il suo prompt chiede
@@ -242,7 +258,7 @@ async def begin_dream_cycle(
         report=report,
         guard=make_write_size_guard(report),
         runs_since_review=0,
-        stuck=0,
+        stuck=stuck,
         review=outcome,
     )
 
