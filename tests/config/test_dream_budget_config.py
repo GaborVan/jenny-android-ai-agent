@@ -1,9 +1,10 @@
 """Test per i budget della memoria lunga su ``DreamConfig``.
 
-Il punto delicato non è la validazione in sé ma il *segno* del vincolo: qui
-zero è il default di spedizione ("misura, non applicare"), non un valore
-malformato. Questi test esistono soprattutto per impedire che qualcuno
-stringa ``ge=0`` in ``gt=0`` durante una pulizia.
+Due cose distinte da tenere ferme. La prima sono i tetti di spedizione, che
+sono un numero misurato sul device e non una stima: cambiarli è una decisione,
+non un refactor. La seconda è il *segno* del vincolo — zero resta legale, è
+"misura, non applicare", e questi test esistono soprattutto per impedire che
+qualcuno stringa ``ge=0`` in ``gt=0`` durante una pulizia.
 """
 
 from __future__ import annotations
@@ -17,15 +18,26 @@ from jenny.config.schema import DreamConfig
 from jenny.pydantic_compat import ValidationError
 
 
-def test_budget_knobs_default_to_measure_only() -> None:
+def test_memory_and_user_ship_enforced_at_two_thousand() -> None:
+    """I due tetti veri, scelti dalle misure del device.
+
+    ``MEMORY.md`` stava a 3.019 caratteri e ``USER.md`` a 1.626 dopo due
+    passaggi di review: 2.000 morde subito il primo e tiene il secondo. Sono
+    numeri misurati, non arrotondamenti — se cambiano, che sia perché è cambiata
+    una misura.
+    """
     cfg = DreamConfig()
 
-    # 0 = gauge sì, rifiuto no: i tetti si scelgono dopo aver letto le
-    # dimensioni reali sul device, cambiando la config e non il codice.
-    assert cfg.memory_budget_chars == 0
-    assert cfg.user_budget_chars == 0
-    assert cfg.soul_budget_chars == 0
+    assert cfg.memory_budget_chars == 2000
+    assert cfg.user_budget_chars == 2000
     assert cfg.review_every_runs == 12
+
+
+def test_soul_stays_measured_but_not_enforced() -> None:
+    # ``SOUL.md`` non segue gli altri due: mescola identità e vincoli di
+    # piattaforma, e un rifiuto di scrittura non sa su quale delle due sta
+    # premendo. Lo strumento giusto lì è il review pass, che legge e sceglie.
+    assert DreamConfig().soul_budget_chars == 0
 
 
 @pytest.mark.parametrize(
@@ -112,7 +124,40 @@ def test_config_written_before_the_budgets_existed_still_loads(tmp_path) -> None
 
     assert dream.enabled is True
     assert dream.interval_h == 2
-    assert dream.memory_budget_chars == 0
-    assert dream.user_budget_chars == 0
+    # Non avendo le chiavi, prende i default nuovi: è l'unica installazione
+    # esistente che il cambio di default raggiunge davvero.
+    assert dream.memory_budget_chars == 2000
+    assert dream.user_budget_chars == 2000
     assert dream.soul_budget_chars == 0
     assert dream.review_every_runs == 12
+
+
+def test_a_zero_already_on_disk_wins_over_the_new_default(tmp_path) -> None:
+    """Il caso del device, e il motivo per cui alzare il default non basta.
+
+    ``config/loader.py`` serializza con ``by_alias=True`` e senza
+    ``exclude_defaults``: ogni ``config.json`` scritto da quando questi campi
+    esistono porta dentro il valore di allora. Sul Titan 2 quel valore è ``0``,
+    e continuerà a vincere su qualunque default in Python finché non lo si
+    riscrive — con ``/dream budget memory 2000``, che è il motivo per cui quel
+    comando esiste. Un'installazione nuova e il device divergono, e questo test
+    è il posto in cui la divergenza è dichiarata invece che scoperta.
+    """
+    existing = tmp_path / "config.json"
+    existing.write_text(
+        json.dumps(
+            {
+                "agents": {
+                    "defaults": {
+                        "dream": {"memoryBudgetChars": 0, "userBudgetChars": 0}
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    dream = load_config(existing).agents.defaults.dream
+
+    assert dream.memory_budget_chars == 0
+    assert dream.user_budget_chars == 0

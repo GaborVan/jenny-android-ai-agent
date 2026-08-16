@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from jenny.agent import dream_cycle
 from jenny.agent.memory import MemoryStore
 from jenny.bus.events import InboundMessage
 from jenny.command.builtin import register_builtin_commands
@@ -243,6 +244,63 @@ class TestShowReport:
         assert _config_path(workspace).stat().st_mtime_ns == before
 
 
+class TestTheBlockedDiagnosis:
+    """Questa è la vista in cui si atterra dopo l'alert di sistema.
+
+    L'alert dice "Dream è fermo, vieni a vedere le misure" e non porta cifre:
+    da ``finish_dream_cycle`` non ce ne sono. Quindi la diagnosi per esteso —
+    quale file sta bloccando, di quanto sfora, quale comando lo sblocca — deve
+    stare qui, e un numero in coda alla riga del review non è una diagnosi.
+    """
+
+    @pytest.mark.asyncio
+    async def test_below_the_threshold_it_stays_a_number(self, router, loop, memory):
+        memory.set_review_state(
+            runs_since_review=3, stuck_runs=dream_cycle.STUCK_IS_ALARMING - 1
+        )
+
+        out = await router.dispatch(_ctx(loop, "/dream budget"))
+
+        assert "Dream is blocked" not in out.content
+
+    @pytest.mark.asyncio
+    async def test_it_names_the_file_and_the_way_out(
+        self, router, loop, memory, workspace
+    ):
+        await router.dispatch(_ctx(loop, "/dream budget memory 400"))
+        memory.set_review_state(
+            runs_since_review=3, stuck_runs=dream_cycle.STUCK_IS_ALARMING
+        )
+
+        out = await router.dispatch(_ctx(loop, "/dream budget"))
+
+        assert "**Dream is blocked.**" in out.content
+        # La stessa frase dell'alert, da un'unica stesura: se divergessero, la
+        # seconda smentirebbe la prima nel momento peggiore.
+        assert dream_cycle.format_stuck_alarm(dream_cycle.STUCK_IS_ALARMING) in out.content
+        assert "`MEMORY.md`" in out.content
+        assert "set it to `0`" in out.content
+
+    @pytest.mark.asyncio
+    async def test_with_no_file_over_budget_it_does_not_promise_a_cap_to_raise(
+        self, router, loop, memory
+    ):
+        """Bloccato ma nessun file sopra soglia: il rifiuto viene da altro.
+
+        Dire "alza il budget" qui manderebbe a cercare una leva che non c'entra;
+        i budget di default stanno larghi sui file di questo workspace.
+        """
+        memory.set_review_state(
+            runs_since_review=3, stuck_runs=dream_cycle.STUCK_IS_ALARMING
+        )
+
+        out = await router.dispatch(_ctx(loop, "/dream budget"))
+
+        assert "**Dream is blocked.**" in out.content
+        assert "No file is over budget" in out.content
+        assert "Raise the budget" not in out.content
+
+
 class TestWrite:
     @pytest.mark.asyncio
     async def test_a_budget_reaches_the_file_on_disk(self, router, loop, workspace):
@@ -252,7 +310,9 @@ class TestWrite:
         # Camel case: è la forma con cui il device legge la config.
         raw = json.loads(_config_path(workspace).read_text(encoding="utf-8"))
         assert raw["agents"]["defaults"]["dream"]["memoryBudgetChars"] == 6000
-        assert "0 → 6,000 chars" in out.content
+        # Il "prima" è il default di spedizione, non zero: scritto come `0 → …`
+        # questa assert passava lo stesso, per sottostringa di `2,000 → …`.
+        assert "2,000 → 6,000 chars" in out.content
 
     @pytest.mark.asyncio
     async def test_each_name_writes_its_own_field(self, router, loop, workspace):
@@ -263,7 +323,8 @@ class TestWrite:
         dream = _dream_config(workspace)
         assert (dream.user_budget_chars, dream.soul_budget_chars) == (1500, 900)
         assert dream.review_every_runs == 4
-        assert dream.memory_budget_chars == 0
+        # Non nominato, quindi fermo al default di spedizione.
+        assert dream.memory_budget_chars == 2000
 
     @pytest.mark.asyncio
     async def test_review_confirmation_speaks_in_runs(self, router, loop):
@@ -386,7 +447,7 @@ class TestValidation:
         out = await router.dispatch(_ctx(loop, "/dream budget memory -1"))
 
         assert _config_path(workspace).stat().st_mtime_ns == before
-        assert _dream_config(workspace).memory_budget_chars == 0
+        assert _dream_config(workspace).memory_budget_chars == 2000
         assert "cannot be negative" in out.content
         assert "`0`" in out.content
 

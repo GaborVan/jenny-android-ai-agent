@@ -42,26 +42,45 @@ class DreamConfig(Base):
     enabled: bool = True  # Register the periodic Dream consolidation job on startup
     interval_h: int = Field(default=2, ge=1)  # Every 2 hours by default
 
-    # I tre budget qui sotto partono a 0 di proposito: 0 = "misurato ma non
-    # applicato". Il gauge compare comunque nel prompt di Dream e nei log, ma
-    # nessuna scrittura viene mai rifiutata. La feature si spedisce così, inerte:
-    # prima si leggono per qualche giorno le dimensioni reali sul device, poi si
-    # sceglie il tetto **cambiando la config, non il codice**.
+    # I due budget qui sotto valgono 2.000 caratteri, ed è un numero misurato,
+    # non stimato: sul Titan 2, dopo due passaggi di review, ``memory/MEMORY.md``
+    # sta a 3.019 caratteri e ``USER.md`` a 1.626. Un tetto a 2.000 morde subito
+    # il primo (151%) e sul secondo è un soffitto contro la ricrescita, che è il
+    # mestiere che gli si chiede. Per riferimento, Hermes tiene gli equivalenti a
+    # 2.200 e 1.375. Un'installazione nuova nasce ben sotto: i template di
+    # ``MEMORY.md`` e ``USER.md`` sono vuoti, il tetto non morde finché non c'è
+    # dentro qualcosa da potare.
     #
-    # Da qui il vincolo ``ge=0`` e non ``gt=0``. La distinzione è la stessa di
-    # ``_positive_float_env`` in ``config/runtime_env.py``, ma con il segno
-    # opposto: lì zero non disabilitava niente (un ``wait_for(0)`` fa fallire
-    # ogni send) e quindi il valore andava rifiutato; qui zero disabilita davvero
-    # l'enforcement ed è il default di spedizione. Non "correggerlo" in ``gt=0``:
-    # renderebbe impossibile esprimere lo stato in cui la feature nasce.
+    # Sono rimasti a 0 — "misurato ma non applicato" — per tutto il tempo in cui
+    # servivano le misure, e soprattutto finché un rifiuto di budget poteva far
+    # avanzare comunque il cursore di Dream: il fatto rifiutato non era su disco
+    # e non sarebbe tornato in nessun batch. Ora ``internal_run_should_commit``
+    # (``agent/memory.py``) non registra il progresso di un run che si è visto
+    # rifiutare una scrittura, quindi l'input torna al run seguente. È quella la
+    # precondizione che questi due numeri aspettavano.
+    #
+    # **Cambiare questo default non raggiunge un'installazione esistente.**
+    # ``config/loader.py`` serializza con ``by_alias=True`` e senza
+    # ``exclude_defaults``, quindi ogni ``config.json`` già scritto porta dentro
+    # lo zero di prima e continua a vincere su questa riga. Là il tetto si alza
+    # con ``/dream budget memory 2000``, che è esattamente il motivo per cui quel
+    # comando esiste.
+    #
+    # Lo 0 resta legale, e da lì il vincolo ``ge=0`` e non ``gt=0``. La
+    # distinzione è la stessa di ``_positive_float_env`` in
+    # ``config/runtime_env.py``, ma con il segno opposto: lì zero non
+    # disabilitava niente (un ``wait_for(0)`` fa fallire ogni send) e quindi il
+    # valore andava rifiutato; qui zero disabilita davvero l'enforcement, ed è
+    # sia il default di SOUL.md sia la via d'uscita se un tetto si rivela
+    # sbagliato. Non "correggerlo" in ``gt=0``.
     memory_budget_chars: int = Field(
-        default=0,
+        default=2000,
         ge=0,
         validation_alias=AliasChoices("memoryBudgetChars", "memory_budget_chars"),
         serialization_alias="memoryBudgetChars",
     )
     user_budget_chars: int = Field(
-        default=0,
+        default=2000,
         ge=0,
         validation_alias=AliasChoices("userBudgetChars", "user_budget_chars"),
         serialization_alias="userBudgetChars",

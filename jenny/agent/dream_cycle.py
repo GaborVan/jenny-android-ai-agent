@@ -64,6 +64,62 @@ STUCK_FORCES_REVIEW = 2
 STUCK_IS_ALARMING = 4
 
 
+def format_stuck_alarm(stuck: int) -> str:
+    """La frase che descrive il livelock, condivisa dalle superfici che lo dicono.
+
+    Una stesura sola perché sono due: l'alert di sistema che parte da
+    :func:`finish_dream_cycle` e la vista di ``/dream budget``, che è dove si va
+    a guardare dopo averlo letto. Se divergessero, la seconda smentirebbe la
+    prima nel momento peggiore.
+
+    Nessuna cifra dei file qui dentro: da ``finish_dream_cycle`` le misure non
+    sono a portata — il report è del prologo, un turno LLM fa — e rifarle
+    vorrebbe dire rileggere tre file per comporre una frase. Chi ha bisogno dei
+    numeri li trova nella vista che questa frase gli dice di aprire.
+    """
+    return (
+        f"Dream has not consolidated anything for {stuck} runs in a row: writes to "
+        "long-term memory keep being refused by their character budget."
+    )
+
+
+def _alert_stuck(stuck: int) -> None:
+    """Porta l'allarme fuori dal log, su una superficie che qualcuno vede.
+
+    Il ``logger.error`` di ``finish_dream_cycle`` è, su Android, un allarme che
+    non suona: nessuno legge logcat, e questo è precisamente lo stato in cui
+    Jenny smette di ricordare senza che niente lo dica. Restava solo la lettura
+    su richiesta (``/dream budget``), che risponde a chi è già venuto a
+    chiedere.
+
+    ``notify_delivery`` è la stessa primitiva con cui il canale WS posta gli
+    alert di consegna: fire-and-forget, zero token, e no-op fuori da Android o
+    senza event loop — quindi anche nei test. Non è il tool ``message``
+    dell'escalation dell'heartbeat, di proposito: quello costa un turno LLM e
+    dipende dal modello che sceglie di chiamarlo, e il modello è esattamente la
+    parte che in questo scenario non sta funzionando.
+
+    Riparte a **ogni** run oltre soglia, non solo all'attraversamento. Il tag che
+    ne deriva (``cron:Dream``) fa sostituire l'alert precedente invece di
+    sommarlo, quindi un livelock lungo lascia sul telefono una notifica sola e
+    sempre aggiornata; e chi l'ha scartata la rivede al giro dopo, che è il
+    comportamento voluto per un allarme che significa "la memoria è ferma". Il
+    tag è suo: con quello di default (``message``) andrebbe a coprire la
+    notifica di un messaggio vero.
+
+    Import locale come in ``runtime/cron_dispatch.py``: nel grafo dei moduli
+    ``jenny/agent`` non dipende da ``jenny/runtime``, e una riga di allarme non
+    è una buona ragione per cominciare.
+    """
+    from jenny.runtime.notifier import notify_delivery
+    from jenny.webui.metadata import WEBUI_MESSAGE_SOURCE_METADATA_KEY
+
+    notify_delivery(
+        f"{format_stuck_alarm(stuck)} Run /dream budget to see the sizes.",
+        {WEBUI_MESSAGE_SOURCE_METADATA_KEY: {"kind": "cron", "label": "Dream"}},
+    )
+
+
 def format_budget(report: Sequence["FileBudget"]) -> str:
     """Riassumi il report di budget in una riga sola di log.
 
@@ -320,4 +376,7 @@ def finish_dream_cycle(
             "review pass is not freeing enough space (cursor still at {})",
             stuck, store.get_last_dream_cursor(),
         )
+        # Il log resta (è dove si legge il cursore), ma non è l'allarme: v.
+        # ``_alert_stuck``.
+        _alert_stuck(stuck)
     return runs_since_review, stuck

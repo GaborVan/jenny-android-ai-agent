@@ -603,7 +603,16 @@ def _format_dream_budget_report(
     Lo stato del review pass sta nella stessa risposta perché fa parte della
     stessa domanda: "cosa sta facendo questa cosa adesso" non si risponde con i
     soli tetti, visto che è il review pass a farli rispettare nel tempo.
+
+    Oltre ``STUCK_IS_ALARMING`` run bloccati il conteggio non basta più: un
+    numero in coda a una riga non dice che Dream ha *smesso* di consolidare né
+    cosa farci. Questa è la vista in cui si atterra dopo l'alert di sistema
+    (``dream_cycle._alert_stuck``), quindi qui va la diagnosi per esteso e la via
+    d'uscita — la stessa frase dell'alert, da un'unica stesura, più il comando
+    che la chiude.
     """
+    from jenny.agent.dream_cycle import STUCK_IS_ALARMING, format_stuck_alarm
+
     lines = ["## Long-term memory budget", ""]
     for item in report:
         if item.enforced:
@@ -626,9 +635,25 @@ def _format_dream_budget_report(
             f"Review pass: every {review_every_runs} Dream runs. "
             f"{runs_since_review} runs since the last one, {stuck_runs} stuck runs."
         ),
-        "",
-        _dream_usage(),
     ])
+    if stuck_runs >= STUCK_IS_ALARMING:
+        over = [item.label for item in report if item.over]
+        # Il nome del file è quello che il rifiuto sta colpendo, e senza di esso
+        # la riga direbbe "alza un budget" senza dire quale. Se nessun file
+        # risulta sopra soglia il blocco è altrove (una policy, un turno che non
+        # completa) e promettere un tetto da alzare sarebbe una pista falsa.
+        if over:
+            fix = (
+                f"Raise the budget of {', '.join(f'`{label}`' for label in over)} above "
+                "its current size, or set it to `0` to stop enforcing it."
+            )
+        else:
+            fix = (
+                "No file is over budget, so the writes are being stopped by something "
+                "else — check the logs for the refused write."
+            )
+        lines.extend(["", f"**Dream is blocked.** {format_stuck_alarm(stuck_runs)} {fix}"])
+    lines.extend(["", _dream_usage()])
     return "\n".join(lines)
 
 

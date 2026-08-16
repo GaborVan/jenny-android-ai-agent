@@ -44,6 +44,7 @@ from jenny.agent.dream_cycle import (
     begin_dream_cycle,
     finish_dream_cycle,
     format_budget,
+    format_stuck_alarm,
     take_dream_snapshot,
 )
 from jenny.agent.dream_review import STATUS_COMPLETED
@@ -53,6 +54,8 @@ from jenny.command.builtin import register_builtin_commands
 from jenny.command.router import CommandContext, CommandRouter
 from jenny.config.schema import Config
 from jenny.runtime.cron_dispatch import CronDispatcher
+from jenny.runtime.notifier import alert_fields
+from jenny.webui.metadata import WEBUI_MESSAGE_SOURCE_METADATA_KEY
 
 _REVIEW_TARGET = "jenny.agent.dream_review.run_dream_review"
 
@@ -511,8 +514,12 @@ class TestBudgetLogLine:
                 _FakeAgent(tmp_path, memory), store=memory, cfg=_dream_cfg(memory_budget=50)
             )
 
+        # ``USER.md`` porta il proprio tetto di spedizione (2.000) perché
+        # ``_dream_cfg`` sovrascrive solo quello di MEMORY.md; SOUL.md resta
+        # l'unico dei tre senza enforcement, ed è la controprova che la riga
+        # distingue i due stati invece di renderli uguali.
         assert messages == [
-            "INFO: Dream memory budget: MEMORY.md 200/50 (400%), USER.md 1 (no budget), "
+            "INFO: Dream memory budget: MEMORY.md 200/50 (400%), USER.md 1/2000 (0%), "
             "SOUL.md 1 (no budget) | runs since review: 3, stuck runs: 1"
         ]
 
@@ -825,6 +832,108 @@ class TestTheAlarmCanActuallySound:
             assert reviews == 2, reviews
             assert any("no longer consolidating" in line or "ERROR" in line
                        for line in logs), logs
+
+
+class TestTheAlarmLeavesTheLog:
+    """Su Android il ``logger.error`` è un allarme che non suona.
+
+    Nessuno legge logcat sul telefono, e la sola altra superficie —
+    ``/dream budget`` — risponde a chi è già andato a chiedere. Un Dream fermo
+    per giorni resterebbe quindi invisibile esattamente come prima della
+    correzione che ha reso raggiungibile la soglia: la si raggiunge, e non lo
+    sa nessuno.
+
+    ``notify_delivery`` è la primitiva che il canale WS usa già per gli alert di
+    consegna: fire-and-forget, zero token, no-op fuori da Android. Non il tool
+    ``message`` dell'heartbeat, che costa un turno LLM e dipende dal modello che
+    sceglie di chiamarlo — e il modello, qui, è la parte che non funziona.
+    """
+
+    @staticmethod
+    def _spy(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, Any]]:
+        sent: list[tuple[str, Any]] = []
+        monkeypatch.setattr(
+            "jenny.runtime.notifier.notify_delivery",
+            lambda content, metadata: sent.append((content, metadata)),
+        )
+        return sent
+
+    async def test_crossing_the_threshold_posts_an_alert(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sent = self._spy(monkeypatch)
+        memory = _FakeMemory(tmp_path / "ws")
+
+        finish_dream_cycle(
+            memory, advanced=False, runs_since_review=9, stuck=STUCK_IS_ALARMING - 1
+        )
+
+        assert len(sent) == 1
+        content, metadata = sent[0]
+        assert format_stuck_alarm(STUCK_IS_ALARMING) in content
+        # L'alert dice dove andare a vedere i numeri, che qui non ci sono.
+        assert "/dream budget" in content
+        assert metadata == {
+            WEBUI_MESSAGE_SOURCE_METADATA_KEY: {"kind": "cron", "label": "Dream"}
+        }
+
+    async def test_below_the_threshold_posts_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sent = self._spy(monkeypatch)
+        memory = _FakeMemory(tmp_path / "ws")
+
+        finish_dream_cycle(
+            memory, advanced=False, runs_since_review=1, stuck=STUCK_IS_ALARMING - 2
+        )
+
+        assert sent == []
+
+    async def test_it_rearms_every_run_and_never_stacks(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Riparte a ogni run oltre soglia, ma il tag lo fa sostituire.
+
+        Chi ha scartato la notifica la rivede al giro dopo — voluto, per un
+        allarme che significa "la memoria è ferma" — e sul telefono ne resta
+        comunque una sola, sempre col conteggio aggiornato. Il tag è suo: con
+        quello di default (``message``) andrebbe a coprire la notifica di un
+        messaggio vero.
+        """
+        sent = self._spy(monkeypatch)
+        memory = _FakeMemory(tmp_path / "ws", review_state=(0, STUCK_IS_ALARMING))
+
+        for _ in range(3):
+            runs, stuck = memory.get_review_state()
+            finish_dream_cycle(memory, advanced=False, runs_since_review=runs, stuck=stuck)
+
+        tags = {alert_fields(content, metadata)[2] for content, metadata in sent}
+        assert len(sent) == 3
+        assert tags == {"cron:Dream"}
+        assert tags != {alert_fields("qualsiasi", None)[2]}
+        # Il conteggio nel corpo cresce: l'alert che sostituisce il precedente
+        # non è una copia, è la misura aggiornata.
+        assert [alert_fields(c, m)[1] for c, m in sent] == [
+            f"{format_stuck_alarm(n)} Run /dream budget to see the sizes."
+            for n in (STUCK_IS_ALARMING + 1, STUCK_IS_ALARMING + 2, STUCK_IS_ALARMING + 3)
+        ]
+
+    async def test_the_body_survives_the_notification_size_cap(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Il notifier tronca a 200 caratteri, e un allarme mozzato perde la parte utile.
+
+        La coda della frase è l'unico pezzo azionabile che contiene — il comando
+        da lanciare — quindi è precisamente quella che una troncatura mangia.
+        """
+        sent = self._spy(monkeypatch)
+        memory = _FakeMemory(tmp_path / "ws")
+
+        finish_dream_cycle(memory, advanced=False, runs_since_review=0, stuck=9998)
+
+        _, body, _ = alert_fields(*sent[0])
+        assert not body.endswith("…"), body
+        assert body.endswith("Run /dream budget to see the sizes.")
 
 
 class TestACycleWithNothingToConsolidate:

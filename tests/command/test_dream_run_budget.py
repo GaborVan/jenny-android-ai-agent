@@ -8,9 +8,10 @@ budget` stampa all'utente tetti e percentuali che l'altra metà dello stesso
 comando ignorava.
 
 Il test che conta è il primo: una scrittura che sfora, lanciata da `/dream`,
-deve essere rifiutata. Il secondo che conta è l'ultimo, ``TestDefaultsAreInert``:
-con i budget al loro default (0) il comando deve comportarsi esattamente come
-prima.
+deve essere rifiutata. Il secondo che conta è l'ultimo,
+``TestTheShippedDefaultsEnforce``: da quando i tetti di ``MEMORY.md`` e
+``USER.md`` valgono 2.000 il rifiuto non aspetta più che qualcuno configuri
+qualcosa, e ``SOUL.md`` è l'unico rimasto a "misurato ma non applicato".
 """
 
 from __future__ import annotations
@@ -449,43 +450,63 @@ class TestReviewPass:
 # ---------------------------------------------------------------------------
 
 
-class TestDefaultsAreInert:
-    """Con i tre budget a 0 — il default di spedizione — nulla deve cambiare.
+class TestTheShippedDefaultsEnforce:
+    """I default non sono più inerti, e questa classe è dove il cambio si vede.
 
-    È la regressione che protegge chi non ha mai toccato `/dream budget`: la
-    feature nasce "misurata ma non applicata", e un `/dream` che iniziasse a
-    rifiutare scritture o a stampare righe di budget su un'installazione di
-    default sarebbe un cambiamento non richiesto.
+    ``memory_budget_chars`` e ``user_budget_chars`` sono nati a 0 — "misurato ma
+    non applicato" — perché servivano le misure vere, e perché un rifiuto poteva
+    ancora far avanzare il cursore di Dream buttando via il fatto rifiutato. Ora
+    valgono 2.000, il numero letto sul device, e la precondizione è chiusa
+    (``internal_run_should_commit``).
+
+    ``SOUL.md`` resta l'unico a 0, e non per dimenticanza: mescola identità e
+    vincoli di piattaforma, e un tetto non sa su quale delle due sta premendo.
     """
 
     @pytest.mark.asyncio
-    async def test_no_write_is_ever_refused(self, router, loop, memory):
+    async def test_a_write_over_the_shipped_cap_is_refused_without_configuring_anything(
+        self, router, loop, memory
+    ):
+        # Nessun ``_set_dream_config``: è il default di spedizione a rifiutare.
         turn = _replace_seed(memory, "y" * 5000)
         loop.on_turn = turn
 
         await router.dispatch(_ctx(loop, "/dream"))
         await _drain(loop)
 
-        assert turn.results and "Write refused" not in turn.results[0]
-        assert len(memory.memory_file.read_text(encoding="utf-8")) > 5000
+        assert turn.results and "Write refused" in turn.results[0]
+        assert "over its 2,000 char budget" in turn.results[0]
+        assert memory.memory_file.read_text(encoding="utf-8") == _MEMORY_TEXT
 
     @pytest.mark.asyncio
-    async def test_the_gauge_still_renders_as_measured_not_enforced(self, router, loop):
-        """L'unica cosa che *cambia* per un'installazione di default, ed è voluta.
+    async def test_a_write_under_the_shipped_cap_still_lands(
+        self, router, loop, memory
+    ):
+        turn = _replace_seed(memory, "- gateway runs on Android")
+        loop.on_turn = turn
 
-        ``render_gauge`` mostra i tre file anche con i budget a 0 — "misurato ma
-        non applicato" — e il percorso cron lo fa dal primo commit della
-        feature. Il prompt manuale ora dice la stessa cosa: un run che non vede
-        la misura è precisamente il difetto che questo lavoro chiude. Nessuna
-        soglia viene però imposta, che è ciò che i test qui sopra e qui sotto
-        verificano.
+        await router.dispatch(_ctx(loop, "/dream"))
+        await _drain(loop)
+
+        assert turn.results and "Successfully edited" in turn.results[0]
+        assert "gateway runs on Android" in memory.memory_file.read_text(encoding="utf-8")
+
+    @pytest.mark.asyncio
+    async def test_the_gauge_shows_two_caps_and_soul_without_one(self, router, loop):
+        """Il gauge distingue i due stati, e sono entrambi presenti di default.
+
+        ``render_gauge`` mostra i tre file comunque; ciò che cambia con i tetti
+        di spedizione è che due righe su tre ora portano una percentuale, cioè
+        una soglia che il modello deve rispettare. La terza no, ed è la
+        controprova che "misurato ma non applicato" esiste ancora.
         """
         await router.dispatch(_ctx(loop, "/dream"))
         await _drain(loop)
 
         prompt = loop.prompts[0]
         assert "Long-term memory budget" in prompt
-        assert f"MEMORY.md [{len(_MEMORY_TEXT)} chars — no budget]" in prompt
+        assert f"MEMORY.md [{len(_MEMORY_TEXT) * 100 // 2000}% — {len(_MEMORY_TEXT)}/2,000" in prompt
+        assert "SOUL.md [7 chars — no budget]" in prompt
 
     @pytest.mark.asyncio
     async def test_the_reply_is_the_one_from_before(self, router, loop):
