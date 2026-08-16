@@ -31,7 +31,11 @@ import pytest
 
 from jenny.agent.turn_types import TurnOutcome
 from jenny.cron.could_not_check import ESCALATE_AFTER_FAILURES
-from jenny.cron.heartbeat_tasks import parse_heartbeat_tasks, task_index_block
+from jenny.cron.heartbeat_tasks import (
+    active_section_text,
+    parse_heartbeat_tasks,
+    task_index_block,
+)
 from jenny.cron.service import CronService
 from jenny.cron.types import CronJob, CronJobState, CronPayload, CronSchedule
 from jenny.runtime.cron_dispatch import _HEARTBEAT_PREAMBLE, CronDispatcher
@@ -59,7 +63,9 @@ def _healthy_prompt(content: str) -> str:
     """
     return (
         _HEARTBEAT_PREAMBLE
-        + f"Review the following HEARTBEAT.md and report any active tasks:\n\n{content}"
+        + "Review the following HEARTBEAT.md and report any active tasks:\n\n"
+        + active_section_text(content)
+        + "\n"
         + task_index_block(parse_heartbeat_tasks(content))
     )
 

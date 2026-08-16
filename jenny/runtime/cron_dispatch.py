@@ -34,6 +34,7 @@ from jenny.cron.could_not_check import (
 )
 from jenny.cron.heartbeat_followup import HeartbeatFollowup
 from jenny.cron.heartbeat_tasks import (
+    active_section_text,
     already_warned_block,
     escalation_block,
     parse_heartbeat_tasks,
@@ -515,11 +516,35 @@ class CronDispatcher:
         # chiedere di parlare non basta a far tacere — v. ``already_warned_block``.
         already_warned = tasks_already_warned(job.state, tasks)
 
+        # Nel prompt entra la sezione dei task, non il file. ``HEARTBEAT.md`` ha
+        # due proprietari — l'elenco è dell'utente, i commenti HTML che lo
+        # spiegano sono nostri — e finché ci finiva grezzo il modello si
+        # rileggeva la nostra spiegazione a ogni run, per sempre, su ogni
+        # installazione. La macchina a stati che salta quei commenti esiste già
+        # ed è già usata da questo stesso ramo (``parse_heartbeat_tasks``, poco
+        # sopra, per ``task_index_block``): qui guadagna un secondo chiamante
+        # invece di una seconda copia.
+        #
+        # Sparisce più dei commenti, e va detto: se ne va anche tutto ciò che sta
+        # **fuori** dalla sezione ``## Active Tasks``, intestazioni comprese —
+        # nella sezione, invece, un ``### WaterBot`` dell'utente resta, perché è
+        # ciò che dice di cosa parlano le righe sotto.
+        #
+        # Cosa NON cambia, e sono due cose. Che cosa conta come task: lo decide
+        # ``parse_heartbeat_tasks``, invariata, la stessa che poche righe sopra
+        # decide se il run parte — cambia ciò che il modello vede, non ciò che il
+        # sistema conta, e l'identità dei task (l'hash del testo, con cui è
+        # indicizzato lo stato dell'escalation già sul dispositivo) resta quella
+        # di prima. E il determinismo: con nessun task in sequenza di guasto il
+        # prompt di un run sano è byte-identico a quello del run precedente, che
+        # è ciò su cui si regge la cache di prefisso del provider.
+        listed_tasks = active_section_text(content)
+
         prompt = (
             _HEARTBEAT_PREAMBLE
             + (already_warned_block(already_warned) if already_warned else "")
             + (escalation_block(escalating) if escalating else "")
-            + f"Review the following HEARTBEAT.md and report any active tasks:\n\n{content}"
+            + f"Review the following HEARTBEAT.md and report any active tasks:\n\n{listed_tasks}\n"
             + task_index_block(tasks)
         )
 

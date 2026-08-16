@@ -86,6 +86,12 @@ they reach the user is the `message` tool — so a conditional check written as 
 heartbeat line must say what the condition is, and must not report a normal
 result.
 
+Only the lines under `## Active Tasks` are read: a heading inside that section is
+kept as context for the lines below it, everything outside it — including HTML
+comments anywhere in the file — never reaches the model. A file with no task
+lines is skipped without running a turn, so a finished task should be deleted
+rather than crossed out or left in place.
+
 ## Time Expressions
 
 | User says | Parameters |

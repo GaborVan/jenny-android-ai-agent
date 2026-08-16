@@ -1,12 +1,6 @@
 # Heartbeat Tasks
 
-<!--
-This file is checked periodically by your Jenny agent. When the gateway starts with `gateway.heartbeat.enabled=true`, it automatically registers a protected heartbeat cron job that reads this file.
-
-If this file has no tasks (only headers and comments), the agent will skip it. Completed tasks should be deleted, not kept — heartbeat only reads "Active Tasks".
--->
+<!-- Your recurring checks go under "Active Tasks". Only that section is read; these comments never are. -->
 
 ## Active Tasks
-
-<!-- Add your periodic tasks below this line -->
 

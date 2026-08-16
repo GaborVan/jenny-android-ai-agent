@@ -141,13 +141,19 @@ class HeartbeatCheckOutcome:
         return "; ".join(parts)[:REASON_MAX_CHARS]
 
 
-def _active_task_lines(content: str) -> Iterator[str]:
-    """Righe della sezione "Active Tasks", righe vuote comprese.
+def _uncommented_lines(content: str) -> Iterator[tuple[str, bool]]:
+    """Le righe del file senza i commenti HTML, ognuna con "sono in Active Tasks".
 
-    Stessa scansione che ``heartbeat_has_active_tasks`` faceva per rispondere
-    sì/no — intestazioni e commenti HTML fuori — con l'unica differenza che le
-    righe vuote della sezione vengono restituite: servono a separare un task
-    dall'altro.
+    La macchina a stati dei commenti — quelli su una riga sola e quelli su più
+    righe — vive qui e in nessun altro posto. I lettori di questo formato sono
+    due (i task, e il testo che va nel prompt) e devono restare d'accordo: se
+    divergessero, al modello finirebbe sotto gli occhi un task che il parser non
+    conta, o viceversa. È lo stesso motivo per cui ``heartbeat_has_active_tasks``
+    non ha una scansione propria.
+
+    Le righe di intestazione escono da qui come tutte le altre — è chi chiama a
+    decidere se sono contenuto o solo struttura — e ``## Active Tasks`` esce già
+    con lo stato aggiornato, quindi appartiene alla sezione che apre.
     """
     in_comment = False
     in_active_section = False
@@ -157,20 +163,59 @@ def _active_task_lines(content: str) -> Iterator[str]:
             if "-->" in stripped:
                 in_comment = False
             continue
-        if not stripped or stripped.startswith("#"):
-            if stripped.startswith("##") and not stripped.startswith("###"):
-                heading = stripped.lstrip("#").strip().lower()
-                in_active_section = heading.startswith("active tasks")
-            elif not stripped and in_active_section:
-                yield ""
-            continue
         if stripped.startswith("<!--"):
             if "-->" not in stripped[4:]:
                 in_comment = True
             continue
+        if stripped.startswith("##") and not stripped.startswith("###"):
+            in_active_section = stripped.lstrip("#").strip().lower().startswith("active tasks")
+        yield line, in_active_section
+
+
+def _active_task_lines(content: str) -> Iterator[str]:
+    """Righe della sezione "Active Tasks", righe vuote comprese.
+
+    Stessa scansione che ``heartbeat_has_active_tasks`` faceva per rispondere
+    sì/no — intestazioni e commenti HTML fuori — con l'unica differenza che le
+    righe vuote della sezione vengono restituite: servono a separare un task
+    dall'altro.
+    """
+    for line, in_active_section in _uncommented_lines(content):
         if not in_active_section:
             continue
-        yield line
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        yield line if stripped else ""
+
+
+def active_section_text(content: str) -> str:
+    """La sezione "Active Tasks" com'è scritta, meno i commenti HTML.
+
+    Serve al prompt dell'heartbeat, e la differenza da :func:`_active_task_lines`
+    è tutta in cosa si considera nostro e cosa dell'utente. I commenti HTML sono
+    nostri: il template ne spedisce uno che spiega come funziona il file, e finché
+    il prompt si costruiva dal file grezzo il modello se lo rileggeva a ogni run,
+    per sempre, su ogni installazione. Le intestazioni **no**: un
+    ``### WaterBot: monitoraggio umidità piante`` sopra quattro righe è ciò che
+    dice di cosa parlano quelle righe, e toglierlo lascerebbe un "notifica una
+    sola volta per pianta" senza soggetto.
+
+    Quindi qui esce tutto il resto verbatim — intestazioni, righe vuote,
+    rientri — e la sola cosa che ci si aggiunge è togliere le righe vuote agli
+    estremi, che dopo la rimozione di un commento sono quasi sempre le sue.
+
+    Cosa **non** fa: decidere che cos'è un task. Quello resta di
+    :func:`parse_heartbeat_tasks`, che non è cambiata e non deve cambiare —
+    l'identità di un task è l'hash del suo testo, e con essa è indicizzato lo
+    stato dell'escalation già scritto sul dispositivo dell'utente.
+    """
+    lines = [line for line, in_active_section in _uncommented_lines(content) if in_active_section]
+    # Via l'intestazione ``## Active Tasks``: è il delimitatore su cui il parser
+    # si orienta, non una riga che l'utente ha scritto per dire qualcosa.
+    if lines and lines[0].strip().lstrip("#").strip().lower().startswith("active tasks"):
+        lines = lines[1:]
+    return "\n".join(lines).strip("\n")
 
 
 def _strip_markers(line: str) -> str:

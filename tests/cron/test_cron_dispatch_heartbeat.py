@@ -20,6 +20,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from jenny.agent.turn_types import TurnOutcome
+from jenny.cron.heartbeat_tasks import parse_heartbeat_tasks
 from jenny.cron.types import CronJob, CronPayload
 from jenny.runtime.cron_dispatch import _HEARTBEAT_PREAMBLE, CronDispatcher
 from jenny.session.keys import HEARTBEAT_SESSION_KEY
@@ -147,6 +148,147 @@ class TestTheHeartbeatTurnIsSilent:
 
         assert await disp.dispatch(_heartbeat_job()) is None
         assert agent.calls == []
+
+
+async def _prompt_for(workspace: Path, content: str) -> str:
+    """Il prompt che un run dell'heartbeat manderebbe, dato quel ``HEARTBEAT.md``."""
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "HEARTBEAT.md").write_text(content, encoding="utf-8")
+    agent = _FakeAgent()
+    disp = CronDispatcher(
+        get_agent=lambda: agent,
+        config=SimpleNamespace(workspace_path=workspace),
+        cron=MagicMock(),
+        heartbeat_cfg=SimpleNamespace(keep_recent_messages=8),
+    )
+    await disp.dispatch(_heartbeat_job())
+    return agent.calls[0]["prompt"]
+
+
+# Gli stessi due task, in un file spoglio e in uno con addosso l'arredo che è
+# **nostro**: i commenti HTML del template (uno su una riga, uno su più righe) e
+# quel che sta fuori dalla sezione dei task.
+_BARE = """## Active Tasks
+
+- Ogni ciclo, controlla l'umidità del suolo e avvertimi solo sotto il 15%.
+- Alle 8:00 dimmi se ci sono scadenze oggi.
+"""
+
+_FURNISHED = """# Heartbeat Tasks
+
+<!--
+This file is checked periodically by your Jenny agent. When the gateway starts
+with `gateway.heartbeat.enabled=true`, it automatically registers a protected
+heartbeat cron job that reads this file.
+
+If this file has no tasks (only headers and comments), the agent will skip it.
+-->
+
+## Notes
+
+Qualcosa che sta fuori dalla sezione dei task.
+
+## Active Tasks
+
+<!-- Add your periodic tasks below this line -->
+
+<!--
+Completed tasks should be deleted, not kept.
+Un commento su più righe: è il caso che una regex ingenua si perde.
+-->
+
+- Ogni ciclo, controlla l'umidità del suolo e avvertimi solo sotto il 15%.
+- Alle 8:00 dimmi se ci sono scadenze oggi.
+"""
+
+_TITAN2 = (Path(__file__).parent / "fixtures" / "heartbeat_titan2_2026-08-16.md").read_text(
+    encoding="utf-8"
+)
+
+# Gli id che ``parse_heartbeat_tasks`` produce oggi sul file del Titan 2,
+# calcolati **prima** di questo lavoro. V. il test che li usa.
+_TITAN2_TASK_IDS = ["903dabc442ff", "8aa2cef88085", "113dc0426e58", "ff28e76dc65c"]
+
+
+class TestThePromptCarriesTheTasksAndNotTheFile:
+    """Nel prompt entra la sezione dei task, non il file.
+
+    I commenti HTML sono spiegazioni nostre, non istruzioni dell'utente, e finché
+    il file ci finiva grezzo il modello se li rileggeva a ogni run, per sempre, su
+    ogni installazione. La macchina a stati che li salta esiste già ed è già usata
+    da questo stesso ramo: qui guadagna un secondo chiamante.
+    """
+
+    async def test_heartbeat_prompt_ignores_comments_and_headings(
+        self, tmp_path: Path
+    ) -> None:
+        """Commenti HTML e struttura fuori sezione non arrivano al modello.
+
+        "Intestazioni" qui vuol dire quelle **fuori** da ``## Active Tasks``: il
+        titolo del file, una sezione di appunti. Quelle dentro sono dell'utente e
+        restano — v. il test sulla fixture del Titan 2.
+        """
+        bare = await _prompt_for(tmp_path / "bare", _BARE)
+        furnished = await _prompt_for(tmp_path / "furnished", _FURNISHED)
+
+        assert bare == furnished
+        # Detto anche in positivo: è questo che un device già installato smette
+        # di pagare, senza che nessuno gli tocchi il file.
+        assert "gateway.heartbeat.enabled" not in furnished
+        assert "Completed tasks should be deleted" not in furnished
+
+    async def test_heartbeat_prompt_is_stable_across_healthy_runs(
+        self, dispatcher
+    ) -> None:
+        """Due run sani, stesso file, prompt byte-identico.
+
+        Non è una novità di questo cambiamento: ``521372f`` e ``ebafa02`` ci si
+        appoggiano entrambi — è ciò su cui si regge la cache di prefisso del
+        provider — e nessuno dei due lo fissava qui. Stesso ``job``, quindi lo
+        stato per-task del primo run è quello che il secondo legge.
+        """
+        disp, agent = dispatcher
+        job = _heartbeat_job()
+
+        await disp.dispatch(job)
+        await disp.dispatch(job)
+
+        assert agent.calls[0]["prompt"] == agent.calls[1]["prompt"]
+
+    async def test_a_user_heading_survives_but_our_comments_do_not(
+        self, tmp_path: Path
+    ) -> None:
+        """Il file vero del Titan 2, che è il solo input che conta davvero.
+
+        I quattro bullet non si reggono da soli: "notifica una sola volta per
+        pianta" non dice di quali piante senza il titolo che ha scritto l'utente,
+        e togliere quel titolo insieme ai nostri commenti sarebbe stata una
+        regressione sull'unico dispositivo installato.
+        """
+        prompt = await _prompt_for(tmp_path / "titan2", _TITAN2)
+
+        assert "### WaterBot: monitoraggio umidità piante" in prompt
+        assert "gateway.heartbeat.enabled=true" not in prompt
+        assert "Add your periodic tasks below this line" not in prompt
+        for bullet in (
+            "segui la skill `waterbot`",
+            "Avverti l'utente SOLO se almeno una pianta",
+            "Anti-spam: notifica una sola volta per pianta",
+            "Se hps/Tailscale è irraggiungibile",
+        ):
+            assert bullet in prompt
+
+    def test_task_ids_are_unchanged_by_this_work(self) -> None:
+        """L'identità di un task non si tocca, e questa è la rete di sicurezza.
+
+        ``_task_id`` è l'hash del testo del task, e ``state.task_checks`` sul
+        telefono dell'utente è indicizzato con quegli hash. Cambiarli lascerebbe
+        orfano lo stato dell'escalation e farebbe ripartire da zero le sequenze
+        di guasto — cioè riaprirebbe il difetto che ``521372f`` e ``ebafa02``
+        hanno appena chiuso. Le costanti qui sotto sono calcolate sul codice
+        precedente a questo lavoro.
+        """
+        assert [t.id for t in parse_heartbeat_tasks(_TITAN2)] == _TITAN2_TASK_IDS
 
 
 class TestThePreambleContract:
