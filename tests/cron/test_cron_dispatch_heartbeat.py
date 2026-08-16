@@ -317,13 +317,29 @@ class TestThePreambleContract:
         assert "CHECK_FAILED <task number>:" in text
         assert "Those lines reach nobody" in text
 
-    def test_it_says_an_instructed_silent_skip_is_not_a_failure(self) -> None:
+    def test_an_instructed_silent_skip_still_writes_the_line(self) -> None:
         """Il task WaterBot reale dice "se hps è irraggiungibile salta il ciclo in
-        silenzio": quello skip è ciò che gli è stato chiesto, non un guasto."""
+        silenzio", e questo preambolo diceva che quello skip non è un guasto.
+
+        Misurato sul Titan 2 il 2026-08-16, con Tailscale spento apposta: il run
+        delle 09:18 ha letto quella frase, ha saltato il controllo senza scrivere
+        nessun marcatore, e la voce è stata potata — sequenza di guasti di nuovo
+        a zero, con hps irraggiungibile da un'ora. L'istruzione dell'utente
+        riguarda il **messaggio**, non la contabilità: la riga non raggiunge
+        nessuno, ed è l'unico motivo per cui qualcuno si accorgerà mai che
+        quel controllo è morto da ore.
+
+        Il caso legittimo resta, ed è un altro: un task che questa volta non
+        aveva niente da fare perché lo dice la sua condizione.
+        """
         text = _HEARTBEAT_PREAMBLE
-        assert "ITS OWN" in text
-        assert "skip the cycle silently" in text
-        assert "that is not a failure" in text
+        assert "skip the cycle " in text and "silently" in text
+        assert "could not reach what it needed did NOT run" in text
+        assert "the line is not a message" in text
+        # Il permesso di tacere con l'utente resta intatto: cambia solo che la
+        # riga si scrive lo stesso.
+        assert "Obey that instruction" in text
+        assert "nothing to do this time because its own schedule or condition" in text
 
     def test_a_task_that_found_nothing_still_writes_no_line(self) -> None:
         assert "ran and found nothing is a success" in _HEARTBEAT_PREAMBLE
