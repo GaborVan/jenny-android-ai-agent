@@ -51,6 +51,7 @@ _VITAMINE = "- Alle 9 ricordami le vitamine."
 
 _ESCALATION_HEAD = "These recurring tasks have now failed to run"
 _FOLLOWUP_HEAD = "This subagent was doing the work of a scheduled check"
+_SILENCE_HEAD = "The user has ALREADY been told"
 
 
 def _heartbeat_md(*tasks: str) -> str:
@@ -156,6 +157,10 @@ class _Harness:
         # Cosa il subagent riferisce: ``None`` = ha fatto il suo lavoro.
         self.subagent_failure: tuple[int, str] | None = None
         self.announces_the_number = True
+        # Un modello che si scorda il marcatore, in un verso o nell'altro. È il
+        # comportamento osservato sul device il 2026-08-13, e l'unica cosa che
+        # separa un avviso per guasto da uno ogni due ore.
+        self.forgets_the_marker = False
         self.announce_count = 0
         self.loop._run_agent_loop = self._fake_announce_turn  # type: ignore[method-assign]
 
@@ -166,11 +171,18 @@ class _Harness:
         )
         self.announce_prompts.append(prompt)
         text = ""
-        if self.subagent_failure is not None and _FOLLOWUP_HEAD in prompt:
-            number, reason = self.subagent_failure
+        if not self.forgets_the_marker and _FOLLOWUP_HEAD in prompt:
+            number, reason = self.subagent_failure or (
+                next(iter(self.agent.delegated), 1), "",
+            )
             ref = f" {number}" if self.announces_the_number else ""
-            text = f"CHECK_FAILED{ref}: {reason}"
-            if _ESCALATION_HEAD in prompt:
+            if self.subagent_failure is None:
+                # Il contratto chiede un verdetto in entrambi i versi: un
+                # controllo che ha girato lo dichiara, e la sua voce si chiude.
+                text = f"CHECK_OK{ref}"
+            else:
+                text = f"CHECK_FAILED{ref}: {reason}"
+            if self.subagent_failure is not None and _ESCALATION_HEAD in prompt:
                 tool = self.loop.tools.get("message")
                 assert isinstance(tool, MessageTool)
                 tool._sent_in_turn = True
@@ -284,18 +296,18 @@ class TestTheDeviceCase:
     async def test_a_healthy_delegated_task_never_accumulates_a_streak(
         self, two_tasks: _Harness
     ) -> None:
-        """Resta **una** voce per il task delegato, e dice "in attesa", non
-        "rotto": senza di lei il turno di ritorno non saprebbe di essere il
-        giudice di qualcosa. Il contatore però non si muove mai, ed è quello che
-        decide se l'utente viene disturbato."""
-        await two_tasks.cycles(10)
-
+        """Dentro il ciclo la voce esiste — dice "in attesa", non "rotto", e
+        senza di lei il turno di ritorno non saprebbe di essere il giudice di
+        qualcosa — ma il verdetto positivo la chiude, quindi a ciclo concluso
+        non resta niente. Il contatore non si muove mai, ed è quello che decide
+        se l'utente viene disturbato."""
+        await two_tasks.service.run_job("heartbeat")
         tasks = parse_heartbeat_tasks(two_tasks.file.read_text(encoding="utf-8"))
         assert list(two_tasks.state.task_checks) == [tasks[0].id]
-        entry = two_tasks.entry_for(0)
-        assert entry is not None
-        assert entry.consecutive_could_not_check == 0
-        assert entry.since_ms is None
+
+        await two_tasks.cycles(10)
+
+        assert two_tasks.state.task_checks == {}
 
     async def test_a_healthy_delegating_heartbeat_sees_the_same_prompt_every_time(
         self, two_tasks: _Harness
@@ -312,10 +324,10 @@ class TestTheDeviceCase:
     ) -> None:
         """Il ritorno alla normalità non è una notizia, e chiude la sequenza.
 
-        La chiude il run *successivo*: un annuncio silenzioso non prova da solo
-        che il controllo sia andato bene — potrebbe essere il subagent di un
-        altro task — mentre un ciclo che si chiude senza che nessuno abbia
-        dichiarato un guasto sì.
+        La chiude il turno d'annuncio, che è l'unico ad avere in mano il
+        risultato: lo dichiara con ``CHECK_OK`` e la voce sparisce. Un annuncio
+        *silenzioso* non basterebbe — potrebbe essere il subagent di un altro
+        task, o lo stesso che si è dimenticato di dire che è ancora rotto.
         """
         two_tasks.subagent_failure = (1, "import di wb_probe fallito")
         await two_tasks.cycles(2)
@@ -323,9 +335,7 @@ class TestTheDeviceCase:
         two_tasks.subagent_failure = None
         await two_tasks.cycles(2)
 
-        entry = two_tasks.entry_for(0)
-        assert entry is not None
-        assert entry.consecutive_could_not_check == 0
+        assert two_tasks.entry_for(0) is None
         assert two_tasks.agent.messages == []
 
     async def test_the_healthy_task_in_the_same_file_is_left_alone(
@@ -349,6 +359,94 @@ class TestTheDeviceCase:
         await two_tasks.cycles(ESCALATE_AFTER_FAILURES)
 
         assert len(two_tasks.agent.messages) == 1
+
+
+class TestOneFaultIsOneWarning:
+    """La notte del 2026-08-13, per intero, dal ciclo completo.
+
+    Tailscale giù per dieci ore, un solo controllo rotto, **quattro** avvisi
+    all'utente. Il meccanismo: il turno d'annuncio a volte non dichiarava
+    niente, la voce restava "in sospeso", e il run successivo la cancellava
+    insieme al ricordo di aver già parlato. Tre cicli dopo la sequenza era di
+    nuovo a tre e l'avviso ripartiva.
+    """
+
+    async def test_a_forgotten_marker_does_not_bring_the_alert_back(
+        self, two_tasks: _Harness
+    ) -> None:
+        two_tasks.subagent_failure = (1, "hps irraggiungibile")
+        await two_tasks.cycles(ESCALATE_AFTER_FAILURES)
+        assert len(two_tasks.agent.messages) == 1
+
+        # Da qui il modello smette di dichiarare l'esito. Il guasto c'è ancora,
+        # ma nessuno lo scrive: è esattamente il 02:31 del logcat.
+        two_tasks.forgets_the_marker = True
+        await two_tasks.cycles(12)
+
+        assert len(two_tasks.agent.messages) == 1
+
+    async def test_the_streak_still_restarts_when_nobody_reports(
+        self, two_tasks: _Harness
+    ) -> None:
+        """Conservare il ricordo non vuol dire conservare il conteggio: da uno
+        stato vecchio non deve poter nascere un allarme."""
+        two_tasks.subagent_failure = (1, "hps irraggiungibile")
+        await two_tasks.cycles(ESCALATE_AFTER_FAILURES)
+
+        two_tasks.forgets_the_marker = True
+        await two_tasks.cycles(4)
+
+        entry = two_tasks.entry_for(0)
+        assert entry is not None
+        assert entry.escalated is True
+        assert entry.consecutive_could_not_check == 0
+
+    async def test_a_new_fault_after_a_recovery_warns_again(
+        self, two_tasks: _Harness
+    ) -> None:
+        """Il test che vale tutti gli altri: un avviso per guasto, e un guasto
+        nuovo è un guasto nuovo."""
+        two_tasks.subagent_failure = (1, "hps irraggiungibile")
+        await two_tasks.cycles(ESCALATE_AFTER_FAILURES)
+        assert len(two_tasks.agent.messages) == 1
+
+        # Il controllo torna a funzionare e lo dichiara: la voce si chiude, e con
+        # lei il ricordo dell'avviso.
+        two_tasks.subagent_failure = None
+        await two_tasks.cycles(2)
+        assert two_tasks.entry_for(0) is None
+
+        # Settimane dopo si rompe di nuovo. L'utente deve saperlo.
+        two_tasks.subagent_failure = (1, "hps di nuovo irraggiungibile")
+        await two_tasks.cycles(ESCALATE_AFTER_FAILURES)
+
+        assert len(two_tasks.agent.messages) == 2
+
+    async def test_the_run_prompt_tells_it_to_stay_quiet_once_it_has_spoken(
+        self, two_tasks: _Harness
+    ) -> None:
+        """Non chiedere di parlare non è chiedere di tacere: al quarto ciclo il
+        modello sul device chiamava ``message`` di propria iniziativa."""
+        two_tasks.subagent_failure = (1, "hps irraggiungibile")
+        await two_tasks.cycles(ESCALATE_AFTER_FAILURES)
+
+        assert _ESCALATION_HEAD in two_tasks.agent.prompts[-1]
+        assert _SILENCE_HEAD not in two_tasks.agent.prompts[-1]
+
+        await two_tasks.cycles(1)
+
+        assert _SILENCE_HEAD in two_tasks.agent.prompts[-1]
+        assert _ESCALATION_HEAD not in two_tasks.agent.prompts[-1]
+
+    async def test_a_healthy_run_never_carries_either_block(
+        self, two_tasks: _Harness
+    ) -> None:
+        """La proprietà su cui si regge la cache di prefisso del provider."""
+        await two_tasks.cycles(5)
+
+        assert len(set(two_tasks.agent.prompts)) == 1
+        assert _SILENCE_HEAD not in two_tasks.agent.prompts[0]
+        assert _ESCALATION_HEAD not in two_tasks.agent.prompts[0]
 
 
 class TestTheOptimismIsPreserved:
@@ -394,15 +492,14 @@ class TestTheOptimismIsPreserved:
     ) -> None:
         """Il task WaterBot dice "se hps è irraggiungibile salta il ciclo in
         silenzio". Delegato, quel silenzio arriva dal subagent — e resta un
-        successo: chi salta perché gli è stato chiesto ha fatto il suo lavoro."""
+        successo: chi salta perché gli è stato chiesto ha fatto il suo lavoro,
+        e il prompt gli chiede infatti di dichiararlo con ``CHECK_OK``."""
         two_tasks.subagent_failure = None
 
         await two_tasks.cycles(10)
 
         assert two_tasks.agent.messages == []
-        entry = two_tasks.entry_for(0)
-        assert entry is not None
-        assert entry.consecutive_could_not_check == 0
+        assert two_tasks.entry_for(0) is None
 
     async def test_an_undeclared_delegation_is_treated_as_a_check_that_ran(
         self, two_tasks: _Harness

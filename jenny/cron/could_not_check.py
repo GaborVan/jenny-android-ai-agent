@@ -1,4 +1,6 @@
-"""Il marcatore con cui un turno silenzioso dichiara "non ho potuto controllare".
+"""I marcatori con cui un turno silenzioso dichiara l'esito di un controllo.
+
+Tre, e il primo è quello da cui è nato tutto: "non ho potuto controllare".
 
 Perché il testo finale del turno e non un tool nuovo: su un controllo periodico
 quel testo esiste già, è già scartato (il turno è SILENT per costruzione) e oggi
@@ -36,6 +38,23 @@ COULD_NOT_CHECK_MARKER = "CHECK_FAILED"
 # scriverne il verdetto è il turno che riceve il risultato
 # (:mod:`jenny.cron.heartbeat_followup`).
 DELEGATED_MARKER = "CHECK_DELEGATED"
+
+# Il verdetto positivo, e l'unico posto in cui questo modulo dice che qualcosa
+# è andato *bene*. Serve dove il silenzio non è una prova: su un controllo
+# delegato il turno d'annuncio che tace può aver visto il controllo riuscire
+# oppure essersi dimenticato di dichiararne il guasto, e le due cose sono la
+# stessa osservazione. Finché lo erano, l'unica scelta era fra due errori —
+# riavvisare dello stesso guasto ogni due ore, o non riavvisare mai più.
+#
+# Con questa riga il recupero si dichiara invece di dedursi: la voce del task
+# si chiude qui, ``escalated`` compreso, e un guasto nuovo mesi dopo torna ad
+# avvisare. Se il modello la dimentica non si torna al ciclo di avvisi: si
+# ricade nel caso "nessun verdetto", che tace (v. ``resolve_pending_delegations``).
+#
+# Non riguarda il monitor: là un controllo per turno e l'assenza di
+# ``CHECK_FAILED`` è già una prova sufficiente. ``could_not_check_reason``
+# legge solo i marcatori di guasto e non cambia comportamento.
+OK_MARKER = "CHECK_OK"
 
 # Quante esecuzioni consecutive senza controllo prima di avvisare l'utente.
 # Tre, a mezz'ora di intervallo, fanno circa un'ora e mezza: abbastanza da non
@@ -98,8 +117,18 @@ def parse_delegated_marks(final_text: str | None) -> list[CouldNotCheckMark]:
     return _parse_marks(final_text, DELEGATED_MARKER)
 
 
+def parse_ok_marks(final_text: str | None) -> list[CouldNotCheckMark]:
+    """Legge le righe ``CHECK_OK``: controlli delegati che sono andati a buon fine.
+
+    Stessa forma e stesso parser degli altri due. ``reason`` qui è quasi sempre
+    vuota — non c'è niente da spiegare di un controllo riuscito — e non viene
+    letta da nessuno: a contare è quale task.
+    """
+    return _parse_marks(final_text, OK_MARKER)
+
+
 def _parse_marks(final_text: str | None, marker: str) -> list[CouldNotCheckMark]:
-    """Corpo condiviso dai due marcatori. Nessuno dei due è prefisso dell'altro."""
+    """Corpo condiviso dai tre marcatori. Nessuno dei tre è prefisso di un altro."""
     marks: list[CouldNotCheckMark] = []
     for line in (final_text or "").splitlines():
         stripped = line.strip().lstrip(_MARKER_DECORATION)

@@ -34,11 +34,13 @@ from jenny.cron.could_not_check import (
 )
 from jenny.cron.heartbeat_followup import HeartbeatFollowup
 from jenny.cron.heartbeat_tasks import (
+    already_warned_block,
     escalation_block,
     parse_heartbeat_tasks,
     record_task_outcomes,
     resolve_pending_delegations,
     task_index_block,
+    tasks_already_warned,
     tasks_due_for_escalation,
 )
 from jenny.cron.service import CronJobSkippedError
@@ -481,12 +483,26 @@ class CronDispatcher:
         # è ripreso lascia dietro di sé il conteggio vecchio, e leggerlo prima di
         # risolverlo metterebbe nel prompt la richiesta di avvisare l'utente di un
         # guasto che non c'è più.
+        #
+        # Da qui passa ormai solo il verdetto mai arrivato: il recupero lo
+        # dichiara il turno d'annuncio con ``CHECK_OK``. Il conteggio si azzera
+        # comunque, ma il ricordo di aver già avvisato l'utente sopravvive — è la
+        # differenza fra un avviso per guasto e uno ogni due ore.
         unresolved = resolve_pending_delegations(job.state)
         if unresolved:
+            still_remembered = [
+                e.label for e in job.state.task_checks.values() if e.escalated
+            ]
             logger.debug(
-                "Heartbeat: {} delegated check(s) never reported back, counted as run: {}",
+                "Heartbeat: {} delegated check(s) never reported back, counted as run: {}"
+                "{}",
                 len(unresolved),
                 "; ".join(unresolved),
+                (
+                    f" (user already warned about: {'; '.join(still_remembered)})"
+                    if still_remembered
+                    else ""
+                ),
             )
 
         # L'escalation si decide PRIMA del turno, perché è una riga di prompt:
@@ -495,9 +511,13 @@ class CronDispatcher:
         # task in sequenza di guasto il blocco è vuoto e il prompt di un run sano
         # resta byte-identico a quello del run precedente.
         escalating = tasks_due_for_escalation(job.state, tasks)
+        # E il suo complemento: i task di cui l'utente è già stato avvisato. Non
+        # chiedere di parlare non basta a far tacere — v. ``already_warned_block``.
+        already_warned = tasks_already_warned(job.state, tasks)
 
         prompt = (
             _HEARTBEAT_PREAMBLE
+            + (already_warned_block(already_warned) if already_warned else "")
             + (escalation_block(escalating) if escalating else "")
             + f"Review the following HEARTBEAT.md and report any active tasks:\n\n{content}"
             + task_index_block(tasks)

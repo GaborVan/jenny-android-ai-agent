@@ -44,16 +44,26 @@ può contenere il verdetto di quel task. Il ciclo è:
   ``pending_since_ms`` — la voce non viene potata e la sequenza non riparte.
 - **T1…Tn**, i turni d'annuncio dei subagent: arrivano più tardi nella stessa
   sessione, hanno il risultato in mano e sono l'unico posto in cui quel task può
-  essere giudicato. Ci pensa :func:`record_followup_outcomes`, che **aggiunge
-  soltanto guasti**: non pota niente, perché un turno d'annuncio vede un
+  essere giudicato. Ci pensa :func:`record_followup_outcomes`, che scrive il
+  verdetto nei due versi — ``CHECK_FAILED`` conta un guasto, ``CHECK_OK`` chiude
+  la voce — ma non pota nient'altro, perché un turno d'annuncio vede un
   risultato, non il file.
 
-Se un verdetto non arriva affatto (subagent perso), la voce resta ``pending``
-fino al run dopo, che la risolve in modo **ottimistico**: il task conta come
-eseguito. È la stessa direzione d'errore di tutto il resto del modulo — al
-massimo si tace su un guasto che nessuno ha dichiarato, mai si avvisa di un
-guasto che non c'è — ed è ciò che impedisce a una voce in sospeso di restare
-appesa più di un ciclo.
+**Perché il successo si dichiara invece di dedursi.** Su un controllo delegato
+il silenzio del turno d'annuncio ha due letture — "è andato bene" e "è ancora
+rotto ma mi sono dimenticato di dirlo" — e sono la stessa osservazione. Finché
+lo sono, ogni regola scritta sopra sceglie fra due errori: riavvisare dello
+stesso guasto a ogni ciclo, o non riavvisare mai più dopo il primo. Il
+marcatore positivo le separa alla fonte, ed è per questo che esiste.
+
+Se un verdetto non arriva affatto — nessuno dei due marcatori, o il subagent
+perso — la voce resta ``pending`` fino al run dopo, che la risolve in modo
+**ottimistico**: il task conta come eseguito. È la stessa direzione d'errore di
+tutto il resto del modulo — al massimo si tace su un guasto che nessuno ha
+dichiarato, mai si avvisa di un guasto che non c'è — ed è ciò che impedisce a
+una voce in sospeso di restare appesa più di un ciclo. Una cosa sola sopravvive
+a quella risoluzione, ed è l'unica che non riguarda il controllo: il fatto che
+all'utente si sia già parlato (v. :func:`resolve_pending_delegations`).
 """
 
 from __future__ import annotations
@@ -67,6 +77,7 @@ from jenny.cron.could_not_check import (
     COULD_NOT_CHECK_MARKER,
     DELEGATED_MARKER,
     ESCALATE_AFTER_FAILURES,
+    OK_MARKER,
     REASON_MAX_CHARS,
     CouldNotCheckMark,
 )
@@ -112,6 +123,9 @@ class HeartbeatCheckOutcome:
 
     pending: list[HeartbeatTask] = field(default_factory=list)
     """Task delegati a un subagent: l'esito arriverà col turno d'annuncio."""
+
+    recovered: list[HeartbeatTask] = field(default_factory=list)
+    """Task delegati che il turno d'annuncio ha dichiarato riusciti (``CHECK_OK``)."""
 
     escalated: bool = False
     """Questo run doveva avvisare l'utente **e** ha davvero parlato."""
@@ -225,19 +239,28 @@ def task_index_block(tasks: list[HeartbeatTask]) -> str:
 
 
 def resolve_pending_delegations(state: CronJobState) -> list[str]:
-    """Chiude le deleghe di cui non è mai arrivato un verdetto. Ritorna le etichette.
+    """Chiude le deleghe di cui non è mai arrivato **nessun** verdetto. Ritorna le etichette.
 
     Va chiamata **all'inizio** di un run, prima che qualcuno legga lo stato: una
     voce ancora in sospeso qui significa che il ciclo precedente si è chiuso
-    senza che nessuno abbia dichiarato un guasto, e vale quindi la regola
-    generale del modulo — nessuna dichiarazione, quindi il controllo è avvenuto.
-    La voce sparisce e la sequenza riparte.
+    senza che nessuno abbia dichiarato niente su quel task, e vale quindi la
+    regola generale del modulo — nessuna dichiarazione, quindi il controllo è
+    avvenuto. La sequenza riparte.
 
     Prima che decidere l'escalation, perché è ciò che impedisce il difetto
     speculare a quello che tutto questo esiste per correggere: un controllo
     delegato che *si è ripreso* lascia dietro di sé una voce con il conteggio
     vecchio, e leggerla prima di risolverla farebbe entrare nel prompt la
     richiesta di avvisare l'utente di un guasto che non c'è più.
+
+    **Cosa arriva qui, e cosa no.** Da quando il turno d'annuncio dichiara anche
+    il successo (``CHECK_OK``, v. :func:`record_followup_outcomes`), un recupero
+    ha una strada propria e non passa più di qua: qui resta il caso in cui il
+    verdetto non è arrivato affatto — il subagent non è mai tornato, o il
+    modello non ha scritto nessuno dei due marcatori. Di quel silenzio non si
+    può dedurre niente sul guasto, e infatti la sequenza si azzera; ma si può
+    dedurre tutto su **ciò che è già stato detto all'utente**, che è un fatto
+    nostro e non del controllo. Quello si conserva.
     """
     stale = [
         task_id
@@ -246,7 +269,21 @@ def resolve_pending_delegations(state: CronJobState) -> list[str]:
     ]
     labels = [state.task_checks[task_id].label for task_id in stale]
     for task_id in stale:
-        del state.task_checks[task_id]
+        entry = state.task_checks[task_id]
+        if not entry.escalated:
+            del state.task_checks[task_id]
+            continue
+        # Con l'utente già avvisato resta una cosa sola da ricordare, ed è
+        # quella. ``escalated`` non è un'affermazione sul guasto — è il verbale
+        # di aver parlato — e buttarlo qui non serve a nessuna delle due
+        # garanzie per cui questa risoluzione esiste: faceva solo ricominciare
+        # la sequenza da capo fino a riavvisare, ogni due ore, dello stesso
+        # guasto. La sequenza riparte comunque da zero, quindi la direzione
+        # dell'errore non cambia: da uno stato vecchio non può nascere un
+        # allarme.
+        entry.consecutive_could_not_check = 0
+        entry.since_ms = None
+        entry.pending_since_ms = None
     return labels
 
 
@@ -270,6 +307,55 @@ def tasks_due_for_escalation(
         if entry.consecutive_could_not_check >= ESCALATE_AFTER_FAILURES - 1:
             due.append(task)
     return due
+
+
+def tasks_already_warned(
+    state: CronJobState, tasks: list[HeartbeatTask]
+) -> list[HeartbeatTask]:
+    """Task di cui l'utente è già stato avvisato e che non sono ancora rientrati.
+
+    Il complemento di :func:`tasks_due_for_escalation` sullo stesso stato: là i
+    task per cui parlare, qui quelli per cui **non** parlare più.
+    """
+    return [
+        task
+        for task in tasks
+        if (entry := state.task_checks.get(task.id)) is not None and entry.escalated
+    ]
+
+
+def already_warned_block(tasks: list[HeartbeatTask]) -> str:
+    """Le righe che chiedono di tacere. Simmetriche a :func:`escalation_block`.
+
+    Perché serve dirlo, invece di limitarsi a non chiedere di parlare: fino a
+    ieri un task già annunciato semplicemente non entrava nel blocco di
+    escalation, e il prompt su di lui taceva. Ma "non ti sto chiedendo di
+    parlare" non è "non parlare" per un modello che il guasto ce l'ha davanti —
+    la coda della sessione dell'heartbeat contiene il proprio avviso di due ore
+    prima e il guasto ancora lì. Misurato sul device: al quarto ciclo
+    consecutivo il modello ha chiamato ``message`` di propria iniziativa, con
+    l'escalation già data, raddoppiando ogni avviso.
+
+    Compare solo quando c'è almeno un guasto già annunciato, cioè quasi mai: il
+    prompt di un run sano resta byte-identico a quello del run precedente, che è
+    ciò su cui si regge la cache di prefisso del provider.
+    """
+    listed = "\n".join(f"- {t.index}. {t.label}" for t in tasks)
+    return (
+        "[The user has ALREADY been told that these recurring checks are not "
+        "working, and nothing has changed since:\n"
+        f"{listed}\n"
+        "Do not tell them again. Not a reminder, not an update, not a shorter "
+        "version — saying it twice is what makes a useful warning into noise, "
+        "and repeating it every cycle is how a person learns to ignore it. Say "
+        "nothing about these, whatever you find about them this time. You will "
+        "be asked to speak again only if one of them starts working and then "
+        "breaks a second time.\n"
+        "Everything else about this run is unaffected: keep writing the "
+        f"{COULD_NOT_CHECK_MARKER} / {OK_MARKER} lines as usual, and if a "
+        "DIFFERENT check needs the user, that is a separate matter and the "
+        "instructions above apply to it.]\n\n"
+    )
 
 
 def escalation_block(tasks: list[HeartbeatTask]) -> str:
@@ -302,13 +388,20 @@ def escalation_block(tasks: list[HeartbeatTask]) -> str:
 
 
 def followup_block(
-    pending: list[HeartbeatTask], escalating: list[HeartbeatTask]
+    pending: list[HeartbeatTask],
+    escalating: list[HeartbeatTask],
+    already_warned: list[HeartbeatTask] | None = None,
 ) -> str:
     """Il blocco che chiede il verdetto al turno d'annuncio di un subagent.
 
     Compare **solo** quando quel turno cade nella sessione dell'heartbeat e c'è
     almeno un task in sospeso: un annuncio qualunque, e un heartbeat che non ha
     delegato niente, vedono il prompt di sempre.
+
+    Porta con sé lo stesso paio di istruzioni condizionali del run — parla di
+    questi, taci di quelli — perché è un turno che può consegnare esattamente
+    come l'altro, ed è anzi quello che il modulo indica come il turno che
+    *decide* per un controllo delegato.
     """
     listed = "\n".join(f"{t.index}. {t.label}" for t in pending)
     return (
@@ -325,11 +418,22 @@ def followup_block(
         f"{COULD_NOT_CHECK_MARKER} <number>: <one short line naming what stopped it>\n"
         "That line reaches nobody: it is how a check gets recorded as 'could "
         "not check' instead of 'nothing to report', and a streak of them is "
-        "what eventually warns the user. A check that ran and found nothing is "
-        "a success — write no line for it and say nothing. A check that was "
-        "skipped because ITS OWN instructions said to skip it did what it was "
-        "asked, and gets no line either.]"
-    ) + ("\n\n" + escalation_block(escalating) if escalating else "\n\n")
+        "what eventually warns the user.\n"
+        "And for every check in the list above that DID run — whether it found "
+        "something worth saying or nothing at all — end your answer with its "
+        "own line, in exactly this form:\n"
+        f"{OK_MARKER} <number>\n"
+        "This line reaches nobody either, and it is not a message to the user: "
+        "it is how a check that had been failing gets recorded as working "
+        "again. Without it a check that recovers stays remembered as broken, "
+        "and the next real fault goes unreported. A check that was skipped "
+        f"because ITS OWN instructions said to skip it ran as asked: {OK_MARKER} "
+        "for that one too. Every check in the list gets exactly one line, one "
+        "or the other, and never both.]"
+        + "\n\n"
+        + (already_warned_block(already_warned) if already_warned else "")
+        + (escalation_block(escalating) if escalating else "")
+    )
 
 
 def attribute_marks(
@@ -474,11 +578,12 @@ def record_followup_outcomes(
     now_ms: int,
     escalating: list[HeartbeatTask],
     spoke: bool,
+    ok: list[CouldNotCheckMark] | None = None,
 ) -> HeartbeatCheckOutcome:
     """Registra il verdetto di un controllo delegato, dal turno d'annuncio.
 
-    Due differenze dal registratore del run, ed entrambe seguono da cosa vede
-    questo turno:
+    Tre differenze dal registratore del run, e tutte seguono da cosa vede questo
+    turno:
 
     - **non pota**. Un turno d'annuncio ha in mano il risultato di *un*
       subagent, non il file: dedurre da qui che gli altri task sono sani
@@ -486,20 +591,42 @@ def record_followup_outcomes(
       successivo, che il file ce l'ha.
     - **il marcatore anonimo si attribuisce al task in sospeso**, quando ce n'è
       uno solo. È il caso normale: un controllo delegato per volta.
+    - **chiude la voce su un verdetto positivo**, ed è l'unico posto del modulo
+      che lo fa. Non è potatura per deduzione — la contraddizione con la riga
+      sopra è solo apparente: qui non si sta concludendo qualcosa su un task
+      *altrui* dal silenzio, si sta registrando ciò che questo turno ha
+      dichiarato del task di cui è il verdetto. Sparita la voce sparisce anche
+      ``escalated``, ed è così che un guasto nuovo mesi dopo torna ad avvisare.
+
+    Un ``CHECK_OK`` su un task che non è in sospeso viene ignorato: la voce di un
+    task non delegato la chiude già il run successivo con la sua regola
+    (assente = sano), e prendere qui una scorciatoia darebbe a un turno
+    d'annuncio il potere di azzerare la sequenza di un controllo che non ha
+    nemmeno guardato.
     """
     pending = pending_tasks(state, tasks)
-    reasons, unattributed = attribute_marks(
-        tasks, marks, default=pending[0] if len(pending) == 1 else None
-    )
+    default = pending[0] if len(pending) == 1 else None
+    reasons, unattributed = attribute_marks(tasks, marks, default=default)
+    # Stessa regola di attribuzione dei guasti: con due o più controlli in
+    # sospeso un marcatore anonimo non chiude niente. Non toccare è la direzione
+    # sicura anche qui — al massimo si aspetta un ciclo in più.
+    ok_by_id, _ = attribute_marks(tasks, ok or [], default=default)
     escalating_ids = {t.id for t in escalating}
     outcome = HeartbeatCheckOutcome(unattributed=unattributed)
+    pending_ids = {t.id for t in pending}
     for task in tasks:
-        if task.id not in reasons:
+        if task.id in reasons:
+            entry = state.task_checks.get(task.id) or CronTaskCheckState()
+            _count_failure(
+                entry, task, reasons[task.id],
+                now_ms=now_ms, escalating_ids=escalating_ids, spoke=spoke, outcome=outcome,
+            )
+            state.task_checks[task.id] = entry
             continue
-        entry = state.task_checks.get(task.id) or CronTaskCheckState()
-        _count_failure(
-            entry, task, reasons[task.id],
-            now_ms=now_ms, escalating_ids=escalating_ids, spoke=spoke, outcome=outcome,
-        )
-        state.task_checks[task.id] = entry
+        # Il guasto vince sul successo se il modello scrive entrambi: una
+        # dichiarazione di guasto è un'informazione, un ``CHECK_OK`` in più è
+        # rumore, e l'errore da evitare resta tacere di un guasto.
+        if task.id in ok_by_id and task.id in pending_ids:
+            del state.task_checks[task.id]
+            outcome.recovered.append(task)
     return outcome

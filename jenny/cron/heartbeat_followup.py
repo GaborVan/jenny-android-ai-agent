@@ -41,12 +41,14 @@ from loguru import logger
 from jenny.cron.could_not_check import (
     COULD_NOT_CHECK_MARKER,
     parse_could_not_check_marks,
+    parse_ok_marks,
 )
 from jenny.cron.heartbeat_tasks import (
     followup_block,
     parse_heartbeat_tasks,
     pending_tasks,
     record_followup_outcomes,
+    tasks_already_warned,
     tasks_due_for_escalation,
 )
 from jenny.session.keys import HEARTBEAT_SESSION_KEY
@@ -110,18 +112,25 @@ class HeartbeatFollowup:
         pending = pending_tasks(job.state, tasks)
         if not pending:
             return ""
-        return followup_block(pending, tasks_due_for_escalation(job.state, pending))
+        return followup_block(
+            pending,
+            tasks_due_for_escalation(job.state, pending),
+            tasks_already_warned(job.state, pending),
+        )
 
     def record(self, session_key: str, *, final_text: str, spoke: bool) -> None:
-        """Registra i marcatori scritti dal turno d'annuncio.
+        """Registra i marcatori scritti dal turno d'annuncio: guasti e successi.
 
-        Solo guasti: un annuncio silenzioso non prova che il controllo sia
-        andato bene *e* non deve poter cancellare la sequenza di un altro task
-        (v. ``record_followup_outcomes``). La voce in sospeso che nessuno smentisce
-        viene chiusa in modo ottimistico dal run successivo.
+        Il silenzio non è ancora un verdetto — un annuncio che non dichiara
+        niente non prova che il controllo sia andato bene, e non deve poter
+        cancellare la sequenza di un altro task (v. ``record_followup_outcomes``).
+        Ciò che è cambiato è che il successo ora **si può** dichiarare, e quando
+        lo è chiude la voce; la voce che nessuno dichiara in nessun verso resta
+        al run successivo, che la risolve tenendosi il ricordo di aver parlato.
         """
         marks = parse_could_not_check_marks(final_text)
-        if not marks:
+        ok = parse_ok_marks(final_text)
+        if not marks and not ok:
             return
         loaded = self._job_and_tasks(session_key)
         if loaded is None:
@@ -131,7 +140,9 @@ class HeartbeatFollowup:
         if not pending:
             # Nessun controllo delegato in attesa: un marcatore qui non appartiene
             # a questo meccanismo, e attribuirlo a caso incolperebbe un task sano.
-            logger.debug("Heartbeat follow-up: {} mark(s) with nothing pending", len(marks))
+            logger.debug(
+                "Heartbeat follow-up: {} mark(s) with nothing pending", len(marks) + len(ok)
+            )
             return
         outcome = record_followup_outcomes(
             job.state,
@@ -140,8 +151,18 @@ class HeartbeatFollowup:
             now_ms=self._now_ms(),
             escalating=tasks_due_for_escalation(job.state, pending),
             spoke=spoke,
+            ok=ok,
         )
+        for task in outcome.recovered:
+            logger.debug(
+                "Heartbeat: delegated task '{}' reported back healthy, entry cleared", task.label
+            )
         if not outcome.any_failure:
+            # Un recupero non è un guasto, ma ha comunque cambiato lo stato: se
+            # non lo si scrive, la voce chiusa riappare al riavvio e con lei il
+            # ricordo di un avviso già dato.
+            if outcome.recovered:
+                self._cron.persist_job_state()
             return
         for task in outcome.failed:
             entry = job.state.task_checks[task.id]

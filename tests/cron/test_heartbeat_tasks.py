@@ -14,8 +14,10 @@ from jenny.cron.could_not_check import (
     could_not_check_reason,
     parse_could_not_check_marks,
     parse_delegated_marks,
+    parse_ok_marks,
 )
 from jenny.cron.heartbeat_tasks import (
+    already_warned_block,
     attribute_marks,
     escalation_block,
     followup_block,
@@ -25,6 +27,7 @@ from jenny.cron.heartbeat_tasks import (
     record_task_outcomes,
     resolve_pending_delegations,
     task_index_block,
+    tasks_already_warned,
     tasks_due_for_escalation,
 )
 from jenny.cron.types import CronJobState, CronTaskCheckState
@@ -364,6 +367,249 @@ class TestADelegatedTaskWaitsForItsVerdict:
         block = followup_block([tasks[0]], [tasks[0]])
 
         assert "EXACTLY ONCE" in block
+
+
+class TestOneFaultIsOneWarning:
+    """Il ciclo completo: parlare una volta, ricordarselo, e tornare a parlare
+    quando è un guasto nuovo.
+
+    Il difetto che tutto questo chiude: ``escalated`` viveva nella stessa voce
+    che la risoluzione ottimistica cancellava, quindi bastava un turno d'annuncio
+    senza marcatore — un ciclo solo — perché il ricordo di aver parlato sparisse.
+    Tre cicli dopo la sequenza era di nuovo a 3, ``escalated`` di nuovo ``False``,
+    e l'utente riceveva lo stesso avviso. Misurato sul device: quattro avvisi in
+    una notte per un guasto solo.
+    """
+
+    def _broken_and_announced(self, task_id: str) -> CronJobState:
+        """Lo stato subito dopo l'avviso: sequenza alta, utente informato, delega in corso."""
+        return CronJobState(
+            task_checks={
+                task_id: CronTaskCheckState(
+                    consecutive_could_not_check=4,
+                    since_ms=10,
+                    escalated=True,
+                    label="Ogni ciclo",
+                    pending_since_ms=11,
+                )
+            }
+        )
+
+    def test_a_markerless_followup_does_not_erase_the_memory_of_having_spoken(self) -> None:
+        tasks = parse_heartbeat_tasks(_file(_WATERBOT))
+        state = self._broken_and_announced(tasks[0].id)
+
+        assert resolve_pending_delegations(state) == ["Ogni ciclo"]
+
+        entry = state.task_checks[tasks[0].id]
+        assert entry.escalated is True
+        assert entry.consecutive_could_not_check == 0
+        assert entry.since_ms is None
+        assert entry.pending_since_ms is None
+
+    def test_the_streak_still_restarts_from_zero(self) -> None:
+        """La direzione dell'errore non cambia: da uno stato vecchio non nasce un allarme."""
+        tasks = parse_heartbeat_tasks(_file(_WATERBOT))
+        state = self._broken_and_announced(tasks[0].id)
+
+        resolve_pending_delegations(state)
+        record_task_outcomes(
+            state,
+            tasks,
+            [CouldNotCheckMark("1", "hps irraggiungibile")],
+            now_ms=12,
+            escalating=[],
+            spoke=False,
+        )
+
+        assert state.task_checks[tasks[0].id].consecutive_could_not_check == 1
+        assert tasks_due_for_escalation(state, tasks) == []
+
+    def test_a_pending_entry_with_nothing_to_remember_is_still_dropped(self) -> None:
+        """Senza un avviso già dato non c'è niente da conservare, e lo store non deve crescere."""
+        tasks = parse_heartbeat_tasks(_file(_WATERBOT))
+        state = CronJobState(
+            task_checks={
+                tasks[0].id: CronTaskCheckState(
+                    consecutive_could_not_check=2, pending_since_ms=11, label="Ogni ciclo"
+                )
+            }
+        )
+
+        resolve_pending_delegations(state)
+
+        assert state.task_checks == {}
+
+    def test_a_declared_success_closes_the_entry(self) -> None:
+        tasks = parse_heartbeat_tasks(_file(_WATERBOT))
+        state = self._broken_and_announced(tasks[0].id)
+
+        outcome = record_followup_outcomes(
+            state, tasks, [], now_ms=12, escalating=[], spoke=False,
+            ok=[CouldNotCheckMark("1", "")],
+        )
+
+        assert outcome.recovered == [tasks[0]]
+        assert state.task_checks == {}
+
+    def test_an_anonymous_success_with_two_pending_closes_nothing(self) -> None:
+        """Non toccare è la direzione sicura: al massimo si aspetta un ciclo in più."""
+        tasks = parse_heartbeat_tasks(_file(_WATERBOT, _VITAMINE))
+        state = CronJobState(
+            task_checks={
+                tasks[0].id: CronTaskCheckState(escalated=True, pending_since_ms=11),
+                tasks[1].id: CronTaskCheckState(escalated=True, pending_since_ms=11),
+            }
+        )
+
+        outcome = record_followup_outcomes(
+            state, tasks, [], now_ms=12, escalating=[], spoke=False,
+            ok=[CouldNotCheckMark(None, "")],
+        )
+
+        assert outcome.recovered == []
+        assert len(state.task_checks) == 2
+
+    def test_a_success_declared_for_a_task_nobody_delegated_is_ignored(self) -> None:
+        """Un turno d'annuncio non può azzerare la sequenza di un controllo che non ha guardato."""
+        tasks = parse_heartbeat_tasks(_file(_WATERBOT, _VITAMINE))
+        state = CronJobState(
+            task_checks={
+                tasks[0].id: CronTaskCheckState(pending_since_ms=11),
+                tasks[1].id: CronTaskCheckState(consecutive_could_not_check=2),
+            }
+        )
+
+        record_followup_outcomes(
+            state, tasks, [], now_ms=12, escalating=[], spoke=False,
+            ok=[CouldNotCheckMark("2", "")],
+        )
+
+        assert state.task_checks[tasks[1].id].consecutive_could_not_check == 2
+
+    def test_a_declared_failure_wins_over_a_declared_success(self) -> None:
+        tasks = parse_heartbeat_tasks(_file(_WATERBOT))
+        state = CronJobState(
+            task_checks={tasks[0].id: CronTaskCheckState(pending_since_ms=11)}
+        )
+
+        outcome = record_followup_outcomes(
+            state, tasks, [CouldNotCheckMark("1", "import fallito")],
+            now_ms=12, escalating=[], spoke=False,
+            ok=[CouldNotCheckMark("1", "")],
+        )
+
+        assert outcome.failed == [tasks[0]]
+        assert outcome.recovered == []
+        assert state.task_checks[tasks[0].id].consecutive_could_not_check == 1
+
+    def test_a_second_fault_after_a_recovery_warns_again(self) -> None:
+        """Il test che vale tutti gli altri: il ciclo intero, dall'avviso al successivo."""
+        tasks = parse_heartbeat_tasks(_file(_WATERBOT))
+        state = self._broken_and_announced(tasks[0].id)
+
+        # Il controllo torna a funzionare e lo dichiara.
+        record_followup_outcomes(
+            state, tasks, [], now_ms=12, escalating=[], spoke=False,
+            ok=[CouldNotCheckMark("1", "")],
+        )
+        assert state.task_checks == {}
+
+        # Settimane dopo si rompe di nuovo: tre cicli, e al terzo si parla.
+        for run in range(3):
+            assert (tasks_due_for_escalation(state, tasks) != []) is (run == 2)
+            record_task_outcomes(
+                state,
+                tasks,
+                [CouldNotCheckMark("1", "hps irraggiungibile")],
+                now_ms=100 + run,
+                escalating=tasks_due_for_escalation(state, tasks),
+                spoke=run == 2,
+            )
+
+        assert state.task_checks[tasks[0].id].escalated is True
+
+    def test_a_task_that_runs_again_in_a_run_forgets_the_announcement(self) -> None:
+        """La seconda via d'uscita, per un task che smette di essere delegato:
+        nessun marcatore in un run e la voce sparisce con la sua regola di sempre."""
+        tasks = parse_heartbeat_tasks(_file(_WATERBOT))
+        state = CronJobState(
+            task_checks={tasks[0].id: CronTaskCheckState(escalated=True, label="Ogni ciclo")}
+        )
+
+        record_task_outcomes(state, tasks, [], now_ms=12, escalating=[], spoke=False)
+
+        assert state.task_checks == {}
+
+
+class TestTheSilenceInstruction:
+    def test_a_healthy_run_has_no_silence_block(self) -> None:
+        """Il prompt di un run sano resta byte-identico: niente voci, niente blocco."""
+        tasks = parse_heartbeat_tasks(_file(_WATERBOT, _VITAMINE))
+
+        assert tasks_already_warned(CronJobState(), tasks) == []
+
+    def test_only_the_tasks_already_announced_are_listed(self) -> None:
+        tasks = parse_heartbeat_tasks(_file(_WATERBOT, _VITAMINE))
+        state = CronJobState(
+            task_checks={
+                tasks[0].id: CronTaskCheckState(escalated=True, consecutive_could_not_check=5),
+                tasks[1].id: CronTaskCheckState(consecutive_could_not_check=1),
+            }
+        )
+
+        warned = tasks_already_warned(state, tasks)
+
+        assert warned == [tasks[0]]
+        block = already_warned_block(warned)
+        assert "1. Ogni ciclo" in block
+        assert "vitamine" not in block
+        assert "Do not tell them again" in block
+
+    def test_a_task_is_never_both_due_and_already_warned(self) -> None:
+        """I due blocchi si contraddirebbero. Sono disgiunti per costruzione."""
+        tasks = parse_heartbeat_tasks(_file(_WATERBOT))
+        state = CronJobState(
+            task_checks={
+                tasks[0].id: CronTaskCheckState(consecutive_could_not_check=9, escalated=True)
+            }
+        )
+
+        assert tasks_already_warned(state, tasks) == [tasks[0]]
+        assert tasks_due_for_escalation(state, tasks) == []
+
+    def test_the_announce_block_carries_the_silence_instruction_too(self) -> None:
+        tasks = parse_heartbeat_tasks(_file(_WATERBOT))
+
+        block = followup_block([tasks[0]], [], [tasks[0]])
+
+        assert "Do not tell them again" in block
+        assert "EXACTLY ONCE" not in block
+
+
+class TestThePositiveMarker:
+    def test_the_marker_is_read_with_and_without_a_number(self) -> None:
+        assert parse_ok_marks("CHECK_OK 2")[0].ref == "2"
+        assert parse_ok_marks("CHECK_OK")[0].ref is None
+
+    def test_the_three_markers_do_not_read_each_other(self) -> None:
+        text = "CHECK_OK 1\nCHECK_FAILED 2: rotto\nCHECK_DELEGATED 3: passato a un subagent"
+
+        assert [m.ref for m in parse_ok_marks(text)] == ["1"]
+        assert [m.ref for m in parse_could_not_check_marks(text)] == ["2"]
+        assert [m.ref for m in parse_delegated_marks(text)] == ["3"]
+
+    def test_the_monitor_reader_ignores_it(self) -> None:
+        """Il monitor ha un controllo per turno: là il silenzio è già una prova."""
+        assert could_not_check_reason("CHECK_OK") is None
+
+    def test_the_announce_block_asks_for_a_verdict_in_both_directions(self) -> None:
+        tasks = parse_heartbeat_tasks(_file(_WATERBOT))
+
+        block = followup_block([tasks[0]], [])
+
+        assert "CHECK_FAILED <number>:" in block
+        assert "CHECK_OK <number>" in block
 
 
 class TestThePromptFragments:

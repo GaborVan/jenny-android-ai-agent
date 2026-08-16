@@ -121,16 +121,24 @@ class CronTaskCheckState:
             eseguito.
         since_ms: inizio della sequenza in corso — "da quando è rotto?", che il
             conteggio da solo non dice.
-        escalated: l'utente è già stato avvisato di QUESTA sequenza.
+        escalated: l'utente è già stato avvisato. **Non** è un'affermazione
+            sulla sequenza qui accanto, ed è la ragione per cui sopravvive al
+            suo azzeramento: è il verbale di aver parlato, un fatto su di noi e
+            non sul controllo. Si cancella solo insieme alla voce, cioè quando
+            il controllo torna a funzionare — dichiarandolo (``CHECK_OK`` da un
+            turno d'annuncio) o semplicemente girando senza marcatori in un run.
+            Finché resta ``True`` nessun avviso parte per questo task, che è il
+            punto: un guasto, un avviso.
         label: prima riga del task, per nominarlo in un log o nella WebUI senza
             dover rileggere il file.
         pending_since_ms: il run che ha appena girato ha **delegato** questo
             task a un subagent, e l'esito non si sa ancora. Serve a una cosa
             sola: impedire che quel silenzio venga letto come "eseguito" e
             azzeri la sequenza prima che il verdetto arrivi. Vive al massimo
-            un ciclo — il run successivo, se un verdetto non è arrivato, lo
-            risolve in modo ottimistico (v. ``record_task_outcomes``), quindi
-            una voce "in sospeso" non può restare appesa per sempre.
+            un ciclo — il turno d'annuncio lo chiude col verdetto, e se un
+            verdetto non arriva affatto lo risolve il run successivo in modo
+            ottimistico (v. ``resolve_pending_delegations``), quindi una voce
+            "in sospeso" non può restare appesa per sempre.
     """
 
     consecutive_could_not_check: int = 0
