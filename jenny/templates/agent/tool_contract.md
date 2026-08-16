@@ -15,6 +15,7 @@ Tool signatures are provided automatically via function calling. This section do
 
 ## Discovery and Reading
 
+- Jenny's own source is not in the workspace. Read it with `get_source` by dotted path (`jenny.agent.tools.android_web`, `jenny.agent.loop.AgentLoop.run`); `python_exec` path operations cannot reach it, because the boundary refuses everything outside the workspace.
 {% if orchestrator %}
 - Use `list_dir` to locate workspace paths before `read_file` when a path is uncertain.
 - Use `grep` to find *which* files contain something, then `read_file` that path. It returns file paths (`files_with_matches`) or per-file counts (`count`) — the matching lines themselves are not available to you, and asking for them returns the paths anyway.
@@ -39,6 +40,7 @@ Tool signatures are provided automatically via function calling. This section do
 - Use `edit_file` only for small exact replacements in one file, with `old_text` copied from `read_file`; add `occurrence`, `line_hint`, or `expected_replacements` when ambiguity matters.
 - Use `write_file` for new files or intentional full-file rewrites, not routine partial edits.
 - If `apply_patch` or `edit_file` fails, re-read with `force=true`, narrow the context, and try a smaller patch rather than switching to `python_exec` for file manipulation.
+- `apply_patch` supports `replace` and `add` only — it cannot delete a file. Deleting is the one file operation that needs `python_exec` (`os.remove`, `os.rmdir`, `shutil.rmtree`, all of which work inside the workspace).
 
 ## Process Execution
 
@@ -53,6 +55,9 @@ This platform has no shell, subprocess, or CLI tools. The only code-execution to
   `grep_files`, `http_get`, `http_post`, `json_parse`, `json_dump`, `regex_match`,
   `regex_replace`, `path_join`, `path_resolve`, `file_exists`, `md5`, `sha256`,
   `base64_encode`, `base64_decode`, `url_encode`, `url_decode`, `platform_info`.
+- The import list is a real allowlist: anything not on it is refused, `subprocess`, `importlib`, `pkgutil`, `zipfile`, `jenny`, `httpx` and `urllib` included. `sys` **is** available — you get a proxy whose `.modules` is filtered, so `sys.path`, `sys.version` and the rest behave normally. `os`, `shutil`, `glob`, `pathlib`, `json`, `re`, `csv`, `html`, `xml`, `asyncio`, `dataclasses` are all there.
+- `working_dir` is an argument of the `python_exec` **call**, not something the code can set: `os.chdir` is refused, because the process working directory is shared with the gateway. A fenced code block cannot express it — pass it explicitly.
+- With `working_dir` passed, `os.getcwd()` reports it and relative paths resolve against it, so relative paths are correct and absolute ones are not required. A module imported from `working_dir` is unloaded when the call ends: edit it, import it again, and you get the new version without a manual reload.
 - `class` definitions work, but `@dataclass` needs real type objects in its field annotations: quoted types or `from __future__ import annotations` make it fail inside `python_exec`.
 - Execution has a configurable timeout (default 60s) and output is truncated at 10000 chars.
 - For long-running code, use `yield_time_ms`; if execution continues, `python_exec` returns
@@ -65,7 +70,9 @@ This platform has no shell, subprocess, or CLI tools. The only code-execution to
 - Use web tools when the user asks for current information, a specific URL, or information likely to have changed.
 - **Use `web_search` as the primary tool for all web lookups.** It uses the native Android WebView and is the most reliable option.
 - Use `web_fetch` to read a specific page or result that needs closer reading.
+- `web_fetch` renders the URL in a real browser, so it returns a document only for HTML pages that allow scripting. Plain-text URLs (raw.githubusercontent.com and the like), downloads and binaries come back empty — read those with the `http_get` builtin inside `python_exec`. Output is cut at the configured limit and flagged `"truncated": true`, and always arrives marked `"untrusted": true`.
 - Do not use `python_exec` with `httpx` as a substitute for `web_search` or `web_fetch`. Only fall back to HTTP functions inside `python_exec` when the web tools are unavailable.
+- Repeating the *same* `web_fetch` URL or the *same* `web_search` query more than twice in a turn is blocked ("repeated external lookup blocked"). A URL that failed will fail again: move to a different source. On a research job, read the few pages that matter — four or five — and take the rest from `web_search` snippets.
 - Do not invent freshness-sensitive facts when tools can verify them.
 
 {% endif %}

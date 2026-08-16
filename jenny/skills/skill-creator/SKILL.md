@@ -30,8 +30,11 @@ you. Ask the question of the current phase and end the turn.
 
 <rule>
 **A skill's helper code lives inside the skill folder, at `skills/<name>/scripts/<mod>.py`.
-NEVER write a helper module to the workspace root.** A module dropped there is
-indistinguishable from scratch debris, and the next cleanup deletes it.
+NEVER write a helper module to the workspace root.** Nothing sweeps the workspace root — the
+danger is the opposite one. A module dropped there has no owner: it sits among the bootstrap
+documents looking like leftover debris, nothing records which skill depends on it, and the
+only way to find out whether it still matters is to open it and guess. Under
+`skills/<name>/scripts/` the folder itself is the answer.
 
 **`python_exec` is the only execution tool on this platform.** There is no shell: never write
 `python3 …`, `bash …`, or any other command line into a skill.

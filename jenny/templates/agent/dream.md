@@ -5,10 +5,12 @@ Do NOT guess paths. Route each fact to its canonical file:
 
 | File | Path | Content |
 |------|------|---------|
-| SOUL.md | `SOUL.md` | Agent behavior rules, guardrails, interaction patterns, tool-use strategy |
+| SOUL.md | `SOUL.md` | How **Jenny** behaves: identity, voice, guardrails, interaction patterns, working habits, and standing rules the user has given her — never how the **app** behaves |
 | USER.md | `USER.md` | Personal attributes: identity, preferences, habits, communication style (language, length, tone) — "identity" means who the user is, not where they happen to be right now |
 | MEMORY.md | `memory/MEMORY.md` | Project context: goals, architecture, strategic decisions, infrastructure overview, integrated services |
 | SKILL.md | `skills/<name>/SKILL.md` | Reusable workflow templates with concrete steps, commands, and examples ([SKILL] entries only) |
+
+**A runtime constraint is not a behavior rule, and it is not memory at all.** What a tool accepts, which modules import, what the sandbox refuses, where a limit is enforced — that describes the app, is identical on every install, and the system prompt states it again, freshly, at the top of every single turn. It does not go to `SOUL.md`, and it does not go to any of these files. The test is one question: *does this describe Jenny, or the app?* If the app, do not store it; if it is genuinely missing from the prompt above, it belongs in `skills/platform-notes/SKILL.md`, never in `SOUL.md`.
 
 `memory/WIKI.md` is **not yours**: it is the wiki directory, compiled by Atlas from `workspace/wikis/`. You cannot write to it, and you must not copy its content into MEMORY.md — an entity that already has a wiki page is reachable from there, and restating it here is exactly the duplication you exist to remove.
 
@@ -16,20 +18,21 @@ Do NOT guess paths. Route each fact to its canonical file:
 - "User prefers concise replies" → USER.md
 - "Reply in Chinese" → USER.md (language preference is communication style)
 - "Always verify claims against source code" → SOUL.md
-- "When searching, prefer grep over file listing" → SOUL.md (tool-use strategy)
+- "When searching, prefer grep over file listing" → SOUL.md (a working habit — what she reaches for first)
+- "`python_exec` refuses `import httpx`" → nowhere: that is the app, not Jenny, and the prompt above already says so
 - "Project targets indie developers, ~10K stars" → MEMORY.md
 - "Reverse proxy on port 8080 with user deploy" → MEMORY.md (infrastructure overview)
 - "Spreadsheet tool requires --id flag for sheet access" → SKILL.md (not MEMORY.md)
 - "API base URL is https://api.example.com" → SKILL.md (not MEMORY.md)
 - "User is in Rome, Italy" → nowhere: the runtime puts a dated `Device location` line in every prompt, and a copy in a file is never told when the user moves
 
-**Communication boundary:** Language, length, and tone preferences go to USER.md. Interaction patterns (active vs passive) and tool-use strategy go to SOUL.md.
+**Communication boundary:** Language, length, and tone preferences go to USER.md. Interaction patterns (active vs passive) and working habits go to SOUL.md.
 
 Cross-boundary rule: no technical configs in USER.md, no user facts in SOUL.md, no operational details in MEMORY.md. If a fact fits multiple files, keep the most specific copy and remove the rest.
 
 ## MECE enforcement
 - USER.md: personal attributes (identity, preferences, habits, communication style) — no technical configs, no project context, nothing the runtime already reports
-- SOUL.md: agent behavior rules, guardrails, interaction patterns, tool-use strategy — no user facts
+- SOUL.md: how Jenny behaves — identity, voice, guardrails, interaction patterns, working habits, standing user rules — no user facts, and nothing about how the app or its tools behave
 - MEMORY.md: project context (goals, architecture, strategic decisions, infrastructure overview, integrated services) — no operational details (commands, flags, tokens, URLs)
 - SKILL.md: reusable workflow templates with concrete steps, commands, and examples
 - If a fact belongs in multiple files, keep it in the most specific one and remove from others
@@ -48,6 +51,7 @@ Always strip these bracketed tags from saved memory content.
 ## Skill-to-skill MECE
 - If a new skill overlaps with an existing skill, merge the delta into the existing skill instead of creating a redundant one
 - Check existing skill descriptions (listed above) before creating a new skill
+- **Never merge into a skill the app ships with.** Bundled skills are re-extracted from the package on every boot, by design — anything you add to one is gone at the next restart. Merge only into a skill created by the user or by an earlier run; otherwise create a new directory.
 
 ## Delete-or-keep
 
@@ -76,7 +80,7 @@ Always strip these bracketed tags from saved memory content.
 **Never delete:**
 - User preferences and personality traits (permanent regardless of age)
 - Active project context still referenced in conversations
-- Behavioral rules in SOUL.md
+- In SOUL.md: identity, voice, guardrails, and standing rules the user gave. A line about how the *app* behaves is none of these and is not protected — see the routing table.
 
 **Age and decay rules:**
 - Sprint goals and milestones: keep current + next sprint; archive completed ones after 30 days

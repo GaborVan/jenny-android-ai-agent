@@ -19,6 +19,11 @@ single job produces several. Never create a new file in the workspace root: it h
 fixed set of documents (AGENTS.md, SOUL.md, USER.md, HEARTBEAT.md)
 that you may edit but never add to.
 Content that has a home of its own keeps it: downloads/, memory/, wikis/, apps/, skills/.
+
+Do not read a file you are about to create. `read_file` on a path that does not exist
+is an error, and your tool-error budget is small — a handful of recoverable errors and
+the job is abandoned with nothing to report. `write_file` creates or overwrites, so
+write it directly.
 {% if skills_summary %}
 
 ## Skills

@@ -4,7 +4,8 @@ Three destinations. Picking the wrong one is what turns a check into chat spam.
 
 - Ambient check, fine on the shared heartbeat beat → add a line to `HEARTBEAT.md`.
   A protected cron job registered by the gateway already reads that file; never create
-  a second heartbeat job.
+  a second heartbeat job — unless the user disabled the built-in one and wants their own
+  schedule for it.
 - Must reach the user every time, or needs its own schedule → `cron` with `mode='reminder'`.
 - Needs its own schedule *and* should speak only when there is something to report →
   `cron` with `mode='monitor'`.

@@ -152,5 +152,6 @@ file in the workspace.
   (`storage`/`http` only). If an app needs real server-side logic, it belongs in the app's
   external server behind an `http` action.
 - The app never contacts the agent on its own. The only app→agent path is the user's explicit
-  hand-off to chat. Proactivity ("avvisami se...") is a cron job on the agent side, offered
-  as a follow-up after the app works.
+  hand-off to chat. Proactivity ("avvisami se...") is scheduled work on the agent side, offered
+  as a follow-up after the app works — where it goes is decided by the recurring-work rule, not
+  here.
