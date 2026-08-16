@@ -205,6 +205,13 @@ class TestBootstrapTemplateGuard:
     workspace e vengono omessi (stessa risposta che ``MEMORY.md`` riceve in
     ``build_system_prompt``); ``SOUL.md`` intatto è l'identità di serie e resta,
     ma etichettato.
+
+    Da 0.8.0 quei due template spediscono vuoti, quindi i loro casi qui li
+    prende la guardia sul contenuto vuoto (``TestEmptiedBootstrapFile``) prima
+    di arrivare al confronto col template: l'esito è lo stesso, la strada no.
+    A coprire ``_BOOTSTRAP_SKIP_IF_TEMPLATE`` su del testo vero resta
+    ``TestRetiredTemplates``, che lavora sulle versioni con la prosa — cioè su
+    quello che c'è davvero sui telefoni già installati.
     """
 
     def test_untouched_user_md_is_skipped(self, tmp_path):
@@ -290,12 +297,29 @@ class TestRetiredTemplates:
         ``_RETIRED_TEMPLATE_DIGESTS["USER.md"]`` (in
         ``jenny/utils/android_assets.py``) con l'etichetta della sua finestra di
         release, e sostituiscilo con quello nuovo.
+
+        **Il template oggi è vuoto**, quindi il digest atteso è ``sha256("")``.
+        Due conseguenze che chi tocca questo test deve avere in testa:
+
+        * ``sha256("")`` è il digest del template *corrente*, non di uno
+          ritirato, e non va registrato come tale in nessun caso. Registrarlo
+          armerebbe ``retire_withdrawn_templates`` contro **ogni** file vuoto o
+          fatto di soli spazi che si trova sul disco di un utente.
+        * il digest della prosa uscente (``e23a60be…``) è già nel registro: è
+          quello che tiene fuori dal prompt gli ``USER.md`` mai toccati sui
+          telefoni già installati, che altrimenti smetterebbero di combaciare col
+          bundle e rientrerebbero come contenuto dell'utente.
         """
         current = hashlib.sha256(
             _bundled("USER.md").strip().encode("utf-8")
         ).hexdigest()
-        assert current == "e23a60be0336c5220d3d0dbd256907f66b590156459422a244dcd24685eb49b7"
+        assert current == hashlib.sha256(b"").hexdigest()
+        assert current == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         assert current not in _RETIRED_TEMPLATE_DIGESTS["USER.md"]
+        assert (
+            "e23a60be0336c5220d3d0dbd256907f66b590156459422a244dcd24685eb49b7"
+            in _RETIRED_TEMPLATE_DIGESTS["USER.md"]
+        ), "la prosa uscente non è stata ritirata: rientra nel prompt di ogni telefono"
 
     @pytest.mark.parametrize("fixture", _RETIRED_AGENTS_FIXTURES)
     def test_every_retired_agents_digest_is_recognised(self, tmp_path, fixture):
@@ -328,12 +352,22 @@ class TestRetiredTemplates:
         fallisce, sposta il digest qui atteso dentro
         ``_RETIRED_TEMPLATE_DIGESTS["AGENTS.md"]`` (in
         ``jenny/utils/android_assets.py``) e mettine qui quello nuovo.
+
+        Vale parola per parola l'avvertenza del gemello sul template vuoto:
+        ``sha256("")`` non si registra mai come ritirato, e la prosa uscente
+        (``f7168ac0…``) invece sì, o gli ``AGENTS.md`` intatti già sul campo
+        rientrano nel prompt.
         """
         current = hashlib.sha256(
             _bundled("AGENTS.md").strip().encode("utf-8")
         ).hexdigest()
-        assert current == "f7168ac0aacf6424203c6173e46ed333981f57c3d491f055fe1358c9b9614569"
+        assert current == hashlib.sha256(b"").hexdigest()
+        assert current == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         assert current not in _RETIRED_TEMPLATE_DIGESTS["AGENTS.md"]
+        assert (
+            "f7168ac0aacf6424203c6173e46ed333981f57c3d491f055fe1358c9b9614569"
+            in _RETIRED_TEMPLATE_DIGESTS["AGENTS.md"]
+        ), "la prosa uscente non è stata ritirata: rientra nel prompt di ogni telefono"
 
     def test_a_template_with_retired_versions_is_never_labelled(self):
         """L'etichetta dice "questo file è ancora il template spedito con l'app",
@@ -365,6 +399,62 @@ class TestRetiredTemplates:
                 "aggiungilo a _BOOTSTRAP_SKIP_IF_TEMPLATE o dai a quel ramo "
                 "un'etichetta che dica la verità"
             )
+
+
+class TestEmptiedBootstrapFile:
+    """Un file di bootstrap svuotato non deve lasciare un heading vuoto nel prompt.
+
+    Non è un caso di laboratorio: ``agent/dream_review.md`` istruisce la
+    revisione a cancellare "l'introduzione che spiega a cosa serve il file", e
+    il template di ``USER.md`` è fatto *solo* di quello. Svuotato, il file non
+    combacia più con nessun digest, quindi esce da
+    ``_BOOTSTRAP_SKIP_IF_TEMPLATE`` e rientrerebbe nel prompt come contenuto
+    dell'utente — ``## USER.md`` seguito dal nulla, a ogni turno e per sempre.
+    """
+
+    def test_emptied_file_contributes_nothing(self, tmp_path):
+        (tmp_path / "USER.md").write_text("", encoding="utf-8")
+        builder = _builder(tmp_path)
+        result = builder._load_bootstrap_files()
+        assert "## USER.md" not in result
+        assert result == ""
+
+    def test_whitespace_only_file_contributes_nothing(self, tmp_path):
+        (tmp_path / "SOUL.md").write_text("\n\n   \n\t\n", encoding="utf-8")
+        builder = _builder(tmp_path)
+        result = builder._load_bootstrap_files()
+        assert "## SOUL.md" not in result
+        assert result == ""
+
+    def test_empty_file_does_not_hide_a_sibling_with_content(self, tmp_path):
+        # Pin di regressione: la guardia salta *quel* file, non il blocco.
+        (tmp_path / "USER.md").write_text("   \n", encoding="utf-8")
+        (tmp_path / "AGENTS.md").write_text("- Deploy con `./gradlew`.", encoding="utf-8")
+        builder = _builder(tmp_path)
+        result = builder._load_bootstrap_files()
+        assert "## AGENTS.md" in result
+        assert "./gradlew" in result
+        assert "## USER.md" not in result
+
+    def test_empty_file_is_skipped_even_when_the_bundled_template_is_empty(
+        self, tmp_path, monkeypatch
+    ):
+        """L'altra lettura di "vuoto", che arriva quando i template si svuotano.
+
+        Oggi ``_is_template_content("", "SOUL.md")`` è ``False`` (vuoto legge
+        come contenuto dell'utente); con un template bundled vuoto diventa
+        ``True``, e ``SOUL.md`` — che non sta in
+        ``_BOOTSTRAP_SKIP_IF_TEMPLATE`` — prenderebbe il ramo che etichetta,
+        emettendo un avviso con sotto niente. Entrambe le letture devono
+        restare innocue, quindi la guardia va prima del confronto col template.
+        """
+        monkeypatch.setattr("jenny.agent.context.load_bundled_template", lambda _p: "")
+        assert ContextBuilder._is_template_content("", "SOUL.md") is True
+        (tmp_path / "SOUL.md").write_text("", encoding="utf-8")
+        builder = _builder(tmp_path)
+        result = builder._load_bootstrap_files()
+        assert result == ""
+        assert ContextBuilder._BOOTSTRAP_TEMPLATE_NOTICE not in result
 
 
 # ---------------------------------------------------------------------------
@@ -458,6 +548,15 @@ class TestSchedulingBlock:
         La regola sta in ``agent/scheduling.md`` (dietro il tool) e in
         ``skills/cron/SKILL.md`` (su richiesta). Nessun altro template di
         sistema la ripete.
+
+        **Questo è il pin stretto su ``tool_contract.md``, non la guardia.** Le
+        cinque frasi sono i letterali che erano stati cancellati da lì, cercati
+        con l'apice singolo, e su un solo tipo di sorgente. La guardia vera —
+        template *più* skill, description dei tool, e i letterali Python di
+        ``jenny/cron`` e ``jenny/runtime`` letti con ``ast``, tutti con regex
+        indifferenti alle virgolette — sta in
+        ``tests/agent/test_prompt_corpus_scheduling.py``, che documenta anche
+        perché questa qui da sola non bastava.
         """
         from jenny.utils.android_assets import _SYSTEM_PROMPT_TEMPLATES
         from jenny.utils.helpers import load_bundled_template
@@ -492,20 +591,38 @@ class TestUserOwnedTemplatesCarryNoSystemGuidance:
     dentro non raggiunge mai un'installazione esistente.
     """
 
-    def test_the_stale_cron_parameters_are_gone(self):
+    @pytest.mark.parametrize("name", _USER_OWNED_TEMPLATES)
+    def test_the_stale_cron_parameters_are_gone(self, name):
         """``USER_ID``/``CHANNEL`` e ``web:default`` non esistono.
 
         Il tool ``cron`` non ha né ``user_id`` né ``channel``
         (``_CRON_PARAMETERS``) e ``jenny/session/keys.py`` conia
         ``unified:default``/``websocket:default``: quella riga diceva al modello
         di procurarsi valori per parametri che non ci sono.
+
+        Guardava solo ``AGENTS.md``, che da 0.8.0 spedisce vuoto: puntato lì non
+        poteva più fallire, e una guardia che non può fallire è peggio di
+        nessuna guardia perché sembra ancora coprire qualcosa. Vale per tutti i
+        template dell'utente — il difetto non era di quel file, era di *scrivere
+        parametri di tool* in un file che nessun aggiornamento raggiunge.
         """
-        text = _bundled("AGENTS.md")
+        text = _bundled(name)
         assert "USER_ID" not in text
         assert "web:default" not in text
 
     @pytest.mark.parametrize("name", _USER_OWNED_TEMPLATES)
     def test_no_user_owned_template_documents_the_tools(self, name):
+        """Tre dei cinque template ora sono vuoti e passano per costruzione.
+
+        La guardia resta viva sui due che del testo ce l'hanno ancora —
+        ``SOUL.md`` (la personalità di serie) e ``HEARTBEAT.md`` (le due
+        intestazioni che il parser cerca) — ed è su quelli che serve, perché
+        sono gli unici in cui si può ancora essere tentati di scrivere una
+        istruzione. Sui tre vuoti il pin è
+        ``test_the_user_owned_templates_ship_no_prose`` in
+        ``tests/utils/test_template_refresh.py``: finché quello tiene, qui non
+        c'è niente da coprire; se cede, questo torna a coprire cinque file.
+        """
         text = _bundled(name).lower()
         for token in ("cron", "mode=", "every_seconds", "apply_patch"):
             assert token not in text, (
@@ -531,6 +648,25 @@ class TestIsTemplateContent:
             pytest.skip("MEMORY.md template not bundled")
         original = tpl.read_text(encoding="utf-8")
         assert ContextBuilder._is_template_content(original, "memory/MEMORY.md") is True
+
+    def test_the_retired_memory_scaffold_is_still_recognised(self):
+        """Il round-trip col template bundled non prova più niente da solo.
+
+        ``memory/MEMORY.md`` spedisce zero byte, quindi il test qui sopra
+        confronta ``""`` con ``""``: passerebbe anche con il riconoscimento
+        rotto. Il caso che conta è l'altro, ed è quello che c'è sui telefoni —
+        lo scaffold "# Long-term Memory" con ``## User Information`` e
+        ``## Preferences``, che contraddicono il routing di ``agent/dream.md``.
+
+        Su un'installazione esistente quel file combaciava col bundle e veniva
+        soppresso; svuotare il template gli toglie quella copertura, e a
+        rimetterla è il digest ritirato. Se questo test fallisce, quelle
+        intestazioni sono tornate nel prompt di ogni telefono già installato, a
+        insegnare il contrario delle regole di sistema.
+        """
+        retired = _fixture("memory_md_retired_v0.3.0.md")
+        assert "## User Information" in retired, "la fixture non è più lo scaffold ritirato"
+        assert ContextBuilder._is_template_content(retired, "memory/MEMORY.md") is True
 
     def test_modified_content_returns_false(self):
         from importlib.resources import files as pkg_files

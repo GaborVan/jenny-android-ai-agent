@@ -348,6 +348,23 @@ class ContextBuilder:
             if not file_path.exists():
                 continue
             content = file_path.read_text(encoding="utf-8")
+            if not content.strip():
+                # File esistente ma senza contenuto: un heading con sotto il
+                # nulla, pagato a ogni turno e senza nemmeno dire cosa manca.
+                # Non è ipotetico: ``agent/dream_review.md`` ordina di
+                # cancellare "l'introduzione che spiega a cosa serve il file",
+                # e il template di ``USER.md`` è fatto solo di quella — una
+                # revisione che lo esegue alla lettera lascia il file vuoto.
+                #
+                # La guardia sta *prima* di ``_is_template_content`` perché
+                # quel confronto legge il vuoto in due modi opposti a seconda
+                # di com'è il template bundled: oggi ``False`` (vuoto = scritto
+                # dall'utente, ramo che lo inietta nudo), e ``True`` appena un
+                # template bundled diventa vuoto a sua volta (ramo che lo
+                # etichetta come default intatto, avviso senza testo sotto).
+                # Qui a monte le due letture sono entrambe innocue: comunque la
+                # si legga, un file vuoto nel prompt non ci entra.
+                continue
             if not self._is_template_content(content, filename):
                 parts.append(f"## {filename}\n\n{content}")
                 continue
