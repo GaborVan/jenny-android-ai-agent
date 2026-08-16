@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from jenny.cron.types import CronJob
+from jenny.session.keys import CRON_SESSION_PREFIX
 
 CRON_TRIGGER_META = "_cron_trigger"
 CRON_DEFER_UNTIL_IDLE_META = "_cron_defer_until_session_idle"
@@ -44,7 +45,7 @@ def is_monitor_cron_turn(metadata: Mapping[str, Any] | None) -> bool:
 
 def monitor_session_key(job_id: str) -> str:
     """Sessione isolata di un monitor: non sporca la conversazione d'origine."""
-    return f"cron:{job_id}"
+    return f"{CRON_SESSION_PREFIX}{job_id}"
 
 
 def cron_run_id(metadata: Mapping[str, Any] | None) -> str | None:

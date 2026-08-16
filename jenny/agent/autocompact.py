@@ -8,7 +8,11 @@ from typing import TYPE_CHECKING, Callable, Coroutine
 
 from loguru import logger
 
-from jenny.session.keys import UNIFIED_SESSION_KEY
+from jenny.session.keys import (
+    ATLAS_SESSION_PREFIX,
+    DREAM_SESSION_PREFIX,
+    UNIFIED_SESSION_KEY,
+)
 from jenny.session.manager import Session, SessionManager
 
 if TYPE_CHECKING:
@@ -17,7 +21,17 @@ if TYPE_CHECKING:
 
 class AutoCompact:
     _RECENT_SUFFIX_MESSAGES = 8
-    _INTERNAL_SESSION_PREFIXES = ("dream:", "atlas:")
+    # Sottoinsieme *deliberatamente stretto* del vocabolario di
+    # :mod:`jenny.session.keys`: qui "interna" non vuol dire "non e' l'utente",
+    # vuol dire "non deve avere ne archiviazione per inattivita ne reiniezione
+    # di ``_last_summary``". Allargarlo a ``cron:``/``heartbeat``/``internal:``/
+    # ``subagent:`` toglierebbe a quelle sessioni il summary che oggi
+    # ``prepare_session`` ricarica quando superano il budget di token: sarebbe
+    # una regressione, non un allineamento. Se l'insieme debba coincidere con
+    # ``is_internal_session_key`` e' una decisione aperta, da prendere a parte.
+    # I prefissi arrivano comunque dalle costanti condivise, cosi la *forma*
+    # della chiave non puo divergere dal lato che la scrive.
+    _INTERNAL_SESSION_PREFIXES = (DREAM_SESSION_PREFIX, ATLAS_SESSION_PREFIX)
 
     def __init__(self, sessions: SessionManager, consolidator: Consolidator,
                  session_ttl_minutes: int = 0):
@@ -83,8 +97,18 @@ class AutoCompact:
             self._summaries.pop(key, None)
             return session, None
         if key in self._archiving or self._is_expired(session.updated_at):
-            logger.info("Auto-compact: reloading session {} (archiving={})", key, key in self._archiving)
-            session = self.sessions.get_or_create(key)
+            # Il log sta *dentro* il confronto e non prima della chiamata: se la
+            # sessione e' gia in ``SessionManager._cache`` — il caso normale, ed
+            # e' l'unico che l'heartbeat incontra a ogni giro — ``get_or_create``
+            # restituisce lo stesso oggetto e non ha ricaricato niente. Loggare
+            # "reloading" li faceva credere a un ricaricamento a ogni battito.
+            reloaded = self.sessions.get_or_create(key)
+            if reloaded is not session:
+                logger.info(
+                    "Auto-compact: reloaded session {} (archiving={})",
+                    key, key in self._archiving,
+                )
+            session = reloaded
         # Hot path: summary from in-memory dict (process hasn't restarted).
         entry = self._summaries.pop(key, None)
         if entry:

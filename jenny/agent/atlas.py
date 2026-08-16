@@ -35,6 +35,7 @@ from typing import Any
 
 from loguru import logger
 
+from jenny.session.keys import ATLAS_SESSION_PREFIX
 from jenny.utils.path import atomic_write
 from jenny.utils.prompt_templates import render_template
 from jenny.utils.wiki_paths import (
@@ -306,7 +307,7 @@ class AtlasStore:
     @staticmethod
     def session_key() -> str:
         """Session key di un run, es. ``atlas:20260806-100000``."""
-        return f"atlas:{datetime.now():%Y%m%d-%H%M%S}"
+        return f"{ATLAS_SESSION_PREFIX}{datetime.now():%Y%m%d-%H%M%S}"
 
 
 def _count_pages(directory: Path) -> int:

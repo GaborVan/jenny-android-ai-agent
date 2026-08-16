@@ -18,6 +18,7 @@ from loguru import logger
 
 from jenny.agent.hook import AgentHook, AgentHookContext
 from jenny.config.paths import get_webui_dir
+from jenny.session.keys import internal_session_kind
 from jenny.utils.path import atomic_write
 
 TOKEN_USAGE_SCHEMA_VERSION = 1
@@ -33,6 +34,17 @@ _USAGE_KEYS = (
 )
 _REQUEST_KEYS = ("requests", "provider_requests", "estimated_requests")
 _SOURCE_KEYS = ("user", "api", "cron", "dream", "atlas", "system")
+# Mappa *locale* kind interno -> bucket di ``_SOURCE_KEYS``. Il vocabolario dei
+# kind e' condiviso (``jenny.session.keys.internal_session_kind``), la
+# partizione in bucket no: e' una scelta di contabilita di questo modulo.
+# I kind assenti (``internal``, ``subagent``) finiscono in ``"user"`` per
+# fallthrough — come prima di questa condivisione.
+_INTERNAL_KIND_TO_SOURCE = {
+    "dream": "dream",
+    "atlas": "atlas",
+    "cron": "cron",
+    "heartbeat": "cron",
+}
 _WRITE_LOCK = threading.Lock()
 
 
@@ -80,13 +92,20 @@ def _clean_source(value: str | None) -> str:
 
 
 def _source_from_session_key(session_key: str | None) -> str:
+    """Bucket di contabilita di una session key. Funzione *totale* su ``_SOURCE_KEYS``.
+
+    Non e' un predicato "interno si/no": e' una mappa in un enum chiuso, per cui
+    da :mod:`jenny.session.keys` prende solo il **vocabolario** (quali prefissi
+    esistono e come si chiamano) e tiene locale la mappa kind -> bucket. I kind
+    che non compaiono in ``_INTERNAL_KIND_TO_SOURCE`` cadono nel fallthrough
+    ``"user"`` come hanno sempre fatto.
+    """
     key = session_key or ""
-    if key.startswith("dream:"):
-        return "dream"
-    if key.startswith("atlas:"):
-        return "atlas"
-    if key == "heartbeat" or key.startswith("cron:"):
-        return "cron"
+    kind = internal_session_kind(key)
+    if kind is not None:
+        source = _INTERNAL_KIND_TO_SOURCE.get(kind)
+        if source is not None:
+            return source
     if key.startswith("api:"):
         return "api"
     if key.startswith("system:"):

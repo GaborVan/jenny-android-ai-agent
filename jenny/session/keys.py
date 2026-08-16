@@ -2,6 +2,20 @@
 
 from __future__ import annotations
 
+__all__ = [
+    "ATLAS_SESSION_PREFIX",
+    "CRON_SESSION_PREFIX",
+    "DREAM_SESSION_PREFIX",
+    "HEARTBEAT_SESSION_KEY",
+    "INTERNAL_SESSION_PREFIX",
+    "SUBAGENT_SESSION_PREFIX",
+    "UNIFIED_SESSION_KEY",
+    "internal_session_kind",
+    "is_internal_session_key",
+    "session_key_for_channel",
+    "subagent_session_key",
+]
+
 UNIFIED_SESSION_KEY = "unified:default"
 
 # Prefisso delle sessioni Tier-2 dei subagent (``subagent:<lineage_id>``).
@@ -9,29 +23,65 @@ UNIFIED_SESSION_KEY = "unified:default"
 # nessun elenco user-facing ne essere leggibili dalle route HTTP della WebUI.
 SUBAGENT_SESSION_PREFIX = "subagent:"
 
+# Prefisso dei run di un job cron (``cron:<job_id>``, v. ``cron/session_turns``).
+CRON_SESSION_PREFIX = "cron:"
+
+# Prefisso dei run di Dream (``dream:<timestamp>``, v. ``agent/memory``).
+DREAM_SESSION_PREFIX = "dream:"
+
+# Prefisso dei run di Atlas (``atlas:<timestamp>``, v. ``agent/atlas``).
+ATLAS_SESSION_PREFIX = "atlas:"
+
+# Prefisso del turno interno generico (``internal:direct``): e' il default di
+# ``AgentLoop.process_direct``, che oggi nessun chiamante di produzione lascia
+# scoperto — tutti passano una chiave esplicita.
+INTERNAL_SESSION_PREFIX = "internal:"
+
 # Sessione dell'heartbeat: chiave *nuda*, senza suffisso, perche ce n'e una sola
 # (``cron_dispatch._run_heartbeat``). Sta qui e non inline nel dispatcher perche
 # e' anche il discriminante di :func:`is_internal_session_key`.
 HEARTBEAT_SESSION_KEY = "heartbeat"
 
-# Prefissi delle sessioni interne (lavoro del sistema, non conversazione con
-# l'utente). Elencare le sessioni e per definizione un'operazione user-facing:
-# chi lo fa deve filtrare con :func:`is_internal_session_key`.
+# Vocabolario delle sessioni interne (lavoro del sistema, non conversazione con
+# l'utente): prefisso -> *kind*. Elencare le sessioni e per definizione
+# un'operazione user-facing: chi lo fa deve filtrare con
+# :func:`is_internal_session_key`.
 #
-# Ogni run coniato con un suffisso compare qui col separatore (``dream:<data>``,
-# ``atlas:<data>``, ``cron:<job_id>``, ``subagent:<lineage>``, ``internal:direct``).
-_INTERNAL_SESSION_PREFIXES = (
-    SUBAGENT_SESSION_PREFIX,
-    "cron:",
-    "dream:",
-    "atlas:",
-    "internal:",
+# Questo modulo e' la porta d'ingresso del vocabolario: chi ha bisogno di
+# distinguere le sessioni interne importa da qui invece di ricopiarsi la lista
+# dei prefissi, cosi il lato scrittura e il lato lettura non possono divergere.
+_INTERNAL_KIND_BY_PREFIX: tuple[tuple[str, str], ...] = (
+    (SUBAGENT_SESSION_PREFIX, "subagent"),
+    (CRON_SESSION_PREFIX, "cron"),
+    (DREAM_SESSION_PREFIX, "dream"),
+    (ATLAS_SESSION_PREFIX, "atlas"),
+    (INTERNAL_SESSION_PREFIX, "internal"),
 )
 
 # Chiavi interne senza suffisso: vanno confrontate per uguaglianza, non per
 # prefisso, altrimenti non matchano (era il caso di ``heartbeat``, che il
 # prefisso ``"heartbeat:"`` non ha mai intercettato).
-_INTERNAL_SESSION_KEYS = frozenset({HEARTBEAT_SESSION_KEY})
+_INTERNAL_KIND_BY_KEY: dict[str, str] = {HEARTBEAT_SESSION_KEY: "heartbeat"}
+
+
+def internal_session_kind(key: str) -> str | None:
+    """Il *kind* di lavoro interno a cui appartiene la session key, o ``None``.
+
+    Ritorna una delle etichette del vocabolario (``"subagent"``, ``"cron"``,
+    ``"dream"``, ``"atlas"``, ``"internal"``, ``"heartbeat"``) quando la chiave
+    e' di una sessione interna, ``None`` quando e' una conversazione utente.
+
+    Serve a chi non ha bisogno solo del si/no di
+    :func:`is_internal_session_key` ma anche di *quale* interno sia — per
+    esempio per instradare la contabilita dei token su un bucket diverso.
+    """
+    kind = _INTERNAL_KIND_BY_KEY.get(key)
+    if kind is not None:
+        return kind
+    for prefix, prefix_kind in _INTERNAL_KIND_BY_PREFIX:
+        if key.startswith(prefix):
+            return prefix_kind
+    return None
 
 
 def is_internal_session_key(key: str) -> bool:
@@ -42,9 +92,7 @@ def is_internal_session_key(key: str) -> bool:
     sta qui e non replicato in ogni chiamante, cosi aggiungere una sessione
     interna non richiede di ricordarsi di aggiornare N punti.
     """
-    if key in _INTERNAL_SESSION_KEYS:
-        return True
-    return any(key.startswith(prefix) for prefix in _INTERNAL_SESSION_PREFIXES)
+    return internal_session_kind(key) is not None
 
 
 def subagent_session_key(lineage_id: str) -> str:
