@@ -152,9 +152,16 @@ def render_gauge(report: Sequence[FileBudget], *, for_review: bool = False) -> s
     if not report:
         return ""
     if for_review:
+        # "Shrink what the criteria allow" e non "porta ogni file sotto il
+        # budget". La seconda formulazione è un ordine senza eccezioni, e su
+        # USER.md contraddice frontalmente le regole che il review pass applica:
+        # quel file è fatto di attributi personali, che ``Never delete`` copre.
+        # Un modello che riceve le due istruzioni insieme deve rompere il
+        # pareggio da solo, e lo romperà in modo diverso a ogni run. Qui il
+        # budget è il bersaglio; l'autorità sono i criteri.
         head = (
-            "Long-term memory budget (characters). Bring each file at or under its "
-            "budget; a file already under it does not need to shrink further."
+            "Long-term memory budget (characters). Shrink what the criteria allow; a "
+            "file already under its budget does not need to shrink further."
         )
     else:
         head = (

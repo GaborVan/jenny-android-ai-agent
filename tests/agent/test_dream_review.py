@@ -521,3 +521,43 @@ class TestTokenAccounting:
 
         assert outcome.status == STATUS_FAILED
         assert recorded == [None]
+
+
+class TestTheUserFileIsNotPrunedLikeTheOthers:
+    """Il budget e i criteri si contraddicono su ``USER.md``, e il prompt deve
+    dire chi vince.
+
+    Il gauge chiede di far rientrare i file; le regole delete-or-keep di
+    ``agent/dream.md`` — che questo run applica per riferimento — dicono
+    *"Never delete: user preferences and personality traits"*. Su MEMORY.md non
+    c'e' conflitto, perche' la sua ciccia sono note di implementazione che una
+    regola marca gia' come cancellabili. Su USER.md le due istruzioni arrivano
+    insieme senza una terza che rompa il pareggio, e un modello lo rompe da
+    solo — in modo diverso a ogni run, su fatti che l'utente non puo' sapere di
+    aver perso.
+    """
+
+    async def test_the_prompt_says_the_criteria_win(self, store: MemoryStore) -> None:
+        agent = _FakeAgent()
+        await _run(store, agent)
+
+        assert "USER.md shrinks by moving, not by forgetting" in agent.prompt
+        # Le due meta' della regola: come si scende, e quando ci si ferma.
+        assert "the criteria win" in agent.prompt
+        assert "finished job, not a failed one" in agent.prompt
+
+    async def test_the_gauge_does_not_order_an_unconditional_shrink(
+        self, store: MemoryStore
+    ) -> None:
+        """Il gauge propone un bersaglio; i criteri restano l'autorita'.
+
+        Se questa riga tornasse a essere un ordine senza eccezioni ("bring each
+        file at or under its budget") contraddirebbe la sezione qui sopra dentro
+        lo stesso prompt, ed e' esattamente il pareggio che quella sezione
+        esiste per rompere.
+        """
+        agent = _FakeAgent()
+        await _run(store, agent)
+
+        assert "Shrink what the criteria allow" in agent.prompt
+        assert "Bring each file at or under" not in agent.prompt

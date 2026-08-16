@@ -28,6 +28,16 @@ Shape only. Restructuring means the same facts in a smaller shape, or fewer fact
 
 Output formats, item counts, step lists and "always do it this way" procedures sitting in `USER.md` or `memory/MEMORY.md` are not personal attributes. `USER.md` is loaded into every single turn, including the ones that only ask what time it is, so a task spec parked there is paid for on every turn. Move it to `skills/<name>/SKILL.md` — merging into an existing skill if one overlaps rather than creating a redundant one — and delete it from the source file. Dream's routing table already says this; this run is where it gets applied.
 
+## USER.md shrinks by moving, not by forgetting
+
+`USER.md` is the one file where the budget and the criteria can pull against each other, and when they do **the criteria win**. Its weight is facts about a person, and *Never delete* covers those: preferences and personality traits stay, however old they are. Being over budget does not promote a personal fact to deletable.
+
+So there is one route down for this file, and it is the section above. In order: the task specs and procedures that drifted in here go to `skills/<name>/SKILL.md` and are deleted from here; then template residue — leftover checkbox lists, a heading with nothing under it, a field still holding its parenthetical placeholder; then prose that takes six lines to say what it could say in one.
+
+When those are done, stop. **A `USER.md` still over budget after the migration is a finished job, not a failed one.** Do not start ranking the user's own preferences by how much they look like they matter. You cannot tell, and neither can they: a personal fact you drop is one they have no way to notice is missing, and the only way it comes back is if they happen to say it again.
+
+`SOUL.md` reads the same way, for the same reason. `memory/MEMORY.md` does not: its weight is implementation detail that a `read_file` recovers, which is why the budget there means what it says.
+
 {% if snapshotted %}
 ## Your edits are reversible
 
