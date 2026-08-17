@@ -7,7 +7,13 @@ import pytest
 from jenny.agent.tools.context import RequestContext
 from jenny.agent.tools.cron import CronTool
 from jenny.cron.service import CronService
-from jenny.cron.types import CronJob, CronJobState, CronPayload, CronSchedule
+from jenny.cron.types import (
+    CronJob,
+    CronJobState,
+    CronPayload,
+    CronSchedule,
+    CronTaskCheckState,
+)
 
 
 def _make_tool(tmp_path) -> CronTool:
@@ -442,3 +448,70 @@ def test_list_excludes_disabled_jobs(tmp_path) -> None:
     result = tool._list_jobs()
     assert "Paused job" not in result
     assert result == "No scheduled jobs."
+
+
+# -- lo stato per-controllo dell'heartbeat --
+
+
+class TestThePerCheckStateIsReadable:
+    """Il job ``heartbeat`` esegue N controlli, e quale sia rotto era invisibile.
+
+    ``state.task_checks`` è indicizzato per task, viene salvato e ricaricato dallo
+    store da commit, e non raggiungeva **nessuna** superficie: non questo elenco,
+    non la WebUI. "Il controllo delle piante sta funzionando?" si rispondeva solo
+    leggendo logcat sul telefono — che su Android vuol dire non rispondere.
+
+    I tre contatori del job sono soltanto il riassunto ("almeno un controllo non è
+    partito"), quindi non sostituiscono questa lettura: dicono che qualcosa è
+    rotto, mai cosa.
+    """
+
+    def test_a_healthy_heartbeat_adds_nothing(self, tmp_path) -> None:
+        """Le voci esistono solo per i controlli rotti: assente vuol dire sano."""
+        tool = _make_tool(tmp_path)
+
+        assert tool._format_state(CronJobState(), CronSchedule(kind="every")) == []
+
+    def test_a_broken_check_is_named_with_its_streak(self, tmp_path) -> None:
+        tool = _make_tool(tmp_path)
+        state = CronJobState(
+            task_checks={
+                "abc": CronTaskCheckState(
+                    consecutive_could_not_check=4, label="WaterBot: umidità piante"
+                )
+            }
+        )
+
+        lines = tool._format_state(state, CronSchedule(kind="every", every_ms=1_800_000))
+
+        assert any("WaterBot: umidità piante" in line and "4 consecutive" in line for line in lines)
+
+    def test_it_says_whether_the_user_has_been_told(self, tmp_path) -> None:
+        """La metà che serve di più: rotto e annunciato è un guasto diverso da
+        rotto e mai annunciato, ed erano indistinguibili."""
+        tool = _make_tool(tmp_path)
+        schedule = CronSchedule(kind="every", every_ms=1_800_000)
+        quiet = CronJobState(
+            task_checks={"a": CronTaskCheckState(consecutive_could_not_check=4, label="piante")}
+        )
+        warned = CronJobState(
+            task_checks={
+                "a": CronTaskCheckState(
+                    consecutive_could_not_check=4, label="piante", escalated=True
+                )
+            }
+        )
+
+        assert "not reported to the user yet" in "\n".join(tool._format_state(quiet, schedule))
+        assert "has been warned" in "\n".join(tool._format_state(warned, schedule))
+
+    def test_a_delegated_check_says_it_is_waiting(self, tmp_path) -> None:
+        """Non è né rotto né sano: il verdetto arriva dal turno d'annuncio."""
+        tool = _make_tool(tmp_path)
+        state = CronJobState(
+            task_checks={"a": CronTaskCheckState(pending_since_ms=11, label="backup")}
+        )
+
+        lines = tool._format_state(state, CronSchedule(kind="every", every_ms=1_800_000))
+
+        assert any("backup" in line and "waiting for its result" in line for line in lines)

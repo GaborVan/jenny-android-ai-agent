@@ -296,9 +296,56 @@ class CronTool(Tool, ContextAware):
             note = f"  Could not check: {state.consecutive_could_not_check} consecutive run(s)"
             if state.could_not_check_since_ms:
                 note += f", since {self._format_timestamp(state.could_not_check_since_ms, display_tz)}"
+            if state.could_not_check_escalated:
+                note += "; the user has been warned"
             lines.append(note)
+        lines.extend(self._format_task_checks(state, display_tz))
         if state.next_run_at_ms:
             lines.append(f"  Next run: {self._format_timestamp(state.next_run_at_ms, display_tz)}")
+        return lines
+
+    def _format_task_checks(self, state: CronJobState, display_tz: str) -> list[str]:
+        """I singoli controlli dell'heartbeat, uno per riga. Vuoto per tutto il resto.
+
+        Il job ``heartbeat`` esegue N controlli scritti a mano in ``HEARTBEAT.md``,
+        e i tre contatori del job qui sopra ne sono soltanto il riassunto ("almeno
+        un controllo non è partito"). Quale sia stava in ``state.task_checks``, che
+        lo store salva e ricarica da commit e che **non raggiungeva nessuna
+        superficie**: né questa, né la WebUI. "Il controllo delle piante sta
+        funzionando?" si rispondeva solo leggendo logcat sul telefono.
+
+        Le voci esistono solo per i controlli rotti (assente = sano), quindi su un
+        heartbeat in salute questo blocco è vuoto e la risposta all'elenco resta
+        identica a prima.
+
+        Dice anche se all'utente è già stato detto, ed è la metà che serve di più:
+        un controllo rotto da giorni di cui nessuno ha parlato è un guasto diverso
+        da uno rotto da giorni e annunciato, e sono i due che il difetto del
+        timbro dedotto rendeva indistinguibili.
+        """
+        lines: list[str] = []
+        for entry in state.task_checks.values():
+            if entry.pending_since_ms is not None and not entry.consecutive_could_not_check:
+                lines.append(
+                    f"  - {entry.label or 'unnamed check'}: handed to a subagent, "
+                    "waiting for its result"
+                )
+                continue
+            if not entry.consecutive_could_not_check:
+                continue
+            detail = (
+                f"  - {entry.label or 'unnamed check'}: "
+                f"{entry.consecutive_could_not_check} consecutive run(s) not carried out"
+            )
+            if entry.since_ms:
+                detail += f", since {self._format_timestamp(entry.since_ms, display_tz)}"
+            if entry.escalated:
+                detail += "; the user has been warned"
+                if entry.escalated_at_ms:
+                    detail += f" on {self._format_timestamp(entry.escalated_at_ms, display_tz)}"
+            else:
+                detail += "; not reported to the user yet"
+            lines.append(detail)
         return lines
 
     @staticmethod
