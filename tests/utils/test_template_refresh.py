@@ -147,43 +147,80 @@ _RETIRED_FIXTURES = [
 
 
 @pytest.mark.parametrize(("name", "fixture"), _RETIRED_FIXTURES)
-def test_a_withdrawn_version_is_left_in_place_now_that_the_bundle_is_empty(
+def test_a_withdrawn_version_is_retired_to_the_empty_bundle(
     workspace: Path, name: str, fixture: str
 ) -> None:
-    """Il caso del Titan 2, e la sua fine: il ritiro non ha più niente da scrivere.
+    """Il caso del Titan 2: il manuale ritirato se ne va davvero dal disco.
 
-    Questo test asseriva l'opposto — che una copia ritirata venisse riscritta
-    alla versione bundled corrente. Da 0.8.0 quella versione è **zero byte**:
-    ``AGENTS.md``, ``USER.md`` e ``memory/MEMORY.md`` spediscono vuoti apposta,
-    e la guardia ``if not data`` in ``retire_withdrawn_templates`` tratta un
-    asset vuoto come illeggibile, perché non sa distinguerlo da uno troncato in
-    lettura e scriverlo azzererebbe il file dell'utente per sempre.
+    Da 0.8.0 la versione bundled di questi tre file è **zero byte** —
+    ``AGENTS.md``, ``USER.md`` e ``memory/MEMORY.md`` spediscono vuoti apposta —
+    quindi ritirare vuol dire portare a zero byte anche la copia sul disco.
 
-    Quindi la migrazione non avviene, e il testo ritirato resta sul disco. Non è
-    una regressione di correttezza: ``ContextBuilder._is_template_content``
-    riconosce ancora quei digest e tiene quel testo fuori dal prompt — è per
-    questo che i digest uscenti sono stati aggiunti al registro invece di essere
-    lasciati cadere. Quello che si perde è l'igiene sul disco, cioè la
-    protezione contro l'utente che aggiunge una riga sua a un manuale ritirato e
-    se lo ritrova promosso a "scritto dall'utente".
+    Per un commit questo test asseriva l'opposto, e la ragione era una guardia
+    scritta male: ``if not data`` trattava un asset vuoto come illeggibile, si
+    prendeva tutti e tre i digest ritirati, e la migrazione non avveniva più —
+    con tre ``logger.warning`` a ogni boot su ogni installazione, per sempre.
+    ``read_asset`` distingue già i due casi nel tipo di ritorno (``None`` per un
+    fallimento, ``b""`` per un asset davvero vuoto), e la protezione dell'utente
+    non era quella guardia: è il digest esatto, v.
+    :func:`test_one_line_of_the_users_own_is_enough_to_stop_it`.
 
-    **Se questo test inizia a fallire**, il ritiro ha ripreso a scrivere: o
-    qualcuno ha rimesso del testo in un template dell'utente (allora il posto
-    giusto per questa asserzione è di nuovo il rewrite, e va rimessa quella di
-    prima — ``target.read_text() == load_bundled_template(name)``), oppure ha
-    allentato la guardia ``if not data``, che invece è quella che impedisce di
-    azzerare il file di qualcuno.
+    **Se questo test inizia a fallire** perché il file non è vuoto ma contiene la
+    nuova copia bundled, qualcuno ha rimesso del testo in un template
+    dell'utente: l'asserzione giusta diventa
+    ``target.read_text() == load_bundled_template(name)``.
     """
     target = workspace / name
-    retired = _retired_fixture(fixture)
-    target.write_text(retired, encoding="utf-8")
+    target.write_text(_retired_fixture(fixture), encoding="utf-8")
 
     sync_workspace_templates(workspace, silent=True)
 
     assert (load_bundled_template(name) or "") == "", (
         f"{name} non è più un template vuoto: v. il docstring"
     )
-    assert target.read_text(encoding="utf-8") == retired
+    assert target.read_text(encoding="utf-8") == ""
+
+
+@pytest.mark.parametrize(("name", "fixture"), _RETIRED_FIXTURES)
+def test_the_retirement_does_not_come_back_on_the_next_boot(
+    workspace: Path, name: str, fixture: str
+) -> None:
+    """Ritirato una volta, e poi silenzio.
+
+    A zero byte il file non combacia più con nessun digest ritirato, quindi il
+    boot successivo non ha niente da fare e non stampa niente: è la differenza fra
+    una migrazione e un avviso a vita.
+    """
+    target = workspace / name
+    target.write_text(_retired_fixture(fixture), encoding="utf-8")
+    sync_workspace_templates(workspace, silent=True)
+
+    assert retire_withdrawn_templates(workspace) == []
+    assert target.read_text(encoding="utf-8") == ""
+
+
+@pytest.mark.parametrize(("name", "fixture"), _RETIRED_FIXTURES)
+def test_a_bom_does_not_hide_a_withdrawn_version(
+    workspace: Path, name: str, fixture: str
+) -> None:
+    """Un BOM UTF-8 non è testo dell'utente, e ``strip()`` non lo rimuove.
+
+    ``"\\ufeff"`` è categoria Cf, quindi ``str.isspace()`` è ``False`` e
+    sopravvive allo ``strip()`` che precede l'hash. Basta aprire e salvare il file
+    una volta con un editor Windows — Notepad lo aggiunge da sé — perché un
+    template che l'utente non ha mai scritto smetta di combaciare con qualunque
+    digest: rientra in ogni prompt come prosa dell'utente, senza nemmeno
+    l'etichetta "default intatto", e il ritiro non lo vede più.
+
+    Da non confondere con i fine-riga: quelli sono già normalizzati, perché ogni
+    lettore passa da ``Path.read_text`` e ``newline=None`` porta un CRLF a ``\\n``
+    prima dell'hash. La pista del CRLF è stata seguita per sbaglio; l'innesco è
+    questo.
+    """
+    target = workspace / name
+    target.write_text("﻿" + _retired_fixture(fixture), encoding="utf-8")
+
+    assert retire_withdrawn_templates(workspace) == [name]
 
 
 @pytest.mark.parametrize(("name", "fixture"), _RETIRED_FIXTURES)
@@ -274,27 +311,31 @@ def test_an_unreadable_bundle_leaves_the_file_alone(
     assert (workspace / "AGENTS.md").read_text(encoding="utf-8") == retired
 
 
-def test_an_empty_bundle_leaves_the_file_alone(
+def test_an_empty_bundle_is_written_because_empty_is_what_we_ship(
     workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Vuoto è illeggibile, e sbagliarlo è irreversibile.
+    """Vuoto e illeggibile sono due cose diverse, e il tipo di ritorno lo dice già.
 
-    ``read_asset`` ritorna ``b""`` per un asset presente ma troncato. Con una
-    guardia sul solo ``None`` quei zero byte finivano nel file dell'utente, e da
-    lì non tornava indietro: a zero byte non combacia con nessun digest ritirato
-    (quindi nessun boot successivo lo riprova) e continua a esistere (quindi
-    l'estrazione ``skip_existing`` gli passa accanto). Il file resta vuoto finché
-    non se ne accorge una persona.
+    ``read_asset`` dà ``None`` quando non è riuscita a leggere e ``b""`` per un
+    asset che è davvero vuoto — che da 0.8.0 è il caso normale di tutti e tre i
+    template dell'utente. Conflaterli con ``if not data`` disattivava il ritiro
+    per l'intero registro.
+
+    Il rischio da cui quella guardia difendeva — azzerare un file che l'utente
+    aveva riempito — non è coperto da qui ma dal digest esatto: un file con una
+    riga in più non combacia con nessuna versione ritirata e non arriva a questo
+    punto.
     """
-    retired = _retired_fixture("agents_md_retired_v0.3.0.md")
-    (workspace / "AGENTS.md").write_text(retired, encoding="utf-8")
+    (workspace / "AGENTS.md").write_text(
+        _retired_fixture("agents_md_retired_v0.3.0.md"), encoding="utf-8"
+    )
     monkeypatch.setattr(
         "jenny.utils.android_assets.read_asset", lambda *args, **kwargs: b""
     )
 
-    assert retire_withdrawn_templates(workspace) == []
+    assert retire_withdrawn_templates(workspace) == ["AGENTS.md"]
 
-    assert (workspace / "AGENTS.md").read_text(encoding="utf-8") == retired
+    assert (workspace / "AGENTS.md").read_text(encoding="utf-8") == ""
 
 
 def test_the_retired_file_keeps_its_permissions(

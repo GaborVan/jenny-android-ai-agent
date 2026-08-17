@@ -2,7 +2,9 @@
 
 Three destinations. Picking the wrong one is what turns a check into chat spam.
 
-- Ambient check, fine on the shared heartbeat beat → add a line to `HEARTBEAT.md`.
+- Ambient check, fine on the shared heartbeat beat → add a line to `HEARTBEAT.md`,
+  **under its `## Active Tasks` heading**: only that section is read, so a line put
+  anywhere else — above it, or under a later `## Notes` — never runs, and nothing says so.
   A protected cron job registered by the gateway already reads that file; never create
   a second heartbeat job — unless the user disabled the built-in one and wants their own
   schedule for it.

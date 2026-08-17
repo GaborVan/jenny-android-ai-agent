@@ -288,6 +288,22 @@ class TestRetiredTemplates:
         assert "Luca" in result
         assert ContextBuilder._BOOTSTRAP_TEMPLATE_NOTICE not in result
 
+    def test_a_bom_does_not_promote_a_template_to_user_prose(self, tmp_path):
+        """Aprire e salvare il file con un editor Windows non lo rende tuo.
+
+        ``"\\ufeff"`` non è whitespace per Python, quindi sopravviveva allo
+        ``strip()`` che precede il confronto: da lì il file non combaciava più con
+        nessun digest e rientrava in **ogni** prompt come prosa dell'utente, senza
+        nemmeno l'etichetta "default intatto". Un modulo a caselle vuote presentato
+        al modello come preferenze di una persona.
+        """
+        (tmp_path / "USER.md").write_text(
+            "﻿" + _retired_user_template(), encoding="utf-8"
+        )
+        builder = _builder(tmp_path)
+
+        assert builder._load_bootstrap_files() == ""
+
     def test_current_user_template_digest_is_pinned(self):
         """Chi riscrive ``USER.md`` deve ritirare esplicitamente la versione uscente.
 
@@ -524,11 +540,17 @@ class TestSchedulingBlock:
         """
         from jenny.utils.prompt_templates import render_template
 
-        # 1300 e non 1600: il testo reso ne occupa 1134, e un tetto che lascia il
+        # 1450 e non 1600: il testo reso ne occupa ~1310, e un tetto che lascia il
         # 40% di margine non dice mai di no — cioè non fa il suo mestiere. Chi ha
         # bisogno di sforarlo ha quasi sempre bisogno della skill.
+        #
+        # Alzato da 1300 il 2026-08-17, e vale dire per cosa: la riga che dice
+        # **dove** va scritto un task nell'heartbeat (sotto ``## Active Tasks``).
+        # Non è profondità da manuale — è l'unica cosa che separa un task che gira
+        # da uno che non gira senza che nessuno lo dica, perché il parser legge
+        # solo quella sezione e appendere a fine file è la mossa naturale.
         rendered = render_template("agent/scheduling.md")
-        assert len(rendered) <= 1300, (
+        assert len(rendered) <= 1450, (
             f"agent/scheduling.md è {len(rendered)} caratteri: sta tornando un manuale. "
             "La profondità — sintassi, fusi orari, esempi, semantica di `list` — va in "
             "`skills/cron/SKILL.md`, che si legge su richiesta invece che a ogni turno."
@@ -992,3 +1014,124 @@ class TestAppsSummarySection:
         prompt = _builder(tmp_path).build_system_prompt()
         assert "BROKEN" in prompt
         assert "rotta" in prompt
+
+
+class TestTheToolContractIsGatedByTool:
+    """Il contratto non deve descrivere tool che in questo turno non esistono.
+
+    Per tre versioni ``agent/tool_contract.md`` si rendeva intero, chiuso sul solo
+    flag ``orchestrator``, che dice come si lavora e non quali tool ci sono. Chi lo
+    pagava era Dream: ``orchestrator=False`` e quattro tool in tutto
+    (``build_dream_tools``), quindi si prendeva le sezioni su ``python_exec``, la
+    ricerca, i tool web e ``download_file``.
+
+    Non è solo contesto pagato a vuoto. Fra quelle righe c'era *"deleting is the
+    one file operation that needs ``python_exec``"*, detta all'unico agente a cui
+    ``agent/dream_review.md`` chiede esplicitamente di cancellare e che
+    ``python_exec`` non ha: un'istruzione che manda in un vicolo cieco proprio il
+    run che deve fare spazio.
+    """
+
+    # Il registry di Dream, come lo costruisce ``MemoryStore.build_dream_tools``.
+    DREAM_TOOLS = ["read_file", "write_file", "edit_file", "apply_patch"]
+
+    def _contract(self, tmp_path, tools):
+        from jenny.utils.prompt_templates import render_template
+
+        return render_template(
+            "agent/tool_contract.md",
+            orchestrator=False,
+            has=ContextBuilder._tool_predicate(tools),
+            output_path=str(tmp_path / "output"),
+        )
+
+    @pytest.mark.parametrize(
+        "absent", ["python_exec", "web_search", "web_fetch", "download_file", "grep", "get_source"]
+    )
+    def test_a_tool_dream_does_not_have_is_never_named(self, tmp_path, absent):
+        assert absent not in self._contract(tmp_path, self.DREAM_TOOLS)
+
+    def test_the_tools_it_does_have_are_still_explained(self, tmp_path):
+        """Il gate toglie il rumore, non le istruzioni che servono."""
+        contract = self._contract(tmp_path, self.DREAM_TOOLS)
+
+        for present in self.DREAM_TOOLS:
+            assert present in contract
+
+    def test_deleting_does_not_send_dream_to_a_tool_it_lacks(self, tmp_path):
+        """La riga peggiore del file, e il motivo per cui questo gate esiste."""
+        contract = self._contract(tmp_path, self.DREAM_TOOLS)
+
+        assert "needs `python_exec`" not in contract
+        assert "cannot delete a file" in contract
+
+    def test_an_unknown_registry_still_gets_everything(self, tmp_path):
+        """``None`` vuol dire "non lo so", non "non c'è".
+
+        È la stessa semantica del gate di ``agent/scheduling.md``, e ciò che
+        garantisce che i percorsi senza registry per-turno vedano il prompt di
+        prima invece di zero sezioni.
+        """
+        contract = self._contract(tmp_path, None)
+
+        for name in ("python_exec", "web_search", "download_file", "grep"):
+            assert name in contract
+
+    def test_the_gate_is_a_callable_so_a_typo_fails_loudly(self):
+        """Perché una funzione e non un insieme passato al template.
+
+        Jinja2 valuta falso un ``in`` su una variabile assente, senza sollevare:
+        con un insieme, un errore di battitura nel nome della variabile spegnerebbe
+        **ogni** sezione del contratto in silenzio. Una callable mancante fa
+        fallire il render, e un render fallito lo si vede.
+        """
+        import jinja2
+
+        from jenny.utils.prompt_templates import render_template
+
+        with pytest.raises(jinja2.UndefinedError):
+            render_template("agent/tool_contract.md", orchestrator=False, output_path="/x")
+
+
+class TestWhichFileAFactBelongsIn:
+    """Il routing dei quattro quaderni deve raggiungere un modello.
+
+    Esisteva soltanto nella scheda di aiuto della WebUI
+    (``ui/assets/i18n/{it,en}.json``), cioè in un posto che nessun modello legge —
+    e da 0.8.0 i template di quei file spediscono zero byte, quindi nel prompt non
+    restava niente che dicesse a cosa serve ciascuno: a "ricordati questo" si
+    scriveva dove capitava.
+    """
+
+    def _contract(self, tools=None):
+        from jenny.utils.prompt_templates import render_template
+
+        return render_template(
+            "agent/tool_contract.md",
+            orchestrator=False,
+            has=ContextBuilder._tool_predicate(tools),
+            output_path="/x/output",
+        )
+
+    @pytest.mark.parametrize(
+        "name", ["USER.md", "SOUL.md", "AGENTS.md", "memory/MEMORY.md", "skills/<name>/SKILL.md"]
+    )
+    def test_every_destination_is_named(self, name):
+        assert name in self._contract()
+
+    def test_it_survives_the_tool_gate(self):
+        """Sta nella coda non gated di proposito: è Dream che ne ha più bisogno."""
+        assert "Which File a Fact Belongs In" in self._contract(
+            TestTheToolContractIsGatedByTool.DREAM_TOOLS
+        )
+
+    def test_it_does_not_ask_for_facts_the_runtime_already_measures(self):
+        """La stessa riga che la scheda della WebUI ha già: ora e posizione no.
+
+        Una copia scritta in ``USER.md`` non la aggiorna nessuno ed è vecchia
+        appena salvata, mentre il runtime le misura a ogni turno.
+        """
+        contract = self._contract()
+
+        assert "timezone" in contract
+        assert "stale the moment it is saved" in contract

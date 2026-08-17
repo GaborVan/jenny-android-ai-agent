@@ -1,7 +1,6 @@
 """Context builder for assembling agent prompts."""
 
 import base64
-import hashlib
 import mimetypes
 import platform
 from contextlib import suppress
@@ -12,7 +11,11 @@ from jenny.agent.memory import MemoryStore
 from jenny.agent.skills import SkillsLoader
 from jenny.config.paths import get_output_path
 from jenny.session.goal_state import goal_state_runtime_lines
-from jenny.utils.android_assets import _RETIRED_TEMPLATE_DIGESTS
+from jenny.utils.android_assets import (
+    _RETIRED_TEMPLATE_DIGESTS,
+    normalized_template_text,
+    template_digest,
+)
 from jenny.utils.helpers import (
     current_time_str,
     detect_image_mime,
@@ -160,9 +163,27 @@ class ContextBuilder:
         # non scrive file: è lui a scrivere i prompt dei subagenti con
         # ``spawn``, quindi è lui a dettare loro la destinazione sbagliata se
         # non la conosce. Da qui l'assenza di guardia sul flag.
+        #
+        # ``has`` è il gate per-tool, e arriva fin qui perché per tre versioni non
+        # c'era: questo template si rendeva intero con il solo flag
+        # ``orchestrator``, che dice come si lavora e non quali tool esistono. Chi
+        # lo pagava era Dream (``orchestrator=False``, quattro tool in tutto), che
+        # si prendeva le sezioni su ``python_exec``, ``grep``, i tool web,
+        # ``download_file`` e ``message`` — ~6 kB di istruzioni su tool assenti, e
+        # non solo contesto sprecato: fra quelle righe c'era "deleting is the one
+        # file operation that needs ``python_exec``", detta all'unico agente a cui
+        # ``dream_review.md`` chiede di cancellare e che ``python_exec`` non ce
+        # l'ha.
+        #
+        # Stessa semantica del gate di ``agent/scheduling.md`` poco sotto: ``None``
+        # vuol dire "non lo so" (nessun registry per-turno, nessuna callable), non
+        # "il tool non c'è", e in quel caso ``has`` è vera per tutto — il prompt
+        # resta byte-identico a quello di prima.
+        tool_names = self._resolve_tool_names(available_tools)
         parts.append(render_template(
             "agent/tool_contract.md",
             orchestrator=orchestrating,
+            has=self._tool_predicate(tool_names),
             output_path=str(get_output_path(_absolute_workspace(root))),
         ))
 
@@ -185,7 +206,6 @@ class ContextBuilder:
         # un'installazione dove l'utente ha scritto *sopra* il vecchio testo di
         # sistema — l'unico caso che nessuna migrazione può raggiungere — è la
         # sola cosa che decide la contraddizione dalla parte giusta.
-        tool_names = self._resolve_tool_names(available_tools)
         if tool_names is None or _CRON_TOOL_NAME in tool_names:
             # v. ``_render_tool_inventory``: workspace di una versione
             # precedente, dove questo template non è ancora stato estratto.
@@ -248,6 +268,26 @@ class ContextBuilder:
             parts.append(inventory)
 
         return "\n\n---\n\n".join(parts)
+
+    @staticmethod
+    def _tool_predicate(tool_names: list[str] | None) -> Callable[[str], bool]:
+        """``has('python_exec')`` per i template, chiuso sui nomi di questo turno.
+
+        Una funzione e non un insieme passato al template: Jinja2 su un ``in`` con
+        una variabile assente non solleva, la valuta falsa — cioè un errore di
+        battitura nel nome della variabile spegnerebbe in silenzio ogni sezione
+        del contratto. Una callable mancante invece fa fallire il render, e un
+        render fallito lo si vede.
+
+        ``None`` (nessun registry per-turno e nessuna callable) vuol dire "non lo
+        so" e risponde sì a tutto: un percorso che non sa quali tool ha deve
+        vedere il contratto intero, non zero sezioni. Stessa scelta del gate di
+        ``agent/scheduling.md``.
+        """
+        if tool_names is None:
+            return lambda _name: True
+        available = set(tool_names)
+        return lambda name: name in available
 
     def _resolve_tool_names(self, available_tools: list[str] | None) -> list[str] | None:
         """I nomi del turno se ci sono, altrimenti quelli del loop."""
@@ -382,15 +422,19 @@ class ContextBuilder:
         è se il file l'ha scritto l'utente, e un template che spediva una
         release fa non l'ha scritto più di quello di oggi (v.
         ``_RETIRED_TEMPLATE_DIGESTS``).
+
+        La normalizzazione dei due lati sta in ``normalized_template_text``, con
+        la riscrittura del boot: un BOM UTF-8 sopravvive a ``strip()`` e faceva
+        smettere di combaciare un template che l'utente non ha mai scritto.
         """
-        stripped = content.strip()
+        stripped = normalized_template_text(content)
         tpl = load_bundled_template(template_path)
-        if tpl is not None and stripped == tpl.strip():
+        if tpl is not None and stripped == normalized_template_text(tpl):
             return True
         retired = _RETIRED_TEMPLATE_DIGESTS.get(template_path)
         if not retired:
             return False
-        return hashlib.sha256(stripped.encode("utf-8")).hexdigest() in retired
+        return template_digest(content) in retired
 
     def build_messages(
         self,

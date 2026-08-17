@@ -1,3 +1,22 @@
+{# Due condizioni, e servono entrambe.
+
+   ``has('nome')`` dice che il tool esiste nel registry di *questo turno* (la
+   passa ``ContextBuilder.build_system_prompt``); ``doer`` dice che fare il lavoro
+   è mestiere di questo turno, invece di delegarlo. Le sezioni che erano chiuse
+   sul solo modo restano tali e guadagnano il gate sul tool, in congiunzione.
+
+   Tenerne una sola è il difetto che questo file aveva. Con il solo modo, Dream
+   (``orchestrator=False``, quattro tool in tutto) si prendeva ~6 kB di istruzioni
+   su ``python_exec``, i tool web e ``download_file`` — non solo contesto pagato a
+   vuoto: invita a chiamare quel che non c'è, e fra quelle righe c'era "deleting
+   is the one file operation that needs ``python_exec``", detta all'unico agente a
+   cui si chiede di cancellare e che ``python_exec`` non ha. Con il solo ``has``,
+   un orchestratore dal registry sconosciuto si riprenderebbe le istruzioni
+   sull'esecuzione che non deve avere.
+
+   Registry sconosciuto (``None``) vuol dire "non lo so", non "non c'è": ``has``
+   risponde sì a tutto e il file resta quello di prima. #}
+{% set doer = not orchestrator %}
 # Tool Usage Notes
 
 Tool signatures are provided automatically via function calling. This section documents the general tool contract and non-obvious usage patterns.
@@ -6,42 +25,73 @@ Tool signatures are provided automatically via function calling. This section do
 
 - Use the narrowest structured tool that directly matches the task.
 - Use read-only discovery before writes when state is uncertain.
-{% if not orchestrator %}
+{% if doer and has('python_exec') %}
 - Do not use `python_exec` as a universal workaround for files, search, web, messages, or schedules.
 {% endif %}
 - If a tool fails, read the error, refresh the relevant state, and retry with a different approach instead of repeating the same call.
 - After meaningful changes, verify with the smallest reliable check: re-read changed state, run targeted tests, or inspect command output.
 - Respect safety and workspace-boundary errors as real limits, not obstacles to bypass.
 
+{# ``locators``: i tool con cui si *trova* un file. Un registry che non ne ha
+   nessuno — Dream, che legge e scrive tre percorsi noti — non deve vedere né
+   questa sezione né la parola "locate" nel ciclo di lavoro qui sotto: era il
+   modo più diretto di suggerirgli una chiamata a un tool inesistente. #}
+{% set locators = [] %}
+{% for t in ['find_files', 'list_dir', 'grep'] if has(t) %}{% set _ = locators.append(t) %}{% endfor %}
+{% if locators or has('get_source') %}
 ## Discovery and Reading
 
-- Jenny's own source is not in the workspace. Read it with `get_source` by dotted path (`jenny.agent.tools.android_web`, `jenny.agent.loop.AgentLoop.run`); `python_exec` path operations cannot reach it, because the boundary refuses everything outside the workspace.
+{% if has('get_source') %}
+- Jenny's own source is not in the workspace. Read it with `get_source` by dotted path (`jenny.agent.tools.android_web`, `jenny.agent.loop.AgentLoop.run`); {% if has('python_exec') %}`python_exec` path operations cannot reach it, because the boundary refuses everything outside the workspace{% else %}nothing else can reach it, because the workspace boundary refuses everything outside the workspace{% endif %}.
+{% endif %}
 {% if orchestrator %}
+{% if has('list_dir') %}
 - Use `list_dir` to locate workspace paths before `read_file` when a path is uncertain.
+{% endif %}
+{% if has('grep') %}
 - Use `grep` to find *which* files contain something, then `read_file` that path. It returns file paths (`files_with_matches`) or per-file counts (`count`) — the matching lines themselves are not available to you, and asking for them returns the paths anyway.
 - Never page through a file in slices to find something. That is what `grep` is for; if the answer needs a lot of reading, delegate it to a subagent instead.
-- Binary or oversized files may be skipped to keep results readable.
+{% endif %}
 {% else %}
-- Use `find_files` or `list_dir` to locate workspace paths before `read_file` when a path is uncertain.
-- Use `grep` for content search inside the workspace; prefer it over inline Python regex for ordinary searches.
+{% if has('find_files') or has('list_dir') %}
+- Use {% if has('find_files') and has('list_dir') %}`find_files` or `list_dir`{% elif has('find_files') %}`find_files`{% else %}`list_dir`{% endif %} to locate workspace paths before `read_file` when a path is uncertain.
+{% endif %}
+{% if has('grep') %}
+- Use `grep` for content search inside the workspace{% if has('python_exec') %}; prefer it over inline Python regex for ordinary searches{% endif %}.
 - `grep` defaults to `output_mode="files_with_matches"`; use `output_mode="content"` for matching lines with context.
 - Use `fixed_strings=true` for literal keywords containing regex characters.
 - Use `output_mode="count"` to size a broad search before reading full matches.
 - Use `head_limit` and `offset` to page across large result sets.
+{% endif %}
+{% endif %}
+{% if locators %}
 - Binary or oversized files may be skipped to keep results readable.
 {% endif %}
+{% endif %}
 
-{% if not orchestrator %}
+{% if doer and (has('apply_patch') or has('edit_file') or has('write_file')) %}
 ## File and Coding Workflows
 
-- For code or config changes, the default loop is: locate (`find_files`/`grep`), inspect (`read_file`), edit (`apply_patch`), then verify (`python_exec` or re-read).
+{% if has('apply_patch') %}
+- For code or config changes, the default loop is: {% if locators %}locate ({% for t in locators %}`{{ t }}`{{ "/" if not loop.last }}{% endfor %}), {% endif %}inspect (`read_file`), edit (`apply_patch`), then verify ({% if has('python_exec') %}`python_exec` or {% endif %}re-read).
 - Use `apply_patch` as the default code editing tool, especially for multi-file changes, structural edits, generated code, moves, adds, or deletes.
 - Use `apply_patch dry_run=true` when the patch is uncertain and you want validation plus a change summary before writing.
+{% endif %}
+{% if has('edit_file') %}
 - Use `edit_file` only for small exact replacements in one file, with `old_text` copied from `read_file`; add `occurrence`, `line_hint`, or `expected_replacements` when ambiguity matters.
+{% endif %}
+{% if has('write_file') %}
 - Use `write_file` for new files or intentional full-file rewrites, not routine partial edits.
-- If `apply_patch` or `edit_file` fails, re-read with `force=true`, narrow the context, and try a smaller patch rather than switching to `python_exec` for file manipulation.
-- `apply_patch` supports `replace` and `add` only — it cannot delete a file. Deleting is the one file operation that needs `python_exec` (`os.remove`, `os.rmdir`, `shutil.rmtree`, all of which work inside the workspace).
+{% endif %}
+{% if has('apply_patch') or has('edit_file') %}
+- If {% if has('apply_patch') %}`apply_patch`{% endif %}{% if has('apply_patch') and has('edit_file') %} or {% endif %}{% if has('edit_file') %}`edit_file`{% endif %} fails, re-read with `force=true`, narrow the context, and try a smaller patch{% if has('python_exec') %} rather than switching to `python_exec` for file manipulation{% endif %}.
+{% endif %}
+{% if has('apply_patch') %}
+- `apply_patch` supports `replace` and `add` only — it cannot delete a file.{% if has('python_exec') %} Deleting is the one file operation that needs `python_exec` (`os.remove`, `os.rmdir`, `shutil.rmtree`, all of which work inside the workspace).{% elif has('write_file') %} To empty a file you own, write it with empty content; removing the file itself is not something your tools can do, so do not plan a step that depends on it.{% endif %}
+{% endif %}
+{% endif %}
 
+{% if doer and has('python_exec') %}
 ## Process Execution
 
 This platform has no shell, subprocess, or CLI tools. The only code-execution tool is `python_exec`. Do not attempt to run `bash`, `sh`, `python3`, `node`, `npm`, `npx`, or any external command.
@@ -49,7 +99,7 @@ This platform has no shell, subprocess, or CLI tools. The only code-execution to
 - Use `python_exec` for tests, builds, data processing, and other logic.
 - Use `code='...'` for inline Python expressions or statements.
 - Use `function='name'` with `args`/`kwargs` to call registered Python functions.
-- Prefer dedicated tools (`read_file`, `find_files`, `grep`, `apply_patch`) over inline code
+- Prefer dedicated tools (`read_file`{% if has('find_files') %}, `find_files`{% endif %}{% if has('grep') %}, `grep`{% endif %}{% if has('apply_patch') %}, `apply_patch`{% endif %}) over inline code
   for ordinary workspace inspection and edits.
 - Registered functions include: `read_file`, `write_file`, `list_dir`, `find_files`,
   `grep_files`, `http_get`, `http_post`, `json_parse`, `json_dump`, `regex_match`,
@@ -62,27 +112,40 @@ This platform has no shell, subprocess, or CLI tools. The only code-execution to
 - Execution has a configurable timeout (default 60s) and output is truncated at 10000 chars.
 - For long-running code, use `yield_time_ms`; if execution continues, `python_exec` returns
   a `session_id` that can be polled with `write_stdin`.
+{% if has('write_stdin') %}
 - Use `write_stdin` to poll, terminate, or wait for output from a running session.
+{% endif %}
+{% if has('list_exec_sessions') %}
 - Use `list_exec_sessions` to recover active session IDs after context shifts.
+{% endif %}
+{% endif %}
 
+{% if doer and (has('web_search') or has('web_fetch')) %}
 ## Web and External Information
 
 - Use web tools when the user asks for current information, a specific URL, or information likely to have changed.
+{% if has('web_search') %}
 - **Use `web_search` as the primary tool for all web lookups.** It uses the native Android WebView and is the most reliable option.
+{% endif %}
+{% if has('web_fetch') %}
 - Use `web_fetch` to read a specific page or result that needs closer reading.
-- `web_fetch` renders the URL in a real browser, so it returns a document only for HTML pages that allow scripting. Plain-text URLs (raw.githubusercontent.com and the like), downloads and binaries come back empty — read those with the `http_get` builtin inside `python_exec`. Output is cut at the configured limit and flagged `"truncated": true`, and always arrives marked `"untrusted": true`.
+- `web_fetch` renders the URL in a real browser, so it returns a document only for HTML pages that allow scripting. Plain-text URLs (raw.githubusercontent.com and the like), downloads and binaries come back empty{% if has('python_exec') %} — read those with the `http_get` builtin inside `python_exec`{% endif %}. Output is cut at the configured limit and flagged `"truncated": true`, and always arrives marked `"untrusted": true`.
+{% endif %}
+{% if has('python_exec') %}
 - Do not use `python_exec` with `httpx` as a substitute for `web_search` or `web_fetch`. Only fall back to HTTP functions inside `python_exec` when the web tools are unavailable.
+{% endif %}
 - Repeating the *same* `web_fetch` URL or the *same* `web_search` query more than twice in a turn is blocked ("repeated external lookup blocked"). A URL that failed will fail again: move to a different source. On a research job, read the few pages that matter — four or five — and take the rest from `web_search` snippets.
 - Do not invent freshness-sensitive facts when tools can verify them.
 
 {% endif %}
+{% if has('message') %}
 ## Messaging and Media
 
 - Use `message` to send content or local media to the user/channel.
 - `read_file` only reads content for your analysis; it does not deliver a file to the user.
 - When sending an existing local file, attach it through the message/media mechanism instead of pasting file contents unless the user asked for text.
 
-{% if not orchestrator %}
+{% if doer and has('download_file') %}
 ### Downloading and presenting files
 
 - Use `download_file` to fetch ANY file from the web (image, PDF, archive, document, …). It saves into the workspace `downloads/` folder and returns the saved path.
@@ -92,10 +155,11 @@ This platform has no shell, subprocess, or CLI tools. The only code-execution to
 - Save downloaded files under `downloads/` only, never in the workspace root.
 
 {% endif %}
+{% endif %}
 ### Incoming user attachments
 
 - Files the user attaches in chat surface in the message as `[Attachment: <path>]` (saved under `uploads/`). Images are given to you directly as vision; other files are referenced by path.
-- Treat every `[Attachment: <path>]` as content the user wants you to use: read it with `read_file`{% if not orchestrator %} (or extract it with `python_exec`){% else %} (delegate extraction of formats `read_file` cannot handle){% endif %} when it is relevant to the request, instead of ignoring it or only describing its metadata.
+- Treat every `[Attachment: <path>]` as content the user wants you to use: read it with `read_file`{% if orchestrator %} (delegate extraction of formats `read_file` cannot handle){% elif has('python_exec') %} (or extract it with `python_exec`){% endif %} when it is relevant to the request, instead of ignoring it or only describing its metadata.
 - Short text/PDF documents may already be inlined for you as `[File: <name>]` followed by their text — use that directly, no extra read needed.
 - For binary attachments you cannot interpret (archives, unknown formats), say so plainly rather than guessing at their contents.
 
@@ -105,3 +169,18 @@ This platform has no shell, subprocess, or CLI tools. The only code-execution to
 - Files you produce go under `{{ output_path }}` — create a topic subfolder when a job produces several.
 - Never create a new file in the workspace root: it holds a fixed set of documents (`AGENTS.md`, `SOUL.md`, `USER.md`, `HEARTBEAT.md`) you may edit but never add to.
 - Content with a home of its own keeps it: `downloads/`, `memory/`, `wikis/`, `apps/`, `skills/`.
+
+{# Il routing dei quaderni sta qui, nella coda che nessun gate tocca, e non in un
+   file dell'utente: quelli si creano al primo avvio e non si aggiornano mai più.
+   Prima esisteva soltanto nella scheda di aiuto della WebUI
+   (``ui/assets/i18n/*.json``), cioè in un posto che nessun modello legge: a
+   "ricordati questo" si scriveva dove capitava. #}
+## Which File a Fact Belongs In
+
+Four documents, and each one answers a different question. Writing a fact in the wrong one is how it stops being found.
+
+- `USER.md` — who the user is: identity, language, communication style, habits, interests. Not the time, timezone or where they are: the runtime measures those every turn, and a copy written here is stale the moment it is saved.
+- `SOUL.md` — who *you* are: personality, tone, behaviour rules you have been asked to keep.
+- `AGENTS.md` — how work is done in this workspace: project preferences and recurring ways of proceeding.
+- `memory/MEMORY.md` — project context: what is going on, what was decided, what is still open.
+- A procedure with concrete steps and an output format is none of the four: it is a skill, under `skills/<name>/SKILL.md`.

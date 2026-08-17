@@ -81,8 +81,10 @@ _TEMPLATES_MANIFEST = [*_USER_OWNED_TEMPLATES, *_SYSTEM_PROMPT_TEMPLATES]
 # versioni con la prosa è ciò che tiene fuori dal prompt le installazioni già
 # esistenti: senza, un ``USER.md`` mai toccato smetterebbe di combaciare con il
 # bundle corrente e rientrerebbe in ogni turno come "scritto dall'utente", senza
-# nemmeno l'etichetta. Il riconoscimento continua a funzionare; la riscrittura
-# no — v. la guardia ``if not data`` in ``retire_withdrawn_templates``.
+# nemmeno l'etichetta. Il ritiro di quelle copie porta a zero byte anche il file
+# sul disco, ed è voluto: v. la guardia ``if data is None`` in
+# ``retire_withdrawn_templates``, che è ciò che distingue un asset spedito vuoto
+# da uno che non si è riusciti a leggere.
 _RETIRED_TEMPLATE_DIGESTS: dict[str, dict[str, str]] = {
     # "# User Profile" con i tre blocchi di caselle, "(your name)" e le sezioni
     # fra parentesi, e — dalla riscrittura dopo — lo scaffold di prosa senza
@@ -132,6 +134,38 @@ _RETIRED_TEMPLATE_DIGESTS: dict[str, dict[str, str]] = {
             "v0.3.0 to v0.7.1 (8833b94)",
     },
 }
+
+# Un BOM UTF-8 in testa al file. Non è testo — è un residuo di codifica che
+# scrive qualunque editor Windows, e Notepad lo mette anche su un file che apri
+# e salvi senza toccare — ma ``str.strip()`` non lo rimuove: ``"﻿"`` non è
+# whitespace per Python (categoria Cf, ``isspace()`` è ``False``).
+#
+# Senza toglierlo, un template intatto salvato una volta da un editor smette di
+# combaciare con qualunque digest: rientra in ogni prompt come prosa dell'utente,
+# senza nemmeno l'etichetta "default intatto", e il ritiro non lo vede più.
+#
+# Da non confondere con i fine-riga, che *sono* già normalizzati: tutti i lettori
+# passano da ``Path.read_text``, e con ``newline=None`` un CRLF diventa ``\n``
+# prima dell'hash. Quella pista è stata seguita per sbaglio; l'innesco è questo.
+_BOM = "﻿"
+
+
+def normalized_template_text(content: str) -> str:
+    """Il testo di un template nella forma su cui si confronta.
+
+    Una stesura sola perché i confronti sono due e devono restare d'accordo:
+    :func:`retire_withdrawn_templates` qui sotto e
+    ``ContextBuilder._is_template_content``. Se divergessero, un file sarebbe
+    riconosciuto come template da uno dei due e non dall'altro — cioè tenuto
+    fuori dal prompt e mai migrato, o migrato e intanto iniettato.
+    """
+    return content.lstrip(_BOM).strip()
+
+
+def template_digest(content: str) -> str:
+    """Il digest con cui si cerca *content* fra le versioni ritirate."""
+    return hashlib.sha256(normalized_template_text(content).encode("utf-8")).hexdigest()
+
 
 _SKILLS_MANIFEST = [
     "cron/SKILL.md",
@@ -545,7 +579,7 @@ def retire_withdrawn_templates(dest: Path) -> list[str]:
             # qui: il file assente lo crea l'estrazione subito dopo, e su un
             # file che non sappiamo leggere l'unica mossa sicura è non toccarlo.
             continue
-        label = retired.get(hashlib.sha256(content.strip().encode("utf-8")).hexdigest())
+        label = retired.get(template_digest(content))
         if label is None:
             continue
         if target.is_symlink():
@@ -562,39 +596,33 @@ def retire_withdrawn_templates(dest: Path) -> list[str]:
             )
             continue
         data = read_asset("jenny.templates", name)
-        if not data:
+        if data is None:
             # Prima si legge, poi si scrive: senza i byte nuovi si lascia stare.
             # L'ordine è il motivo per cui non esiste un istante in cui il file
             # dell'utente non c'è.
             #
-            # Vuoto conta come illeggibile, e non è pignoleria: ``read_asset``
-            # ritorna ``b""`` per un asset presente ma troncato, e scriverlo
-            # azzererebbe il file dell'utente **per sempre**. A zero byte non
-            # combacia più con nessun digest, quindi il ritiro non lo riprova; e
-            # siccome esiste, l'estrazione ``skip_existing`` gli passa accanto a
-            # ogni boot. Nessun avvio successivo lo rimette a posto.
+            # ``is None`` e non ``not data``, ed è la correzione del 2026-08-17.
+            # Da 0.8.0 un template bundled vuoto è la **normalità**: ``AGENTS.md``,
+            # ``USER.md`` e ``memory/MEMORY.md`` spediscono zero byte apposta (la
+            # prosa che si spiegava da sola si pagava a ogni turno, non la leggeva
+            # nessuno, e nel caso di ``MEMORY.md`` insegnava il contrario del
+            # routing di ``agent/dream.md``). Con ``not data`` questo ramo si
+            # prendeva tutti e tre i digest ritirati elencati sopra: la migrazione
+            # non avveniva più, la copia con la prosa restava sul disco a un tasto
+            # dal diventare "scritta dall'utente", e ogni boot di ogni
+            # installazione stampava tre di questi warning per sempre.
             #
-            # **Da 0.8.0 un template bundled vuoto è la normalità, non un
-            # guasto**: ``AGENTS.md``, ``USER.md`` e ``memory/MEMORY.md``
-            # spediscono zero byte apposta (la prosa che si spiegava da sola si
-            # pagava a ogni turno, non la leggeva nessuno, e nel caso di
-            # ``MEMORY.md`` insegnava il contrario del routing di
-            # ``agent/dream.md``). Questo ramo quindi *si prende* tutti e tre i
-            # digest ritirati qui sopra, e la migrazione non avviene più: la
-            # copia con la prosa resta sul disco dell'utente.
+            # La distinzione che serviva esiste già nel tipo di ritorno:
+            # ``read_asset`` dà ``None`` quando non è riuscita a leggere e ``b""``
+            # per un asset che è davvero vuoto. Non serve un elenco di eccezioni.
             #
-            # Non "aggiustare" la guardia lasciando passare il vuoto. Il ritiro
-            # non sa distinguere un asset spedito vuoto da uno troncato in
-            # lettura, e sbagliando dalla parte opposta azzererebbe un file che
-            # l'utente potrebbe aver riempito nel frattempo — perdita di dati
-            # senza appello, contro un file che intanto ``_is_template_content``
-            # continua a tenere fuori dal prompt. Il testo resta sul disco ed è
-            # innocuo lì; è una questione di igiene, non di correttezza.
-            #
-            # Il costo residuo è questo ``logger.warning`` a ogni boot su ogni
-            # installazione con una copia ritirata. Rumore, non un allarme.
+            # E il presidio contro la perdita di dati non era questa guardia: è il
+            # digest **esatto** poche righe sopra, che ha già dimostrato che nel
+            # file non c'è una riga dell'utente. Un file che l'utente avesse
+            # riempito nel frattempo non combacerebbe con nessun digest e non
+            # arriverebbe mai qui.
             logger.warning(
-                "Cannot retire {}: the bundled template is unreadable or empty, "
+                "Cannot retire {}: the bundled template could not be read, "
                 "leaving the withdrawn {} copy in place",
                 name, label,
             )
