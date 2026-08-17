@@ -89,9 +89,17 @@ def format_stuck_alarm(stuck: int) -> str:
     vorrebbe dire rileggere tre file per comporre una frase. Chi ha bisogno dei
     numeri li trova nella vista che questa frase gli dice di aprire.
     """
+    # Nessuna causa nominata, e non è vaghezza. ``stuck`` conta i run in cui
+    # nessuna scrittura è andata a segno, e i modi di non andare a segno sono due:
+    # il tetto in caratteri, e il rifiuto di *path* — un file fuori dalla
+    # allowlist del registry di Dream. Sul Titan 2 si è visto il secondo con tutti
+    # i file all'81% o meno, cioè il caso in cui questa frase, nominando il
+    # budget, mandava chi la legge a controllare l'unica cosa che stava a posto.
+    # La vista che la frase indica distingue: mostra le misure, e se sono sotto
+    # soglia la causa è l'altra.
     return (
-        f"Dream has not consolidated anything for {stuck} runs in a row: writes to "
-        "long-term memory keep being refused by their character budget."
+        f"Dream has not consolidated anything for {stuck} runs in a row: its writes "
+        "to long-term memory keep being refused."
     )
 
 
