@@ -68,6 +68,30 @@ def test_no_dream_tool_can_write_agents_md(tmp_path: Path) -> None:
         assert "AGENTS.md" not in files, f"{name} ha guadagnato AGENTS.md"
 
 
+def test_atlas_writes_one_file_and_its_prompt_names_all_four(tmp_path: Path) -> None:
+    """Atlas riceve lo stesso routing e ne può scrivere zero: il prompt lo dice.
+
+    Atlas non è mai stato esposto come Dream — la sua riga *"it is the only path
+    you can write to; every other file is read-only"* copre già tutto. Qui si fissa
+    che l'enumerazione non resti indietro rispetto ai quattro quaderni che
+    ``tool_contract.md`` gli nomina: era di tre, e la mancante era proprio quella
+    su cui Dream ha perso due run.
+    """
+    from jenny.agent.atlas import AtlasStore
+
+    store = AtlasStore(tmp_path)
+    tools = store.build_tools()
+    for name in ("write_file", "edit_file", "apply_patch"):
+        tool = tools.get(name)
+        assert tool is not None, f"Atlas deve avere {name}"
+        files = {Path(p).name for p in (vars(tool).get("_extra_write_allowed_files") or [])}
+        assert files == {"WIKI.md"}, f"{name}: {files}"
+
+    prompt = store.build_prompt()
+    for notebook in ("AGENTS.md", "SOUL.md", "USER.md", "MEMORY.md"):
+        assert notebook in prompt, f"{notebook} non è nominato fra i file vietati"
+
+
 def test_dream_prompt_says_agents_md_is_not_writable(tmp_path: Path) -> None:
     """E il prompt glielo dice, perché il contratto dei tool gliela nomina."""
     prompt = render_template(

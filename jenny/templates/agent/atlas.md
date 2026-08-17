@@ -64,6 +64,6 @@ When in doubt, leave it out. A directory of thirty sharp entries is useful; a di
 ## Discipline
 
 - Never invent an entity that has no page. Every entry traces to something in the inventory.
-- Never write outside `{{ wiki_file }}`. `MEMORY.md`, `SOUL.md` and `USER.md` belong to Dream; writing there is both blocked and wrong.
+- Never write outside `{{ wiki_file }}`. The system prompt above lists four notebooks — `AGENTS.md`, `SOUL.md`, `USER.md`, `memory/MEMORY.md` — and that routing is written for the main agent, not for you: none of the four is writable here. The three memory files belong to Dream, `AGENTS.md` to the user. Writing to any of them is both blocked and wrong, and a run whose only write is refused updates no fingerprint, so the whole directory is recompiled next time for nothing.
 - If the inventory says it was truncated, say so in one line under the title, so a later reader knows the directory is partial.
 - If nothing has meaningfully changed, leave the file as it is and stop. A run that writes nothing is a valid outcome.
