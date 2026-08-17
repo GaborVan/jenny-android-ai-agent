@@ -70,7 +70,21 @@ jobs:
       # via bridge nativo e `asyncssh` NON va mai nei requirements Android.
       # Senza questa riga i tre moduli di test SSH fallivano in collection.
       - run: pip install asyncssh
-      - run: pip install pytest-cov
-      # Il report di coverage è informativo (nessuna soglia bloccante): serve
-      # a rendere visibili i moduli scoperti, non a far fallire la build.
-      - run: pytest -q --cov=jenny --cov-report=term-missing:skip-covered
+      # NON aggiungere `--cov` qui, e non reinstallare `pytest-cov`: la misura
+      # perturba ciò che misura. La sandbox di `python_exec` intercetta *tutte*
+      # le operazioni su path del processo per la durata di una `execute`,
+      # rifiuta quelle fuori dal workspace e le mette a verbale; le letture di
+      # path del tracer di coverage cadono in quella finestra, vengono rifiutate
+      # come le altre, e le prove che asseriscono un verbale pulito falliscono.
+      # Non è aggirabile: allargare l'esenzione della sandbox indebolirebbe un
+      # confine di sicurezza su una piattaforma che non spediamo (fuori da
+      # Chaquopy `_discover_runtime_path_prefixes` è vuota di proposito);
+      # sospendere il tracer attorno a ogni `execute` è stato misurato e va da
+      # 122 s a oltre venti minuti; marcare le prove con `no_cover` sposta il
+      # problema sulla prima prova non marcata, all'infinito.
+      # Il report non aveva consumatori — nessun `fail_under`, nessun badge,
+      # nessun servizio esterno — e in cambio ha tenuto questa CI rossa per tre
+      # release, cioè ha insegnato a ignorare l'unico segnale che conta. Per
+      # vederlo in locale: `pytest -q --cov=jenny`, sapendo che quelle prove
+      # della sandbox falliranno e che il motivo è questo.
+      - run: pytest -q
