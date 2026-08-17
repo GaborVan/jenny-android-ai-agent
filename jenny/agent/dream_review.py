@@ -73,6 +73,12 @@ class ReviewOutcome:
     status: str
     before: dict[str, int]
     after: dict[str, int]
+    # Scritture rifiutate dal budget il cui contenuto non è mai atterrato. Se è
+    # > 0 lo status non è ``completed``: ``failed`` quando qualcosa è anche calato
+    # (possibile migrazione troncata), altrimenti ``no-change`` — che è l'esito
+    # corretto quando il run ha lasciato stare la fonte, come il prompt gli chiede.
+    # V. :func:`run_dream_review`.
+    unresolved_refusals: int = 0
 
     @property
     def freed(self) -> int:
@@ -167,7 +173,13 @@ async def run_dream_review(
         # farci. Le misure si prendono comunque: il modello può aver scritto
         # prima di morire.
         logger.exception("Dream review pass failed")
-        return ReviewOutcome(status=STATUS_FAILED, before=before, after=_measure(report))
+        refused = getattr(getattr(tools, "file_states", None), "unrecovered_refusals", 0)
+        return ReviewOutcome(
+            status=STATUS_FAILED,
+            before=before,
+            after=_measure(report),
+            unresolved_refusals=refused if isinstance(refused, int) else 0,
+        )
     finally:
         # La contabilità dei token sta qui e non nel chiamante, come in
         # ``run_atlas``: questa funzione è l'unico punto che vede la risposta del
@@ -187,6 +199,19 @@ async def run_dream_review(
         )
 
     after = _measure(report)
+    # Rifiuti di budget il cui contenuto non è atterrato. ``unrecovered_refusals``
+    # e non il contatore cumulativo: un file rifiutato e poi riscritto con dentro
+    # il fatto è stato recuperato, e contarlo qui trasformerebbe in allarme il caso
+    # in cui il modello ha fatto esattamente ciò che il messaggio gli chiede.
+    #
+    # ``getattr`` perché ``ToolRegistry.file_states`` è dichiarato
+    # ``FileStates | None``: il registry qui sopra lo costruisce sempre valorizzato,
+    # quindi il ramo ``None`` è irraggiungibile e questa è solo la lettura che non
+    # obbliga a un ``assert`` per accontentare il type checker.
+    file_states = getattr(tools, "file_states", None)
+    outstanding = getattr(file_states, "unrecovered_refusals", 0)
+    if not isinstance(outstanding, int):
+        outstanding = 0
 
     # ``failed`` ha la precedenza su qualsiasi riduzione osservata: lo status
     # descrive la salute del run, non il suo effetto collaterale. Un turno
@@ -195,9 +220,71 @@ async def run_dream_review(
     # comunque.
     if not MemoryStore.internal_run_completed(resp):
         logger.warning("Dream review: run did not complete cleanly")
-        return ReviewOutcome(status=STATUS_FAILED, before=before, after=after)
+        return ReviewOutcome(
+            status=STATUS_FAILED, before=before, after=after,
+            unresolved_refusals=outstanding,
+        )
 
-    if any(after[label] < chars for label, chars in before.items()):
+    # Un rifiuto rimasto aperto vale come il turno interrotto, e per una ragione
+    # più stretta: il route down di ``dream_review.md`` sposta un fatto da
+    # ``USER.md`` a ``memory/MEMORY.md``, e la cancellazione dalla fonte è una
+    # scrittura che *rimpicciolisce* — quindi sempre accettata — mentre l'aggiunta
+    # alla destinazione può essere rifiutata perché il tetto è già superato. Se
+    # succede in quest'ordine il fatto non è in nessuno dei due file, e i soli
+    # ``before``/``after`` lo raccontano come un successo: ``USER.md`` è
+    # diminuito, quindi ``freed > 0``.
+    #
+    shrank = any(after[label] < chars for label, chars in before.items())
+
+    # La firma distruttiva è la **congiunzione**: un rifiuto rimasto aperto *e*
+    # qualcosa che si è rimpicciolito. Il route down sposta un fatto da ``USER.md``
+    # a ``memory/MEMORY.md``: la cancellazione dalla fonte è una scrittura che
+    # rimpicciolisce, quindi sempre accettata, mentre l'aggiunta alla destinazione
+    # può essere rifiutata perché il tetto è già superato. Se succede in
+    # quest'ordine il fatto non è in nessuno dei due file, e i soli
+    # ``before``/``after`` lo raccontano come un successo — ``USER.md`` è
+    # diminuito, quindi ``freed > 0``.
+    #
+    # Il rifiuto da solo non basta a dire "fallito", e una prima versione di questa
+    # riga lo faceva: segnalava i due comportamenti che il prompt *raccomanda*. Un
+    # solo ``apply_patch`` con entrambe le metà rifiutato rolla indietro tutto e non
+    # perde niente; e la via di riserva scritta due righe sopra — "se la
+    # destinazione viene rifiutata lascia la fonte dov'è" — è obbedienza, non
+    # guasto. Entrambe finivano in ``failed``, in contraddizione con quel che dice
+    # la fine di quel template: *"un run che non cambia niente è un esito valido"*.
+    #
+    # "Rimasto aperto" è comunque una misura di contenuto, non di tentativi (v.
+    # ``FileStates.record_write_refused``): un modello che pota e si riporta dentro
+    # il fatto non arriva qui. Quel che resta è il caso che il prompt non può
+    # garantire di evitare, e per quello lo status esiste.
+    if outstanding > 0 and shrank:
+        logger.warning(
+            "Dream review: {} write(s) refused by their budget never landed while a "
+            "source file shrank — a fact may have been deleted without reaching its "
+            "destination. The pre-Dream snapshot is the only copy of the previous state",
+            outstanding,
+        )
+        return ReviewOutcome(
+            status=STATUS_FAILED, before=before, after=after,
+            unresolved_refusals=outstanding,
+        )
+
+    if outstanding > 0:
+        # Rifiuto aperto ma nulla è calato: la migrazione non è partita, che è
+        # l'esito che il prompt chiede quando la destinazione è piena. Non è un
+        # fallimento e non è un successo — resta ``no-change``, con il numero in
+        # chiaro nell'outcome perché il chiamante possa dirlo.
+        logger.info(
+            "Dream review: nothing shrank; {} write(s) were refused by their budget "
+            "and the run correctly left their source alone",
+            outstanding,
+        )
+        return ReviewOutcome(
+            status=STATUS_NO_CHANGE, before=before, after=after,
+            unresolved_refusals=outstanding,
+        )
+
+    if shrank:
         outcome = ReviewOutcome(status=STATUS_COMPLETED, before=before, after=after)
         logger.info(
             "Dream review: freed {:,} chars ({})",

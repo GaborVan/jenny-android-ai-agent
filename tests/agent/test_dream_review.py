@@ -227,6 +227,25 @@ class TestTheThreeThingsItMustNotDo:
 
 
 class TestPromptRendering:
+    async def test_the_migration_is_told_to_be_atomic(self, store: MemoryStore) -> None:
+        """La prevenzione del passo 3, che senza questo test non è pinnata da niente.
+
+        Spostare un fatto fra due file non è due modifiche indipendenti: la
+        cancellazione dalla fonte rimpicciolisce e passa sempre, l'aggiunta alla
+        destinazione può essere rifiutata perché quel file è già al tetto. In
+        quell'ordine il fatto non è in nessuno dei due. ``apply_patch`` interpella
+        il guard su tutti i bersagli prima di scrivere un byte e rolla indietro,
+        quindi è la sola forma in cui l'esito è sempre uno dei due giusti.
+        """
+        agent = _FakeAgent()
+        await _run(store, agent)
+
+        assert "one `apply_patch` call carrying **both** halves" in agent.prompt
+        assert "all-or-nothing" in agent.prompt
+        # E la via di riserva, per quando il modello la spezza comunque.
+        assert "write the destination first" in agent.prompt
+        assert "leave the source exactly as it is" in agent.prompt
+
     async def test_snapshotted_true_promises_reversibility(self, store: MemoryStore) -> None:
         agent = _FakeAgent()
         await _run(store, agent, snapshotted=True)
@@ -444,6 +463,176 @@ class TestTools:
 
         assert outcome.status == STATUS_COMPLETED
         assert store.memory_file.read_text(encoding="utf-8") == "# Memory\n"
+
+
+class TestAMigrationThatDeletesButCannotLand:
+    """Il passo 3 del route down può distruggere il fatto che doveva spostare.
+
+    Riprodotto sulle misure del device il 2026-08-17. ``memory/MEMORY.md`` è oltre
+    il suo tetto, e il route down ordina di spostarci il contesto di progetto
+    *"deleted from here"* — da ``USER.md``. La cancellazione dalla fonte è una
+    scrittura che rimpicciolisce, quindi sempre accettata; l'aggiunta alla
+    destinazione è oltre budget e non rimpicciolisce, quindi rifiutata. Il fatto
+    finisce in nessuno dei due file.
+
+    Prima, l'esito era ``completed`` con ``freed > 0``, perché ``USER.md`` era
+    diminuito: il log diceva *"freed N chars"* e nessun contatore veniva letto.
+    L'ordine imposto nel prompt è la prevenzione; questa classe fissa il
+    rilevamento, che serve perché su questo progetto è già stato misurato che il
+    modello scavalca le istruzioni.
+    """
+
+    @staticmethod
+    def _refuses_memory(path: Path, _text: str) -> str | None:
+        if path.name == "MEMORY.md":
+            return "Write refused: MEMORY.md would go over its char budget."
+        return None
+
+    async def _destructive_migration(self, store: MemoryStore) -> Any:
+        """Cancella il fatto da ``USER.md``, poi non riesce a scriverlo altrove."""
+
+        async def effect(tools: Any) -> None:
+            await tools.execute(
+                "edit_file",
+                {
+                    "path": "USER.md",
+                    "old_text": "- Timezone: Europe/Rome\n",
+                    "new_text": "",
+                },
+            )
+            await tools.execute(
+                "edit_file",
+                {
+                    "path": "memory/MEMORY.md",
+                    "old_text": "# Memory\n",
+                    "new_text": "# Memory\n- Timezone: Europe/Rome\n",
+                },
+            )
+
+        return await _run(
+            store,
+            _FakeAgent(effect=effect),
+            write_size_guard=self._refuses_memory,
+        )
+
+    async def test_the_pass_is_not_reported_as_completed(self, store: MemoryStore) -> None:
+        outcome = await self._destructive_migration(store)
+
+        assert outcome.status == STATUS_FAILED
+        assert outcome.unresolved_refusals == 1
+
+    async def test_and_it_would_have_looked_like_a_win(self, store: MemoryStore) -> None:
+        """La prova che il solo delta non basta: i numeri dicono "riuscito"."""
+        outcome = await self._destructive_migration(store)
+
+        # ``USER.md`` è calato, la destinazione è intatta: su ``before``/``after``
+        # questo run è indistinguibile da una potatura andata bene.
+        assert outcome.after["USER.md"] < outcome.before["USER.md"]
+        assert outcome.after["MEMORY.md"] == outcome.before["MEMORY.md"]
+        assert outcome.freed > 0
+        # E il fatto non è in nessuno dei due file.
+        assert "Europe/Rome" not in store.user_file.read_text(encoding="utf-8")
+        assert "Europe/Rome" not in store.memory_file.read_text(encoding="utf-8")
+
+    async def test_a_refusal_the_model_recovers_from_is_not_flagged(
+        self, store: MemoryStore
+    ) -> None:
+        """Il rovescio: obbedire al messaggio di rifiuto non è un fallimento.
+
+        Il modello aggiunge un fatto, viene rifiutato, pota le voci vecchie e
+        riscrive **portandosi dentro il fatto** — cioè fa alla lettera quel che il
+        messaggio di rifiuto gli chiede. Va riconosciuto come riuscito.
+        """
+        refused_growth = _MEMORY_TEXT + "- fatto nuovo\n"
+
+        def guard(path: Path, text: str) -> str | None:
+            if path.name == "MEMORY.md" and len(text) > len(_MEMORY_TEXT):
+                return "Write refused: over budget."
+            return None
+
+        async def effect(tools: Any) -> None:
+            await tools.execute(
+                "edit_file",
+                {"path": "memory/MEMORY.md", "old_text": _MEMORY_TEXT, "new_text": refused_growth},
+            )
+            await tools.execute(
+                "edit_file",
+                {
+                    "path": "memory/MEMORY.md",
+                    "old_text": _MEMORY_TEXT,
+                    "new_text": "# Memory\n- fatto nuovo\n",
+                },
+            )
+
+        outcome = await _run(store, _FakeAgent(effect=effect), write_size_guard=guard)
+
+        assert "fatto nuovo" in store.memory_file.read_text(encoding="utf-8")
+        assert outcome.unresolved_refusals == 0
+        assert outcome.status == STATUS_COMPLETED
+
+    async def test_obeying_the_fallback_is_not_a_failure(self, store: MemoryStore) -> None:
+        """La via di riserva che il prompt prescrive non deve risultare un guasto.
+
+        *"Se la destinazione viene rifiutata, lascia la fonte esattamente dov'è e
+        passa al passo successivo."* Un modello che obbedisce lascia un rifiuto
+        aperto e non cancella niente: nessun fatto perso. Una prima versione
+        segnalava proprio questo come ``failed``, in contraddizione con la fine
+        dello stesso template — *"un run che non cambia niente è un esito
+        valido"*. La firma distruttiva è la congiunzione: rifiuto aperto **e**
+        qualcosa che è calato.
+        """
+
+        def guard(path: Path, _text: str) -> str | None:
+            return "Write refused: over budget." if path.name == "MEMORY.md" else None
+
+        async def effect(tools: Any) -> None:
+            await tools.execute(
+                "edit_file",
+                {
+                    "path": "memory/MEMORY.md",
+                    "old_text": "# Memory\n",
+                    "new_text": "# Memory\n- contesto spostato\n",
+                },
+            )
+
+        outcome = await _run(store, _FakeAgent(effect=effect), write_size_guard=guard)
+
+        assert outcome.unresolved_refusals == 1
+        assert outcome.status == STATUS_NO_CHANGE
+        # E la fonte è intatta: è tutto il punto della via di riserva.
+        assert store.user_file.read_text(encoding="utf-8") == _USER_TEXT
+
+    async def test_pruning_that_drops_the_refused_fact_stays_flagged(
+        self, store: MemoryStore
+    ) -> None:
+        """E il caso che il solo percorso non distingueva: pota, ma perde il fatto.
+
+        Stessa forma del test sopra, con una sola differenza — la riscrittura non
+        contiene la riga che era stata rifiutata. Per un insieme di soli percorsi
+        i due run erano identici; qui il rifiuto resta aperto, perché il fatto non
+        è atterrato da nessuna parte.
+        """
+        refused_growth = _MEMORY_TEXT + "- fatto nuovo\n"
+
+        def guard(path: Path, text: str) -> str | None:
+            if path.name == "MEMORY.md" and len(text) > len(_MEMORY_TEXT):
+                return "Write refused: over budget."
+            return None
+
+        async def effect(tools: Any) -> None:
+            await tools.execute(
+                "edit_file",
+                {"path": "memory/MEMORY.md", "old_text": _MEMORY_TEXT, "new_text": refused_growth},
+            )
+            await tools.execute(
+                "edit_file",
+                {"path": "memory/MEMORY.md", "old_text": _MEMORY_TEXT, "new_text": "# Memory\n"},
+            )
+
+        outcome = await _run(store, _FakeAgent(effect=effect), write_size_guard=guard)
+
+        assert "fatto nuovo" not in store.memory_file.read_text(encoding="utf-8")
+        assert outcome.unresolved_refusals == 1
 
 
 class TestTheCriteriaAreReachable:
