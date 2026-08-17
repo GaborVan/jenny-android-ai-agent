@@ -14,6 +14,7 @@ from filelock import SoftFileLock
 from loguru import logger
 
 from jenny.cron.session_turns import is_bound_cron_job
+from jenny.cron.silence_watchdog import alert_silently_broken_checks
 from jenny.cron.types import (
     CronJob,
     CronJobSilencedError,
@@ -945,6 +946,15 @@ class CronService:
                 job.state.consecutive_could_not_check,
                 e.reason or "no reason given",
             )
+            # Ultimo, e dopo che lo stato è completo: è l'unico punto del sistema
+            # che vede sia i contatori del job aggiornati sia la mappa per-task
+            # che il dispatcher ha appena riscritto, ed è quindi l'unico da cui
+            # una sola chiamata copre monitor e heartbeat insieme.
+            #
+            # Il presupposto di ogni altro avviso è che il modello faccia la sua
+            # parte; questa riga è ciò che accade quando non la fa. V.
+            # ``jenny/cron/silence_watchdog.py``.
+            alert_silently_broken_checks(job.name, job.state, now_ms=start_ms)
         except CronJobSilencedError:
             # Esito riuscito, non mancato: il job monitor ha girato fino in
             # fondo e ha deciso che non c'era niente da dire. Nessun
