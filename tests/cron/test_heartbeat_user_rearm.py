@@ -85,6 +85,23 @@ def _escalated_labels(prompt: str) -> list[str]:
     return labels
 
 
+def _escalated_numbers(prompt: str) -> list[int]:
+    """I numeri dei task che il blocco chiede di annunciare.
+
+    Servono all'agente finto per scrivere la riga ``CHECK_WARNED``, che è ciò che
+    registra l'avviso: senza di essa lo stato non sa che è uscito, e il blocco di
+    escalation ricompare al giro dopo.
+    """
+    lines = prompt.splitlines()
+    start = next(i for i, line in enumerate(lines) if _ESCALATION_HEAD in line)
+    numbers: list[int] = []
+    for line in lines[start + 1:]:
+        if not line.startswith("- "):
+            break
+        numbers.append(int(line[2:].split(".", 1)[0]))
+    return numbers
+
+
 class _FakeSessions:
     """Sessioni vere: il lettore del timbro utente è ciò che si sta provando."""
 
@@ -109,13 +126,21 @@ class _FakeHeartbeatAgent:
 
     async def process_direct_outcome(self, prompt: str, **_kwargs: Any) -> TurnOutcome:
         self.prompts.append(prompt)
-        marks = "\n".join(
+        lines = [
             f"CHECK_FAILED {number}: {reason}" for number, reason in sorted(self.broken.items())
-        )
+        ]
         if _ESCALATION_HEAD in prompt and self.broken:
             self.messages.append("Non riesco più a eseguire: " + ", ".join(_escalated_labels(prompt)))
-            return TurnOutcome.spoke_via_tool(final_text=marks)
-        return TurnOutcome.silent(final_text=marks)
+            # E dichiara l'avviso, che è ciò che il prompt chiede insieme al
+            # messaggio: il timbro nello stato viene da questa riga, non dal
+            # fatto che un ``message`` sia uscito.
+            lines += [
+                f"CHECK_WARNED {number}"
+                for number in _escalated_numbers(prompt)
+                if number in self.broken
+            ]
+            return TurnOutcome.spoke_via_tool(final_text="\n".join(lines))
+        return TurnOutcome.silent(final_text="\n".join(lines))
 
     def evict_pruned_sessions(self, keys: list[str]) -> None:  # pragma: no cover
         pass

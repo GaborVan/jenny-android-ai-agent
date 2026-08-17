@@ -37,6 +37,7 @@ from jenny.cron.bound_runner import (
     could_not_check_reason,
     run_bound_cron_job,
 )
+from jenny.cron.could_not_check import ESCALATION_ASK_LIMIT
 from jenny.cron.service import CronService
 from jenny.cron.types import CronJobState, CronSchedule
 from jenny.utils.prompt_templates import render_template
@@ -122,7 +123,12 @@ class _FakeMonitorAgent:
         if not self._asked_to_warn(msg.content):
             return TurnOutcome.silent(final_text="CHECK_FAILED: hps non raggiungibile")
         self.messages.append("Il controllo delle piante non riesce a partire da un po'.")
-        return TurnOutcome.spoke_via_tool(final_text="CHECK_FAILED: hps non raggiungibile")
+        # E dichiara l'avviso: il timbro nello stato viene da questa riga, non
+        # dal fatto che ``message`` sia stato chiamato — un messaggio può parlare
+        # d'altro, e per tre commit è stato quello a zittire il guasto.
+        return TurnOutcome.spoke_via_tool(
+            final_text="CHECK_FAILED: hps non raggiungibile\nCHECK_WARNED"
+        )
 
 
 def _monitor(
@@ -320,7 +326,9 @@ class _ObedientlySilentAgent(_FakeMonitorAgent):
         if not self._asked_to_warn(msg.content):
             return TurnOutcome.silent(final_text="CHECK_FAILED: hps irraggiungibile")
         self.messages.append("Il controllo del server non riesce a partire da un po'.")
-        return TurnOutcome.spoke_via_tool(final_text="CHECK_FAILED: hps irraggiungibile")
+        return TurnOutcome.spoke_via_tool(
+            final_text="CHECK_FAILED: hps irraggiungibile\nCHECK_WARNED"
+        )
 
 
 class TestAnInstructedSilenceIsAboutTheMessage:
@@ -392,7 +400,7 @@ class _RepeatsItsOwnWarning(_FakeMonitorAgent):
         if not self._asked_to_warn(msg.content) and not self.messages:
             return TurnOutcome.silent(final_text=final)
         self.messages.append("Il controllo delle piante non riesce a partire da un po'.")
-        return TurnOutcome.spoke_via_tool(final_text=final)
+        return TurnOutcome.spoke_via_tool(final_text=final + "\nCHECK_WARNED")
 
 
 class TestTheUserIsNotToldTwice:
@@ -446,13 +454,17 @@ class TestTheUserIsNotToldTwice:
 
 
 class _WarnsWithoutBeingAsked(_FakeMonitorAgent):
-    """Avvisa al primo guasto, senza che nessuno glielo abbia chiesto.
+    """Avvisa al primo guasto, senza che nessuno glielo abbia chiesto — e lo dichiara.
 
     Misurato sul device alle 10:19 del 2026-08-16 (v.
     ``roadmap/heartbeat-escalation-amnesia.md``, punto 3): il guasto ce l'ha
     davanti, e il fatto che il prompt non chieda ancora di parlare non gli
     impedisce di chiamare ``message``. Tace solo quando il prompt glielo chiede
     esplicitamente, che è l'unica riga che il modello vero rispetta.
+
+    La riga ``CHECK_WARNED`` la scrive perché il prompt gliela chiede fra le
+    regole di sempre, non solo nel blocco di escalation: è quella l'istruzione
+    che rende registrabile un avviso spontaneo, e senza di essa non lo era.
     """
 
     async def submit_cron_turn(self, msg: InboundMessage) -> TurnOutcome:
@@ -463,25 +475,102 @@ class _WarnsWithoutBeingAsked(_FakeMonitorAgent):
         if _ALREADY_WARNED in msg.content:
             return TurnOutcome.silent(final_text=final)
         self.messages.append("Il controllo delle piante non riesce a partire da un po'.")
-        return TurnOutcome.spoke_via_tool(final_text=final)
+        return TurnOutcome.spoke_via_tool(final_text=final + "\nCHECK_WARNED")
 
 
-class TestAnUnaskedWarningIsStillAWarning:
-    """Un avviso è un avviso anche se non lo avevamo chiesto.
+class _WarnsAndNeverDeclaresIt(_FakeMonitorAgent):
+    """Avvisa a ogni giro e non scrive mai la riga. Il caso peggiore possibile.
 
-    ``escalated and spoke`` registrava solo gli avvisi *ordinati*: uno spontaneo
-    lasciava lo stato pulito, la soglia scattava lo stesso due giri dopo e
-    l'utente si sentiva dire la stessa cosa una seconda volta. È il difetto che
-    ``3894351`` ha chiuso sul ramo heartbeat, ed era rimasto vivo qui.
-
-    Sul monitor l'attribuzione non è in dubbio: un controllo per turno, e questo
-    ramo gira solo quando il turno ha scritto ``CHECK_FAILED``, quindi di
-    quell'unico guasto si tratta.
+    Ignora entrambe le istruzioni: quella che chiede la riga e quella che chiede
+    di tacere. Non è quel che fa un modello vero — è il tetto del costo, ed è qui
+    per fissarlo.
     """
 
-    async def test_an_unasked_warning_is_recorded_the_moment_it_goes_out(
+    async def submit_cron_turn(self, msg: InboundMessage) -> TurnOutcome:
+        self.prompts.append(msg.content)
+        if self.healthy:
+            return TurnOutcome.silent(final_text="Tutte le piante sopra il 15%.")
+        self.messages.append("Il controllo delle piante non riesce a partire da un po'.")
+        return TurnOutcome.spoke_via_tool(final_text="CHECK_FAILED: hps non raggiungibile")
+
+
+class _ReportsAFindingAndAlsoFails(_FakeMonitorAgent):
+    """Riporta un risultato degno di nota e, nello stesso turno, non completa il controllo.
+
+    Non è un caso di scuola. ``cron_monitor.md:11`` elenca fra le cose degne di
+    nota "una soglia superata, una scadenza in arrivo", quindi un monitor che
+    parla di ciò che ha trovato sta obbedendo. Un controllo in più parti legge la
+    prima e non raggiunge la seconda: risultato da riferire *e* ``CHECK_FAILED``.
+    Il tetto di ``message.py:251`` — un messaggio per run silenzioso — rende i due
+    esiti mutuamente esclusivi: se parla del risultato, del guasto non parla.
+    """
+
+    async def submit_cron_turn(self, msg: InboundMessage) -> TurnOutcome:
+        self.prompts.append(msg.content)
+        if self.healthy:
+            return TurnOutcome.silent(final_text="Tutte le piante sopra il 15%.")
+        self.messages.append("Basilico all'11%.")
+        return TurnOutcome.spoke_via_tool(final_text="CHECK_FAILED: hps non raggiungibile")
+
+
+class TestAMessageAboutSomethingElseDoesNotCountAsTheWarning:
+    """``spoke`` è di turno e non ha soggetto: da solo attribuisce male.
+
+    Con ``escalated=outcome.spoke`` questo agente si timbrava "già avvisato" allo
+    streak 1 per un messaggio che del guasto non parlava, e da lì
+    ``cron_monitor.md:18`` gli diceva di tacere "qualunque cosa tu trovi". Per
+    sempre: il re-arm su messaggio utente itera ``state.task_checks``, che per un
+    monitor è vuoto, quindi era l'unico latch senza via d'uscita.
+    """
+
+    async def test_a_finding_does_not_latch_the_failure_as_already_warned(
         self, tmp_path: Path
     ) -> None:
+        service, job_id, agent = _monitor(tmp_path, agent=_ReportsAFindingAndAlsoFails())
+
+        await _cycles(service, job_id, 1)
+
+        assert agent.messages == ["Basilico all'11%."]
+        state = _state(service, job_id)
+        assert state.consecutive_could_not_check == 1
+        assert state.could_not_check_escalated is False
+
+    async def test_the_escalation_is_asked_for_at_the_threshold(self, tmp_path: Path) -> None:
+        """Alla soglia il prompt chiede di avvisare, invece di tacere.
+
+        Attenzione a cosa questo test *non* prova: asserisce il prompt, non una
+        consegna. Che l'avviso arrivi davvero non è deducibile da qui, e misurato
+        il 2026-08-17 spesso non arriva — ``message.py`` lascia passare un solo
+        invio per run silenzioso, quindi un turno che ha già parlato del proprio
+        risultato si vede rifiutare il secondo, e ``escalated`` si timbra comunque
+        perché è inferito da ``outcome.spoke``, che non ha soggetto.
+        Quello resta aperto: la correzione vera è derivare ``escalated``
+        dall'*invio* dell'escalation e non dal turno.
+        """
+        service, job_id, agent = _monitor(tmp_path, agent=_ReportsAFindingAndAlsoFails())
+
+        await _cycles(service, job_id, MONITOR_ESCALATE_AFTER_FAILURES)
+
+        assert _MUST_WARN in agent.prompts[-1]
+        assert _ALREADY_WARNED not in agent.prompts[-1]
+
+
+class TestAnUnaskedWarningIsRecorded:
+    """Un avviso spontaneo che il turno dichiara **entra** nello stato.
+
+    Questa classe pinnava l'opposto, e non per un capriccio: registrarlo
+    richiedeva di credere che il messaggio riguardasse il guasto, e
+    :class:`_ReportsAFindingAndAlsoFails` mostra che da ``spoke`` non è
+    deducibile. Fra i due errori si scelse la direzione — un doppione è rumore
+    recuperabile, un guasto zittito per sempre no — e si pagò il doppione
+    misurato alle 10:19 del 2026-08-16.
+
+    ``CHECK_WARNED`` toglie la scelta: il soggetto lo scrive il modello, quindi un
+    avviso spontaneo si può registrare senza dedurre niente, e all'utente non
+    arriva la stessa cosa due volte.
+    """
+
+    async def test_an_unasked_warning_is_remembered(self, tmp_path: Path) -> None:
         service, job_id, agent = _monitor(tmp_path, agent=_WarnsWithoutBeingAsked())
 
         await _cycles(service, job_id, 1)
@@ -492,15 +581,84 @@ class TestAnUnaskedWarningIsStillAWarning:
         assert state.consecutive_could_not_check == 1
         assert state.could_not_check_escalated is True
 
-    async def test_the_threshold_does_not_say_it_a_second_time(self, tmp_path: Path) -> None:
+    async def test_the_threshold_does_not_ask_for_it_a_second_time(
+        self, tmp_path: Path
+    ) -> None:
+        """Il doppione misurato, ora chiuso: un avviso, non due."""
         service, job_id, agent = _monitor(tmp_path, agent=_WarnsWithoutBeingAsked())
 
         await _cycles(service, job_id, MONITOR_ESCALATE_AFTER_FAILURES + 3)
 
         assert len(agent.messages) == 1
-        # E il prompt non glielo chiede mai: l'utente lo sa già dal primo giro.
-        assert not any(_MUST_WARN in p for p in agent.prompts)
+        assert _MUST_WARN not in agent.prompts[MONITOR_ESCALATE_AFTER_FAILURES - 1]
         assert _ALREADY_WARNED in agent.prompts[-1]
+
+
+class TestTheAskIsBoundedNotEndless:
+    """Il costo residuo, e il suo tetto.
+
+    Il timbro adesso è una riga che il modello deve scrivere, quindi un modello
+    che non la scrive mai non fa scattare ``already_warned``: senza un limite la
+    richiesta tornerebbe nel prompt a ogni run per sempre, e con lei un messaggio
+    all'utente ogni mezz'ora. "Per sempre" non è un costo accettabile nemmeno
+    nella direzione del rumore.
+
+    Dove la finestra finisce comincia ``jenny/cron/silence_watchdog.py``, che
+    l'allarme lo alza da sé — v. ``ESCALATION_ASK_LIMIT``.
+    """
+
+    async def test_the_prompt_stops_asking_after_the_limit(self, tmp_path: Path) -> None:
+        service, job_id, agent = _monitor(tmp_path, agent=_WarnsAndNeverDeclaresIt())
+
+        await _cycles(service, job_id, MONITOR_ESCALATE_AFTER_FAILURES + ESCALATION_ASK_LIMIT)
+
+        asked = [p for p in agent.prompts if _MUST_WARN in p]
+        assert len(asked) == ESCALATION_ASK_LIMIT
+        # E l'ultimo run non chiede più niente: il prompt è quello di sempre.
+        assert agent.prompts[-1] == _base_prompt()
+
+    async def test_the_watchdog_picks_up_where_the_asking_stops(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Le due finestre sono contigue: non resta un run scoperto."""
+        alerts: list[str] = []
+        monkeypatch.setattr(
+            "jenny.runtime.notifier.notify_delivery",
+            lambda content, metadata: alerts.append(content),
+        )
+        service, job_id, agent = _monitor(tmp_path, agent=_WarnsAndNeverDeclaresIt())
+        last_ask = MONITOR_ESCALATE_AFTER_FAILURES - 1 + ESCALATION_ASK_LIMIT
+
+        await _cycles(service, job_id, last_ask)
+        assert alerts == []
+
+        await _cycles(service, job_id, 1)
+        assert len(alerts) == 1
+
+    async def test_the_escalate_block_claims_the_one_message_for_the_warning(
+        self, tmp_path: Path
+    ) -> None:
+        """La mitigazione dov'è utile: contro il tetto di un messaggio per run.
+
+        Una prima versione qui diceva al modello "a meno che non gliel'abbia già
+        detto", per limitare il doppione. Sbagliata, e misurata: se il modello
+        obbedisce non parla, quindi ``spoke`` è falso proprio al run
+        dell'escalation, ``escalated`` non si timbra mai e il blocco si ri-rende
+        per sempre. Le due mitigazioni si combattevano.
+
+        Quel che serve invece è dire di *cosa* parlare: ``message.py`` lascia
+        passare un solo invio per run silenzioso, quindi un turno che spende quel
+        messaggio su un risultato non può più avvisare del guasto — ed è il buco
+        vero, perché ``escalated`` si timbra comunque.
+        """
+        service, job_id, agent = _monitor(tmp_path)
+
+        await _cycles(service, job_id, MONITOR_ESCALATE_AFTER_FAILURES)
+
+        escalation_prompt = agent.prompts[-1]
+        assert _MUST_WARN in escalation_prompt
+        assert "this run's message is the warning" in escalation_prompt
+        assert "already told them" not in escalation_prompt
 
 
 class TestRecovery:

@@ -1422,7 +1422,7 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
                 # registrarlo. Isolato: un registratore rotto non deve poter
                 # far fallire un turno di background.
                 try:
-                    followup.record(key, final_text=text, spoke=spoke_via_tool)
+                    followup.record(key, final_text=text)
                 except Exception:
                     logger.exception("Heartbeat follow-up: could not record the outcome")
             return (

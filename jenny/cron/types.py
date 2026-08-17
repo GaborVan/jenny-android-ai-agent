@@ -44,9 +44,11 @@ class CronMonitorCouldNotCheckError(CronJobSilencedError):
 
     Attributes:
         reason: riga breve scritta dal modello su cosa lo ha bloccato.
-        escalated: il turno aveva l'istruzione di avvisare l'utente **e** ha
-            parlato. Il servizio lo usa per non ripetere l'avviso a ogni ciclo
-            finché lo stato non cambia.
+        escalated: il turno **dichiara** di aver avvisato l'utente di questo
+            guasto (riga ``CHECK_WARNED``). Il servizio lo usa per non ripetere
+            l'avviso a ogni ciclo finché lo stato non cambia. Non è "è uscito un
+            messaggio": quello era il difetto di prima, e un messaggio che
+            parlava d'altro zittiva il guasto per sempre.
     """
 
     def __init__(

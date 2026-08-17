@@ -14,7 +14,9 @@ from jenny.bus.events import InboundMessage
 from jenny.cron.could_not_check import (
     COULD_NOT_CHECK_MARKER,
     ESCALATE_AFTER_FAILURES,
+    ESCALATION_ASK_LIMIT,
     could_not_check_reason,
+    parse_warned_marks,
 )
 from jenny.cron.session_delivery import origin_delivery_context
 from jenny.cron.session_turns import (
@@ -84,10 +86,19 @@ def should_escalate_could_not_check(state: CronJobState) -> bool:
     adesso — a decidere se chiamare ``message``. Nessun turno in più, e nessuna
     consegna generata da fuori il turno: il dispatcher cron non ne ha una, per
     scelta (v. la docstring di ``jenny/runtime/cron_dispatch.py``).
+
+    E una finestra, non una semiretta: si chiede per ``ESCALATION_ASK_LIMIT`` run
+    e poi si smette. Il timbro che chiuderebbe la richiesta è una riga che il
+    modello deve scrivere (``CHECK_WARNED``), e un modello che non la scrive mai
+    si vedrebbe altrimenti chiedere l'avviso ogni mezz'ora per sempre. Dove
+    finisce la finestra comincia ``silence_watchdog``, che non passa dal modello.
     """
+    streak = state.consecutive_could_not_check
     return (
         not has_already_warned_could_not_check(state)
-        and state.consecutive_could_not_check >= MONITOR_ESCALATE_AFTER_FAILURES - 1
+        and MONITOR_ESCALATE_AFTER_FAILURES - 1
+        <= streak
+        < MONITOR_ESCALATE_AFTER_FAILURES - 1 + ESCALATION_ASK_LIMIT
     )
 
 
@@ -297,22 +308,37 @@ async def _run_bound_cron_job(
             raise CronMonitorCouldNotCheckError(
                 f"cron monitor job {job.id} could not run its check",
                 reason=reason or None,
-                # L'avviso è "dato" solo se è davvero uscito — un modello che
-                # ignora l'istruzione deve ritrovarsela al giro dopo — ma
-                # *chi* lo abbia chiesto non conta: anche un avviso che non
-                # avevamo ordinato è un avviso già dato, e legarlo a
-                # ``escalate`` lasciava lo stato pulito su un messaggio partito
-                # di iniziativa del modello. La soglia scattava lo stesso due
-                # giri dopo e l'utente si sentiva dire la stessa cosa una
-                # seconda volta (misurato alle 10:19; è il difetto che
-                # ``3894351`` ha chiuso sul ramo heartbeat).
+                # Il timbro viene da ciò che il turno **dichiara**, non da un suo
+                # effetto collaterale. Storia breve di come si è arrivati qui,
+                # perché è il genere di riga che qualcuno riscriverà.
                 #
-                # Qui non c'è il problema di attribuzione che là ha richiesto
-                # ``sole_failure``: un monitor ha UN controllo per turno, e
-                # questo ramo gira solo se il turno ha scritto ``CHECK_FAILED``
-                # — un messaggio uscito da quel turno non può che riguardare
-                # quel guasto.
-                escalated=outcome.spoke,
+                # Con ``outcome.spoke`` da solo: ``spoke`` è di turno e non ha
+                # soggetto — è vero per QUALUNQUE ``message`` riuscito. Ma
+                # ``cron_monitor.md:11`` autorizza esplicitamente il monitor a
+                # segnalare "una soglia superata, una scadenza in arrivo", e
+                # ``message.py:251`` ne lascia passare uno solo per run
+                # silenzioso. Un turno che riporta un risultato legittimo e poi
+                # non riesce a completare il controllo si timbrava ``escalated``
+                # allo streak 1 per un messaggio che del guasto non parlava. Da
+                # lì ``cron_monitor.md`` dice "non dirglielo di nuovo, qualunque
+                # cosa tu trovi" — per sempre, perché il re-arm su messaggio
+                # utente itera ``state.task_checks``, che per un monitor è vuoto.
+                # Misurato il 2026-08-17 sul dispatcher vero: 19 run, zero
+                # avvisi, controllo morto tutto il tempo.
+                #
+                # Con ``escalate and outcome.spoke``: un avviso spontaneo sotto
+                # soglia non veniva registrato, la soglia scattava lo stesso due
+                # giri dopo e l'utente sentiva la stessa cosa due volte
+                # (misurato alle 10:19). Si scelse il doppione, cioè la
+                # direzione d'errore giusta fra due letture entrambe sbagliate.
+                #
+                # ``CHECK_WARNED`` toglie la scelta: il turno dice di aver
+                # avvisato, e il timbro registra quello. Nessun ``escalate and``
+                # — un avviso di propria iniziativa è un avviso, e registrarlo è
+                # esattamente ciò che impedisce il doppione due giri dopo. Se il
+                # modello dimentica la riga il guasto si ripete: rumore, non
+                # silenzio.
+                escalated=bool(parse_warned_marks(outcome.final_text)),
             )
         # L'esito lo dice da sé: per un monitor l'outbound finale è sempre None,
         # e ``spoke`` distingue "ho parlato col tool ``message``" da "non avevo

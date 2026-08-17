@@ -1,6 +1,8 @@
 """I marcatori con cui un turno silenzioso dichiara l'esito di un controllo.
 
-Tre, e il primo è quello da cui è nato tutto: "non ho potuto controllare".
+Quattro, e il primo è quello da cui è nato tutto: "non ho potuto controllare".
+Tre parlano del controllo (non è avvenuto, è delegato, è andato bene) e il
+quarto parla di noi: all'utente gliel'ho detto.
 
 Perché il testo finale del turno e non un tool nuovo: su un controllo periodico
 quel testo esiste già, è già scartato (il turno è SILENT per costruzione) e oggi
@@ -56,6 +58,32 @@ DELEGATED_MARKER = "CHECK_DELEGATED"
 # legge solo i marcatori di guasto e non cambia comportamento.
 OK_MARKER = "CHECK_OK"
 
+# Il quarto, e il solo che non parli del controllo: parla di **noi**. Dice "di
+# questo guasto all'utente ho appena parlato", ed è ciò che permette allo stato
+# di registrare l'avviso invece di dedurlo.
+#
+# Perché serve. Il timbro ``escalated`` è il verbale di aver parlato, e finché
+# lo si deduceva da ``TurnOutcome.spoke`` si deduceva dalla cosa sbagliata:
+# ``spoke`` è vero per QUALUNQUE chiamata a ``message`` riuscita e non ha
+# soggetto. Un monitor autorizzato a segnalare "una soglia superata" (v.
+# ``agent/cron_monitor.md``) che poi non riesce a completare il controllo si
+# timbrava così per un messaggio che del guasto non parlava, e da lì il prompt
+# dice "non dirglielo di nuovo": misurato il 2026-08-17 sul dispatcher vero, 19
+# run consecutivi con il controllo morto e zero avvisi. Sull'heartbeat lo stesso
+# difetto era mediato da un'euristica (``sole_failure``, "se c'è un solo
+# candidato quel messaggio era per lui"), che sbagliava dalla parte opposta ogni
+# volta che i candidati erano due.
+#
+# Con questa riga il fatto è dichiarato: nessuna euristica, e il soggetto c'è.
+# E vale anche per un avviso di **propria iniziativa**, che era il caso per cui
+# ``sole_failure`` esisteva — un modello che decide di parlare lo dichiara, e non
+# si finisce per riavvisare della stessa cosa due giri dopo.
+#
+# Se il modello la dimentica, ``escalated`` resta ``False`` e l'avviso si ripete
+# al giro dopo: rumore recuperabile. È la direzione d'errore giusta — un guasto
+# zittito per sempre non lo è — e la stessa scelta che fa ``OK_MARKER``.
+WARNED_MARKER = "CHECK_WARNED"
+
 # Quante esecuzioni consecutive senza controllo prima di avvisare l'utente.
 # Tre, a mezz'ora di intervallo, fanno circa un'ora e mezza: abbastanza da non
 # reagire a una rete che va e viene, poco abbastanza da non lasciare un
@@ -63,6 +91,23 @@ OK_MARKER = "CHECK_OK"
 # gratis — qui non si muove niente finché il modello non dichiara di non aver
 # potuto controllare.
 ESCALATE_AFTER_FAILURES = 3
+
+# Quante volte di fila si può *chiedere* l'avviso, se il turno non lo dichiara.
+#
+# Serve perché ``CHECK_WARNED`` sposta il timbro su una riga che il modello deve
+# scrivere, e un modello che non la scrive mai non fa mai scattare
+# ``already_warned``: la richiesta tornerebbe nel prompt a ogni run, per sempre,
+# e con lei il messaggio all'utente ogni mezz'ora. La direzione d'errore scelta è
+# il rumore, ma il rumore va comunque limitato — "per sempre" non è un costo
+# accettabile in nessuna delle due direzioni.
+#
+# Tre, cioè la stessa soglia: si chiede ai run con sequenza 2, 3 e 4, e dal
+# quinto in poi non si chiede più. Non resta scoperto niente, perché è
+# esattamente lì che comincia ``jenny/cron/silence_watchdog.py``, che alza
+# l'allarme a 6 (``ESCALATE_AFTER_FAILURES * 2``) senza passare dal modello. Le
+# due finestre sono contigue di proposito: prima si chiede a chi sa scrivere una
+# frase, poi si suona un allarme che non ha bisogno di lui.
+ESCALATION_ASK_LIMIT = 3
 
 # Il motivo finisce in ``CronJobState.last_error`` e nella run record: va tenuto
 # corto, non è un log.
@@ -127,8 +172,18 @@ def parse_ok_marks(final_text: str | None) -> list[CouldNotCheckMark]:
     return _parse_marks(final_text, OK_MARKER)
 
 
+def parse_warned_marks(final_text: str | None) -> list[CouldNotCheckMark]:
+    """Legge le righe ``CHECK_WARNED``: guasti di cui il turno ha avvisato l'utente.
+
+    Stessa forma e stesso parser degli altri tre. ``reason`` non viene letta da
+    nessuno — a contare è quale task — e sul monitor, che ha un controllo solo,
+    conta la sola presenza di una riga.
+    """
+    return _parse_marks(final_text, WARNED_MARKER)
+
+
 def _parse_marks(final_text: str | None, marker: str) -> list[CouldNotCheckMark]:
-    """Corpo condiviso dai tre marcatori. Nessuno dei tre è prefisso di un altro."""
+    """Corpo condiviso dai quattro marcatori. Nessuno è prefisso di un altro."""
     marks: list[CouldNotCheckMark] = []
     for line in (final_text or "").splitlines():
         stripped = line.strip().lstrip(_MARKER_DECORATION)

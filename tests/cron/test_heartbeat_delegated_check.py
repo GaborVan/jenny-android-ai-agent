@@ -226,6 +226,10 @@ class _Harness:
                 self.agent.messages.append(
                     "Non riesco più a eseguire: " + ", ".join(_escalated_labels(prompt))
                 )
+                # E la riga che registra l'avviso, che il prompt chiede insieme
+                # al messaggio: il timbro nello stato viene da qui, non dal fatto
+                # che ``message`` sia stato chiamato.
+                text += f"\nCHECK_WARNED{ref}"
         return (text, [], [*initial_messages, {"role": "assistant", "content": text}], "stop", False)
 
     def rewrite(self, content: str) -> None:

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from jenny.cron.could_not_check import (
     ESCALATE_AFTER_FAILURES,
+    ESCALATION_ASK_LIMIT,
     CouldNotCheckMark,
     could_not_check_reason,
     parse_could_not_check_marks,
@@ -209,7 +210,7 @@ class TestTheStateSelfHeals:
         state = self._state_with(tasks[0].id, 2)
 
         outcome = record_task_outcomes(
-            state, tasks, [], now_ms=1, escalating=[], spoke=False
+            state, tasks, [], now_ms=1, escalating=[]
         )
 
         assert outcome.any_failure is False
@@ -221,7 +222,7 @@ class TestTheStateSelfHeals:
         state = self._state_with(gone.id, 2)
         tasks = parse_heartbeat_tasks(_file(_WATERBOT))
 
-        record_task_outcomes(state, tasks, [], now_ms=1, escalating=[], spoke=False)
+        record_task_outcomes(state, tasks, [], now_ms=1, escalating=[])
 
         assert state.task_checks == {}
 
@@ -236,7 +237,6 @@ class TestTheStateSelfHeals:
                 [CouldNotCheckMark("1", "hps down")],
                 now_ms=7,
                 escalating=[],
-                spoke=False,
             )
 
         assert list(state.task_checks) == [tasks[0].id]
@@ -292,7 +292,6 @@ class TestADelegatedTaskWaitsForItsVerdict:
             [],
             now_ms=11,
             escalating=[],
-            spoke=False,
             delegated=[CouldNotCheckMark("1", "leggi hps")],
         )
 
@@ -314,7 +313,6 @@ class TestADelegatedTaskWaitsForItsVerdict:
             [CouldNotCheckMark(None, "import di wb_probe fallito")],
             now_ms=12,
             escalating=[],
-            spoke=False,
         )
 
         assert outcome.failed == [tasks[0]]
@@ -334,7 +332,7 @@ class TestADelegatedTaskWaitsForItsVerdict:
         )
 
         record_followup_outcomes(
-            state, tasks, [], now_ms=12, escalating=[], spoke=False
+            state, tasks, [], now_ms=12, escalating=[]
         )
 
         assert state.task_checks[tasks[1].id].consecutive_could_not_check == 2
@@ -421,7 +419,6 @@ class TestOneFaultIsOneWarning:
             [CouldNotCheckMark("1", "hps irraggiungibile")],
             now_ms=12,
             escalating=[],
-            spoke=False,
         )
 
         assert state.task_checks[tasks[0].id].consecutive_could_not_check == 1
@@ -447,7 +444,7 @@ class TestOneFaultIsOneWarning:
         state = self._broken_and_announced(tasks[0].id)
 
         outcome = record_followup_outcomes(
-            state, tasks, [], now_ms=12, escalating=[], spoke=False,
+            state, tasks, [], now_ms=12, escalating=[],
             ok=[CouldNotCheckMark("1", "")],
         )
 
@@ -465,7 +462,7 @@ class TestOneFaultIsOneWarning:
         )
 
         outcome = record_followup_outcomes(
-            state, tasks, [], now_ms=12, escalating=[], spoke=False,
+            state, tasks, [], now_ms=12, escalating=[],
             ok=[CouldNotCheckMark(None, "")],
         )
 
@@ -483,7 +480,7 @@ class TestOneFaultIsOneWarning:
         )
 
         record_followup_outcomes(
-            state, tasks, [], now_ms=12, escalating=[], spoke=False,
+            state, tasks, [], now_ms=12, escalating=[],
             ok=[CouldNotCheckMark("2", "")],
         )
 
@@ -497,7 +494,7 @@ class TestOneFaultIsOneWarning:
 
         outcome = record_followup_outcomes(
             state, tasks, [CouldNotCheckMark("1", "import fallito")],
-            now_ms=12, escalating=[], spoke=False,
+            now_ms=12, escalating=[],
             ok=[CouldNotCheckMark("1", "")],
         )
 
@@ -505,13 +502,18 @@ class TestOneFaultIsOneWarning:
         assert outcome.recovered == []
         assert state.task_checks[tasks[0].id].consecutive_could_not_check == 1
 
-    def test_an_unrequested_message_still_counts_as_having_spoken(self) -> None:
+    def test_an_unrequested_warning_still_counts_as_having_spoken(self) -> None:
         """Misurato sul device il 2026-08-16. Al secondo ciclo di guasto, senza
         che il prompt lo chiedesse, il modello ha chiamato ``message``. Se quel
         messaggio non viene registrato, un ciclo dopo la soglia scatta e
         l'utente riceve lo stesso avviso una seconda volta — e nessuna riga di
         prompt lo impedisce, visto che lì il modello stava già ignorando sia la
-        nostra istruzione sia quella scritta dall'utente."""
+        nostra istruzione sia quella scritta dall'utente.
+
+        Ciò che è cambiato è **come** lo si sa: il modello lo dichiara con
+        ``CHECK_WARNED``, e il preambolo dell'heartbeat gli chiede quella riga
+        anche per un avviso di propria iniziativa. Prima si deduceva da
+        ``spoke``, che era vero anche per un messaggio su altro."""
         tasks = parse_heartbeat_tasks(_file(_WATERBOT))
         state = CronJobState(
             task_checks={tasks[0].id: CronTaskCheckState(pending_since_ms=11)}
@@ -521,7 +523,7 @@ class TestOneFaultIsOneWarning:
             state, tasks, [CouldNotCheckMark("1", "hps irraggiungibile")],
             now_ms=12,
             escalating=[],  # nessuno gli aveva chiesto di parlare
-            spoke=True,
+            warned=[CouldNotCheckMark("1", "")],
         )
 
         assert state.task_checks[tasks[0].id].escalated is True
@@ -531,18 +533,17 @@ class TestOneFaultIsOneWarning:
         assert tasks_due_for_escalation(state, tasks) == []
         assert tasks_already_warned(state, tasks) == [tasks[0]]
 
-    def test_an_unrequested_message_does_not_silence_the_other_broken_task(self) -> None:
-        """``spoke`` è del TURNO, non del task, e questa è la trappola.
+    def test_a_warning_about_one_task_does_not_silence_the_other(self) -> None:
+        """Il messaggio è di UN task, e questa era la trappola.
 
-        Con due controlli rotti nello stesso turno e un messaggio spontaneo,
+        Con due controlli rotti nello stesso turno e un avviso spontaneo,
         timbrare ``escalated`` su entrambi zittisce per sempre quello di cui il
         modello NON ha parlato: rotto da sei cicli, mai annunciato, e mai più
         annunciabile. È l'errore peggiore dei due — lo stesso che rende
         inaccettabile la fix minima da cui è partito tutto questo.
 
-        Con più di un guasto resta quindi solo l'attribuzione esplicita, che è
-        la stessa regola con cui ``attribute_marks`` tratta un marcatore
-        anonimo: attribuibile solo se il candidato è uno.
+        Con ``CHECK_WARNED`` il soggetto è scritto, quindi non c'è più niente da
+        indovinare: si timbra il task nominato e nessun altro.
         """
         tasks = parse_heartbeat_tasks(_file(_WATERBOT, _VITAMINE))
         state = CronJobState()
@@ -553,21 +554,92 @@ class TestOneFaultIsOneWarning:
             [CouldNotCheckMark("1", "hps giù"), CouldNotCheckMark("2", "backup giù")],
             now_ms=10,
             escalating=[],  # nessuno ha chiesto di parlare
-            spoke=True,  # ma il modello ha parlato, di uno solo dei due
+            warned=[CouldNotCheckMark("1", "")],  # ma il modello ha avvisato del 1
         )
 
-        assert [e.escalated for e in state.task_checks.values()] == [False, False]
+        assert [e.escalated for e in state.task_checks.values()] == [True, False]
 
-        # E infatti entrambi restano annunciabili quando la soglia arriva.
+        # E il 2, di cui non ha parlato, resta annunciabile quando la soglia arriva.
         for run in range(1, ESCALATE_AFTER_FAILURES):
             record_task_outcomes(
                 state, tasks,
                 [CouldNotCheckMark("1", "hps giù"), CouldNotCheckMark("2", "backup giù")],
-                now_ms=10 + run, escalating=[], spoke=False,
+                now_ms=10 + run, escalating=[],
             )
-        assert tasks_due_for_escalation(state, tasks) == tasks
+        assert tasks_due_for_escalation(state, tasks) == [tasks[1]]
 
-    def test_a_message_about_the_already_warned_task_does_not_stamp_the_new_one(self) -> None:
+    def test_an_anonymous_warning_with_two_candidates_stamps_nobody(self) -> None:
+        """Un ``CHECK_WARNED`` senza numero, e due guasti in gioco.
+
+        Con due candidati non si sa di quale il modello abbia parlato, ed è la
+        stessa regola che ``attribute_marks`` applica a un marcatore di guasto
+        anonimo. La direzione dell'errore è quella accettata: nessun timbro
+        significa che l'avviso verrà richiesto di nuovo — rumore recuperabile —
+        mentre timbrarli entrambi zittirebbe un guasto reale per sempre.
+        """
+        tasks = parse_heartbeat_tasks(_file(_WATERBOT, _VITAMINE))
+        state = CronJobState()
+
+        record_task_outcomes(
+            state,
+            tasks,
+            [CouldNotCheckMark("1", "hps giù"), CouldNotCheckMark("2", "backup giù")],
+            now_ms=10,
+            escalating=[],
+            warned=[CouldNotCheckMark(None, "")],
+        )
+
+        assert [e.escalated for e in state.task_checks.values()] == [False, False]
+
+    def test_an_anonymous_warning_with_one_candidate_lands_on_it(self) -> None:
+        """Con un candidato solo il marcatore nudo non è ambiguo: è quello.
+
+        Il file può avere N task — quello delle vitamine qui gira benissimo — e
+        chiedere un numero dove non c'è niente da distinguere sarebbe solo
+        un'occasione di sbagliarlo. È la stessa regola, e lo stesso parametro
+        ``default`` di :func:`attribute_marks`, che vale per i guasti.
+        """
+        tasks = parse_heartbeat_tasks(_file(_WATERBOT, _VITAMINE))
+        state = CronJobState()
+
+        record_task_outcomes(
+            state,
+            tasks,
+            [CouldNotCheckMark("1", "hps giù")],
+            now_ms=10,
+            escalating=[],
+            warned=[CouldNotCheckMark(None, "")],
+        )
+
+        assert state.task_checks[tasks[0].id].escalated is True
+
+    def test_a_message_without_the_marker_is_not_a_recorded_warning(self) -> None:
+        """Il prezzo di questo meccanismo, dichiarato.
+
+        Un modello che manda l'avviso e si dimentica la riga non lascia traccia,
+        quindi al giro dopo gli verrà chiesto di nuovo e l'utente sentirà la
+        stessa cosa due volte. È il costo scelto: rumore recuperabile invece di
+        un guasto zittito per sempre, ed è anche la direzione che
+        ``jenny/cron/silence_watchdog.py`` presidia dall'altro lato.
+        """
+        tasks = parse_heartbeat_tasks(_file(_WATERBOT))
+        state = CronJobState(
+            task_checks={tasks[0].id: CronTaskCheckState(consecutive_could_not_check=2)}
+        )
+
+        record_task_outcomes(
+            state,
+            tasks,
+            [CouldNotCheckMark("1", "hps giù")],
+            now_ms=10,
+            escalating=tasks,  # gli è stato chiesto di parlare
+            warned=[],  # ha parlato (o no), ma non l'ha dichiarato
+        )
+
+        assert state.task_checks[tasks[0].id].escalated is False
+        assert tasks_due_for_escalation(state, tasks) == [tasks[0]]
+
+    def test_a_warning_about_the_already_warned_task_does_not_stamp_the_new_one(self) -> None:
         """La forma davvero raggiungibile della stessa trappola, e la peggiore.
 
         Il task 1 è già stato annunciato, è ancora rotto ed è nel blocco
@@ -582,10 +654,10 @@ class TestOneFaultIsOneWarning:
         nel blocco ``already_warned``, non è più dovuto per escalation, e
         all'utente non arriva mai. Un guasto reale zittito per sempre.
 
-        Il task 1 qui non scrive il suo marcatore — succede, ed è il 02:31 del
-        logcat — quindi la sua voce viene potata in questo stesso turno: la
-        fotografia dei già-avvisati va presa **prima** del ciclo, o il candidato
-        sparisce insieme alla voce.
+        Il task 1 qui non scrive il suo ``CHECK_FAILED`` — succede, ed è il 02:31
+        del logcat — quindi la sua voce viene potata in questo stesso turno; ma
+        il suo ``CHECK_WARNED`` dice di quale controllo il messaggio parlava, e
+        quello basta.
         """
         tasks = parse_heartbeat_tasks(_file(_WATERBOT, _VITAMINE))
         state = CronJobState(
@@ -602,7 +674,7 @@ class TestOneFaultIsOneWarning:
             [CouldNotCheckMark("2", "sveglia non impostata")],
             now_ms=10,
             escalating=[],  # nessuno ha chiesto di parlare: il 1 è già annunciato
-            spoke=True,  # ma il modello ha parlato lo stesso, del 1
+            warned=[CouldNotCheckMark("1", "")],  # ha riparlato del 1, non del 2
         )
 
         assert state.task_checks[tasks[1].id].escalated is False
@@ -611,7 +683,7 @@ class TestOneFaultIsOneWarning:
         for run in range(1, ESCALATE_AFTER_FAILURES):
             record_task_outcomes(
                 state, tasks, [CouldNotCheckMark("2", "sveglia non impostata")],
-                now_ms=10 + run, escalating=[], spoke=False,
+                now_ms=10 + run, escalating=[],
             )
         assert tasks_due_for_escalation(state, tasks) == [tasks[1]]
 
@@ -630,22 +702,23 @@ class TestOneFaultIsOneWarning:
 
         record_followup_outcomes(
             state, tasks, [CouldNotCheckMark("2", "sveglia non impostata")],
-            now_ms=12, escalating=[], spoke=True,
+            now_ms=12, escalating=[], warned=[CouldNotCheckMark("1", "")],
         )
 
         assert state.task_checks[tasks[1].id].escalated is False
 
     def test_an_explicit_escalation_still_covers_every_task_it_named(self) -> None:
         """Il blocco di escalation chiede **un** messaggio per tutti i task che
-        elenca, quindi un solo ``message`` li copre tutti: lì l'attribuzione è
-        esplicita e non serve indovinarla."""
+        elenca, e una riga ``CHECK_WARNED`` per ciascuno di quelli che quel
+        messaggio ha davvero nominato: un solo ``message`` li copre tutti."""
         tasks = parse_heartbeat_tasks(_file(_WATERBOT, _VITAMINE))
         state = CronJobState()
 
         record_task_outcomes(
             state, tasks,
             [CouldNotCheckMark("1", "hps giù"), CouldNotCheckMark("2", "backup giù")],
-            now_ms=10, escalating=tasks, spoke=True,
+            now_ms=10, escalating=tasks,
+            warned=[CouldNotCheckMark("1", ""), CouldNotCheckMark("2", "")],
         )
 
         assert [e.escalated for e in state.task_checks.values()] == [True, True]
@@ -657,7 +730,7 @@ class TestOneFaultIsOneWarning:
 
         # Il controllo torna a funzionare e lo dichiara.
         record_followup_outcomes(
-            state, tasks, [], now_ms=12, escalating=[], spoke=False,
+            state, tasks, [], now_ms=12, escalating=[],
             ok=[CouldNotCheckMark("1", "")],
         )
         assert state.task_checks == {}
@@ -671,7 +744,7 @@ class TestOneFaultIsOneWarning:
                 [CouldNotCheckMark("1", "hps irraggiungibile")],
                 now_ms=100 + run,
                 escalating=tasks_due_for_escalation(state, tasks),
-                spoke=run == 2,
+                warned=[CouldNotCheckMark("1", "")] if run == 2 else [],
             )
 
         assert state.task_checks[tasks[0].id].escalated is True
@@ -684,7 +757,7 @@ class TestOneFaultIsOneWarning:
             task_checks={tasks[0].id: CronTaskCheckState(escalated=True, label="Ogni ciclo")}
         )
 
-        record_task_outcomes(state, tasks, [], now_ms=12, escalating=[], spoke=False)
+        record_task_outcomes(state, tasks, [], now_ms=12, escalating=[])
 
         assert state.task_checks == {}
 
@@ -848,10 +921,48 @@ class TestThePromptFragments:
         Un task dovuto alla soglia e uno di cui il modello aveva già ignorato
         l'istruzione arrivano qui con due numeri diversi: una frase sola per
         entrambi ne direbbe uno sbagliato per uno dei due.
+
+        Il secondo numero sta dentro ``ESCALATION_ASK_LIMIT``, e non è un
+        dettaglio del test: oltre quella finestra non si chiede più (v.
+        :class:`TestTheAskStopsInsteadOfRepeatingForever`), quindi un task a
+        sequenza 5 nel blocco non ci sarebbe.
         """
-        due = self._due(2, 5)
+        due = self._due(2, ESCALATE_AFTER_FAILURES - 1 + ESCALATION_ASK_LIMIT - 1)
 
         block = escalation_block(due)
 
         assert f"- 1. {due[0].label} (2 runs in a row)" in block
-        assert f"- 2. {due[1].label} (5 runs in a row)" in block
+        assert f"- 2. {due[1].label} ({due[1].failed_runs} runs in a row)" in block
+
+
+class TestTheAskStopsInsteadOfRepeatingForever:
+    """Il costo residuo di ``CHECK_WARNED``, e il suo tetto.
+
+    Il timbro è una riga che il modello deve scrivere, quindi un modello che non
+    la scrive mai non fa mai scattare ``already_warned``: senza limite il blocco
+    di escalation tornerebbe nel prompt a ogni run per sempre, e con lui un
+    messaggio all'utente ogni mezz'ora. Dove la finestra finisce comincia
+    ``jenny/cron/silence_watchdog.py``, che non passa dal modello.
+    """
+
+    def _state_at(self, task_id: str, streak: int) -> CronJobState:
+        return CronJobState(
+            task_checks={task_id: CronTaskCheckState(consecutive_could_not_check=streak)}
+        )
+
+    def test_the_ask_covers_exactly_the_window(self) -> None:
+        tasks = parse_heartbeat_tasks(_file(_WATERBOT))
+        first = ESCALATE_AFTER_FAILURES - 1
+
+        asked = [
+            tasks_due_for_escalation(self._state_at(tasks[0].id, streak), tasks) != []
+            for streak in range(first + ESCALATION_ASK_LIMIT + 2)
+        ]
+
+        assert asked == [False] * first + [True] * ESCALATION_ASK_LIMIT + [False, False]
+
+    def test_the_window_hands_over_to_the_watchdog_with_no_gap(self) -> None:
+        """Le due finestre sono contigue, e questo test è ciò che le tiene tali."""
+        from jenny.cron.silence_watchdog import WATCHDOG_AFTER_FAILURES
+
+        assert ESCALATE_AFTER_FAILURES - 1 + ESCALATION_ASK_LIMIT == WATCHDOG_AFTER_FAILURES - 1

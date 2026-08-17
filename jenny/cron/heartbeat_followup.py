@@ -42,6 +42,7 @@ from jenny.cron.could_not_check import (
     COULD_NOT_CHECK_MARKER,
     parse_could_not_check_marks,
     parse_ok_marks,
+    parse_warned_marks,
 )
 from jenny.cron.heartbeat_tasks import (
     followup_block,
@@ -142,7 +143,7 @@ class HeartbeatFollowup:
             tasks_already_warned(job.state, pending),
         )
 
-    def record(self, session_key: str, *, final_text: str, spoke: bool) -> None:
+    def record(self, session_key: str, *, final_text: str) -> None:
         """Registra i marcatori scritti dal turno d'annuncio: guasti e successi.
 
         Il silenzio non è ancora un verdetto — un annuncio che non dichiara
@@ -174,7 +175,10 @@ class HeartbeatFollowup:
             marks,
             now_ms=self._now_ms(),
             escalating=tasks_due_for_escalation(job.state, pending),
-            spoke=spoke,
+            # Non più ``spoke``, che il chiamante passava e che questo metodo
+            # non chiede più: diceva che in quel turno un messaggio era uscito,
+            # non di quale controllo parlasse (v. ``WARNED_MARKER``).
+            warned=parse_warned_marks(final_text),
             ok=ok,
         )
         for task in outcome.recovered:

@@ -31,6 +31,7 @@ from jenny.cron.bound_runner import (
 from jenny.cron.could_not_check import (
     parse_could_not_check_marks,
     parse_delegated_marks,
+    parse_warned_marks,
 )
 from jenny.cron.heartbeat_followup import HeartbeatFollowup
 from jenny.cron.heartbeat_tasks import (
@@ -144,6 +145,14 @@ _HEARTBEAT_PREAMBLE = (
     "write the line: the line is not a message, it reaches nobody, and it is "
     "the only reason anyone will ever notice that this check has been dead for "
     "hours. Swallowing it is how a broken check stays broken in silence.\n"
+    "And if you DO decide to tell the user that one of these checks is not "
+    "working — whether you were asked to below or chose to on your own — end "
+    "your answer with one more line for it:\n"
+    "CHECK_WARNED <task number>\n"
+    "That line reaches nobody. It is the only record that the warning went out, "
+    "and it is what stops the same warning from being sent to them again on the "
+    "next run. Write it only for a task you really named to the user, never for "
+    "a message about something else.\n"
     "If you delegate a check to a subagent, you do NOT have its answer in this "
     "turn: `spawn` returns immediately. Send NOTHING now — not the result, not "
     "'checking…', not an interim guess. The subagent's result comes back to you "
@@ -694,7 +703,9 @@ class CronDispatcher:
             parse_could_not_check_marks(outcome.final_text),
             now_ms=self._now_ms(),
             escalating=escalating,
-            spoke=outcome.spoke,
+            # Non ``outcome.spoke``: quello dice che in questo turno è uscito un
+            # messaggio, non di che cosa parlava. V. ``WARNED_MARKER``.
+            warned=parse_warned_marks(outcome.final_text),
             delegated=parse_delegated_marks(outcome.final_text),
         )
         if check.pending:

@@ -82,6 +82,23 @@ def _escalated_labels(prompt: str) -> list[str]:
     return labels
 
 
+def _escalated_numbers(prompt: str) -> list[int]:
+    """I numeri degli stessi task, per scrivere la riga ``CHECK_WARNED``.
+
+    È quella riga a registrare l'avviso: lo stato non lo deduce più dal fatto che
+    un ``message`` sia uscito, perché quel fatto è vero anche per un messaggio
+    che parlava d'altro.
+    """
+    lines = prompt.splitlines()
+    start = next(i for i, line in enumerate(lines) if _ESCALATION_HEAD in line)
+    numbers: list[int] = []
+    for line in lines[start + 1:]:
+        if not line.startswith("- "):
+            break
+        numbers.append(int(line[2:].split(".", 1)[0]))
+    return numbers
+
+
 class _FakeSession:
     def __init__(self) -> None:
         # Il ramo heartbeat legge la sessione unificata per sapere se l'utente
@@ -129,15 +146,21 @@ class _FakeHeartbeatAgent:
         # Uno skip istruito non produce niente: non un messaggio, non un
         # marcatore. Contato solo perché il test possa dire che è avvenuto.
         self.skips += len(self.silently_skipped)
-        marks = "\n".join(
+        lines = [
             f"CHECK_FAILED{'' if self.omits_the_task_number else f' {number}'}: {reason}"
             for number, reason in sorted(self.broken.items())
-        )
+        ]
         if _ESCALATION_HEAD in prompt and self.broken and self.obeys_the_escalation:
             labels = _escalated_labels(prompt)
             self.messages.append("Non riesco più a eseguire: " + ", ".join(labels))
-            return TurnOutcome.spoke_via_tool(final_text=marks)
-        return TurnOutcome.silent(final_text=marks)
+            # Il prompt chiede il messaggio **e** la riga che lo registra.
+            lines += [
+                f"CHECK_WARNED {number}"
+                for number in _escalated_numbers(prompt)
+                if number in self.broken
+            ]
+            return TurnOutcome.spoke_via_tool(final_text="\n".join(lines))
+        return TurnOutcome.silent(final_text="\n".join(lines))
 
     def evict_pruned_sessions(self, keys: list[str]) -> None:  # pragma: no cover
         pass

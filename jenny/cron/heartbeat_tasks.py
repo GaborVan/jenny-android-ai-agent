@@ -79,8 +79,10 @@ from jenny.cron.could_not_check import (
     COULD_NOT_CHECK_MARKER,
     DELEGATED_MARKER,
     ESCALATE_AFTER_FAILURES,
+    ESCALATION_ASK_LIMIT,
     OK_MARKER,
     REASON_MAX_CHARS,
+    WARNED_MARKER,
     CouldNotCheckMark,
 )
 from jenny.cron.types import CronJobState, CronTaskCheckState
@@ -143,7 +145,11 @@ class HeartbeatCheckOutcome:
     """Task delegati che il turno d'annuncio ha dichiarato riusciti (``CHECK_OK``)."""
 
     escalated: bool = False
-    """Questo run doveva avvisare l'utente **e** ha davvero parlato."""
+    """Il run doveva avvisare l'utente e ha dichiarato di averlo fatto.
+
+    La dichiarazione è la riga ``CHECK_WARNED`` del task: non "è uscito un
+    messaggio in questo turno", che è vero anche per un messaggio su altro.
+    """
 
     @property
     def any_failure(self) -> bool:
@@ -199,6 +205,7 @@ def _uncommented_lines(content: str, source: str | None = None) -> Iterator[tupl
     """
     in_comment = False
     in_active_section = False
+    stray = 0
     for line in content.splitlines():
         stripped = line.strip()
         if in_comment:
@@ -211,7 +218,32 @@ def _uncommented_lines(content: str, source: str | None = None) -> Iterator[tupl
             continue
         if _is_section_heading(stripped):
             in_active_section = _opens_active_tasks(stripped)
+        if not in_active_section and stripped and not stripped.startswith("#"):
+            stray += 1
         yield line, in_active_section
+    if stray and source is not None:
+        # Prosa fuori dalla sezione. Non è un errore — un file può avere
+        # un'introduzione, un ``## Notes``, un ``## Archive`` — ma è anche la forma
+        # che prende un guasto silenzioso: solo ``## Active Tasks`` viene letta,
+        # quindi un task scritto altrove non gira **e non lo dice nessuno**. Un
+        # file con un task nel posto sbagliato è indistinguibile da un file con un
+        # task in meno.
+        #
+        # Il caso concreto: ``agent/scheduling.md`` dice all'agente di aggiungere
+        # una riga a ``HEARTBEAT.md``, e appendere a fine file — la cosa più
+        # naturale — su un file che ha una sezione dopo l'elenco scrive un task che
+        # non partirà mai. Il prompt ora dice dove va; questa riga è il presidio
+        # per quando quell'istruzione non viene seguita.
+        #
+        # Livello ``debug`` e non ``warning``: quelle righe sono legittime nella
+        # maggioranza dei casi, e un warning a ogni run su ogni file con delle note
+        # sarebbe il rumore da cui si scappa. Basta che sia grep-abile quando si va
+        # a cercare perché un task non è partito.
+        logger.debug(
+            "{}: {} line(s) outside the '## Active Tasks' section are not read as "
+            "tasks — check that nothing meant to run was written there",
+            source, stray,
+        )
     if in_comment and source is not None:
         # Il file è malformato, non lo è il parser: da un ``<!--`` senza chiusura
         # in poi non arriva più niente né al conteggio né al prompt. Il conteggio
@@ -475,13 +507,20 @@ def tasks_due_for_escalation(
     posto che la conosce e :func:`escalation_block` la deve scrivere nel prompt.
     Copie: ``HeartbeatTask`` è ``frozen`` e ``failed_runs`` non entra nel
     confronto, quindi restano uguali agli originali per chiunque le guardi.
+
+    Ed è una finestra, non una semiretta: si chiede per ``ESCALATION_ASK_LIMIT``
+    run e poi si smette, per lo stesso motivo del monitor (v.
+    ``should_escalate_could_not_check`` in ``jenny/cron/bound_runner.py``). Il
+    timbro che chiuderebbe la richiesta lo scrive il modello con
+    ``CHECK_WARNED``; dove la finestra finisce comincia ``silence_watchdog``.
     """
     due: list[HeartbeatTask] = []
+    first_ask = ESCALATE_AFTER_FAILURES - 1
     for task in tasks:
         entry = state.task_checks.get(task.id)
         if entry is None or _escalation_already_given(entry):
             continue
-        if entry.consecutive_could_not_check >= ESCALATE_AFTER_FAILURES - 1:
+        if first_ask <= entry.consecutive_could_not_check < first_ask + ESCALATION_ASK_LIMIT:
             due.append(replace(task, failed_runs=entry.consecutive_could_not_check))
     return due
 
@@ -566,7 +605,13 @@ def escalation_block(tasks: list[HeartbeatTask]) -> str:
         "tasks that are working, and if one of the listed tasks works this time "
         "do not mention it either: past failures are not news. Then still end "
         f"your answer with the {COULD_NOT_CHECK_MARKER} line for every task that "
-        "failed.\n"
+        "failed, and — for every task your message actually told them about — one "
+        "more line:\n"
+        f"{WARNED_MARKER} <number>\n"
+        "That line reaches nobody. It is the only record that this warning went "
+        "out, and without it you will be asked to send the same warning again on "
+        "the next run. Write it only for the tasks you really named to the user, "
+        "never for one you decided to leave out.\n"
         "One exception, and it is the usual one: for a task you are handing to a "
         "subagent you do not know yet whether it failed again, so send nothing "
         "now. You will be asked the same question again when its result reaches "
@@ -670,6 +715,33 @@ def attribute_marks(
     return reasons, unattributed
 
 
+def _sole_candidate(
+    tasks: list[HeartbeatTask], candidate_ids: set[str]
+) -> HeartbeatTask | None:
+    """Il task cui attribuire un ``CHECK_WARNED`` scritto senza numero.
+
+    Un modello che scrive ``CHECK_WARNED`` nudo su un file con quattro task non
+    sta essendo ambiguo: sta rispondendo alla sola cosa di cui il turno aveva
+    motivo di parlare. Candidato è ogni task per cui quel motivo esiste — un
+    guasto dichiarato adesso, uno che il prompt ha chiesto di annunciare, uno di
+    cui l'utente è già stato avvisato (``already_warned_block`` esiste perché il
+    modello ne riparla lo stesso) — e con **uno solo** il marcatore anonimo non è
+    ambiguo. Con due o più resta non attribuito, che vuol dire nessun timbro e
+    quindi l'avviso ripetuto al giro dopo: rumore, non silenzio.
+
+    È la stessa regola che :func:`attribute_marks` applica già ai marcatori di
+    guasto, ristretta con il suo parametro ``default`` invece di riscritta. Ciò
+    che **non** è: l'euristica ``sole_failure`` che questa sostituisce. Là il
+    fatto da attribuire era ``spoke``, cioè "in questo turno è uscito un
+    messaggio, di qualunque cosa parlasse"; qui è una dichiarazione esplicita di
+    aver avvisato, e attribuirla all'unico candidato non inventa niente.
+    """
+    if len(candidate_ids) != 1:
+        return None
+    only = next(iter(candidate_ids))
+    return next((t for t in tasks if t.id == only), None)
+
+
 def _count_failure(
     entry: CronTaskCheckState,
     task: HeartbeatTask,
@@ -677,8 +749,7 @@ def _count_failure(
     *,
     now_ms: int,
     escalating_ids: set[str],
-    spoke: bool,
-    sole_failure: bool,
+    warned_ids: set[str],
     outcome: HeartbeatCheckOutcome,
 ) -> None:
     """Un controllo mancato in più per ``task``. Condiviso dai due registratori."""
@@ -688,36 +759,32 @@ def _count_failure(
     entry.pending_since_ms = None
     if entry.since_ms is None:
         entry.since_ms = now_ms
-    if spoke and (task.id in escalating_ids or sole_failure):
-        # L'avviso è "dato" solo se è davvero uscito: un modello che ignora
-        # l'istruzione deve ritrovarsela al giro dopo. E non conta solo l'avviso
-        # che abbiamo chiesto noi — ``escalated`` è il verbale di aver parlato
-        # all'utente, e per chi lo riceve un messaggio spontaneo e uno richiesto
-        # sono lo stesso messaggio.
+    if task.id in warned_ids:
+        # L'avviso è "dato" solo se è davvero uscito, e da chi lo dichiara: un
+        # modello che ignora l'istruzione deve ritrovarsela al giro dopo. Vale
+        # anche per un avviso di **propria iniziativa** — ``escalated`` è il
+        # verbale di aver parlato all'utente, e per chi lo riceve un messaggio
+        # spontaneo e uno richiesto sono lo stesso messaggio. Misurato sul Titan
+        # 2 il 2026-08-16: al secondo ciclo di guasto, con il blocco di
+        # escalation ancora assente dal prompt, il modello ha chiamato
+        # ``message`` di testa sua ("il server WaterBot non si raggiunge…").
         #
-        # Misurato sul Titan 2 il 2026-08-16: al secondo ciclo di guasto, con il
-        # blocco di escalation ancora assente dal prompt, il modello ha chiamato
-        # ``message`` di propria iniziativa ("il server WaterBot non si
-        # raggiunge…"). Senza registrarlo, un ciclo dopo la soglia scattava e
-        # all'utente arrivava lo stesso avviso una seconda volta.
-        #
-        # ``sole_failure`` è ciò che rende attribuibile quel messaggio, ed è la
-        # stessa regola che ``attribute_marks`` applica a un marcatore anonimo:
-        # ``spoke`` riguarda il TURNO, non il task, quindi con due candidati
-        # nello stesso turno non si sa di quale il modello abbia parlato — e
-        # candidato non è solo un guasto dichiarato adesso, v. chi lo calcola.
-        # Timbrarli entrambi zittirebbe per sempre quello di cui NON ha parlato
-        # — un guasto reale che non verrebbe annunciato mai, che è l'errore
-        # peggiore dei due. Con più di un guasto resta quindi solo
-        # l'attribuzione esplicita: il run ha chiesto di avvisare per QUESTI
-        # task, e il blocco chiede un messaggio solo per tutti quanti.
+        # Il soggetto arriva da ``CHECK_WARNED``, e non più da ``spoke`` più
+        # un'euristica. ``spoke`` riguarda il TURNO e non il task: era vero per
+        # qualunque ``message`` riuscito, e con due candidati nello stesso turno
+        # non diceva di quale il modello avesse parlato. L'euristica che lo
+        # rendeva attribuibile (``sole_failure``, "se il candidato è uno solo era
+        # per lui") sbagliava dalla parte peggiore ogni volta che il messaggio
+        # riguardava altro: timbrava un guasto di cui nessuno aveva parlato, e da
+        # lì ``already_warned_block`` lo zittiva per sempre. V.
+        # ``WARNED_MARKER`` in :mod:`jenny.cron.could_not_check` per la misura.
         entry.escalated = True
         # Timbrato **anche** quando era già ``True``: questo è un avviso nuovo,
         # e lasciargli addosso l'ora del precedente vorrebbe dire che lo stesso
         # messaggio dell'utente — già più recente di quel timbro vecchio — lo
         # riarma di nuovo al ciclo dopo, e a ogni ciclo dopo ancora.
         entry.escalated_at_ms = now_ms
-    if task.id in escalating_ids and spoke:
+    if task.id in escalating_ids and task.id in warned_ids:
         # Distinto da sopra: questo dice "l'escalation che il run aveva chiesto
         # è davvero uscita", ed è ciò che il dispatcher riporta nella run
         # record. Un avviso spontaneo non è un'escalation richiesta.
@@ -733,7 +800,7 @@ def record_task_outcomes(
     *,
     now_ms: int,
     escalating: list[HeartbeatTask],
-    spoke: bool,
+    warned: list[CouldNotCheckMark] | None = None,
     delegated: list[CouldNotCheckMark] | None = None,
 ) -> HeartbeatCheckOutcome:
     """Aggiorna lo stato per-task dopo il turno dell'heartbeat, e dice cosa è successo.
@@ -761,15 +828,12 @@ def record_task_outcomes(
     # Fotografia PRIMA del ciclo: ``_count_failure`` muta le voci in loco e la
     # riassegnazione in fondo pota i task senza marcatore, quindi un già-avvisato
     # può sparire proprio nel turno in cui serve contarlo.
-    warned_ids = {tid for tid, e in state.task_checks.items() if e.escalated}
-    # V. ``_count_failure``: un messaggio spontaneo è attribuibile a un task solo
-    # quando quel task è l'unico *candidato* del turno. Candidato è ogni task di
-    # cui il turno aveva motivo di parlare: i guasti dichiarati adesso, quelli
-    # che il prompt ha chiesto di annunciare, e quelli già annunciati — il
-    # blocco ``already_warned`` esiste perché il modello ne riparla lo stesso.
-    # Un marcatore che non si è saputo attribuire conta come un secondo guasto
-    # possibile, e quindi toglie l'attribuzione anche all'altro.
-    sole_failure = len(reasons.keys() | escalating_ids | warned_ids) == 1 and not unattributed
+    already_warned_ids = {tid for tid, e in state.task_checks.items() if e.escalated}
+    warned_by_id, _ = attribute_marks(
+        tasks,
+        warned or [],
+        default=_sole_candidate(tasks, reasons.keys() | escalating_ids | already_warned_ids),
+    )
     outcome = HeartbeatCheckOutcome(unattributed=unattributed)
 
     updated: dict[str, CronTaskCheckState] = {}
@@ -779,8 +843,8 @@ def record_task_outcomes(
             entry = entry or CronTaskCheckState()
             _count_failure(
                 entry, task, reasons[task.id],
-                now_ms=now_ms, escalating_ids=escalating_ids, spoke=spoke,
-                sole_failure=sole_failure, outcome=outcome,
+                now_ms=now_ms, escalating_ids=escalating_ids,
+                warned_ids=set(warned_by_id), outcome=outcome,
             )
             updated[task.id] = entry
             continue
@@ -817,7 +881,7 @@ def record_followup_outcomes(
     *,
     now_ms: int,
     escalating: list[HeartbeatTask],
-    spoke: bool,
+    warned: list[CouldNotCheckMark] | None = None,
     ok: list[CouldNotCheckMark] | None = None,
 ) -> HeartbeatCheckOutcome:
     """Registra il verdetto di un controllo delegato, dal turno d'annuncio.
@@ -856,8 +920,12 @@ def record_followup_outcomes(
     # entrambi i blocchi condizionali, quindi un task già avvisato è un
     # candidato anche qui. Fotografia prima del ciclo, che le voci le muta e le
     # cancella.
-    warned_ids = {tid for tid, e in state.task_checks.items() if e.escalated}
-    sole_failure = len(reasons.keys() | escalating_ids | warned_ids) == 1 and not unattributed
+    already_warned_ids = {tid for tid, e in state.task_checks.items() if e.escalated}
+    warned_by_id, _ = attribute_marks(
+        tasks,
+        warned or [],
+        default=_sole_candidate(tasks, reasons.keys() | escalating_ids | already_warned_ids),
+    )
     outcome = HeartbeatCheckOutcome(unattributed=unattributed)
     pending_ids = {t.id for t in pending}
     for task in tasks:
@@ -865,8 +933,8 @@ def record_followup_outcomes(
             entry = state.task_checks.get(task.id) or CronTaskCheckState()
             _count_failure(
                 entry, task, reasons[task.id],
-                now_ms=now_ms, escalating_ids=escalating_ids, spoke=spoke,
-                sole_failure=sole_failure, outcome=outcome,
+                now_ms=now_ms, escalating_ids=escalating_ids,
+                warned_ids=set(warned_by_id), outcome=outcome,
             )
             state.task_checks[task.id] = entry
             continue
