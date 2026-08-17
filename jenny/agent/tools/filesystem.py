@@ -215,6 +215,15 @@ class _FsTool(Tool):
         Il rifiuto non passa da ``record_write``: la scrittura non è avvenuta,
         quindi resta un ``writes_attempted`` senza ``writes_ok`` — vedi il
         commento su ``FileStates.writes_refused_budget``.
+
+        Il rifiuto viene registrato **con il testo**, non solo contato: se il
+        modello obbedisce al messaggio e riscrive lo stesso file accorciato
+        *portandosi dentro* ciò che stava aggiungendo, quella scrittura chiude il
+        rifiuto e il run torna a poter commettere. Se invece pota e perde il
+        contenuto nuovo, il rifiuto resta aperto — distinzione che il solo
+        percorso non sa fare, perché il guard accetta sia una scrittura che
+        rientra nel tetto sia una che rimpicciolisce (v.
+        ``FileStates.record_write_refused``).
         """
         guard = self._write_size_guard
         if guard is None:
@@ -222,7 +231,7 @@ class _FsTool(Tool):
         refusal = guard(path, text)
         if refusal is None:
             return None
-        self._file_states.writes_refused_budget += 1
+        self._file_states.record_write_refused(path, text)
         return refusal
 
     def _resolve(self, path: str) -> Path:
