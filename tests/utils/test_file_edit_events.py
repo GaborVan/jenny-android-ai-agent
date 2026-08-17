@@ -5,7 +5,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from jenny.utils.file_edit_events import (
-    StreamingFileEditTracker,
     build_file_edit_end_event,
     build_file_edit_start_event,
     line_diff_stats,
@@ -13,6 +12,7 @@ from jenny.utils.file_edit_events import (
     prepare_file_edit_trackers,
     read_file_snapshot,
 )
+from jenny.utils.file_edit_streaming import StreamingFileEditTracker
 
 
 def test_line_diff_stats_counts_replacements_insertions_and_deletions() -> None:

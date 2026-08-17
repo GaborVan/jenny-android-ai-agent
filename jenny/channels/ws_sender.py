@@ -36,7 +36,6 @@ from jenny.channels.subagent_activity_wire import (
 )
 from jenny.config.runtime_env import ws_send_timeout_s
 from jenny.runtime.notifier import notify_delivery
-from jenny.webui.media_api import media_attachment_kind
 from jenny.webui.metadata import WEBUI_DEFAULT_CHAT_ID
 
 # Timeout wall-clock per un singolo `connection.send()`. Modulo-level (non
@@ -329,6 +328,21 @@ class OutboundSenderMixin:
             "text": wire_text,
         }
         if msg.media:
+            # Import dentro la funzione, e non in testa al modulo: importare
+            # ``jenny.webui.media_api`` a freddo passa da
+            # ``jenny.channels.http_utils``, quindi esegue
+            # ``jenny/channels/__init__.py``, che importa ``websocket`` → questo
+            # modulo → di nuovo ``media_api``, ancora a metà inizializzazione.
+            # Tre moduli non sopravvivevano a un ``import`` isolato per questa
+            # sola riga (v. ``tests/session/test_cold_imports.py``); in un
+            # processo che parte dal gateway il ciclo non si vedeva, perché
+            # ``webui`` era già caricato.
+            #
+            # La sede del simbolo resta quella giusta: è un helper della
+            # superficie media della WebUI. Ciò che va tolto è il *momento*
+            # dell'import, non il posto.
+            from jenny.webui.media_api import media_attachment_kind
+
             payload["media"] = msg.media
             urls: list[dict[str, str]] = []
             for entry in msg.media:

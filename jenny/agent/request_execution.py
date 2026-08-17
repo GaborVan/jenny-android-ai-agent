@@ -21,7 +21,7 @@ from jenny.agent.progress_events import (
     on_progress_accepts_file_edit_events,
 )
 from jenny.providers.base import LLMResponse
-from jenny.utils.file_edit_events import StreamingFileEditTracker
+from jenny.utils.file_edit_streaming import StreamingFileEditTracker
 from jenny.utils.helpers import IncrementalAnswerStepper
 from jenny.utils.prompt_templates import render_template
 from jenny.utils.runtime import (

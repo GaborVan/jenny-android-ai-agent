@@ -10,11 +10,6 @@ from typing import Any
 
 from loguru import logger
 
-# Importato e non ricopiato come stringa: è la chiave con cui un turno di cron si
-# marca nella storia, e ``last_user_message_ms`` deve saltarla. Nessun ciclo —
-# ``jenny.cron.session_turns`` dipende solo da ``jenny.cron.types``, che non
-# importa niente di nostro.
-from jenny.cron.session_turns import CRON_HISTORY_META
 from jenny.utils.helpers import (
     channel_delivery_aware_user_start,
     ensure_dir,
@@ -337,6 +332,24 @@ def last_user_message_ms(session: Session | None) -> int | None:
     """
     if session is None:
         return None
+    # Import dentro la funzione, e non in testa al modulo, perché altrimenti è un
+    # ciclo: ``jenny.cron.session_turns`` importa ``jenny.session.keys``, che
+    # esegue ``jenny/session/__init__.py``, che carica questo modulo, che tornerebbe
+    # su ``session_turns`` ancora a metà inizializzazione. Misurato il 2026-08-17: a
+    # freddo ``import jenny.cron.session_turns`` e ``from jenny.cron import
+    # CronService`` fallivano entrambi, e la suite era verde perché una raccolta
+    # completa carica ``jenny.session`` per prima.
+    #
+    # L'alternativa era rendere pigro ``jenny/session/__init__.py``, e costa più di
+    # quanto sembri: una ``__getattr__`` di modulo fa diventare ``Any`` ogni
+    # attributo sconosciuto del package — misurato, ``jenny.session.SessionManagr``
+    # smette di essere un errore — e ``jenny/session`` sta nel sottoinsieme
+    # **bloccante** di pyright. Si perderebbe il controllo dei nomi su tutto il
+    # package per chiudere un ciclo che si chiude qui in una riga. La stringa resta
+    # importata e non ricopiata: è la chiave con cui un turno di cron si marca nella
+    # storia, e questa funzione deve saltarla.
+    from jenny.cron.session_turns import CRON_HISTORY_META
+
     for message in reversed(session.messages):
         if message.get("role") != "user" or message.get(CRON_HISTORY_META):
             continue

@@ -419,10 +419,14 @@ def _predict_after_text(
         return None
     return None
 
-# StreamingFileEditTracker vive in file_edit_streaming (importa i builder qui
-# sopra). Re-export in coda — a questo punto i leaf sono già definiti, così
-# l'import di ritorno non trova un modulo a metà inizializzazione. I chiamanti
-# (request_execution, test) continuano a importarlo da questo modulo.
-from jenny.utils.file_edit_streaming import (  # noqa: E402
-    StreamingFileEditTracker as StreamingFileEditTracker,
-)
+# ``StreamingFileEditTracker`` sta in ``file_edit_streaming``, che importa i
+# builder qui sopra. Per un po' questo modulo lo ri-esportava in coda — dopo i
+# leaf, così l'import di ritorno non trovava un modulo a metà — e funzionava
+# finché si entrava da *questa* parte del ciclo: importare
+# ``jenny.utils.file_edit_streaming`` per primo, invece, esplodeva
+# (``ImportError`` su un modulo parzialmente inizializzato). Un ciclo tollerato è
+# un ciclo che funziona solo nell'ordine che qualcuno ha provato.
+#
+# I chiamanti erano due — ``agent/request_execution`` e il suo test — e ora
+# importano dalla sede vera. Il ciclo non c'è più: la dipendenza è in un verso
+# solo, streaming → events.
