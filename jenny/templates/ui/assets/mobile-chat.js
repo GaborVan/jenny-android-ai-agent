@@ -557,7 +557,10 @@ export class ChatController {
     if (this._wsListenersBound) return;
     this._wsListenersBound = true;
     this._onChatMessage = (e) => this.handleMessage(e.detail);
-    this._onChatOpen = () => this._setConnectionStatus(true);
+    this._onChatOpen = () => {
+      this._setConnectionStatus(true);
+      this._resyncThreadAfterReconnect();
+    };
     this._onChatClose = () => this._setConnectionStatus(false);
     wsManager.addEventListener('chat:message', this._onChatMessage);
     wsManager.addEventListener('chat:open', this._onChatOpen);
@@ -611,6 +614,44 @@ export class ChatController {
     this.historyCursor = null;
     this.hasMoreHistory = true;
     this._initialHistoryLoaded = false;
+  }
+
+  /* Una riconnessione può aver scavalcato dei messaggi, e nulla se ne accorgeva.
+     Il thread si legge una volta sola per caricamento di pagina (il latch
+     `_initialHistoryLoaded`), poi la vista vive di soli frame WebSocket: quelli
+     pubblicati mentre il socket era giù non arrivano mai, e restano invisibili
+     finché non si ricarica. Chi lo paga sono i comandi che rispondono in due
+     tempi — `/atlas`, `/dream` — perché fra l'ack e l'esito passano secondi o
+     minuti, cioè esattamente la finestra in cui lo schermo si spegne e il socket
+     cade: in chat resta "Mapping the wiki..." e nessun risultato, che è
+     indistinguibile da un comando piantato.
+
+     Si scarta e si ricarica invece di riconciliare perché non c'è un'ancora su
+     cui riconciliare: gli id del thread sono relativi alla finestra di fetch (lo
+     stesso messaggio è `as-37-…` a limit=10 e `as-1853-…` a limit=160), e l'API
+     ha `before` ma non un `after`. `invalidateHistory()` esiste già per questo —
+     "la copia a schermo può essere stale, buttala" — ed è la stessa strada del
+     cambio di sessione.
+
+     Solo con la vista incollata in fondo, e non è un dettaglio: `invalidateHistory()`
+     azzera anche le pagine già paginate indietro, quindi a chi sta leggendo la
+     storia il resync porterebbe via ciò che stava guardando per rimediare a un
+     messaggio in coda che non sta nemmeno guardando. Incollati in fondo, invece,
+     l'operazione è invisibile — ed è il caso normale: telefono in tasca, schermo
+     che si riaccende. Il gate è `_autoScroll`, lo stesso che decide il
+     riallineamento al ritorno in foreground. */
+  async _resyncThreadAfterReconnect() {
+    if (!this._initialHistoryLoaded) return;
+    if (this._resyncingThread || this.isLoadingHistory) return;
+    if (!this._autoScroll) return;
+    if (!sessionManager.currentKey) return;
+    this._resyncingThread = true;
+    try {
+      this.invalidateHistory();
+      await this.loadInitialHistory();
+    } finally {
+      this._resyncingThread = false;
+    }
   }
 
   async loadInitialHistory() {
