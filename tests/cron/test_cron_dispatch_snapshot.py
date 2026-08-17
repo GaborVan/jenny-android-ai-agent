@@ -29,6 +29,9 @@ class _FakeMemory:
     def get_review_state(self) -> tuple[int, int]:
         return (0, 0)
 
+    def get_review_forced_at_stuck(self) -> int:
+        return 0
+
     def set_review_state(self, **_kwargs) -> None:
         pass
 

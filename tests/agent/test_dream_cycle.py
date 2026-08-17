@@ -39,6 +39,7 @@ import pytest
 from loguru import logger
 
 from jenny.agent.dream_cycle import (
+    REVIEW_RETRY_AFTER_RUNS,
     STUCK_FORCES_REVIEW,
     STUCK_IS_ALARMING,
     begin_dream_cycle,
@@ -47,7 +48,7 @@ from jenny.agent.dream_cycle import (
     format_stuck_alarm,
     take_dream_snapshot,
 )
-from jenny.agent.dream_review import STATUS_COMPLETED
+from jenny.agent.dream_review import STATUS_COMPLETED, STATUS_FAILED
 from jenny.agent.tools.file_state import FileStates
 from jenny.bus.events import InboundMessage
 from jenny.command.builtin import register_builtin_commands
@@ -101,6 +102,7 @@ class _FakeMemory:
         self.soul_file.write_text("s", encoding="utf-8")
 
         self._review_state = review_state
+        self._forced_at_stuck = 0
         self._has_work = has_work
         self._file_states = file_states
 
@@ -112,8 +114,18 @@ class _FakeMemory:
     def get_review_state(self) -> tuple[int, int]:
         return self._review_state
 
-    def set_review_state(self, *, runs_since_review: int, stuck_runs: int) -> None:
+    def get_review_forced_at_stuck(self) -> int:
+        return self._forced_at_stuck
+
+    def set_review_state(
+        self, *, runs_since_review: int, stuck_runs: int, forced_at_stuck: int | None = None,
+    ) -> None:
         self._review_state = (runs_since_review, stuck_runs)
+        # ``None`` conserva il valore su disco, come il vero ``MemoryStore``: un
+        # doppio che lo azzerasse per omissione renderebbe verde il livelock che
+        # ``forced_at_stuck`` esiste per chiudere.
+        if forced_at_stuck is not None:
+            self._forced_at_stuck = forced_at_stuck
         self.events.append(f"review_state:{runs_since_review},{stuck_runs}")
 
     def build_dream_prompt(self, *, max_entries: int = 20, gauge: str = ""):
@@ -155,12 +167,14 @@ class _FakeAgent:
         memory: _FakeMemory,
         *,
         snapshot_before_dream: Any = None,
+        turn_explodes: bool = False,
     ) -> None:
         self.context = SimpleNamespace(memory=memory, timezone=None)
         self.sessions = SimpleNamespace(sessions_dir=workspace / "sessions")
         self.bus = SimpleNamespace(publish_outbound=self._publish)
         self.published: list[Any] = []
         self.snapshot_before_dream = snapshot_before_dream
+        self.turn_explodes = turn_explodes
         self._memory = memory
 
     async def _publish(self, message: Any) -> None:
@@ -168,6 +182,11 @@ class _FakeAgent:
 
     async def process_direct(self, prompt: str, **_kwargs: Any):
         self._memory.events.append("process_direct")
+        if self.turn_explodes:
+            # Un turno che solleva non è ipotetico: provider giù, token esauriti,
+            # processo ucciso a metà. Ciò che conta è che il ciclo si chiuda
+            # comunque, o la cadenza del review non avanza mai.
+            raise RuntimeError("il provider non risponde")
         return SimpleNamespace(metadata={"_stop_reason": "completed"}, usage={})
 
     def evict_pruned_sessions(self, _keys: Any) -> None:
@@ -177,9 +196,16 @@ class _FakeAgent:
 class _ReviewSpy:
     """Sostituto di ``run_dream_review`` che registra cosa gli è arrivato."""
 
-    def __init__(self, memory: _FakeMemory, *, shrink_to: str | None = None) -> None:
+    def __init__(
+        self,
+        memory: _FakeMemory,
+        *,
+        shrink_to: str | None = None,
+        status: str = STATUS_COMPLETED,
+    ) -> None:
         self._memory = memory
         self._shrink_to = shrink_to
+        self._status = status
         self.calls: list[dict[str, Any]] = []
 
     async def __call__(self, agent, *, store, report, snapshotted, write_size_guard=None):
@@ -195,7 +221,7 @@ class _ReviewSpy:
             store.memory_file.write_text(self._shrink_to, encoding="utf-8")
         after = {item.label: len(item.path.read_text(encoding="utf-8")) for item in report}
         return SimpleNamespace(
-            status=STATUS_COMPLETED,
+            status=self._status,
             before=before,
             after=after,
             freed=sum(before[label] - after[label] for label in before),
@@ -344,6 +370,121 @@ class TestReviewTrigger:
         # insieme al report da cui deriva.
         assert prologue.guard is not spy.calls[0]["guard"]
         assert prologue.guard(memory.memory_file, "z" * 300) is not None
+
+
+class TestTheForcedReviewDoesNotRepeatOnAFrozenCounter:
+    """``stuck`` fermo non deve far partire un review a ogni run.
+
+    Il ramo del livelock scatta su ``stuck % STUCK_FORCES_REVIEW == 0``, e
+    ``stuck`` **non** viene toccato quando non c'era storia da consolidare
+    (``advanced is None`` in ``finish_dream_cycle``) — cioè su ogni installazione
+    in pari, che è lo stato normale di un telefono che Dream ha già digerito.
+    Fermo su un multiplo della soglia, quella condizione è vera per sempre: un
+    turno LLM di review ogni due ore, a vuoto, su file che nessuno sta toccando.
+    Lo specchio esatto del livelock che il contatore esiste per chiudere, su una
+    feature il cui scopo è contenere i costi.
+    """
+
+    async def test_a_frozen_stuck_forces_exactly_one_review(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        memory = _FakeMemory(tmp_path / "ws", review_state=(0, STUCK_FORCES_REVIEW))
+        spy = _ReviewSpy(memory)
+        monkeypatch.setattr(_REVIEW_TARGET, spy)
+        agent = _FakeAgent(tmp_path, memory)
+
+        for _ in range(3):
+            await begin_dream_cycle(agent, store=memory, cfg=_dream_cfg(review_every_runs=99))
+            # Nessuna storia da consolidare: ``stuck`` resta dov'è, ed è
+            # esattamente la condizione che rendeva il trigger permanente.
+            finish_dream_cycle(
+                memory, advanced=None, runs_since_review=0, stuck=STUCK_FORCES_REVIEW
+            )
+
+        assert len(spy.calls) == 1
+
+    async def test_a_stuck_that_grows_forces_it_again(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Il meccanismo resta vivo: è "non riforzare sullo stesso valore", non
+        "non riforzare più"."""
+        memory = _FakeMemory(tmp_path / "ws", review_state=(0, STUCK_FORCES_REVIEW))
+        spy = _ReviewSpy(memory)
+        monkeypatch.setattr(_REVIEW_TARGET, spy)
+        agent = _FakeAgent(tmp_path, memory)
+        cfg = _dream_cfg(review_every_runs=99)
+
+        await begin_dream_cycle(agent, store=memory, cfg=cfg)
+        # Due run bloccati in più: il contatore avanza e riattraversa la soglia.
+        memory.set_review_state(runs_since_review=0, stuck_runs=STUCK_FORCES_REVIEW * 2)
+        await begin_dream_cycle(agent, store=memory, cfg=cfg)
+
+        assert len(spy.calls) == 2
+
+    async def test_the_periodic_cadence_is_untouched_by_the_memory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Un review periodico non dice niente sul livelock e non lo registra."""
+        memory = _FakeMemory(tmp_path / "ws", review_state=(4, STUCK_FORCES_REVIEW))
+        spy = _ReviewSpy(memory)
+        monkeypatch.setattr(_REVIEW_TARGET, spy)
+
+        await begin_dream_cycle(
+            _FakeAgent(tmp_path, memory), store=memory, cfg=_dream_cfg(review_every_runs=4)
+        )
+
+        assert memory.get_review_forced_at_stuck() == STUCK_FORCES_REVIEW
+
+
+class TestAFailedReviewDoesNotBuyAFullCadence:
+    """Un review che ha fallito non ha fatto la manutenzione.
+
+    L'azzeramento era incondizionato, quindi anche uno ``STATUS_FAILED`` — che il
+    ramo della migrazione troncata usa per dire "del contenuto voluto non è
+    atterrato" — si comprava l'intero intervallo, con il default circa un giorno.
+    Proprio il caso in cui tornare presto conta di più.
+    """
+
+    async def test_a_failed_review_comes_back_in_two_runs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        memory = _FakeMemory(tmp_path / "ws", review_state=(12, 0))
+        monkeypatch.setattr(_REVIEW_TARGET, _ReviewSpy(memory, status=STATUS_FAILED))
+
+        prologue = await begin_dream_cycle(
+            _FakeAgent(tmp_path, memory), store=memory, cfg=_dream_cfg(review_every_runs=12)
+        )
+
+        runs, _stuck = memory.get_review_state()
+        assert runs == 12 - REVIEW_RETRY_AFTER_RUNS
+        assert prologue.runs_since_review == 0
+
+    async def test_it_is_not_retried_on_every_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """La protezione di costo per cui l'azzeramento incondizionato esisteva."""
+        memory = _FakeMemory(tmp_path / "ws", review_state=(12, 0))
+        spy = _ReviewSpy(memory, status=STATUS_FAILED)
+        monkeypatch.setattr(_REVIEW_TARGET, spy)
+        agent = _FakeAgent(tmp_path, memory)
+        cfg = _dream_cfg(review_every_runs=12)
+
+        await begin_dream_cycle(agent, store=memory, cfg=cfg)
+        await begin_dream_cycle(agent, store=memory, cfg=cfg)
+
+        assert len(spy.calls) == 1
+
+    async def test_a_successful_review_still_resets_to_zero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        memory = _FakeMemory(tmp_path / "ws", review_state=(12, 0))
+        monkeypatch.setattr(_REVIEW_TARGET, _ReviewSpy(memory))
+
+        await begin_dream_cycle(
+            _FakeAgent(tmp_path, memory), store=memory, cfg=_dream_cfg(review_every_runs=12)
+        )
+
+        assert memory.get_review_state() == (0, 0)
 
 
 class TestSnapshot:
@@ -543,6 +684,7 @@ class _Scenario:
     blocked_writes: bool = False
     with_snapshot: bool = True
     shrink_to: str | None = None
+    turn_explodes: bool = False
 
 
 _SCENARIOS = {
@@ -568,6 +710,13 @@ _SCENARIOS = {
         blocked_writes=True,
         with_snapshot=False,
     ),
+    # Il turno incrementale solleva. Prima della correzione del 2026-08-17 i
+    # contatori non venivano scritti affatto — ``finish_dream_cycle`` era l'ultima
+    # istruzione del ``try`` — quindi ``runs_since_review`` non avanzava e un Dream
+    # che crasha a ogni run non arrivava **mai** a un review pass. Entrambi i
+    # percorsi avevano la stessa forma, quindi la traccia restava uguale: è per
+    # questo che serve uno scenario, e non basta il confronto fra i due.
+    "crashing_turn": _Scenario(turn_explodes=True),
 }
 
 
@@ -610,6 +759,7 @@ def _build(scenario: _Scenario, root: Path) -> tuple[_FakeMemory, _FakeAgent]:
         root,
         memory,
         snapshot_before_dream=checkpoint if scenario.with_snapshot else None,
+        turn_explodes=scenario.turn_explodes,
     )
     return memory, agent
 
@@ -686,6 +836,30 @@ class TestTheTwoCallersStayAligned:
 
         assert cron_events == manual_events
         assert cron_logs == manual_logs
+
+    @pytest.mark.parametrize("run", [_run_cron, _run_manual])
+    async def test_a_crashing_turn_still_closes_the_cycle(
+        self, run: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Il caso che l'uguaglianza fra i due percorsi non può prendere.
+
+        Prima della correzione del 2026-08-17 ``finish_dream_cycle`` era l'ultima
+        istruzione del ``try``, quindi un turno che solleva la saltava del tutto:
+        ``runs_since_review`` non avanzava e un Dream che crasha a ogni run non
+        arrivava **mai** a un review pass — invisibile, perché il crash era già
+        loggato e sembrava l'unico problema. Entrambi i percorsi avevano la stessa
+        forma, quindi il confronto fra loro restava verde: serve un'asserzione su
+        cosa la traccia deve contenere.
+
+        ``stuck`` non si muove, di proposito: il suo allarme dice "le scritture
+        continuano a essere rifiutate dal budget", che di un'eccezione è una
+        diagnosi sbagliata — e finisce su una notifica che l'utente legge.
+        """
+        with monkeypatch.context() as m:
+            events, _logs = await run(_SCENARIOS["crashing_turn"], tmp_path, m)
+
+        assert "process_direct" in events, "il turno non è nemmeno partito"
+        assert events[-1] == "review_state:1,0"
 
     async def test_the_trace_is_not_vacuously_equal(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

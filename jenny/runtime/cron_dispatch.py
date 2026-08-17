@@ -324,15 +324,9 @@ class CronDispatcher:
         # condivisi con lo slash command ``/dream``: erano due copie della stessa
         # sequenza e divergevano una divergenza alla volta. Qui resta il mestiere
         # di questo percorso — il turno incrementale, i log, la pulizia.
-        from jenny.agent.dream_cycle import (
-            begin_dream_cycle,
-            finish_dream_cycle,
-            take_dream_snapshot,
-        )
+        from jenny.agent.dream_cycle import begin_dream_cycle, finish_dream_cycle
         from jenny.agent.memory import MemoryStore
-        from jenny.agent.memory_budget import render_gauge
 
-        dream_session_key = MemoryStore.dream_session_key
         prune_dream_sessions = MemoryStore.prune_dream_sessions
 
         store = agent.context.memory
@@ -363,66 +357,33 @@ class CronDispatcher:
                 cfg=cfg,
                 take_snapshot=self._snapshot_before_dream,
             )
-
-            result = store.build_dream_prompt(gauge=render_gauge(prologue.report))
-            if result is None:
-                # Il ciclo si chiude comunque: ``advanced=None`` fa avanzare la
-                # cadenza del review senza toccare ``stuck``. Senza questa riga
-                # un'installazione in pari con la storia non arrivava mai a un
-                # review pass — v. la docstring di ``finish_dream_cycle``.
+            # Il turno incrementale ha un ``try`` suo, e il ciclo si chiude nel
+            # suo ``finally``: correzione del 2026-08-17. Con
+            # ``finish_dream_cycle`` come ultima istruzione del try esterno, un
+            # ``process_direct`` che solleva finiva nell'``except`` e i contatori
+            # non venivano scritti — quindi ``runs_since_review`` non avanzava, e
+            # un Dream che crasha a ogni run non arrivava **mai** a un review
+            # pass, senza che niente lo dicesse. È lo stesso guasto che la
+            # docstring di ``finish_dream_cycle`` racconta di aver chiuso per il
+            # caso "niente storia da consolidare"; mancava questo.
+            #
+            # ``advanced=None`` significa "il turno non ha mancato niente": è il
+            # valore del ramo senza storia, e anche quello di un turno crashato.
+            # Su un crash **non** si usa ``False``: quello incrementa ``stuck``,
+            # il cui allarme dice "le scritture continuano a essere rifiutate dal
+            # budget" — una diagnosi sbagliata per un'eccezione, e su una
+            # superficie che l'utente vede. Il crash ha già il suo
+            # ``logger.exception``.
+            advanced: bool | None = None
+            try:
+                resp, advanced = await self._dream_turn(agent, store, prologue)
+            finally:
                 finish_dream_cycle(
                     store,
-                    advanced=None,
+                    advanced=advanced,
                     runs_since_review=prologue.runs_since_review,
                     stuck=prologue.stuck,
                 )
-                logger.info("Dream: nothing to process")
-                return None
-            prompt, last_cursor = result
-            if prologue.review is None:
-                # Un solo checkpoint per ciclo. Se il review è appena girato lo
-                # snapshot è già stato preso pochi secondi fa e copre anche il
-                # turno incrementale che segue; rifarlo qui archivierebbe lo
-                # stato *dopo* il review sotto la stessa etichetta "pre_dream",
-                # cioè un secondo checkpoint che non è pre-niente.
-                await take_dream_snapshot(self._snapshot_before_dream)
-            key = dream_session_key()
-            dream_tools = store.build_dream_tools(write_size_guard=prologue.guard)
-            resp = await agent.process_direct(
-                prompt,
-                session_key=key,
-                ephemeral=True,
-                tools=dream_tools,
-                on_progress=_silent,
-            )
-            # ``getattr``: il registry Dream espone ``file_states``, ma il
-            # contratto resta tollerante verso registry di altra provenienza.
-            dream_file_states = getattr(dream_tools, "file_states", None)
-            advanced = MemoryStore.dream_should_advance_cursor(resp, dream_file_states)
-            if advanced:
-                store.set_last_dream_cursor(last_cursor)
-                logger.info("Dream cron job completed, cursor advanced to {}", last_cursor)
-            elif MemoryStore.dream_run_completed(resp):
-                # Completato pulito ma senza scritture riuscite pur avendole
-                # tentate: blocco/rifiuto. Non avanzare: le voci vanno
-                # riprocessate al prossimo run.
-                logger.warning(
-                    "Dream cron job completed without writing (attempts blocked/refused); "
-                    "cursor remains at {}",
-                    store.get_last_dream_cursor(),
-                )
-            else:
-                logger.warning(
-                    "Dream cron job did not complete; cursor remains at {}",
-                    store.get_last_dream_cursor(),
-                )
-
-            finish_dream_cycle(
-                store,
-                advanced=advanced,
-                runs_since_review=prologue.runs_since_review,
-                stuck=prologue.stuck,
-            )
         except Exception:
             logger.exception("Dream cron job failed")
         finally:
@@ -441,6 +402,67 @@ class CronDispatcher:
         if pruned_keys:
             agent.evict_pruned_sessions(pruned_keys)
         return None
+
+    async def _dream_turn(
+        self, agent: "CronCapableAgent", store: Any, prologue: Any
+    ) -> tuple[Any, bool | None]:
+        """Il turno incrementale di Dream. Ritorna ``(risposta, avanzato)``.
+
+        Estratto in un metodo perché la chiusura del ciclo va in un ``finally`` e
+        il ramo "niente storia" esce con un ``return`` di mezzo: inline, quel
+        ``return`` costringeva a ripetere la chiusura in due punti — che è
+        esattamente il genere di duplicazione da cui questo sottosistema è nato
+        (due copie della stessa sequenza, divergenti una divergenza alla volta).
+
+        ``None`` come secondo valore vuol dire "non c'era niente da consolidare",
+        che è diverso da ``False`` (ha provato e non ce l'ha fatta).
+        """
+        from jenny.agent.dream_cycle import take_dream_snapshot
+        from jenny.agent.memory import MemoryStore
+        from jenny.agent.memory_budget import render_gauge
+
+        result = store.build_dream_prompt(gauge=render_gauge(prologue.report))
+        if result is None:
+            logger.info("Dream: nothing to process")
+            return None, None
+        prompt, last_cursor = result
+        if prologue.review is None:
+            # Un solo checkpoint per ciclo. Se il review è appena girato lo
+            # snapshot è già stato preso pochi secondi fa e copre anche il turno
+            # incrementale che segue; rifarlo qui archivierebbe lo stato *dopo* il
+            # review sotto la stessa etichetta "pre_dream", cioè un secondo
+            # checkpoint che non è pre-niente.
+            await take_dream_snapshot(self._snapshot_before_dream)
+        dream_tools = store.build_dream_tools(write_size_guard=prologue.guard)
+        resp = await agent.process_direct(
+            prompt,
+            session_key=MemoryStore.dream_session_key(),
+            ephemeral=True,
+            tools=dream_tools,
+            on_progress=_silent,
+        )
+        # ``getattr``: il registry Dream espone ``file_states``, ma il contratto
+        # resta tollerante verso registry di altra provenienza.
+        dream_file_states = getattr(dream_tools, "file_states", None)
+        advanced = MemoryStore.dream_should_advance_cursor(resp, dream_file_states)
+        if advanced:
+            store.set_last_dream_cursor(last_cursor)
+            logger.info("Dream cron job completed, cursor advanced to {}", last_cursor)
+        elif MemoryStore.dream_run_completed(resp):
+            # Completato pulito ma senza scritture riuscite pur avendole tentate:
+            # blocco/rifiuto. Non avanzare: le voci vanno riprocessate al
+            # prossimo run.
+            logger.warning(
+                "Dream cron job completed without writing (attempts blocked/refused); "
+                "cursor remains at {}",
+                store.get_last_dream_cursor(),
+            )
+        else:
+            logger.warning(
+                "Dream cron job did not complete; cursor remains at {}",
+                store.get_last_dream_cursor(),
+            )
+        return resp, advanced
 
     async def _run_update_check(self, agent: "CronCapableAgent") -> str | None:
         """Update check: annuncia una versione nuova UNA volta sola, poi tace.

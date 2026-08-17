@@ -71,6 +71,7 @@ class _FakeMemory:
         self.soul_file.write_text("s", encoding="utf-8")
 
         self._review_state = review_state
+        self._forced_at_stuck = 0
         self._has_work = has_work
         self._file_states = file_states
         self.events = events if events is not None else []
@@ -85,8 +86,15 @@ class _FakeMemory:
     def get_review_state(self) -> tuple[int, int]:
         return self._review_state
 
-    def set_review_state(self, *, runs_since_review: int, stuck_runs: int) -> None:
+    def get_review_forced_at_stuck(self) -> int:
+        return self._forced_at_stuck
+
+    def set_review_state(
+        self, *, runs_since_review: int, stuck_runs: int, forced_at_stuck: int | None = None,
+    ) -> None:
         self._review_state = (runs_since_review, stuck_runs)
+        if forced_at_stuck is not None:
+            self._forced_at_stuck = forced_at_stuck
         self.review_state_writes.append((runs_since_review, stuck_runs))
 
     # -- turno incrementale ----------------------------------------------------

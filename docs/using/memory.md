@@ -166,7 +166,7 @@ Dream's configuration lives under `agents.defaults.dream` in `config.json`, and 
 | `memoryBudgetChars` | Target size for `memory/MEMORY.md`, in characters. Dream sees how full the file is in every prompt, and a write that would push it further over the line is refused — a write that *shrinks* it is always allowed, or an over-budget file could never be pruned. `0` means "measure, don't enforce". | `2000` |
 | `userBudgetChars` | The same for `USER.md`. | `2000` |
 | `soulBudgetChars` | The same for `SOUL.md` — and it ships at `0` on purpose. That file mixes Jenny's identity, which must never be pruned, with notes that belong elsewhere, and a size limit cannot tell the two apart. The review pass reads before it decides; the limit does not. | `0` |
-| `reviewEveryRuns` | Every how many Dream runs the **review pass** runs: a pass whose only job is to make the files smaller, rather than to add to them. At the default interval, twelve runs is about once a day. | `12` |
+| `reviewEveryRuns` | Every how many Dream runs the **review pass** runs: a pass whose only job is to make the files smaller, rather than to add to them. At the default interval, twelve runs is about once a day. Do not lower it below **6**: a review pass that lands on a file a previous pass has already pruned keeps looking for things to remove, and measured on a real device the second consecutive pass deletes personal facts instead of redundancy. Setting it from chat prints the same warning. | `12` |
 
 The budgets are counted in **characters**, not tokens, because that is the only unit the model can count while it is writing.
 

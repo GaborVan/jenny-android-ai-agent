@@ -404,8 +404,42 @@ class MemoryStore:
             self._review_counter(data.get("stuck_runs")),
         )
 
-    def set_review_state(self, *, runs_since_review: int, stuck_runs: int) -> None:
-        """Persist the review-pass counters to ``.dream_review``."""
+    def get_review_forced_at_stuck(self) -> int:
+        """A quale valore di ``stuck_runs`` il review è stato forzato l'ultima volta.
+
+        Terzo campo dello stesso file, letto a parte per non cambiare la firma di
+        :meth:`get_review_state` e i suoi chiamanti. ``0`` significa "mai forzato",
+        che è anche il valore che si legge da uno stato scritto prima che questo
+        campo esistesse: la prima volta il review si riforza, e da lì in poi il
+        conto è giusto.
+
+        Perché serve. Il review forzato dal livelock scatta su
+        ``stuck % STUCK_FORCES_REVIEW == 0``, e ``stuck`` **non** viene toccato
+        quando non c'era storia da consolidare (``advanced is None``). Su
+        un'installazione in pari, con ``stuck`` fermo su un multiplo della soglia,
+        quella condizione è vera a *ogni* run: un turno LLM di review ogni due ore
+        per sempre — lo specchio esatto del livelock che il contatore esiste per
+        chiudere. Ricordando a che valore si è già forzato, non si riforza finché
+        quel valore non cambia, cioè finché Dream non manca un altro consolidamento.
+        """
+        try:
+            data = json.loads(self._review_state_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return 0
+        if not isinstance(data, dict):
+            return 0
+        return self._review_counter(data.get("forced_at_stuck"))
+
+    def set_review_state(
+        self, *, runs_since_review: int, stuck_runs: int, forced_at_stuck: int | None = None,
+    ) -> None:
+        """Persist the review-pass counters to ``.dream_review``.
+
+        *forced_at_stuck* a ``None`` — il default — **conserva** il valore su
+        disco: i chiamanti che aggiornano solo i due contatori non devono
+        conoscerlo, e non devono poterlo azzerare per omissione. Lo passa solo chi
+        forza il review (v. :meth:`get_review_forced_at_stuck`).
+        """
         # Stesso helper del cursore di Dream (v. ``set_last_dream_cursor``): un
         # write_text nudo lascerebbe, se il processo muore a metà, un JSON
         # troncato — che ``get_review_state`` legge come (0, 0), cioè un review
@@ -413,9 +447,13 @@ class MemoryStore:
         # file o è quello vecchio o è quello nuovo, mai una via di mezzo.
         # I valori si normalizzano anche in scrittura: un contatore negativo
         # arrivato da un chiamante non deve nemmeno toccare il disco.
+        forced = (
+            self.get_review_forced_at_stuck() if forced_at_stuck is None else forced_at_stuck
+        )
         payload = json.dumps({
             "runs_since_review": self._review_counter(runs_since_review),
             "stuck_runs": self._review_counter(stuck_runs),
+            "forced_at_stuck": self._review_counter(forced),
         })
         atomic_write(self._review_state_file, payload)
 
@@ -563,8 +601,9 @@ class MemoryStore:
         run:
 
         - è completato pulito (``internal_run_completed``), **e**
-        - nessuna scrittura è stata rifiutata dal budget
-          (``writes_refused_budget == 0``), **e**
+        - nessun rifiuto di budget è rimasto aperto
+          (``unrecovered_refusals == 0``: un file rifiutato e poi riscritto
+          accorciato non conta più), **e**
         - ha scritto almeno un file (``writes_ok > 0``), **oppure** non ha mai
           tentato una scrittura (``writes_attempted == 0``) — il caso legittimo
           "non c'era niente da cambiare".
@@ -572,21 +611,35 @@ class MemoryStore:
         Se ha tentato scritture e nessuna è riuscita NON si registra: l'input va
         riprocessato al run seguente.
 
-        Il rifiuto di budget va guardato a parte perché i contatori sono **per
-        run, non per file**: un run che scrive con successo una skill e si vede
-        rifiutare ``MEMORY.md`` ha comunque ``writes_ok > 0``, e sui soli due
-        contatori aggregati passerebbe per riuscito. Il fatto rifiutato non è su
-        disco e, registrato il progresso, non tornerebbe in nessun batch
-        successivo: perso. Basta quindi un rifiuto perché il run non commetta.
-        La via d'uscita dal livelock che ne consegue è il review forzato
-        (v. ``agent/dream_cycle.py``), non un commit più permissivo.
+        Il rifiuto di budget va guardato a parte dai due contatori aggregati: un
+        run che scrive con successo una skill e si vede rifiutare ``MEMORY.md`` ha
+        comunque ``writes_ok > 0``, e su ``ok``/``attempted`` passerebbe per
+        riuscito. Il fatto rifiutato non è su disco e, registrato il progresso, non
+        tornerebbe in nessun batch successivo: perso.
+
+        Ma il rifiuto che conta è quello **rimasto aperto**, non quello avvenuto —
+        ed è una misura di *contenuto*, non un conteggio per run. Il messaggio di
+        rifiuto chiede al modello di liberare spazio e riscrivere nello stesso
+        turno; se obbedisce e il contenuto atterra, il run ha fatto il suo lavoro.
+        Guardare il contatore cumulativo trattava quel successo come un
+        fallimento: cursore fermo, stesso batch due ore dopo, ``stuck`` in salita e
+        un allarme che annunciava scritture rifiutate che erano riuscite — con i
+        tetti armati, lo stato normale e non un caso limite. Si legge quindi
+        ``unrecovered_refusals``, che si chiude solo quando una scrittura riuscita
+        su *quel* percorso fa atterrare almeno una delle righe rifiutate
+        (v. ``FileStates.record_write_refused`` per il perché di "almeno una").
+
+        Il livelock che resta — rifiuto che nessuno recupera — esce dal review
+        forzato (v. ``agent/dream_cycle.py``), non da un commit più permissivo.
 
         ``file_states`` è tollerante a ``None`` / oggetti senza i contatori di
         scrittura (fallback conservativo: nessun avanzamento) per non far
         esplodere il chiamante se il registry non è quello costruito qui. Un
-        ``writes_refused_budget`` assente vale invece zero: chi non ha il
-        contatore non ha nemmeno il gancio che lo incrementa
-        (``_FsTool._check_write_size``), quindi non può aver rifiutato nulla.
+        registry senza ``unrecovered_refusals`` ripiega sul contatore cumulativo
+        — comportamento di prima, che per chi non ha il gancio è identico — e in
+        assenza di entrambi vale zero: chi non ha i contatori non ha nemmeno il
+        gancio che li incrementa (``_FsTool._check_write_size``), quindi non può
+        aver rifiutato nulla.
         """
         if not MemoryStore.internal_run_completed(resp):
             return False
@@ -594,8 +647,10 @@ class MemoryStore:
         writes_attempted = getattr(file_states, "writes_attempted", None)
         if not isinstance(writes_ok, int) or not isinstance(writes_attempted, int):
             return False
-        refused_budget = getattr(file_states, "writes_refused_budget", 0)
-        if isinstance(refused_budget, int) and refused_budget > 0:
+        outstanding = getattr(file_states, "unrecovered_refusals", None)
+        if not isinstance(outstanding, int):
+            outstanding = getattr(file_states, "writes_refused_budget", 0)
+        if isinstance(outstanding, int) and outstanding > 0:
             return False
         if writes_ok > 0:
             return True
@@ -614,7 +669,8 @@ class MemoryStore:
         silenziosamente saltato). Perciò si avanza solo quando il run:
 
         - è completato pulito (``dream_run_completed``), **e**
-        - non si è visto rifiutare nessuna scrittura dal budget, **e**
+        - non ha rifiuti di budget rimasti aperti — un file rifiutato e poi
+          riscritto accorciato nello stesso turno è recuperato, non perso, **e**
         - ha scritto almeno un file (``writes_ok > 0``), **oppure** non ha mai
           tentato una scrittura (``writes_attempted == 0``) — il caso legittimo
           "nulla da consolidare".

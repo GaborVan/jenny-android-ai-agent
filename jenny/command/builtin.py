@@ -337,72 +337,74 @@ async def cmd_dream(ctx: CommandContext) -> OutboundMessage:
             if prologue.review is not None:
                 review_note = _format_dream_review_note(prologue.review)
 
-            result = store.build_dream_prompt(gauge=render_gauge(prologue.report))
-            if result is None:
-                # Stesso ramo del percorso cron, stessa ragione: il ciclo si
-                # chiude con ``advanced=None``, che fa avanzare la cadenza del
-                # review senza toccare ``stuck``. V. ``finish_dream_cycle``.
+            # ``advanced=None`` vuol dire "il turno non ha mancato niente": è il
+            # valore del ramo senza storia, e anche quello di un turno che è
+            # crashato. Non ``False``, che incrementerebbe ``stuck`` e quindi
+            # dichiarerebbe un livelock del budget dove c'è stata un'eccezione.
+            advanced: bool | None = None
+            try:
+                result = store.build_dream_prompt(gauge=render_gauge(prologue.report))
+                if result is None:
+                    await loop.bus.publish_outbound(OutboundMessage(
+                        channel=msg.channel, chat_id=msg.chat_id,
+                        content=_prefix_review_note(
+                            review_note, _format_dream_no_input_message()
+                        ),
+                        metadata={"render_as": "text"},
+                    ))
+                    return
+                prompt, last_cursor = result
+                if prologue.review is None:
+                    # Un solo checkpoint per ciclo: se il review è appena girato
+                    # lo snapshot è già stato preso e copre anche il turno
+                    # incrementale che segue, mentre un secondo "pre_dream"
+                    # archiviato dopo il review non sarebbe pre-niente.
+                    await take_dream_snapshot(snapshot_cb)
+                key = dream_session_key()
+                dream_tools = store.build_dream_tools(write_size_guard=prologue.guard)
+                resp = await loop.process_direct(
+                    prompt,
+                    session_key=key,
+                    ephemeral=True,
+                    tools=dream_tools,
+                    on_progress=_silent,
+                )
+                elapsed = time.monotonic() - t0
+                # ``getattr``: il registry Dream espone ``file_states``, ma il
+                # contratto resta tollerante verso registry di altra provenienza.
+                dream_file_states = getattr(dream_tools, "file_states", None)
+                advanced = MemoryStore.dream_should_advance_cursor(resp, dream_file_states)
+                if advanced:
+                    store.set_last_dream_cursor(last_cursor)
+                    content = f"Dream completed in {elapsed:.1f}s."
+                elif MemoryStore.dream_run_completed(resp):
+                    content = (
+                        f"Dream completed in {elapsed:.1f}s but wrote nothing "
+                        "(attempts blocked/refused); memory cursor was not advanced."
+                    )
+                else:
+                    content = (
+                        f"Dream did not complete after {elapsed:.1f}s; "
+                        "memory cursor was not advanced."
+                    )
+                content = _prefix_review_note(review_note, content)
+            finally:
+                # Anti-livelock, con la stessa regola del percorso cron perché è
+                # la stessa funzione (la spiegazione sta lì). Contare anche da qui
+                # è ciò che impedisce a un utente che lancia Dream a mano di
+                # restare fuori dal meccanismo: un batch rifiutato dal budget
+                # tornerebbe altrimenti identico a ogni `/dream`, per sempre.
+                #
+                # In un ``finally``, e vale per entrambi i percorsi: come ultima
+                # istruzione del try, un turno che solleva la saltava del tutto —
+                # quindi ``runs_since_review`` non avanzava e un Dream che
+                # fallisce sempre non arrivava mai a un review pass.
                 finish_dream_cycle(
                     store,
-                    advanced=None,
+                    advanced=advanced,
                     runs_since_review=prologue.runs_since_review,
                     stuck=prologue.stuck,
                 )
-                await loop.bus.publish_outbound(OutboundMessage(
-                    channel=msg.channel, chat_id=msg.chat_id,
-                    content=_prefix_review_note(
-                        review_note, _format_dream_no_input_message()
-                    ),
-                    metadata={"render_as": "text"},
-                ))
-                return
-            prompt, last_cursor = result
-            if prologue.review is None:
-                # Un solo checkpoint per ciclo: se il review è appena girato lo
-                # snapshot è già stato preso e copre anche il turno incrementale
-                # che segue, mentre un secondo "pre_dream" archiviato dopo il
-                # review non sarebbe pre-niente.
-                await take_dream_snapshot(snapshot_cb)
-            key = dream_session_key()
-            dream_tools = store.build_dream_tools(write_size_guard=prologue.guard)
-            resp = await loop.process_direct(
-                prompt,
-                session_key=key,
-                ephemeral=True,
-                tools=dream_tools,
-                on_progress=_silent,
-            )
-            elapsed = time.monotonic() - t0
-            # ``getattr``: il registry Dream espone ``file_states``, ma il
-            # contratto resta tollerante verso registry di altra provenienza.
-            dream_file_states = getattr(dream_tools, "file_states", None)
-            advanced = MemoryStore.dream_should_advance_cursor(resp, dream_file_states)
-            if advanced:
-                store.set_last_dream_cursor(last_cursor)
-                content = f"Dream completed in {elapsed:.1f}s."
-            elif MemoryStore.dream_run_completed(resp):
-                content = (
-                    f"Dream completed in {elapsed:.1f}s but wrote nothing "
-                    "(attempts blocked/refused); memory cursor was not advanced."
-                )
-            else:
-                content = (
-                    f"Dream did not complete after {elapsed:.1f}s; "
-                    "memory cursor was not advanced."
-                )
-
-            # Anti-livelock, con la stessa regola del percorso cron perché è la
-            # stessa funzione (la spiegazione sta lì). Contare anche da qui è ciò
-            # che impedisce a un utente che lancia Dream a mano di restare fuori
-            # dal meccanismo: un batch rifiutato dal budget tornerebbe altrimenti
-            # identico a ogni `/dream`, per sempre.
-            finish_dream_cycle(
-                store,
-                advanced=advanced,
-                runs_since_review=prologue.runs_since_review,
-                stuck=prologue.stuck,
-            )
-            content = _prefix_review_note(review_note, content)
         except Exception as e:
             elapsed = time.monotonic() - t0
             content = _prefix_review_note(
@@ -518,6 +520,18 @@ class _DreamBudgetField:
     # per quelli ha senso confrontare il valore appena scritto con una misura.
     measured: bool
 
+
+# Sotto questa cadenza il review pass smette di essere manutenzione e comincia a
+# cancellare. Un consiglio e non un vincolo: lo schema ammette ``ge=1``, che è
+# corretto in senso stretto (un review ogni run *è* una configurazione), e un
+# ``config.json`` scritto a mano è una scelta dell'utente. Ma è il solo numero di
+# questa feature che sotto soglia perde dati invece di limitarne la crescita, e
+# chi lo abbassa da chat deve leggere la misura prima di scoprirla dai file.
+#
+# Sei e non dodici: dodici è il default e "sotto il default" non è un allarme.
+# Il difetto misurato è la passata *consecutiva*, e sotto sei run — con
+# ``interval_h`` al default, mezza giornata — le passate cominciano a incontrarsi.
+_REVIEW_CADENCE_ADVISED_FLOOR = 6
 
 _DREAM_BUDGET_FIELDS: dict[str, _DreamBudgetField] = {
     "memory": _DreamBudgetField(
@@ -688,7 +702,25 @@ def _format_dream_budget_change(
 ) -> str:
     """Conferma di una scrittura, con il prima e il dopo."""
     if not field.measured:
-        return f"{field.label}: every {before} → every {after} {field.unit}."
+        lines = [f"{field.label}: every {before} → every {after} {field.unit}."]
+        if field.attr == "review_every_runs" and after < _REVIEW_CADENCE_ADVISED_FLOOR:
+            # Scritto comunque — è una manopola dell'utente — ma detto, perché
+            # questo è l'unico numero della feature che sotto una certa soglia
+            # **cancella dati** invece di limitarne la crescita.
+            #
+            # Misurato il 2026-08-16 sul Titan 2: una prima passata di review è
+            # esemplare, la seconda di fila arriva a un file già potato e continua
+            # a cercare cose da togliere — sono finiti i fatti personali. Il
+            # prompt del review dichiara valido un run che non cambia niente, ma
+            # il modello obbedisce all'istruzione di rimpicciolire.
+            lines.append(
+                f"Note: below {_REVIEW_CADENCE_ADVISED_FLOOR} runs the review pass starts "
+                "landing on files a previous pass has already pruned, and measured on this "
+                "device the second consecutive pass deletes personal facts rather than "
+                "redundancy. It is written — this is your call — but the safe range starts "
+                f"at {_REVIEW_CADENCE_ADVISED_FLOOR}."
+            )
+        return "\n".join(lines)
     lines = [f"`{field.label}` budget: {before:,} → {after:,} {field.unit}."]
     if after == 0:
         lines.append(

@@ -63,6 +63,18 @@ STUCK_FORCES_REVIEW = 2
 # risposta. Lo azzera solo un cursore che avanza, cioè il problema che finisce.
 STUCK_IS_ALARMING = 4
 
+# Fra quanti run si ritenta un review pass che è **fallito**.
+#
+# Un review che dichiara ``STATUS_FAILED`` non ha fatto la manutenzione, quindi
+# azzerare la cadenza come se l'avesse fatta gli regala l'intero intervallo (con
+# il default, dodici run: circa un giorno). Ma nemmeno "riprova subito": il
+# fallimento più probabile è una migrazione che il budget ha troncato, e
+# ritentarla a ogni run è un turno LLM ogni due ore — la stessa spesa a vuoto che
+# il modulo esiste per evitare. Due run è il compromesso, e non è un numero
+# nuovo: è la stessa distanza con cui ``STUCK_FORCES_REVIEW`` reagisce a un
+# problema che si ripete.
+REVIEW_RETRY_AFTER_RUNS = 2
+
 
 def format_stuck_alarm(stuck: int) -> str:
     """La frase che descrive il livelock, condivisa dalle superfici che lo dicono.
@@ -262,10 +274,18 @@ async def begin_dream_cycle(
     # modulo la cadenza è la stessa di prima — un review ogni due run bloccati —
     # ma il contatore continua a salire, ed è ciò che rende raggiungibile
     # l'allarme.
-    review_due = (
-        runs_since_review >= cfg.review_every_runs
-        or (stuck > 0 and stuck % STUCK_FORCES_REVIEW == 0)
-    )
+    #
+    # E il modulo da solo non basta, correzione del 2026-08-17: ``stuck`` resta
+    # **fermo** quando non c'era storia da consolidare (``advanced is None`` in
+    # ``finish_dream_cycle``), cioè su ogni installazione in pari. Fermo su un
+    # multiplo della soglia, quella condizione è vera a ogni run: un review ogni
+    # due ore per sempre, a vuoto, su file che nessuno ha toccato — lo specchio
+    # del livelock, e su una feature il cui scopo è contenere i costi. Serve
+    # quindi anche sapere a che valore si è già forzato: si riforza solo quando
+    # ``stuck`` è cambiato, cioè quando Dream ha mancato un altro consolidamento.
+    forced_at = store.get_review_forced_at_stuck()
+    livelock_due = stuck > 0 and stuck % STUCK_FORCES_REVIEW == 0 and stuck != forced_at
+    review_due = runs_since_review >= cfg.review_every_runs or livelock_due
     if not review_due:
         return DreamPrologue(
             report=report,
@@ -288,7 +308,27 @@ async def begin_dream_cycle(
     # quanti run di fila Dream non consolida — e un review appena girato non è
     # una risposta a quella domanda. Lo azzera ``finish_dream_cycle``, e solo
     # quando il cursore avanza davvero.
-    store.set_review_state(runs_since_review=0, stuck_runs=stuck)
+    #
+    # Ma non si azzera a 0 se il review ha **fallito**, ed è la correzione del
+    # 2026-08-17: la riga di prima si comprava dodici run di tregua qualunque
+    # fosse l'esito, compreso lo ``STATUS_FAILED`` che segnala una migrazione
+    # troncata — cioè il caso in cui tornare presto conta di più. Si riparte
+    # invece a due run dalla prossima occasione: prima di dodici, e non "a ogni
+    # run", che è la protezione di costo per cui l'azzeramento incondizionato era
+    # stato scritto.
+    if outcome.status == dream_review.STATUS_FAILED:
+        runs_after = max(0, cfg.review_every_runs - REVIEW_RETRY_AFTER_RUNS)
+    else:
+        runs_after = 0
+    store.set_review_state(
+        runs_since_review=runs_after,
+        stuck_runs=stuck,
+        # Il valore a cui questo review è stato forzato, quando è il livelock ad
+        # averlo chiesto: è ciò che impedisce di riforzarlo su uno ``stuck`` che
+        # non si muove più. Un review periodico non lo tocca (``None``), perché
+        # del livelock non dice niente.
+        forced_at_stuck=stuck if livelock_due else None,
+    )
     # ``freed`` è il delta dei **tre file misurati**, non del
     # workspace. Un review che sposta una task spec da USER.md a una
     # ``skills/<name>/SKILL.md`` — cosa che il suo prompt chiede
@@ -357,9 +397,16 @@ def finish_dream_cycle(
     # nuovo. Un turno LLM completo ogni due ore, per sempre.
     #
     # Non avanzare È la semantica corretta — il fatto non è stato scritto
-    # e avanzare lo perderebbe — quindi la via d'uscita è forzare il
-    # review, non allentare il commit: ``internal_run_should_commit`` e i
-    # contatori di ``FileStates`` non si toccano.
+    # e avanzare lo perderebbe — quindi la via d'uscita è forzare il review,
+    # non allentare il commit.
+    #
+    # Con una correzione, del 2026-08-17: quel che *non* si allenta è il caso
+    # in cui il contenuto non è atterrato. Un modello che obbedisce al
+    # messaggio di rifiuto, pota e riscrive portandosi dentro il fatto ora
+    # commette, perché il rifiuto si chiude quando il contenuto arriva su
+    # disco (``FileStates.record_write_refused``). Prima no, e quel run — che
+    # ha fatto esattamente il lavoro — era la sorgente di livelock più
+    # probabile di tutte.
     #
     # E il conto non è solo in token. ``compact_history`` gira comunque a
     # fine run, nel chiamante, e tiene le ultime ``max_history_entries`` voci
