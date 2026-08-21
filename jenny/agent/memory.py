@@ -19,6 +19,7 @@ from jenny.session.keys import (
     DREAM_SESSION_PREFIX,
     is_internal_session_key,
     is_personal_session_key,
+    is_project_session_key,
 )
 from jenny.utils.helpers import (
     ensure_dir,
@@ -374,7 +375,32 @@ class MemoryStore:
         applied as a final safety net: individual callers should cap their own
         content more tightly; this default only exists to catch unintentional
         large writes (e.g. an LLM echoing its input back as a "summary").
+
+        **Una sessione di progetto non scrive qui, e ritorna ``0``.** Questo file
+        e' la coda di lavoro da cui Dream costruisce ``MEMORY.md``: un progetto
+        non alimenta la memoria di lungo periodo, e la sua compattazione continua
+        a funzionare senza toccarla, perche' quel che il turno dopo rilegge e'
+        ``_last_summary`` nei metadati della sessione, non questa coda.
+
+        Il gate sta qui e non nei chiamanti di proposito. E' l'imbuto: ci passano
+        sia il riassunto di ``Consolidator.archive`` sia il dump di
+        ``raw_archive`` quando la chiamata LLM fallisce, piu' qualunque chiamante
+        futuro. L'isolamento di un progetto deve essere un'*assenza*, e un filtro
+        replicato in N punti e' una cosa che si puo' sbagliare una volta e mettere
+        il progetto dentro il diario personale. ``0`` non e' un cursore valido —
+        partono da 1 — ed e' ignorato da tutti i chiamanti di produzione.
+
+        Nota l'asimmetria, e non "correggerla": per una sessione **interna** la
+        scrittura qui e' voluta, perche' un job cron rilegge le proprie voci per
+        ricordarsi dei run passati.
         """
+        if session_key and is_project_session_key(session_key):
+            logger.debug(
+                "history append skipped for project session {}: a project does not "
+                "feed the personal diary",
+                session_key,
+            )
+            return 0
         limit = max_chars if max_chars is not None else _HISTORY_ENTRY_HARD_CAP
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
         raw = entry.rstrip()
@@ -534,7 +560,31 @@ class MemoryStore:
         *,
         session_key: str | None,
     ) -> list[dict[str, Any]]:
-        """Return unprocessed history entries safe to inject into a turn prompt."""
+        """Return unprocessed history entries safe to inject into a turn prompt.
+
+        La regola e' ternaria, una risposta per categoria:
+
+        - **progetto**: niente, e non "niente di altrui" ma proprio niente. Questa
+          coda e' la contabilita della conversazione personale e la finestra e' il
+          suo cursore di Dream; un progetto non condivide ne' l'una ne' l'altro,
+          quindi il blocco "Recent History" del suo prompt non esiste invece di
+          essere filtrato. Un'assenza non si puo' sbagliare, un filtro si.
+        - **interna**: le proprie voci *piu'* la conversazione personale. Il primo
+          ramo e' la cura dell'amnesia dell'heartbeat — un job rilegge i propri run
+          — e ha un test che lo nomina
+          (``test_cron_recent_history_can_see_own_history_and_unified_context``).
+        - **personale**: la conversazione personale.
+
+        Gli ultimi due rami sono la stessa riga, perche' il secondo membro della
+        condizione e' la whitelist e non "non e' interna": la differenza si vede
+        solo su una voce di progetto, che con la negazione sarebbe entrata in ogni
+        prompt. Oggi nessuna voce di progetto puo' esistere — la scrittura e'
+        chiusa in ``append_history`` — e questo e' il secondo giro di chiave, non
+        una ridondanza inutile: chiude anche le voci scritte da una versione
+        precedente o a mano.
+        """
+        if session_key is not None and is_project_session_key(session_key):
+            return []
         entries = self.read_unprocessed_history(since_cursor=since_cursor)
         if session_key is None:
             return entries
@@ -542,7 +592,7 @@ class MemoryStore:
             entry
             for entry in entries
             if (entry_session := entry.get("session_key")) == session_key
-            or not self._is_internal_history_session(entry_session)
+            or self._is_personal_history_session(entry_session)
         ]
 
     def compact_history(self) -> None:

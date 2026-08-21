@@ -8,17 +8,31 @@ __all__ = [
     "DREAM_SESSION_PREFIX",
     "HEARTBEAT_SESSION_KEY",
     "INTERNAL_SESSION_PREFIX",
+    "PROJECT_SESSION_PREFIX",
     "SUBAGENT_SESSION_PREFIX",
     "UNIFIED_SESSION_KEY",
     "internal_session_kind",
     "is_internal_session_key",
     "is_personal_session_key",
+    "is_project_session_key",
     "normalize_user_session_key",
+    "project_session_key",
     "session_key_for_channel",
+    "session_kind",
     "subagent_session_key",
 ]
 
 UNIFIED_SESSION_KEY = "unified:default"
+
+# Prefisso di una sessione-progetto (``project:<id>``): una conversazione con
+# l'utente, legata a una cartella, che **non** alimenta la memoria di lungo
+# periodo. E' la terza categoria, e la ragione per cui questo modulo ha una
+# classificazione ternaria invece di un booleano: v. :func:`session_kind`.
+#
+# L'id e' stabile ai rinomini della cartella (la cartella e' l'indirizzo, l'id
+# e' l'identita'), quindi non e' derivabile dal path: lo assegna chi crea il
+# legame.
+PROJECT_SESSION_PREFIX = "project:"
 
 # Prefisso delle sessioni Tier-2 dei subagent (``subagent:<lineage_id>``).
 # Sono storia di lavoro interno, non conversazioni: non devono comparire in
@@ -86,6 +100,39 @@ def internal_session_kind(key: str) -> str | None:
     return None
 
 
+def session_kind(key: str) -> str:
+    """La categoria di una session key: ``"internal"``, ``"project"``, ``"personal"``.
+
+    **La classificazione delle sessioni sta qui e in nessun altro posto.** Le tre
+    categorie non sono una tassonomia per bellezza: rispondono a domande diverse
+    e vengono trattate diversamente da chi tiene la memoria.
+
+    - ``internal`` — lavoro del sistema (cron, Dream, Atlas, subagent,
+      heartbeat). Non e' conversazione, non compare negli elenchi user-facing, e
+      rilegge le *proprie* voci in coda di lavoro perche' e' cosi che un job si
+      ricorda dei suoi run passati.
+    - ``project`` — conversazione con l'utente dentro un progetto. Non alimenta
+      la memoria di lungo periodo e non condivide niente della contabilita
+      personale: ne' la coda, ne' il cursore. La sua continuita vive nella
+      propria sessione e nei file che scrive.
+    - ``personal`` — la conversazione con l'utente. E' la sola che alimenta il
+      diario da cui Dream costruisce ``MEMORY.md``.
+
+    Il predicato che serviva prima era binario, e :func:`is_personal_session_key`
+    aveva scritto in docstring che il giorno in cui fosse nata una terza
+    categoria la blacklist "non e' interna" sarebbe diventata silenziosamente
+    sbagliata. Quel giorno e' questo: una chiave ``project:`` non e' interna, e
+    con la vecchia definizione risultava percio' *personale* — cioe' avrebbe
+    alimentato ``MEMORY.md``. Le tre etichette qui sono un insieme chiuso; chi ne
+    ha bisogno usa i tre predicati sotto e non riscrive il confronto.
+    """
+    if internal_session_kind(key) is not None:
+        return "internal"
+    if key.startswith(PROJECT_SESSION_PREFIX):
+        return "project"
+    return "personal"
+
+
 def is_internal_session_key(key: str) -> bool:
     """True se la session key appartiene a lavoro interno, non all'utente.
 
@@ -94,23 +141,34 @@ def is_internal_session_key(key: str) -> bool:
     sta qui e non replicato in ogni chiamante, cosi aggiungere una sessione
     interna non richiede di ricordarsi di aggiornare N punti.
     """
-    return internal_session_kind(key) is not None
+    return session_kind(key) == "internal"
+
+
+def is_project_session_key(key: str) -> bool:
+    """True se la session key e' la conversazione di un progetto."""
+    return session_kind(key) == "project"
 
 
 def is_personal_session_key(key: str) -> bool:
     """True se la session key e' la conversazione personale con l'utente.
 
-    Oggi e' l'esatto complemento di :func:`is_internal_session_key`, e il nome
-    e' l'unica differenza. Ma e' la differenza che serve: chi decide *cosa
-    entra nella memoria di lungo periodo* ha bisogno di una whitelist — "solo
-    la conversazione personale" — non della blacklist dei lavori interni. Le
-    due coincidono finche' le categorie sono due; il giorno in cui ne esiste
-    una terza (una sessione legata a un progetto, che e' conversazione con
-    l'utente ma **non** deve alimentare il diario personale) la blacklist
-    diventa silenziosamente sbagliata e questa resta giusta cambiando qui, in
-    un punto solo, senza toccare nessun chiamante.
+    **Whitelist, non la negazione di :func:`is_internal_session_key`.** Chi la usa
+    decide cosa entra nella memoria di lungo periodo, e per quella decisione
+    serve l'elenco di chi *puo'* — che oggi ha un solo membro — e non quello di
+    chi non puo'. Da quando esiste :func:`session_kind` le due non coincidono
+    piu': una chiave ``project:`` non e' interna e non e' personale.
     """
-    return not is_internal_session_key(key)
+    return session_kind(key) == "personal"
+
+
+def project_session_key(project_id: str) -> str:
+    """La session key di un progetto dal suo id.
+
+    Sta qui accanto al prefisso per la stessa ragione di
+    :func:`subagent_session_key`: la chiave la compone chi la definisce, cosi il
+    lato che la scrive e quello che la classifica non possono divergere.
+    """
+    return f"{PROJECT_SESSION_PREFIX}{project_id}"
 
 
 # Chiavi utente nella forma vecchia ``<canale>:<chat_id>``. Non esistono piu' come

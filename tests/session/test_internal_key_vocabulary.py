@@ -1,4 +1,4 @@
-"""Guardia: il vocabolario delle sessioni interne vive in un solo modulo.
+"""Guardia: il vocabolario delle session key vive in un solo modulo.
 
 Il confine "sessione interna vs conversazione utente" è stato ricopiato quattro
 volte (``session/keys.py``, ``agent/memory.py``, ``agent/autocompact.py``,
@@ -24,6 +24,14 @@ restano solo i punti che davvero *decidono*.
 
 La soglia è 2 perché un modulo che nomina un solo membro sta trattando un caso
 particolare, non replicando la partizione.
+
+**Esteso alla terza categoria** quando ``project:`` è nato (2026-08-21): la
+partizione da difendere non è più "interna sì/no" ma
+interna/progetto/personale, e la forma sbagliata da intercettare è la stessa —
+un modulo che si ricopia i prefissi invece di chiedere a
+``jenny.session.keys.session_kind``. Il prefisso di progetto è quello che costa
+di più a lasciar copiare: sbagliarlo non fa sparire una funzione, mette la
+conversazione di un progetto dentro ``MEMORY.md``.
 """
 
 from __future__ import annotations
@@ -34,8 +42,11 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # I membri del vocabolario, nella forma testuale in cui li si scrive nel codice.
+# ``project:`` sta nello stesso insieme e non in uno a parte: chi classifica una
+# session key deve chiedere a ``keys.py``, e la domanda è una sola quale che sia
+# la categoria che gli interessa.
 VOCABULARY = frozenset(
-    {"subagent:", "cron:", "dream:", "atlas:", "internal:", "heartbeat"}
+    {"subagent:", "cron:", "dream:", "atlas:", "internal:", "heartbeat", "project:"}
 )
 
 # Chi può nominarne quanti vuole: il modulo canonico (è la sua definizione) e
@@ -122,6 +133,24 @@ class TestInternalKeyVocabulary:
             "    return 'user'\n"
         )
         assert _classification_literals(tree) & VOCABULARY == {"dream:", "heartbeat"}
+
+    def test_the_project_prefix_is_in_the_swept_vocabulary(self):
+        """La terza categoria è difesa come le altre, non solo documentata.
+
+        Senza questo, aggiungere ``project:`` all'insieme resta un gesto che
+        qualcuno può disfare per far passare un modulo, e il costo lo si scopre
+        dal contenuto di ``MEMORY.md``.
+        """
+        assert "project:" in VOCABULARY
+        tree = ast.parse(
+            "def f(key):\n"
+            "    if key.startswith('project:'):\n"
+            "        return 'project'\n"
+            "    if key.startswith('cron:'):\n"
+            "        return 'internal'\n"
+            "    return 'personal'\n"
+        )
+        assert _classification_literals(tree) & VOCABULARY == {"project:", "cron:"}
 
     def test_sweep_ignores_producers_and_labels(self):
         """Un f-string produttore o un'etichetta non sono classificazione."""
