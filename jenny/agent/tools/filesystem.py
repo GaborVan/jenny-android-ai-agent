@@ -157,6 +157,30 @@ class _FsTool(Tool):
             return access_allowed_root
         return allowed_dir
 
+    def _read_allowed_root(self, access: Any) -> Path | None:
+        """Il confine di **lettura**: la radice dell'installazione, non quella dello scope.
+
+        La prigione di una sessione-progetto e' sulla scrittura, non sulla
+        lettura. In lettura non serve: fuori dalla cartella privata dell'app non
+        si arriva comunque, perche' l'app non chiede il permesso di storage — il
+        confine vero lo mette Android. Restringere anche le letture non
+        aggiungeva sicurezza e toglieva a Jenny la possibilita' di leggere,
+        dentro un progetto, la propria skill: ``SkillsLoader`` le passa il
+        percorso di ``SKILL.md`` perche' se lo legga da se', e sotto uno scope
+        stretto quel percorso veniva poi negato — il caricamento progressivo
+        moriva dentro ogni progetto.
+
+        Resta invece una restrizione **esplicita del costruttore** (Dream, un
+        subagent con la sua directory): quella e' una scelta di chi ha costruito
+        il tool, non dello scope, e non va allargata.
+        """
+        if not access.restrict_to_workspace:
+            return None
+        explicit = self._effective_allowed_root(None)
+        if explicit is not None:
+            return explicit
+        return self._workspace
+
     def _resolve_with_extra(
         self,
         path: str,
@@ -164,15 +188,24 @@ class _FsTool(Tool):
         extra_allowed_files: list[Path] | None,
         *,
         include_media_dir: bool,
+        for_write: bool,
     ) -> Path:
         access = current_tool_workspace(
             self._workspace,
             restrict_to_workspace=self._restrict_to_workspace,
         )
+        # La base dei percorsi relativi resta ``project_path`` per entrambi: "il
+        # file X" dentro un progetto vuol dire dentro quel progetto, che si stia
+        # leggendo o scrivendo. A cambiare e' solo il *confine*.
+        allowed_root = (
+            self._effective_allowed_root(access.allowed_root)
+            if for_write
+            else self._read_allowed_root(access)
+        )
         return resolve_workspace_path(
             path,
             access.project_path,
-            self._effective_allowed_root(access.allowed_root),
+            allowed_root,
             extra_allowed_dirs,
             extra_allowed_files,
             include_media_dir=include_media_dir,
@@ -184,6 +217,7 @@ class _FsTool(Tool):
             self._extra_read_allowed_dirs,
             None,
             include_media_dir=True,
+            for_write=False,
         )
 
     def _resolve_write(self, path: str) -> Path:
@@ -216,6 +250,7 @@ class _FsTool(Tool):
             self._extra_write_allowed_dirs,
             self._extra_write_allowed_files,
             include_media_dir=False,
+            for_write=True,
         )
 
     def _archive_departing(self, path: Path, text: str) -> None:

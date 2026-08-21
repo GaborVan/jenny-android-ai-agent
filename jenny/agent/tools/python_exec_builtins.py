@@ -90,12 +90,36 @@ def _register_builtin_functions(
 
         return _active_path_base() or workspace
 
-    def _enforce_path(path: str) -> Path:
-        """Resolve path and enforce workspace boundary when restricted.
+    def _write_root() -> str | None:
+        """La radice entro cui una SCRITTURA deve restare, adesso.
+
+        Con una sessione-progetto legata e' la cartella del progetto; senza, il
+        workspace di sempre. La *lettura* non passa di qui: resta sul workspace,
+        perche' la prigione di un progetto e' sulla scrittura (v.
+        ``_enforce_path``).
+        """
+        from jenny.security.workspace_access import current_tool_workspace
+
+        access = current_tool_workspace(
+            workspace, restrict_to_workspace=restrict_to_workspace
+        )
+        root = access.allowed_root
+        return str(root) if root is not None else workspace
+
+    def _enforce_path(path: str, *, for_write: bool = False) -> Path:
+        """Resolve path and enforce the workspace boundary when restricted.
 
         Un percorso RELATIVO si misura dalla base di ``_resolution_base()``,
-        cioè dalla stessa che usa ``open()`` dentro il sandbox. Il CONFINE resta
-        la radice del workspace: la base si sposta, il confine no.
+        cioè dalla stessa che usa ``open()`` dentro il sandbox. La base si
+        sposta, il confine no — ma **il confine non e' lo stesso nei due versi**:
+
+        - in lettura e' il workspace, sempre. Dentro un progetto Jenny deve poter
+          leggere la propria skill e le altre wiki se gliele si chiede; e fuori
+          dalla cartella privata dell'app non si arriva comunque, perche' il
+          permesso di storage non ce l'abbiamo — il confine vero lo mette Android;
+        - in scrittura e' la cartella del progetto, quando ce n'e' una legata.
+          Questa e' l'isolazione che conta: e' cio' che tiene un progetto lontano
+          dai file di un altro, da ``USER.md`` e da ``SOUL.md``.
         """
         if not restrict_to_workspace:
             from jenny.security.workspace_policy import _safe_expanduser
@@ -103,6 +127,7 @@ def _register_builtin_functions(
         from jenny.agent.tools.python_exec import _path_guard_bypass
         from jenny.security.workspace_policy import resolve_allowed_path
 
+        allowed_root = _write_root() if for_write else workspace
         # La base va letta PRIMA del bypass, che la azzera. Il bypass copre la
         # sola risoluzione: `Path.resolve()` passa da `os.lstat` su ogni
         # prefisso del percorso e sotto guard quei prefissi sono fuori dal
@@ -110,7 +135,11 @@ def _register_builtin_functions(
         # rifiuti spuri (stessa ragione di `_guarded_os_path`).
         base = _resolution_base()
         with _path_guard_bypass():
-            return resolve_allowed_path(path, workspace=base, allowed_root=workspace)
+            return resolve_allowed_path(path, workspace=base, allowed_root=allowed_root)
+
+    def _write_path(path: str) -> Path:
+        """Percorso di una scrittura: confinato alla cartella del progetto."""
+        return _enforce_path(path, for_write=True)
 
     # File I/O
     def read_file(path: str, encoding: str = "utf-8") -> str:
@@ -119,13 +148,13 @@ def _register_builtin_functions(
 
     def write_file(path: str, content: str, encoding: str = "utf-8") -> None:
         """Write content to a file."""
-        p = _enforce_path(path)
+        p = _write_path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding=encoding)
 
     def append_file(path: str, content: str, encoding: str = "utf-8") -> None:
         """Append content to a file."""
-        p = _enforce_path(path)
+        p = _write_path(path)
         with open(p, "a", encoding=encoding) as f:
             f.write(content)
 
@@ -146,7 +175,7 @@ def _register_builtin_functions(
 
     def write_json(path: str, data: Any, indent: int = 2) -> None:
         """Write data as JSON to a file."""
-        p = _enforce_path(path)
+        p = _write_path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(data, indent=indent, ensure_ascii=False))
 
@@ -400,7 +429,12 @@ def _register_builtin_functions(
         e con un messaggio chiaro una root fuori dal confine invece di lasciar
         morire lo script più a valle.
         """
-        return str(_enforce_path(root))
+        # Confine di **scrittura**: da qui passano `wiki_scaffold` (che crea file)
+        # insieme a `wiki_lint`/`wiki_audit` (che leggono). Un solo helper per
+        # tre operazioni, quindi vince la piu' restrittiva: lasciar scaffoldare
+        # fuori dal progetto sarebbe una breccia, mentre non poter lintare la
+        # wiki di un altro progetto e' una scomodita'.
+        return str(_enforce_path(root, for_write=True))
 
     def wiki_scaffold(root: str, title: str) -> str:
         """Bootstrap a new LLM Wiki directory structure at root."""

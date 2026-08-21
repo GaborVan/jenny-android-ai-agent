@@ -357,6 +357,22 @@ def _active_path_boundary() -> str | None:
     return getattr(_path_guard_state, "boundary", None)
 
 
+# Caratteri di modo che rendono un ``open`` una scrittura. ``+`` incluso: ``r+``
+# apre in lettura *e* scrittura, e vale come scrittura. Un modo non-stringa (o
+# assente) e' lettura: e' il default di ``open``.
+_WRITE_MODE_CHARS = frozenset("wxa+")
+
+
+def _is_write_mode(mode: Any) -> bool:
+    """True se questo ``open`` puo' modificare il file.
+
+    Serve perche' il confine non e' lo stesso nei due versi: dentro una
+    sessione-progetto si legge in tutto il workspace e si scrive solo nella
+    cartella del progetto (v. ``_resolve_workspace_write``).
+    """
+    return isinstance(mode, str) and any(ch in _WRITE_MODE_CHARS for ch in mode)
+
+
 def _active_path_base() -> str | None:
     """Base di risoluzione dei percorsi relativi sul thread corrente, o None.
 
@@ -1122,8 +1138,26 @@ class PythonNamespace:
             safe["open"] = self._workspace_builtin_open
         return safe
 
+    def _project_write_boundary(self) -> str | None:
+        """La cartella del progetto legato a questo turno, se c'e'.
+
+        ``None`` quando non c'e' nessuno scope: il chiamante ricade sul confine
+        di sempre. Letto a ogni chiamata e non memorizzato: lo scope e' un
+        ContextVar del turno, e questa istanza di tool e' condivisa fra sessioni.
+        """
+        from jenny.security.workspace_access import current_tool_workspace
+
+        access = current_tool_workspace(self.workspace, restrict_to_workspace=True)
+        root = access.allowed_root
+        return str(root) if root is not None else None
+
     def _resolve_workspace_write(
-        self, file: Any, *, boundary: str | None = None, base: str | None = None
+        self,
+        file: Any,
+        *,
+        boundary: str | None = None,
+        base: str | None = None,
+        for_write: bool = False,
     ) -> Any:
         """Resolve *file* against the workspace boundary; fds passano invariati.
 
@@ -1170,6 +1204,17 @@ class PythonNamespace:
         from jenny.security.workspace_policy import _resolve_logical_path, resolve_allowed_path
 
         root = boundary or self.workspace
+        if for_write:
+            # **Il confine di scrittura non e' quello di lettura.** Dentro una
+            # sessione-progetto si legge in tutto il workspace — la skill, le
+            # altre wiki se l'utente le chiede — e si scrive solo nella cartella
+            # del progetto. E' quella asimmetria a tenere un progetto lontano dai
+            # file di un altro, da ``USER.md`` e da ``SOUL.md``; il lato lettura
+            # non proteggeva niente, perche' fuori dalla directory privata
+            # dell'app non si arriva comunque (nessun permesso di storage).
+            project_root = self._project_write_boundary()
+            if project_root is not None:
+                root = project_root
         if isinstance(file, int):
             # Vedi il docstring: un fd non è validabile e non è un confine.
             return file
@@ -1200,7 +1245,9 @@ class PythonNamespace:
         Installed in the guarded namespace only when ``restrict_to_workspace``
         is True; otherwise the raw builtin is used (behavior unchanged).
         """
-        resolved = self._resolve_workspace_write(file, base=_active_path_base())
+        resolved = self._resolve_workspace_write(
+            file, base=_active_path_base(), for_write=_is_write_mode(mode)
+        )
         return _real_builtins_open()(self._open_target(resolved), mode, *args, **kwargs)
 
     # ------------------------------------------------------------------
@@ -2021,7 +2068,10 @@ class PythonNamespace:
                 # Host code (no guarded exec active on this thread): untouched.
                 return real_open(file, mode, *args, **kwargs)
             resolved = self._resolve_workspace_write(
-                file, boundary=boundary, base=_active_path_base()
+                file,
+                boundary=boundary,
+                base=_active_path_base(),
+                for_write=_is_write_mode(mode),
             )
             return real_open(self._open_target(resolved), mode, *args, **kwargs)
 
@@ -2083,7 +2133,10 @@ class PythonNamespace:
                     # legittima e stringere l'int aprirebbe un file di nome "5".
                     file = namespace._open_target(
                         namespace._resolve_workspace_write(
-                            file, boundary=boundary, base=_active_path_base()
+                            file,
+                            boundary=boundary,
+                            base=_active_path_base(),
+                            for_write=_is_write_mode(mode),
                         )
                     )
                 super().__init__(file, mode, closefd=closefd, opener=opener)
@@ -2141,7 +2194,10 @@ class PythonNamespace:
                 # Codice host (nessun exec guardato su questo thread): intatto.
                 return real_open(file, mode, *args, **kwargs)
             resolved = self._resolve_workspace_write(
-                file, boundary=boundary, base=_active_path_base()
+                file,
+                boundary=boundary,
+                base=_active_path_base(),
+                for_write=_is_write_mode(mode),
             )
             return real_open(self._open_target(resolved), mode, *args, **kwargs)
 
