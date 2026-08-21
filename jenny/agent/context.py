@@ -229,6 +229,13 @@ class ContextBuilder:
         wiki_directory = self.memory.get_wiki_memory_context(self.wiki_directory_max_tokens)
         if wiki_directory:
             memory_sections.append(wiki_directory)
+        # Terza sottosezione, e la piu' economica: una riga che dice che il tier
+        # freddo esiste. Senza, l'archivio della fase 2 sarebbe indistinguibile
+        # da una cancellazione dal punto di vista di chi deve rispondere — ed e'
+        # la stessa ragione per cui la rubrica di Atlas sta qui sopra.
+        archive = self.memory.get_archive_context()
+        if archive:
+            memory_sections.append(archive)
         if memory_sections:
             parts.append("# Memory\n\n" + "\n\n".join(memory_sections))
 

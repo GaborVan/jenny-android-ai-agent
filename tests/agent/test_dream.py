@@ -188,6 +188,93 @@ class TestDreamPromptBudgetGauge:
         assert explicit[0] == default[0]
 
 
+class TestThePromptTeachesTheEntryTool:
+    """Il tool da solo non basta: finché il prompt dice "modifica il file", il
+    modello modifica il file.
+
+    Misurato sul Titan 2 il 2026-08-18, sei run su sei sotto pressione: il
+    modello pota una riga esistente e si ferma senza aggiungere il fatto nuovo.
+    Il prompt chiedeva due passi e lui faceva il primo, quindi il testo che
+    descrive i due passi è parte del difetto, non un contorno.
+    """
+
+    def _prompt(self) -> str:
+        return render_template(
+            "agent/dream.md", strip=True, skill_creator_path="skills/skill-creator/SKILL.md",
+        )
+
+    def test_it_names_the_tool_and_its_three_verbs(self):
+        prompt = self._prompt()
+
+        assert "`memory` tool" in prompt
+        for verb in ("`add`", "`replace`", "`remove`"):
+            assert verb in prompt
+
+    def test_every_verb_it_names_exists_in_the_tool(self):
+        """Antideriva: il prompt e lo schema non devono raccontare due tool
+        diversi. Un verbo inventato qui diventa una chiamata rifiutata là."""
+        from pathlib import Path
+
+        from jenny.agent.tools.memory_entries import MemoryEntryTool
+
+        actions = set(
+            MemoryEntryTool(Path("/tmp")).parameters["properties"]["action"]["enum"]
+        )
+        prompt = self._prompt()
+
+        named = {v for v in ("add", "replace", "remove", "list") if f"`{v}`" in prompt}
+        assert named
+        assert named <= actions
+
+    def test_it_says_not_to_rewrite_those_two_files(self):
+        assert "Propose entries, do not rewrite files" in self._prompt()
+
+    def test_it_asks_for_the_whole_batch_in_one_add(self):
+        """Il rimedio a D10: il modello sceglie la chiamata che costa meno, quindi
+        la chiamata che costa meno deve essere quella che produce l'evidenza.
+
+        Misurato sul Titan 2: con ``add`` a un fatto per volta faceva ``list`` e
+        filtrava da sé, e un batch di soli duplicati restava senza nessuna
+        evidenza per voce — trattenuto pur essendo consolidato.
+        """
+        prompt = self._prompt()
+
+        assert "Propose the whole batch in one call" in prompt
+        assert "`add` takes `texts`" in prompt
+
+    def test_it_tells_it_not_to_read_the_file_to_decide(self):
+        prompt = self._prompt()
+
+        assert "Do not read the file first to work out what is new" in prompt
+        # E dice a cosa serve davvero ``list``, o toglierglielo di mano lo
+        # lascerebbe senza il modo di trovare un id da sostituire.
+        assert "the id of an entry you intend to `replace` or `remove`" in prompt
+
+    def test_proposing_a_known_fact_is_declared_free(self):
+        """Se proporre un duplicato sembrasse costoso, il modello tornerebbe a
+        filtrare da sé — che è esattamente il comportamento da chiudere."""
+        assert "costs nothing to propose" in self._prompt()
+
+    def test_soul_keeps_the_file_tools(self):
+        """Prosa con una struttura, non un elenco: le voci non c'entrano."""
+        prompt = self._prompt()
+
+        assert "SOUL.md and `skills/<name>/SKILL.md` have no entry tool" in prompt
+
+    def test_the_budget_rule_no_longer_blesses_stopping(self, store):
+        """La riga vecchia — "a run that only prunes is a run well spent" — diceva
+        esattamente quello che il modello poi faceva. Potare resta utile, ma è
+        metà del lavoro, e la frase ora finisce sull'``add``."""
+        store.append_history("hello")
+        result = store.build_dream_prompt(gauge="USER.md [96%]")
+        assert result is not None
+        prompt, _ = result
+
+        assert "a run that only prunes is a run well spent" not in prompt
+        assert "prunes and then stops has saved nothing" in prompt
+        assert "Finish with the `add`." in prompt
+
+
 class TestDreamReviewState:
     def test_missing_file_reads_as_zero(self, store):
         assert not store._review_state_file.exists()
@@ -256,13 +343,58 @@ class TestDreamReviewState:
         assert store.get_review_state() == (9, 0)
 
 
+class TestForcedAtStuckDoesNotOutliveItsClimb:
+    """``forced_at_stuck`` indicizza una salita di ``stuck``, non l'installazione.
+
+    Serve a non riforzare il review sullo stesso valore. Ma azzerato ``stuck`` —
+    cioè quando il cursore è avanzato — quel valore diventa una mina: alla salita
+    successiva ``dream_cycle`` ritrova ``stuck == forced_at`` e salta il review
+    proprio al run in cui servirebbe. Misurato sul Titan 2 il 2026-08-18: il
+    review è arrivato solo a ``stuck == 4``, sulla soglia d'allarme, due run oltre
+    il suo scopo.
+    """
+
+    def test_advancing_the_cursor_clears_it(self, store):
+        store.set_review_state(runs_since_review=0, stuck_runs=2, forced_at_stuck=2)
+
+        store.set_review_state(runs_since_review=1, stuck_runs=0)
+
+        assert store.get_review_forced_at_stuck() == 0
+
+    def test_a_climb_that_continues_still_preserves_it(self, store):
+        """L'omissione conserva ancora: è "la salita è finita", non "azzera sempre"."""
+        store.set_review_state(runs_since_review=0, stuck_runs=2, forced_at_stuck=2)
+
+        store.set_review_state(runs_since_review=1, stuck_runs=3)
+
+        assert store.get_review_forced_at_stuck() == 2
+
+    def test_a_negative_stuck_counts_as_a_reset(self, store):
+        """Uno ``stuck`` negativo finisce a 0 su disco, e i due campi non devono
+        raccontare stati diversi."""
+        store.set_review_state(runs_since_review=0, stuck_runs=2, forced_at_stuck=2)
+
+        store.set_review_state(runs_since_review=1, stuck_runs=-1)
+
+        assert store.get_review_state() == (1, 0)
+        assert store.get_review_forced_at_stuck() == 0
+
+
 class TestDreamTools:
-    def test_dream_tools_are_restricted_to_file_edits(self, store):
+    def test_dream_tools_are_restricted_to_memory_writing(self, store):
+        """L'elenco è chiuso di proposito: Dream non naviga, non cerca, non esegue.
+
+        ``memory`` si è aggiunto il 2026-08-18 e non ha allargato il perimetro —
+        scrive gli stessi due file che ``edit_file`` già poteva scrivere, per voce
+        invece che per file. Se un giorno qui comparisse un tool di rete o di
+        shell, questo test è il posto in cui accorgersene.
+        """
         tools = store.build_dream_tools()
 
         assert set(tools.tool_names) == {
             "apply_patch",
             "edit_file",
+            "memory",
             "read_file",
             "write_file",
         }
@@ -569,6 +701,7 @@ class TestDreamToolsWriteTracking:
         assert set(tools.tool_names) == {
             "apply_patch",
             "edit_file",
+            "memory",
             "read_file",
             "write_file",
         }

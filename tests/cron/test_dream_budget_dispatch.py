@@ -31,9 +31,24 @@ _REVIEW_TARGET = "jenny.agent.dream_review.run_dream_review"
 
 
 def _blocked_writes() -> FileStates:
-    """Run che ha tentato di scrivere senza riuscirci: il cursore non avanza."""
+    """Run che ha tentato di scrivere senza riuscirci: il cursore non avanza.
+
+    Nessun rifiuto **di budget** registrato: è il caso della policy — un path
+    fuori dalla allowlist del registry di Dream. Da qui in poi conta la
+    differenza (fase 5): liberare spazio non sposta un file che non è scrivibile,
+    quindi un review forzato girerebbe a vuoto.
+    """
     states = FileStates()
     states.record_write_attempt()
+    return states
+
+
+def _refused_by_budget(path: Path) -> FileStates:
+    """Run in cui il tetto ha rifiutato una scrittura, e il contenuto non è
+    atterrato: **qui** un review pass ha una leva, perché c'è spazio da liberare."""
+    states = FileStates()
+    states.record_write_attempt()
+    states.record_write_refused(path, "- un fatto che non ci sta")
     return states
 
 
@@ -72,6 +87,7 @@ class _FakeMemory:
 
         self._review_state = review_state
         self._forced_at_stuck = 0
+        self._nothing_new = 0
         self._has_work = has_work
         self._file_states = file_states
         self.events = events if events is not None else []
@@ -86,15 +102,21 @@ class _FakeMemory:
     def get_review_state(self) -> tuple[int, int]:
         return self._review_state
 
+    def get_nothing_new_runs(self) -> int:
+        return self._nothing_new
+
     def get_review_forced_at_stuck(self) -> int:
         return self._forced_at_stuck
 
     def set_review_state(
-        self, *, runs_since_review: int, stuck_runs: int, forced_at_stuck: int | None = None,
+        self, *, runs_since_review: int, stuck_runs: int,
+        forced_at_stuck: int | None = None, nothing_new_runs: int | None = None,
     ) -> None:
         self._review_state = (runs_since_review, stuck_runs)
         if forced_at_stuck is not None:
             self._forced_at_stuck = forced_at_stuck
+        if nothing_new_runs is not None:
+            self._nothing_new = nothing_new_runs
         self.review_state_writes.append((runs_since_review, stuck_runs))
 
     # -- turno incrementale ----------------------------------------------------
@@ -306,13 +328,15 @@ async def test_two_stuck_runs_force_a_review_on_the_third(
     consolidata. La via d'uscita è forzare il review, non allentare il commit.
     """
     memory = _FakeMemory(
-        tmp_path / "ws", memory_text="x" * 10, file_states=_blocked_writes()
+        tmp_path / "ws",
+        memory_text="x" * 10,
+        file_states=_refused_by_budget(tmp_path / "ws" / "MEMORY.md"),
     )
     spy = _ReviewSpy(memory.events)
     _install_review(monkeypatch, spy)
     agent = _FakeAgent(tmp_path, memory, "completed")
     # Nessun file oltre budget e cadenza lontana: l'unica strada verso il review
-    # è il contatore dei run bloccati.
+    # è il contatore dei run bloccati dal **tetto**.
     dispatcher = _dispatcher(agent, _config(memory_budget=500, review_every_runs=99))
 
     await dispatcher.dispatch(_DREAM_JOB)
@@ -557,3 +581,32 @@ async def test_a_budget_set_after_startup_reaches_the_cron_run(
     # E il Config di avvio e' rimasto quello che era: non lo stiamo mutando,
     # lo stiamo scavalcando con la lettura da disco.
     assert startup_config.agents.defaults.dream.memory_budget_chars == 0
+
+
+async def test_a_write_the_policy_blocked_does_not_force_a_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fase 5: i due contatori hanno rimedi diversi, quindi sono due contatori.
+
+    Una scrittura fermata dalla **policy** — un path fuori dalla allowlist del
+    registry di Dream — non ha niente a che vedere con lo spazio: liberarne non
+    rende scrivibile quel file. Prima saliva lo stesso contatore del tetto e due
+    run dopo partiva un review pass che non poteva servire a niente. Misurato sul
+    Titan 2 il 2026-08-18 nella sua variante gemella: un review forzato su file al
+    77% e 79%, senza niente da liberare.
+    """
+    memory = _FakeMemory(
+        tmp_path / "ws", memory_text="x" * 10, file_states=_blocked_writes()
+    )
+    spy = _ReviewSpy(memory.events)
+    _install_review(monkeypatch, spy)
+    agent = _FakeAgent(tmp_path, memory, "completed")
+    dispatcher = _dispatcher(agent, _config(memory_budget=500, review_every_runs=99))
+
+    for _ in range(3):
+        await dispatcher.dispatch(_DREAM_JOB)
+
+    assert not spy.ran
+    # Il contatore che forza il review resta fermo; sale l'altro.
+    assert memory.get_review_state()[1] == 0
+    assert memory.get_nothing_new_runs() == 3

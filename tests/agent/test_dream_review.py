@@ -817,3 +817,230 @@ class TestTheRouteDownNamesWhatTheDeviceLeftBehind:
             assert fragment in agent.prompt, fragment
         # La ragione, che e' quella che rende la regola difendibile.
         assert "no reader at all" in agent.prompt
+
+
+class TestTheReviewPassKeepsTheFileTools:
+    """Il review pass ristruttura davvero, e per farlo gli servono i tool file.
+
+    Ora che esiste un tool per voci c'è una ragione per pensare di togliere gli
+    altri, e sarebbe sbagliata: il prompt del review chiede di spostare un fatto
+    da un file all'altro con **una sola** ``apply_patch``, perché quel tool è
+    tutto-o-niente. Due chiamate per voci su due file non sono atomiche, e il
+    modo in cui falliscono è il peggiore possibile — il fatto tolto dall'origine
+    e mai arrivato a destinazione, senza che niente lo dica.
+    """
+
+    def test_the_registry_still_carries_them(self, store):
+        names = set(store.build_dream_tools().tool_names)
+
+        assert {"apply_patch", "edit_file", "write_file", "read_file"} <= names
+
+    def test_the_atomic_move_instruction_has_a_tool_behind_it(self, store):
+        """Antideriva fra il prompt e il registry: se ``apply_patch`` sparisse, il
+        paragrafo sullo spostamento atomico resterebbe a chiedere una cosa
+        impossibile, e nessun test lo direbbe."""
+        prompt = prompt_templates.render_template(
+            "agent/dream_review.md", budget_gauge="", snapshotted=True,
+        )
+
+        assert "`apply_patch`" in prompt
+        assert "apply_patch" in set(store.build_dream_tools().tool_names)
+
+    def test_it_also_gets_the_entry_tool(self, store):
+        """Non è una svista: rimuovere una voce è ciò che il review pass fa di
+        mestiere, e nella fase 2 del piano ``remove`` diventerà la degradazione."""
+        assert "memory" in store.build_dream_tools().tool_names
+
+
+class TestTheTwoRegistriesDoNotShareCounters:
+    """Il review pass e il turno incrementale costruiscono due registry distinti,
+    e devono restare tali.
+
+    ``batch_was_not_consolidated`` legge i contatori di voci del **turno
+    incrementale** per decidere se il cursore avanza. Se quelli del review pass
+    ci finissero dentro, un review che aggiunge una voce — cosa che fa
+    legittimamente, spostando un fatto — farebbe passare per atterrato un batch
+    che il turno dopo non ha salvato affatto. Sarebbe il difetto di partenza,
+    reintrodotto da una porta nuova.
+    """
+
+    def test_each_build_gets_its_own_counters(self, store):
+        review_tools = store.build_dream_tools()
+        turn_tools = store.build_dream_tools()
+
+        assert review_tools.memory_entries is not turn_tools.memory_entries
+
+    async def test_a_write_through_one_does_not_show_in_the_other(self, store):
+        review_tools = store.build_dream_tools()
+        turn_tools = store.build_dream_tools()
+
+        await review_tools.execute(
+            "memory", {"action": "add", "file": "user", "text": "un fatto"},
+        )
+
+        assert review_tools.memory_entries.entries_added == 1
+        assert turn_tools.memory_entries.entries_added == 0
+
+    async def test_the_file_states_are_separate_too(self, store):
+        """Stessa proprietà, sul contatore che c'era già: ``file_states`` è
+        per-run e non condiviso fra Dream concorrenti."""
+        review_tools = store.build_dream_tools()
+        turn_tools = store.build_dream_tools()
+
+        await review_tools.execute(
+            "memory", {"action": "add", "file": "user", "text": "un fatto"},
+        )
+
+        assert review_tools.file_states.writes_ok == 1
+        assert turn_tools.file_states.writes_ok == 0
+
+
+class TestTheFloorIsNowNeverLose:
+    """6.0: il pavimento smette di essere "non togliere" e diventa "non perdere".
+
+    La riscrittura è arrivata dopo che la rete della fase 2 è stata verificata sul
+    telefono — dieci voci passate dall'archivio, nessuna persa — perché prima
+    sarebbe stata un permesso senza copertura. Misurato il 2026-08-19: il review
+    sotto pressione ha riformulato sette voci per raschiare 109 caratteri e non ne
+    ha tolta nessuna, obbedendo alla lettera a una regola scritta quando togliere
+    significava perdere.
+    """
+
+    def _dream(self) -> str:
+        return prompt_templates.render_template(
+            "agent/dream.md", strip=True, skill_creator_path="skills/skill-creator/SKILL.md",
+        )
+
+    def _review(self) -> str:
+        return prompt_templates.render_template(
+            "agent/dream_review.md", budget_gauge="", snapshotted=True,
+        )
+
+    def test_the_floor_is_named_never_lose(self):
+        assert "**Never lose**" in self._dream()
+
+    def test_it_says_removal_from_those_two_files_is_not_deletion(self):
+        prompt = self._dream()
+
+        assert "does not delete it" in prompt
+        assert "memory/archive/" in prompt
+
+    def test_soul_keeps_the_hard_floor(self):
+        """L'archivio copre i due file a voci. ``SOUL.md`` non è uno di quelli:
+        niente archivia ciò che ne esce, e una riga tolta è persa davvero."""
+        prompt = self._dream()
+
+        assert "there *never delete* still means never delete" in prompt
+        assert "nothing archives what leaves it" in prompt
+
+    def test_the_permission_is_last_not_first(self):
+        """Non è una licenza: le voci protette restano l'ultima cosa che si muove,
+        dopo che le altre categorie sono esaurite."""
+        prompt = self._dream()
+
+        assert "the **last** things to move, never the first" in prompt
+        assert "before you touch one" in prompt
+
+    def test_the_review_prompt_puts_it_after_its_route_down(self):
+        prompt = self._review()
+
+        assert "a fifth step below the four" in prompt
+        assert "when the four steps below are exhausted" in prompt
+
+    def test_the_review_prompt_names_the_cost_of_over_pruning(self):
+        """Una voce archiviata è fuori dal prompt: l'effetto osservabile non è "ho
+        perso un fatto" ma "Jenny non se lo ricorda più"."""
+        assert "made Jenny stop knowing things" in self._review()
+
+    def test_the_permission_did_not_replace_the_route_down(self):
+        """Il percorso di discesa resta il modo normale di far spazio: se sparisse,
+        il permesso diventerebbe la prima mossa invece dell'ultima."""
+        prompt = self._review()
+
+        assert "route down" in prompt
+        assert "Task specs and procedures" in prompt
+        assert "Template residue" in prompt
+
+
+class TestADestructivePassSaysSo:
+    """6.2, e ha dovuto uscire *insieme* alla 6.0.
+
+    Degradare non è gratis: una voce archiviata è recuperabile ma non è più nel
+    prompt. Allargare il permesso senza la sua visibilità è l'unico ordine, fra i
+    due, che potrebbe fare danno davvero.
+    """
+
+    def test_the_threshold_is_about_a_quarter_of_a_real_file(self):
+        from jenny.agent.dream_review import DEMOTION_IS_NOTABLE
+
+        assert DEMOTION_IS_NOTABLE == 5
+
+    @staticmethod
+    def _captured():
+        """Sink loguru: ``caplog`` non lo vede, perché loguru non passa da
+        ``logging`` a meno che qualcuno non ce lo instradi."""
+        from loguru import logger
+
+        lines: list[str] = []
+        sink = logger.add(lines.append, level="WARNING", format="{message}")
+        return lines, lambda: logger.remove(sink)
+
+    def test_a_quiet_pass_says_nothing_loud(self, store):
+        from jenny.agent.dream_review import _report_demotions
+
+        lines, done = self._captured()
+        try:
+            moved = _report_demotions(store, set())
+        finally:
+            done()
+
+        assert moved == ()
+        assert not lines
+
+    def test_it_names_what_moved_not_just_how_many(self, store):
+        """Il numero dice quanto; chi legge un avviso deve sapere *cosa*, o non
+        può decidere se andare a guardare."""
+        from datetime import date
+
+        from jenny.agent.dream_review import DEMOTION_IS_NOTABLE, _report_demotions
+        from jenny.agent.memory_archive import ArchivedEntry, archive_entry
+
+        for i in range(DEMOTION_IS_NOTABLE + 1):
+            archive_entry(
+                store.memory_dir,
+                ArchivedEntry(id=f"c{i}", text=f"- Un fatto numero {i}", source="USER.md"),
+                when=date(2026, 8, 19),
+            )
+
+        lines, done = self._captured()
+        try:
+            moved = _report_demotions(store, set())
+        finally:
+            done()
+
+        assert len(moved) == DEMOTION_IS_NOTABLE + 1
+        assert "Un fatto numero 0" in "".join(lines)
+        assert "6 entries" in "".join(lines)
+
+    def test_only_what_this_pass_moved_is_reported(self, store, caplog):
+        from datetime import date
+
+        from jenny.agent.dream_review import _report_demotions
+        from jenny.agent.memory_archive import ArchivedEntry, archive_entry, archived_ids
+
+        archive_entry(
+            store.memory_dir,
+            ArchivedEntry(id="old", text="- Roba di ieri", source="USER.md"),
+            when=date(2026, 8, 18),
+        )
+        before = archived_ids(store.memory_dir)
+        archive_entry(
+            store.memory_dir,
+            ArchivedEntry(id="new", text="- Roba di oggi", source="USER.md"),
+            when=date(2026, 8, 19),
+        )
+
+        moved = _report_demotions(store, before)
+
+        assert len(moved) == 1 and "new" in moved[0]
+

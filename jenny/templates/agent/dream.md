@@ -79,10 +79,16 @@ Always strip these bracketed tags from saved memory content.
 - Service-specific configuration patterns
 - After migrating content to a skill, delete it from the source file (MEMORY.md or USER.md) to maintain MECE
 
-**Never delete:**
+**Never lose** — which, for two of these files, is no longer the same as never remove:
+
+Taking an entry out of `USER.md` or `memory/MEMORY.md` does not delete it. The runtime files it in `memory/archive/`, where it stays readable and searchable; you do not write there and cannot forget to. So for those two the floor is **never lose**, and nothing you take out of them is lost.
+
+That does not make the entries below ordinary. They are the **last** things to move, never the first: work through *Always delete*, *Likely delete* and *Migrate to SKILL.md* completely before you touch one. But when room genuinely has to be made and everything else is already gone, moving one is allowed — it is a relocation, and the fact stays.
+
 - User preferences and personality traits (permanent regardless of age)
 - Active project context still referenced in conversations
-- In SOUL.md: identity, voice, guardrails, and standing rules the user gave. A line about how the *app* behaves is none of these and is not protected — see the routing table.
+
+**`SOUL.md` is the exception, and there *never delete* still means never delete.** It is not one of the entry files, nothing archives what leaves it, and a line removed from it is gone for good. Its floor is unchanged: identity, voice, guardrails, and standing rules the user gave. A line about how the *app* behaves is none of these and is not protected — see the routing table.
 
 **Age and decay rules:**
 - Sprint goals and milestones: keep current + next sprint; archive completed ones after 30 days
@@ -108,8 +114,17 @@ For [SKILL] entries:
 - Skills are instruction sets with concrete values, commands, and examples. MEMORY.md keeps strategic context and high-level facts only.
 
 ## Editing
-- Inspect current file contents before editing; they are not embedded in the prompt to keep context compact.
-- Batch changes into as few calls as possible. Surgical edits only.
+USER.md and memory/MEMORY.md are lists of facts, and you change them one fact at a time with the `memory` tool: `add` a fact that is new, `replace` one that changed, `remove` one that is no longer true. Use `file` = `user` or `memory`.
+
+- **Propose entries, do not rewrite files.** A whole-file write to those two can drop the rest of the file without saying so, and it cannot tell anyone which fact you were trying to save. The entry tools can do neither.
+- **Propose the whole batch in one call.** `add` takes `texts`, a list: put every fact you want saved for this file in it. The answer says, fact by fact, whether it was added or was already there.
+- **Do not read the file first to work out what is new.** Propose everything and let the answer tell you — that is what it is for, and a fact you decided not to propose leaves no trace that it was ever considered. Use `list` when you need the id of an entry you intend to `replace` or `remove`.
+- An entry already in the file costs nothing to propose: it is reported as already present and nothing is written.
+
+SOUL.md and `skills/<name>/SKILL.md` have no entry tool — they are prose with a structure, not lists.
+
+- Inspect current file contents before editing them; they are not embedded in the prompt to keep context compact.
+- Batch those changes into as few calls as possible. Surgical edits only.
 
 Do not add: current weather, transient status, temporary errors, conversational filler, public documentation, standard library APIs, common configuration defaults, generic tutorials — anything a quick web search would surface.
 
@@ -119,5 +134,7 @@ Do not add what the runtime already reports either: the current time, the timezo
 ## Budget
 {{ budget_gauge }}
 
-Past 80% on a file, consolidate **before** adding to it: merge or delete first in the same turn, then write the new fact. This overrides the call-frugality rule above — a run that only prunes is a run well spent.
+Past 80% on a file, make room **before** adding to it: `remove` or `replace` what is redundant, then `add` what is new. Two calls, that order, same turn. This overrides the call-frugality rule above.
+
+Freeing room is not the job, though — it is the first half of it. A turn that prunes and then stops has saved nothing: the fact it was carrying is still only in the history, the batch comes back, and the next run meets the same wall with one line less to give. Finish with the `add`.
 {% endif %}

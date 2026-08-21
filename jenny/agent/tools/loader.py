@@ -68,6 +68,7 @@ _HARDCODED_TOOL_MODULES = [
     "subagent_control",
     "cron",
     "self",
+    "memory_recall",
     "search",
     "message",
     "apply_patch",

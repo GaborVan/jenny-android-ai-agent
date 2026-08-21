@@ -645,5 +645,28 @@
       "finish": "Done",
       "pairedToast": "Telegram paired!"
     }
+  },
+  "scope": {
+    "personal": "jenny",
+    "change": "Change scope",
+    "personalSection": "Personal session",
+    "projectsSection": "Projects",
+    "loading": "Loading...",
+    "noProjects": "No projects yet",
+    "newProject": "New project...",
+    "newProjectName": "Project name:",
+    "newProjectPlaceholder": "e.g. patreon",
+    "invalidName": "Use only letters, numbers, dot, dash and underscore.",
+    "createFailed": "Could not create: {error}",
+    "created": "Project “{name}” created",
+    "askAbout": "Ask something about {name}...",
+    "notBound": "The scope is presentation only for now: the agent is not repointed yet.",
+    "ago": {
+      "now": "just now",
+      "minutes": "{n} min ago",
+      "hours": "{n} h ago",
+      "yesterday": "yesterday",
+      "days": "{n} days ago"
+    }
   }
 }

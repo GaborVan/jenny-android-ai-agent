@@ -645,5 +645,28 @@
       "finish": "Fine",
       "pairedToast": "Telegram collegato!"
     }
+  },
+  "scope": {
+    "personal": "jenny",
+    "change": "Cambia scope",
+    "personalSection": "Sessione personale",
+    "projectsSection": "Progetti",
+    "loading": "Caricamento...",
+    "noProjects": "Nessun progetto ancora",
+    "newProject": "Nuovo progetto...",
+    "newProjectName": "Nome del progetto:",
+    "newProjectPlaceholder": "es. patreon",
+    "invalidName": "Usa solo lettere, numeri, punto, trattino e underscore.",
+    "createFailed": "Creazione fallita: {error}",
+    "created": "Progetto “{name}” creato",
+    "askAbout": "Chiedi qualcosa su {name}...",
+    "notBound": "Per ora lo scope e' solo grafico: l'agente non e' ancora ripuntato.",
+    "ago": {
+      "now": "adesso",
+      "minutes": "{n} min fa",
+      "hours": "{n} ore fa",
+      "yesterday": "ieri",
+      "days": "{n} giorni fa"
+    }
   }
 }

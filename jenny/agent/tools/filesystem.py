@@ -76,6 +76,7 @@ class _FsTool(Tool):
         restrict_to_workspace: bool | None = None,
         write_files_only: bool = False,
         write_size_guard: WriteSizeGuard | None = None,
+        entry_archiver: Callable[[Path, str], None] | None = None,
     ):
         self._workspace = workspace
         self._allowed_dir = allowed_dir
@@ -103,9 +104,21 @@ class _FsTool(Tool):
         # current async task, which keeps shared tool instances session-safe.
         self._explicit_file_states = file_states
         self._fallback_file_states = FileStates()
-        # Assente per default: l'agente principale non deve pagare nulla per un
-        # limite che riguarda solo i runner isolati che lo passano.
+        # Assente per default, ed è una decisione: i budget dei file di memoria
+        # sono **consultivi** per l'agente principale e vincolanti solo per Dream,
+        # che lo passa esplicitamente. Un rifiuto in mezzo a una conversazione
+        # arriverebbe all'unico scrittore che ha l'utente lì davanti, e
+        # scambierebbe un fallimento visibile con uno invisibile — il fatto appena
+        # chiesto non salvato. Il prezzo è noto e sta in ``docs/using/memory.md``:
+        # un turno di chat può lasciare il file saturo (misurato sul Titan 2:
+        # 2.399 su 2.400) ed è Dream a non trovare più spazio.
         self._write_size_guard = write_size_guard
+        # Gancio di degradazione, montato accanto al guard e per il motivo
+        # opposto: il guard decide se una scrittura può avvenire, questo salva
+        # ciò che quella scrittura sta per portare via. Assente di default —
+        # riguarda i due file di memoria e li conosce solo chi lo costruisce
+        # (``memory_entries.make_entry_archiver``).
+        self._entry_archiver = entry_archiver
 
     @classmethod
     def create(cls, ctx: Any) -> Tool:
@@ -204,6 +217,18 @@ class _FsTool(Tool):
             self._extra_write_allowed_files,
             include_media_dir=False,
         )
+
+    def _archive_departing(self, path: Path, text: str) -> None:
+        """Salva le voci che questa scrittura sta per far sparire.
+
+        Chiamata subito prima della scrittura vera, non insieme al guard: per
+        ``apply_patch`` il guard si pronuncia su tutti i file *prima* che parta la
+        prima scrittura, e archiviare lì significherebbe degradare voci di una
+        patch poi rifiutata.
+        """
+        if self._entry_archiver is None:
+            return
+        self._entry_archiver(path, text)
 
     def _check_write_size(self, path: Path, text: str) -> str | None:
         """Chiede al gancio se questo esatto contenuto può andare su disco.
@@ -544,6 +569,7 @@ class WriteFileTool(_FsTool):
             refusal = self._check_write_size(fp, content)
             if refusal is not None:
                 return refusal
+            self._archive_departing(fp, content)
             fp.parent.mkdir(parents=True, exist_ok=True)
             fp.write_text(content, encoding="utf-8")
             self._file_states.record_write(fp)
@@ -646,6 +672,7 @@ class EditFileTool(_FsTool):
                     if refusal is not None:
                         return refusal
                     fp.parent.mkdir(parents=True, exist_ok=True)
+                    self._archive_departing(fp, new_text)
                     fp.write_text(new_text, encoding="utf-8")
                     self._file_states.record_write(fp)
                     return f"Successfully created {fp}"
@@ -668,6 +695,7 @@ class EditFileTool(_FsTool):
                 refusal = self._check_write_size(fp, new_text)
                 if refusal is not None:
                     return refusal
+                self._archive_departing(fp, new_text)
                 fp.write_text(new_text, encoding="utf-8")
                 self._file_states.record_write(fp)
                 return f"Successfully edited {fp}"
@@ -759,6 +787,7 @@ class EditFileTool(_FsTool):
             refusal = self._check_write_size(fp, new_content)
             if refusal is not None:
                 return refusal
+            self._archive_departing(fp, new_content)
             fp.write_bytes(new_content.encode("utf-8"))
             self._file_states.record_write(fp)
             msg = f"Successfully edited {fp}"

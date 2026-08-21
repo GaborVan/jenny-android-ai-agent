@@ -2,6 +2,7 @@
 
 import { AppState } from './shared/state.js';
 import { sessionManager } from './shared/session-manager.js';
+import { scopeChip } from './shared/scope-chip.js';
 import { showToast } from './shared/utils.js';
 import { i18n } from './shared/i18n.js';
 import { api } from './shared/api-client.js';
@@ -114,6 +115,10 @@ class MobileApp {
       this._updateSidebarTitles();
       this._applyStaticTranslations();
       this.header._refreshTitles();
+      // Il chip dello scope scrive il proprio testo da JS, quindi
+      // _applyStaticTranslations non lo raggiunge: senza questo resterebbe con
+      // le chiavi grezze ("scope.personal") fino al primo cambio di lingua.
+      scopeChip.render();
     });
     i18n.onLocaleChange(() => {
       this._updateSidebarTitles();
@@ -326,6 +331,9 @@ class MobileApp {
     } catch (err) {
       console.error('Failed to init sessions:', err);
     }
+    // Il chip dello scope si accende comunque: senza sessione mostra la
+    // personale, che e' lo stato giusto quando non c'e' niente da leggere.
+    scopeChip.init();
   }
 
   _initKeyboardShortcuts() {

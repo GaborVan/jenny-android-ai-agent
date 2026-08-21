@@ -135,6 +135,19 @@
         </div>
         <div class="attach-preview" id="attach-preview" style="display:none"></div>
         <div id="input-bar">
+          <!-- Scope della conversazione: ancorato sopra il composer perche' e'
+               l'unico punto su cui l'occhio e' posato prima di scrivere. La
+               tendina la costruisce shared/scope-chip.js. -->
+          <div class="compose-scope">
+            <div class="scope-menu" id="scope-menu" role="menu" aria-labelledby="scope-chip"></div>
+            <button class="scope-chip" id="scope-chip" type="button"
+                    aria-haspopup="menu" aria-expanded="false"
+                    aria-label="Cambia scope" data-i18n-aria="scope.change">
+              <span class="scope-chip-mark">✿</span>
+              <span class="scope-chip-path"></span>
+              <i class="ti ti-selector scope-chip-switch"></i>
+            </button>
+          </div>
           <div id="input-row" class="compose-row">
             <div class="compose-pill">
               <textarea id="chat-input" placeholder="Chiedi qualcosa…" rows="1" aria-label="Messaggio" data-i18n-placeholder="chat.placeholder" data-i18n-aria="chat.message"></textarea>

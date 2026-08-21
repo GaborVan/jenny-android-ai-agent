@@ -42,14 +42,30 @@ class DreamConfig(Base):
     enabled: bool = True  # Register the periodic Dream consolidation job on startup
     interval_h: int = Field(default=2, ge=1)  # Every 2 hours by default
 
-    # I due budget qui sotto valgono 2.000 caratteri, ed è un numero misurato,
-    # non stimato: sul Titan 2, dopo due passaggi di review, ``memory/MEMORY.md``
-    # sta a 3.019 caratteri e ``USER.md`` a 1.626. Un tetto a 2.000 morde subito
-    # il primo (151%) e sul secondo è un soffitto contro la ricrescita, che è il
-    # mestiere che gli si chiede. Per riferimento, Hermes tiene gli equivalenti a
-    # 2.200 e 1.375. Un'installazione nuova nasce ben sotto: i template di
-    # ``MEMORY.md`` e ``USER.md`` sono vuoti, il tetto non morde finché non c'è
-    # dentro qualcosa da potare.
+    # I due budget qui sotto valgono 3.000 caratteri, ed è un numero misurato,
+    # non stimato — ma la misura giusta non è quella con cui erano nati. La prima
+    # stesura li metteva a 2.000 leggendo il device *dopo due passaggi di review*
+    # (``memory/MEMORY.md`` 3.019 caratteri, ``USER.md`` 1.626): un tetto tarato
+    # sul pavimento post-compressione, non sulla dimensione a cui il file lavora.
+    # Senza review gli stessi due file misurano 3.943 e 3.524 (Titan 2,
+    # 2026-08-16, le stesse misure citate sotto per ``SOUL.md``), e un tetto sotto
+    # quella soglia non è un soffitto contro la ricrescita: è uno stato di
+    # saturazione permanente. Il 2026-08-18 ``USER.md`` sul device stava a
+    # 1.999/2.000 — 99%, un carattere — e in quel giro Dream ha letto tutti e tre
+    # i file e non ha scritto niente: la conversazione da consolidare è passata
+    # per un file che non aveva più spazio.
+    #
+    # Da lì il criterio dei 3.000: il massimo delle due dimensioni non potate
+    # (3.943 e 3.524) non ci sta comunque, e non deve — il tetto serve a mordere.
+    # Ma deve mordere lasciando margine di manovra a chi pota, non chiudere la
+    # porta a chi aggiunge: 3.000 tiene ``USER.md`` sotto soglia con ~500
+    # caratteri di respiro sopra il suo stato attuale, e resta vincolante su
+    # entrambi i file quando ricrescono. Per riferimento, Hermes tiene gli
+    # equivalenti a 2.200 e 1.375.
+    #
+    # Un'installazione nuova nasce ben sotto: i template di ``MEMORY.md`` e
+    # ``USER.md`` sono vuoti, il tetto non morde finché non c'è dentro qualcosa
+    # da potare.
     #
     # Sono rimasti a 0 — "misurato ma non applicato" — per tutto il tempo in cui
     # servivano le misure, e soprattutto finché un rifiuto di budget poteva far
@@ -63,7 +79,7 @@ class DreamConfig(Base):
     # ``config/loader.py`` serializza con ``by_alias=True`` e senza
     # ``exclude_defaults``, quindi ogni ``config.json`` già scritto porta dentro
     # lo zero di prima e continua a vincere su questa riga. Là il tetto si alza
-    # con ``/dream budget memory 2000``, che è esattamente il motivo per cui quel
+    # con ``/dream budget memory 3000``, che è esattamente il motivo per cui quel
     # comando esiste.
     #
     # Lo 0 resta legale, e da lì il vincolo ``ge=0`` e non ``gt=0``. La
@@ -74,13 +90,13 @@ class DreamConfig(Base):
     # sia il default di SOUL.md sia la via d'uscita se un tetto si rivela
     # sbagliato. Non "correggerlo" in ``gt=0``.
     memory_budget_chars: int = Field(
-        default=2000,
+        default=3000,
         ge=0,
         validation_alias=AliasChoices("memoryBudgetChars", "memory_budget_chars"),
         serialization_alias="memoryBudgetChars",
     )
     user_budget_chars: int = Field(
-        default=2000,
+        default=3000,
         ge=0,
         validation_alias=AliasChoices("userBudgetChars", "user_budget_chars"),
         serialization_alias="userBudgetChars",

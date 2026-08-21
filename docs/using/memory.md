@@ -62,6 +62,8 @@ Because of that, Jenny takes a workspace snapshot right before every Dream run. 
 
 Dream's cursor into `history.jsonl` only advances once a run completes cleanly **and** actually manages to write something (or has nothing to write in the first place). If Dream gets blocked or a write fails partway through, the cursor stays put and those entries are retried on the next run — nothing is silently skipped.
 
+"Wrote something" is not the same as "saved the batch", and the difference is worth stating because it cost real entries. A run can obey the first half of an over-budget refusal — free some space by rewriting an existing line shorter — and then stop without adding the new fact. Every counter reads healthy: a write succeeded, no refusal is outstanding. So Dream also checks, at the end of each run, whether **any** memory file grew. If a memory file was already near its budget when the run started, the batch carried facts tagged for retention, and nothing grew, the cursor is held and those entries come back next run, which is also what pulls in the review pass that frees room. The "near its budget" part is what keeps this quiet: without it the check fires on every batch of facts Jenny already knows, which is most of them — the consolidator re-extracts the same facts each pass. Below that mark, a run that adds nothing is believed. This is a size heuristic, not a proof: a run that legitimately replaces a line with a shorter one carrying the new fact reads as "nothing landed" and gets replayed a few times. That is the cheap direction to be wrong in — the expensive one is losing the fact — and the replay is bounded: after four held runs Dream gives up on the batch, advances, and the stuck alarm has already fired.
+
 ## Why Dream can say "nothing to process"
 
 If you run `/dream` on a chat that just started, or one that's still short, Jenny will reply that there's no conversation history to process yet. This is expected, not a bug: Dream only reads from `memory/history.jsonl`, and fresh conversations only reach that file *after* the Consolidator has compacted them (see Stage 1 above). A short, still-active chat simply hasn't produced any compacted history for Dream to read yet.
@@ -149,8 +151,8 @@ Dream's configuration lives under `agents.defaults.dream` in `config.json`, and 
       "dream": {
         "enabled": true,
         "intervalH": 2,
-        "memoryBudgetChars": 2000,
-        "userBudgetChars": 2000,
+        "memoryBudgetChars": 3000,
+        "userBudgetChars": 3000,
         "soulBudgetChars": 0,
         "reviewEveryRuns": 12
       }
@@ -163,12 +165,16 @@ Dream's configuration lives under `agents.defaults.dream` in `config.json`, and 
 |-------|---------|---------|
 | `enabled` | Whether the periodic Dream job is registered at all. | `true` |
 | `intervalH` | How often Dream runs automatically, in hours. Internally this becomes an "every N hours" schedule. | `2` |
-| `memoryBudgetChars` | Target size for `memory/MEMORY.md`, in characters. Dream sees how full the file is in every prompt, and a write that would push it further over the line is refused — a write that *shrinks* it is always allowed, or an over-budget file could never be pruned. `0` means "measure, don't enforce". | `2000` |
-| `userBudgetChars` | The same for `USER.md`. | `2000` |
+| `memoryBudgetChars` | Target size for `memory/MEMORY.md`, in characters. Dream sees how full the file is in every prompt, and a Dream write that would push it further over the line is refused — a write that *shrinks* it is always allowed, or an over-budget file could never be pruned. `0` means "measure, don't enforce". | `3000` |
+| `userBudgetChars` | The same for `USER.md`. | `3000` |
 | `soulBudgetChars` | The same for `SOUL.md` — and it ships at `0` on purpose. That file mixes Jenny's identity, which must never be pruned, with notes that belong elsewhere, and a size limit cannot tell the two apart. The review pass reads before it decides; the limit does not. | `0` |
 | `reviewEveryRuns` | Every how many Dream runs the **review pass** runs: a pass whose only job is to make the files smaller, rather than to add to them. At the default interval, twelve runs is about once a day. Do not lower it below **6**: a review pass that lands on a file a previous pass has already pruned keeps looking for things to remove, and measured on a real device the second consecutive pass deletes personal facts instead of redundancy. Setting it from chat prints the same warning. | `12` |
 
 The budgets are counted in **characters**, not tokens, because that is the only unit the model can count while it is writing.
+
+**These caps bind Dream, not Jenny.** The refusal is mounted only on the tools Dream's own runs get. The tools Jenny uses while you are talking to her carry no size guard at all, so a chat turn can write past a budget and nothing stops it — measured on a real device at 2,399 characters against a cap of 2,400. That is deliberate. A refusal in the middle of a conversation would land on the one writer that has you sitting there, and it would trade a visible failure for an invisible one: the thing you just asked Jenny to remember would quietly not be saved. So for the main agent the numbers are **advisory** — the size the review pass aims for, not a wall. They are enforced where the writer is unattended and has a review pass behind it to make room.
+
+The cost of that choice is worth knowing: a chat turn can leave a file saturated, and it is Dream that then finds no room. If you see Dream reporting that it consolidated nothing, a file already at its cap is the first thing to check — `/dream budget` shows it.
 
 **Being over budget is not an error.** It means the next thing Dream wants to add has to wait for the review pass to make room — usually by *moving* something to where it belongs (a task specification to a skill file, project context to `MEMORY.md`) rather than by forgetting it.
 

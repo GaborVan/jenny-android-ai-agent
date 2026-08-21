@@ -21,7 +21,7 @@ list used to carry four of seven, and a reader triaging by header was skipping l
 | [`roadmap/heartbeat-escalation-amnesia.md`](roadmap/heartbeat-escalation-amnesia.md) | **Done**, in two waves, both measured. A delegating cron monitor is reported and unbuilt |
 | [`roadmap/workspace-scratch-dir.md`](roadmap/workspace-scratch-dir.md) | **Split**: the scratch directory is superseded, its *original subject* is still live, and two items have no owner |
 | [`roadmap/inbound-webhooks.md`](roadmap/inbound-webhooks.md) | **Split**: Phase 1 is not planned, but **Phase 0 is endorsed and unbuilt** and there is a costed one-commit alternative |
-| [`roadmap/project-sessions.md`](roadmap/project-sessions.md) | **Proposed**, not started. Work item 7 was rewritten after T5.4 — as originally written it would have opened a real leak |
+| [`roadmap/project-sessions.md`](roadmap/project-sessions.md) | **Proposed**, and **consolidated 2026-08-18** (868 -> 456 lines, archaeology dropped, two load-bearing warnings kept). **A project is a wiki**: `wikis/<name>/` already is the entity, so no `projects/` is created. The UI half — scope chip + picker — is **built and on the device**. No owner decisions outstanding; the blocker is work item **14**, the scope allowlist, without which a spawned writer cannot read the skill it is told to use |
 
 ---
 

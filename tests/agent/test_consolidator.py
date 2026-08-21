@@ -137,7 +137,15 @@ class TestConsolidatorPromptContract:
         for mark in ("[permanent]", "[durable]", "[ephemeral]", "[correction]", "[skip]"):
             assert mark in prompt
         assert "check context below" not in prompt.lower()
-        assert "Do not mark something [skip] merely because it might already exist" in prompt
+        # La riga precedente diceva di non usare *mai* la memoria di lungo
+        # termine come motivo per uno [skip], e aveva ragione finché il modello
+        # quella memoria non la vedeva: "potrebbe già esserci" era un'ipotesi, e
+        # uno [skip] su un'ipotesi perde il fatto. Con la fase 4 il prompt gliela
+        # mostra quando c'è, quindi la regola non è più "non usarla" ma "non
+        # tirare a indovinare" — vera in entrambi gli stati, che è ciò che un
+        # template statico deve essere visto che il blocco è dinamico.
+        assert "Never mark something [skip] on a guess" in prompt
+        assert "let Dream deduplicate" in prompt
 
 
 class TestConsolidatorArchiveErrorHandling:

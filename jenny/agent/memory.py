@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 from collections.abc import Callable
 from contextlib import suppress
@@ -13,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Iterator
 
 from loguru import logger
 
+from jenny.agent.memory_archive import archive_dir
 from jenny.session.keys import DREAM_SESSION_PREFIX, is_internal_session_key
 from jenny.utils.helpers import (
     ensure_dir,
@@ -22,6 +24,87 @@ from jenny.utils.helpers import (
 )
 from jenny.utils.path import atomic_write
 from jenny.utils.prompt_templates import render_template
+
+# Separatore fra il template di Dream e il batch di storia, dentro il prompt che
+# ``MemoryStore.build_dream_prompt`` incolla. È una costante perché lo legge anche
+# ``dream_prompt_history``, che sul prompt fa il taglio inverso.
+DREAM_HISTORY_HEADER = "\n\n## Conversation History\n"
+
+# Il blocco "già registrato" che la fase 4 del piano aggiunge al prompt del
+# Consolidator. Tre numeri, e nessuno è arbitrario:
+#
+# ``_KNOWN_FACTS_MAX_TOKENS`` è **misurato, non stimato**. Era 1.200, scelto
+# sommando i tetti dei due file caldi; sul Titan 2 il blocco reale è uscito a
+# 5.239 caratteri contro i 4.800 concessi, perché quel conto dimenticava le
+# istruzioni in testa e la coda in attesa. 1.600 li copre con margine, e resta
+# comunque irrilevante contro la finestra da cui viene sottratto (v.
+# ``Consolidator._truncate_to_token_budget``). Il taglio non è lì per il costo:
+# è lì per il giorno in cui i tetti dei file si alzano senza che nessuno guardi
+# qui.
+#
+# ``_KNOWN_FACTS_PENDING_ENTRIES`` limita quante voci di history si leggono, e
+# ``_KNOWN_FACTS_PENDING_SHARE`` quanto blocco possono occupare. Servono i due
+# insieme e per ragioni opposte: la coda è la fonte dominante del difetto — una
+# conversazione lunga viene consolidata più volte prima che Dream giri una sola
+# — quindi le va garantito uno spazio; ma è anche l'unica delle due sorgenti
+# senza un tetto proprio, e un Dream fermo da giorni (cioè esattamente il
+# guasto per cui esiste questo piano) le farebbe altrimenti prendere il blocco
+# intero, cancellando i file e facendo riestrarre tutto USER.md. La quota è un
+# pavimento per la coda, non un soffitto per il resto: ciò che non spende torna
+# ai file.
+_KNOWN_FACTS_MAX_TOKENS = 1600
+_KNOWN_FACTS_PENDING_ENTRIES = 20
+_KNOWN_FACTS_PENDING_SHARE = 0.4
+
+# I mark che il Consolidator scrive davanti a ogni fatto. Elencati qui e non
+# dedotti da una regex generica perché questa lista è anche il filtro che tiene
+# fuori dal blocco i raw-dump: quando la chiamata LLM fallisce, in history
+# finisce una conversazione intera sotto ``[RAW]``, e reiniettarla nel prompt
+# della consolidation successiva sarebbe rimettere in circolo esattamente ciò
+# che la consolidation esiste per togliere.
+_FACT_LINE = re.compile(
+    r"^[-*][ \t]+\[(permanent|durable|ephemeral|correction|skip)\][ \t]*(\S.*)$"
+)
+
+
+def _entries_cost(entries: list[str]) -> int:
+    return sum(len(entry) + 1 for entry in entries)
+
+
+def _pack_entries(entries: list[str], budget_chars: int | None) -> tuple[list[str], int]:
+    """Le voci che entrano nel budget, intere, e quante ne restano fuori.
+
+    Il taglio a carattere di ``truncate_text_to_tokens`` qui non va bene: mezza
+    voce in un elenco di fatti già registrati si legge come un fatto diverso, e
+    il modello confronterebbe con qualcosa che nessuno ha mai scritto.
+    """
+    if budget_chars is None:
+        return list(entries), 0
+    kept: list[str] = []
+    used = 0
+    for entry in entries:
+        cost = len(entry) + 1
+        if used + cost > budget_chars:
+            break
+        kept.append(entry)
+        used += cost
+    return kept, len(entries) - len(kept)
+
+
+def iter_fact_lines(text: str) -> list[tuple[str, str]]:
+    """I fatti annotati dentro una voce di history, come ``(mark, fatto)``.
+
+    Serve a due chiamanti con lo stesso bisogno da lati opposti: il blocco
+    "già registrato" li legge per dire cosa è in attesa, e la misura della
+    fase 4 li conta per dire quanti ne sono usciti da un run.
+    """
+    found: list[tuple[str, str]] = []
+    for line in (text or "").splitlines():
+        match = _FACT_LINE.match(line.strip())
+        if match:
+            found.append((match.group(1), match.group(2).strip()))
+    return found
+
 
 if TYPE_CHECKING:
     pass
@@ -95,6 +178,162 @@ class MemoryStore:
         if max_tokens is not None and max_tokens > 0:
             content = truncate_text_to_tokens(content, max_tokens)
         return f"## Wiki Directory\n{content}"
+
+    def get_archive_context(self) -> str:
+        """Una riga sola per dire che il tier freddo esiste, o stringa vuota.
+
+        Serve per la stessa ragione per cui Atlas funziona: **un indice che
+        nessuno sa esistere non viene mai aperto**. Un archivio invisibile al
+        modello è indistinguibile, dal suo punto di vista, da una cancellazione —
+        e allora tanto varrebbe cancellare.
+
+        Tre vincoli, e sono ciò che tiene la riga onesta:
+
+        - **È piatta nella dimensione dell'archivio.** Un abstract per voce
+          spenderebbe il budget caldo che questa fase esiste per proteggere. Qui
+          c'è un numero, e cresce di zero token quando l'archivio raddoppia.
+        - **Sparisce quando l'archivio è vuoto**, così un'installazione nuova non
+          paga niente per una cartella che non esiste ancora.
+        - **Dice esplicitamente che lì non si scrive.** Il percorso, nominato in un
+          prompt che riceve anche Dream, sarebbe altrimenti un invito: la sua
+          allowlist non lo comprende, e per lui una scrittura rifiutata non è un
+          tentativo a vuoto ma un run intero che non commette niente. La
+          degradazione la fa il runtime (v. ``tools/memory_entries.py``), e questa
+          riga lo dichiara invece di lasciarlo indovinare.
+        """
+        directory = archive_dir(self.memory_dir)
+        try:
+            count = sum(1 for _ in directory.glob("*.md"))
+        except OSError:
+            return ""
+        if not count:
+            return ""
+        return (
+            "## Archive\n"
+            f"Facts removed from long-term memory are moved to `memory/archive/` "
+            f"({count} so far), never deleted — one file each, the fact itself as the body. "
+            "The runtime files them there; you never write to that directory. "
+            "Use the `recall` tool to read it — not `grep`, which matches on "
+            "substrings and so cannot find an Italian fact from an English "
+            "question, and skips large files without saying so."
+        )
+
+    def get_known_facts_context(
+        self,
+        *,
+        max_tokens: int = _KNOWN_FACTS_MAX_TOKENS,
+        pending_entries: int = _KNOWN_FACTS_PENDING_ENTRIES,
+    ) -> str:
+        """Ciò che la memoria già registra, per il prompt del Consolidator.
+
+        Il difetto che questo blocco chiude (``D5``) è che il Consolidator
+        estrae alla cieca: non vede cosa è già stato consolidato, quindi
+        riestrae gli stessi fatti a ogni passaggio. Il costo non è teorico — è
+        un turno LLM, rumore in ``history.jsonl``, e un batch di soli duplicati
+        che a valle si legge come "Dream non ha consolidato niente", che è
+        falso e che è la ragione per cui a un certo punto è servita una soglia
+        di pressione per indovinarlo.
+
+        **Due sorgenti, e la seconda è quella che conta.** I file caldi dicono
+        cosa Dream ha già archiviato; la coda di history oltre il cursore di
+        Dream dice cosa è già stato estratto e sta aspettando. Con i soli file,
+        una conversazione lunga — consolidata tre volte prima che Dream giri
+        una — resterebbe duplicata esattamente come prima, perché al momento
+        della seconda estrazione nei file non c'è ancora niente.
+
+        **Quindi la coda si serve per prima, con una quota sua.** Misurato sul
+        Titan 2 il 2026-08-19: il blocco stava a 5.239 caratteri contro un
+        tetto di 4.800, e il troncamento tagliava proprio le voci in attesa,
+        che stavano in fondo — la sorgente dominante nella posizione che si
+        perde per prima. Le due quote non sono simmetriche e non devono
+        esserlo: se il tetto lo prendesse tutto la coda, un Dream fermo da
+        giorni — cioè esattamente il guasto per cui esiste questo piano —
+        cancellerebbe i file dal blocco e farebbe riestrarre tutto USER.md.
+
+        **Solo voci intere.** Un fatto tagliato a metà in un elenco che dice
+        "questi sono già registrati" è peggio di un fatto assente: si legge
+        come un fatto *diverso*, e il confronto che il blocco esiste per
+        permettere diventa un confronto con qualcosa che nessuno ha mai
+        scritto. Ciò che non entra viene contato in chiaro, così il modello sa
+        di leggere un elenco parziale invece di dedurlo.
+
+        **Le istruzioni stanno prima dell'elenco**, e non è impaginazione: ciò
+        che si perde per primo dev'essere un fatto in meno da confrontare, mai
+        la regola su come confrontarli.
+
+        Stringa vuota quando non c'è niente da mostrare, per la stessa ragione
+        di :meth:`get_archive_context`: un'installazione nuova non paga token
+        per dichiarare che la memoria è vuota.
+        """
+        from jenny.agent.tools.memory_entries import entry_id, parse_entries
+
+        seen: set[str] = set()
+
+        pending_facts: list[str] = []
+        pending = self.read_unprocessed_history(since_cursor=self.get_last_dream_cursor())
+        for record in pending[-pending_entries:] if pending_entries > 0 else []:
+            for mark, fact in iter_fact_lines(record.get("content", "")):
+                # ``[skip]`` non è un fatto registrato: è un fatto che il
+                # Consolidator ha già giudicato non degno. Mostrarlo qui
+                # direbbe "questo è in memoria", che è il contrario del vero.
+                if mark == "skip":
+                    continue
+                bullet = f"- {fact}"
+                fid = entry_id(bullet)
+                if fid not in seen:
+                    seen.add(fid)
+                    pending_facts.append(bullet)
+
+        file_facts: list[str] = []
+        for text in (self.read_file(self.user_file), self.read_memory()):
+            for entry in parse_entries(text):
+                if entry.id not in seen:
+                    seen.add(entry.id)
+                    file_facts.append(entry.text.strip())
+
+        if not pending_facts and not file_facts:
+            return ""
+
+        head = "\n".join([
+            "## Already recorded",
+            "",
+            "These facts are already in long-term memory, or are already extracted and "
+            "waiting to be filed. Do not extract them again: a chunk of duplicates costs "
+            "a full consolidation turn and is discarded downstream.",
+            "",
+            "Match on substance, not on wording. Two things are still worth extracting, "
+            "and they are why this is a list rather than a blanket \"skip what you have "
+            "seen before\":",
+            "",
+            # Numerate, non puntate: sotto, ogni riga che comincia con un
+            # trattino è un fatto registrato, e due istruzioni travestite da
+            # voci dell'elenco sarebbero due fatti che la memoria non contiene.
+            "1. A fact that **changes or contradicts** one of these. Mark it [correction] "
+            "and say what changed — a memory that cannot be updated is worse than one "
+            "that repeats itself.",
+            "2. A fact that **adds** to one of these: a detail, a limit, a case where it "
+            "does not hold. That is new information about a known subject, not a repeat.",
+            "",
+        ])
+
+        budget = (max_tokens * 4 - len(head)) if max_tokens > 0 else None
+        if budget is not None and budget <= 0:
+            return head.rstrip() + "\n"
+
+        pending_budget = None if budget is None else int(budget * _KNOWN_FACTS_PENDING_SHARE)
+        kept_pending, dropped = _pack_entries(pending_facts, pending_budget)
+        # Ciò che la coda non ha speso torna ai file: la quota è un pavimento
+        # per la coda, non un soffitto per il resto.
+        file_budget = None if budget is None else budget - _entries_cost(kept_pending)
+        kept_files, dropped_files = _pack_entries(file_facts, file_budget)
+        dropped += dropped_files
+
+        lines = [head, *kept_pending, *kept_files]
+        if dropped:
+            # Riga piatta e senza trattino: sopra, un trattino significa "fatto
+            # registrato", e questa non lo è.
+            lines.append(f"\n({dropped} further recorded facts are not listed here.)")
+        return "\n".join(lines)
 
     # -- history.jsonl — append-only, JSONL format ---------------------------
 
@@ -404,6 +643,34 @@ class MemoryStore:
             self._review_counter(data.get("stuck_runs")),
         )
 
+    def get_nothing_new_runs(self) -> int:
+        """Run consecutivi in cui Dream non ha consolidato **senza** rifiuti.
+
+        Quarto campo di ``.dream_review``, letto a parte come
+        :meth:`get_review_forced_at_stuck` e per la stessa ragione: non cambiare
+        la firma di :meth:`get_review_state` e i suoi chiamanti.
+
+        Perché è separato da ``stuck_runs``. Quel contatore conta va bene per
+        "Dream non consolida", ma la domanda che governa il rimedio è un'altra:
+        **un review pass può servire a qualcosa?** Se una scrittura è stata
+        rifiutata dal tetto, sì — c'è spazio da liberare e forzarlo ha senso. Se
+        invece non è stato rifiutato niente e comunque non è atterrato nulla, un
+        review non ha nessuna leva: potherebbe file che non hanno niente da dare.
+        Misurato sul Titan 2 il 2026-08-18, un review forzato su file al 77% e
+        79% che non avevano niente da liberare.
+
+        Uno stato scritto prima che questo campo esistesse legge ``0``, ed è la
+        lettura giusta: il vecchio ``stuck_runs`` si eredita come *no room*, che è
+        il ramo che tiene armata la via d'uscita dal livelock.
+        """
+        try:
+            data = json.loads(self._review_state_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return 0
+        if not isinstance(data, dict):
+            return 0
+        return self._review_counter(data.get("nothing_new_runs"))
+
     def get_review_forced_at_stuck(self) -> int:
         """A quale valore di ``stuck_runs`` il review è stato forzato l'ultima volta.
 
@@ -421,6 +688,10 @@ class MemoryStore:
         per sempre — lo specchio esatto del livelock che il contatore esiste per
         chiudere. Ricordando a che valore si è già forzato, non si riforza finché
         quel valore non cambia, cioè finché Dream non manca un altro consolidamento.
+
+        Il campo vale però solo dentro la salita di ``stuck`` che lo ha prodotto, e
+        :meth:`set_review_state` lo azzera insieme al contatore: sopravvivergli lo
+        trasformerebbe da freno in blocco — v. il commento lì.
         """
         try:
             data = json.loads(self._review_state_file.read_text(encoding="utf-8"))
@@ -431,14 +702,21 @@ class MemoryStore:
         return self._review_counter(data.get("forced_at_stuck"))
 
     def set_review_state(
-        self, *, runs_since_review: int, stuck_runs: int, forced_at_stuck: int | None = None,
+        self,
+        *,
+        runs_since_review: int,
+        stuck_runs: int,
+        forced_at_stuck: int | None = None,
+        nothing_new_runs: int | None = None,
     ) -> None:
         """Persist the review-pass counters to ``.dream_review``.
 
         *forced_at_stuck* a ``None`` — il default — **conserva** il valore su
         disco: i chiamanti che aggiornano solo i due contatori non devono
         conoscerlo, e non devono poterlo azzerare per omissione. Lo passa solo chi
-        forza il review (v. :meth:`get_review_forced_at_stuck`).
+        forza il review (v. :meth:`get_review_forced_at_stuck`). Con un'eccezione, che
+        è un invariante del file e non una scelta del chiamante: scrivere
+        ``stuck_runs=0`` azzera anche ``forced_at_stuck``.
         """
         # Stesso helper del cursore di Dream (v. ``set_last_dream_cursor``): un
         # write_text nudo lascerebbe, se il processo muore a metà, un JSON
@@ -450,10 +728,36 @@ class MemoryStore:
         forced = (
             self.get_review_forced_at_stuck() if forced_at_stuck is None else forced_at_stuck
         )
+        stuck = self._review_counter(stuck_runs)
+        # Stessa convenzione di ``forced_at_stuck``: ``None`` conserva. I due
+        # contatori si azzerano però **insieme**, perché a azzerarli è lo stesso
+        # evento — il cursore che avanza — e uno dei due rimasto su per omissione
+        # racconterebbe un blocco che non c'è.
+        nothing_new = (
+            self.get_nothing_new_runs() if nothing_new_runs is None else nothing_new_runs
+        )
+        nothing_new = self._review_counter(nothing_new)
+        # ``forced_at_stuck`` indicizza la salita di ``stuck`` che lo ha prodotto:
+        # dice "a questo valore il review l'ho già forzato, non riforzarlo". Azzerato
+        # ``stuck`` — cioè quando il cursore è avanzato e quella salita è finita — il
+        # valore resta a galleggiare, e alla salita successiva ``dream_cycle`` ritrova
+        # ``stuck == forced_at`` proprio al run in cui il review servirebbe: la
+        # condizione ``stuck != forced_at`` è falsa e il freno diventa un blocco.
+        # Misurato sul Titan 2 il 2026-08-18: ``forced_at_stuck: 2`` avanzato da un
+        # episodio già chiuso, ``stuck`` di nuovo a 2, nessun review — è arrivato solo
+        # a 4, sulla soglia d'allarme, due run oltre il suo scopo.
+        #
+        # Sta qui e non nel chiamante perché è una proprietà del file, non una
+        # politica: i due campi non possono raccontare stati diversi. E non scarta la
+        # scelta di nessuno — l'unico chiamante che passa un ``forced_at_stuck``
+        # esplicito è il ramo livelock, che richiede ``stuck > 0``.
+        if stuck == 0:
+            forced = 0
         payload = json.dumps({
             "runs_since_review": self._review_counter(runs_since_review),
-            "stuck_runs": self._review_counter(stuck_runs),
+            "stuck_runs": stuck,
             "forced_at_stuck": self._review_counter(forced),
+            "nothing_new_runs": nothing_new,
         })
         atomic_write(self._review_state_file, payload)
 
@@ -489,8 +793,30 @@ class MemoryStore:
             skill_creator_path=skill_creator_path,
             budget_gauge=gauge,
         )
-        prompt = f"{template}\n\n## Conversation History\n{history_text}"
+        prompt = f"{template}{DREAM_HISTORY_HEADER}{history_text}"
         return (prompt, batch[-1]["cursor"])
+
+    @staticmethod
+    def dream_prompt_history(prompt: str) -> str:
+        """La sola parte di *storia* di un prompt di Dream, senza il template.
+
+        Serve a chi deve decidere qualcosa **sul batch** — oggi
+        ``dream_cycle.batch_carries_retained_facts`` — e vive qui perché qui il
+        prompt viene incollato: dove finisce il template e comincia la storia è
+        una cosa che sa un modulo solo.
+
+        E non è una comodità. Il template di Dream *nomina* i tag di ritenzione
+        (``[durable]``, ``[permanent]``, ``[correction]``) nella sua sezione
+        "History attribute tags": cercarli nel prompt intero li trova **sempre**,
+        su qualunque batch, anche su uno che non ne contiene nessuno. Un predicato
+        costruito così è vero per costruzione, cioè non è un predicato. Da qui il
+        ritaglio, e il test che lo prova su un batch senza tag.
+
+        Su un prompt che l'header non contiene ritorna stringa vuota: chi non ha
+        storia non ha batch, ed è la risposta conservativa giusta.
+        """
+        _, _, history = prompt.partition(DREAM_HISTORY_HEADER)
+        return history
 
     def build_dream_tools(
         self, *, write_size_guard: Callable[[Path, str], str | None] | None = None,
@@ -513,6 +839,7 @@ class MemoryStore:
         from jenny.agent.tools.apply_patch import ApplyPatchTool
         from jenny.agent.tools.file_state import FileStates
         from jenny.agent.tools.filesystem import EditFileTool, ReadFileTool, WriteFileTool
+        from jenny.agent.tools.memory_entries import MemoryEntryTool, make_entry_archiver
         from jenny.agent.tools.registry import ToolRegistry
 
         tools = ToolRegistry()
@@ -531,6 +858,14 @@ class MemoryStore:
         skills_dir.mkdir(parents=True, exist_ok=True)
 
         extra_read = [skills_dir] if skills_dir.exists() else None
+        # Degradazione al **confine del file**, non dentro un tool. Il review pass
+        # pota con ``apply_patch``/``edit_file`` sui file interi — gli serve per
+        # ristrutturare — quindi una difesa che vivesse solo in ``memory remove``
+        # lascerebbe scoperto proprio lo scrittore i cui errori sono definitivi
+        # (v. 2.4b del piano). Passandolo a tutti e quattro, qualunque cosa
+        # riscriva USER.md o memory/MEMORY.md fa passare dall'archivio le voci che
+        # sta per togliere, senza che nessuno debba ricordarsene.
+        entry_archiver = make_entry_archiver(workspace)
         editable_files = [
             self.memory_file.resolve(),
             self.soul_file.resolve(),
@@ -548,6 +883,7 @@ class MemoryStore:
             extra_read_allowed_dirs=extra_read,
             file_states=file_states,
             write_size_guard=write_size_guard,
+            entry_archiver=entry_archiver,
         ))
         tools.register(EditFileTool(
             workspace=workspace,
@@ -555,6 +891,7 @@ class MemoryStore:
             extra_write_allowed_files=editable_files,
             file_states=file_states,
             write_size_guard=write_size_guard,
+            entry_archiver=entry_archiver,
         ))
         tools.register(ApplyPatchTool(
             workspace=workspace,
@@ -562,17 +899,43 @@ class MemoryStore:
             extra_write_allowed_files=editable_files,
             file_states=file_states,
             write_size_guard=write_size_guard,
+            entry_archiver=entry_archiver,
         ))
         tools.register(WriteFileTool(
             workspace=workspace,
             allowed_dir=skills_dir,
             file_states=file_states,
             write_size_guard=write_size_guard,
+            entry_archiver=entry_archiver,
         ))
+        # Scrittura per voce su USER.md e memory/MEMORY.md, accanto — non al posto
+        # — dei tool sopra: il review pass ristruttura davvero quei file, e per
+        # farlo gli serve riscriverli interi. Quello che cambia è il turno
+        # incrementale, dove aggiungere un fatto smette di essere una riscrittura
+        # e diventa un'aggiunta, con un id da citare.
+        #
+        # Montato qui e non in ``_HARDCODED_TOOL_MODULES``: quella lista è il
+        # registry dell'agente principale, e la decisione del 2026-08-18 è di
+        # dare il tool prima a Dream soltanto. Se ha un difetto, scoprirlo in un
+        # run notturno costa un batch rigiocato; scoprirlo in chat costa il turno
+        # dell'utente.
+        memory_entries = MemoryEntryTool(
+            workspace,
+            file_states=file_states,
+            write_size_guard=write_size_guard,
+            entry_archiver=entry_archiver,
+        )
+        tools.register(memory_entries)
         # Esposto per ``dream_should_advance_cursor``: stesso oggetto usato da
         # tutti i tool sopra (passato esplicitamente ai costruttori), quindi
         # riflette le scritture del run.
         tools.file_states = file_states
+        # Esposto come ``file_states`` e per la stessa ragione: il chiamante deve
+        # poter chiedere com'è andato il run senza rifare le misure. Qui però la
+        # risposta è in voci — quante ne sono entrate, quante sostituite, quante
+        # erano già lì — che è ciò che rende ``batch_was_not_consolidated`` una
+        # verifica invece di una stima.
+        tools.memory_entries = memory_entries
         return tools
 
     @staticmethod

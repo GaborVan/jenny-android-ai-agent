@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 
 from jenny.agent.memory import MemoryStore
+from jenny.agent.memory_archive import archived_ids, summarize_archived
 from jenny.agent.memory_budget import count_chars, render_gauge
 from jenny.agent.token_usage import record_response_token_usage
 from jenny.utils.prompt_templates import render_template
@@ -73,6 +74,12 @@ class ReviewOutcome:
     status: str
     before: dict[str, int]
     after: dict[str, int]
+    # I file d'archivio comparsi durante questo run: le voci che il passaggio ha
+    # **spostato** invece di cancellare. Viaggiano nell'esito perché "quanto ha
+    # liberato" e "cosa ha tolto di mezzo" sono due domande diverse, e dopo la
+    # fase 2 la seconda ha finalmente una risposta esatta invece di un delta in
+    # caratteri.
+    demoted: tuple[str, ...] = ()
     # Scritture rifiutate dal budget il cui contenuto non è mai atterrato. Se è
     # > 0 lo status non è ``completed``: ``failed`` quando qualcosa è anche calato
     # (possibile migrazione troncata), altrimenti ``no-change`` — che è l'esito
@@ -122,6 +129,40 @@ def _measure(report: Sequence[FileBudget]) -> dict[str, int]:
     return {item.label: count_chars(item.path) for item in report}
 
 
+# Oltre quante voci spostate in un solo passaggio la cosa va detta per nome.
+#
+# Cinque è circa un quarto di un ``USER.md`` tipico (19 voci sul Titan 2 il
+# 2026-08-19), e questa soglia esiste perché la degradazione **non è gratis**: una
+# voce archiviata è recuperabile ma non è più nel prompt, quindi l'effetto che
+# l'utente osserva non è "ho perso un fatto" ma "Jenny non se lo ricorda più".
+# Il permesso di potare più a fondo (v. la sezione *Never lose* di ``dream.md``)
+# è arrivato insieme a questa riga di proposito: allargare il permesso senza la
+# sua visibilità è l'unico ordine, fra i due, che potrebbe fare danno.
+DEMOTION_IS_NOTABLE = 5
+
+
+def _report_demotions(store: "MemoryStore", before: set[str]) -> tuple[str, ...]:
+    """Cosa il passaggio ha spostato in archivio, e lo dice se è tanto.
+
+    Ritorna i nomi dei file comparsi durante il run. Sopra
+    :data:`DEMOTION_IS_NOTABLE` il log li elenca **con il fatto dentro**, non solo
+    con il conteggio: il numero dice quanto, e chi legge un avviso deve sapere
+    *cosa*, o non può decidere se andare a guardare.
+    """
+    moved = sorted(archived_ids(store.memory_dir) - before)
+    if not moved:
+        return ()
+    if len(moved) > DEMOTION_IS_NOTABLE:
+        logger.warning(
+            "Dream review demoted {} entries to memory/archive/ in one pass: {}",
+            len(moved),
+            "; ".join(summarize_archived(store.memory_dir, name) for name in moved),
+        )
+    else:
+        logger.info("Dream review demoted {} entries to memory/archive/", len(moved))
+    return tuple(moved)
+
+
 async def run_dream_review(
     agent: Any,
     *,
@@ -156,6 +197,9 @@ async def run_dream_review(
     # criteri di cancellazione invece di ricopiarli, e quel rimando sta in piedi
     # solo perché ``ReadFileTool`` qui dentro è montato sull'intero workspace.
     tools = store.build_dream_tools(write_size_guard=write_size_guard)
+    # Fotografia dell'archivio prima del turno: la differenza dirà quali voci il
+    # passaggio ha spostato, che è una domanda diversa da "quanto ha liberato".
+    archived_before = archived_ids(store.memory_dir)
 
     resp = None
     try:
@@ -199,6 +243,7 @@ async def run_dream_review(
         )
 
     after = _measure(report)
+    demoted = _report_demotions(store, archived_before)
     # Rifiuti di budget il cui contenuto non è atterrato. ``unrecovered_refusals``
     # e non il contatore cumulativo: un file rifiutato e poi riscritto con dentro
     # il fatto è stato recuperato, e contarlo qui trasformerebbe in allarme il caso
@@ -222,7 +267,7 @@ async def run_dream_review(
         logger.warning("Dream review: run did not complete cleanly")
         return ReviewOutcome(
             status=STATUS_FAILED, before=before, after=after,
-            unresolved_refusals=outstanding,
+            unresolved_refusals=outstanding, demoted=demoted,
         )
 
     # Un rifiuto rimasto aperto vale come il turno interrotto, e per una ragione
@@ -266,7 +311,7 @@ async def run_dream_review(
         )
         return ReviewOutcome(
             status=STATUS_FAILED, before=before, after=after,
-            unresolved_refusals=outstanding,
+            unresolved_refusals=outstanding, demoted=demoted,
         )
 
     if outstanding > 0:

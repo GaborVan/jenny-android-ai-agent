@@ -40,6 +40,11 @@
   --radius-bubble: 14px 14px 4px 14px;
   --radius-seg:    999px;
   --dock-height:   56px;
+  /* Altezza della riga dello scope sopra il composer (chip + margine): la
+     geometria della mascotte e' ancorata all'altezza di #input-bar, che
+     questa riga ha alzato. Un token invece di numeri magici che divergono
+     al primo ritocco del chip. */
+  --scope-row:     33px;
   --dock-icon:     22px;
   /* Lato del canvas quadrato della mascotte. Default = taglia piccola; le
      altre taglie la riscrivono su <html> (v. shared/mascot.js). Tutta la
@@ -620,6 +625,178 @@ body {
   flex-shrink: 0;
   padding: 10px 14px 12px;
   background: var(--bg);
+}
+
+/* ── Scope della conversazione: chip sopra il composer + tendina ──────────
+   Il chip dice a quale scope va il prossimo messaggio ed è il modo di
+   cambiarlo. Costruito con l'idioma dei chip che l'app ha già
+   (`.chat-tool-header`, `.tool-events-header`): inline-flex, fondo `--overlay`,
+   bordo da mezzo pixel, `--radius-seg`. Nessun valore nuovo.
+   La tendina prende il contenitore da `.wiki-popover` e le righe da
+   `.oc-sheet-action`, e si apre verso l'ALTO: sotto ci sono solo composer e
+   dock. Vive sopra la mascotte (z-index 120) perché il tap sul chip non deve
+   finire dietro Jenny. */
+.compose-scope {
+  position: relative;
+  z-index: 121;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.scope-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 10px 4px 9px;
+  background: var(--overlay);
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius-seg);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  transition: background .16s ease, border-color .16s ease, color .16s ease;
+}
+.scope-chip:hover { background: var(--overlay-strong); }
+.scope-chip:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+.scope-chip:active { transform: scale(0.98); }
+/* Essere in un progetto è lo stato che deve farsi notare; la sessione
+   personale è il default e resta quieta. */
+.scope-chip[data-scope="project"] {
+  background: var(--overlay-strong);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+.scope-chip-mark {
+  flex-shrink: 0;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--flower);
+}
+.scope-chip[data-scope="project"] .scope-chip-mark { color: var(--accent); }
+.scope-chip-path {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+.scope-chip-crumb {
+  max-width: 15ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+/* Conta l'ultimo segmento: i precedenti sono contesto. */
+.scope-chip-crumb:not(:last-child) { color: var(--text-faint); font-weight: 400; }
+.scope-chip-sep { flex-shrink: 0; font-size: 10px; color: var(--text-faint); }
+.scope-chip-switch { flex-shrink: 0; margin-left: 1px; font-size: 12px; color: var(--text-faint); }
+
+.scope-menu {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 6px);
+  z-index: 122;
+  display: none;
+  min-width: 232px;
+  max-width: min(340px, calc(100vw - 40px));
+  padding: 4px;
+  /* Superficie ALZATA, non incassata: `--surface-2` è più scuro di `--bg` in
+     tutti e sette i temi (è il token dell'incassato), e un pannello che
+     galleggia deve leggersi come sollevato. Il guadagno di contrasto del solo
+     fondo è però minimo — 1.03÷1.09 con surface-2, 1.08÷1.24 con surface —
+     quindi chi separa davvero sono il bordo e l'ombra qui sotto. */
+  background: var(--surface);
+  /* `--border-strong` e non `--border`: è la convenzione che
+     `.session-info-popover` già segue, ed era la mia deviazione. Su pietra
+     passa da 1.26:1 a 1.54:1 contro il fondo — su un capello da mezzo pixel a
+     3x di densità la differenza è tra invisibile e visibile. */
+  border: 0.5px solid var(--border-strong);
+  /* 16px come `.oc-sheet` e `.drawer`, non `--radius` (10px) come i popover
+     piccoli: questo pannello e' una superficie grande, e i suoi vicini nello
+     stesso angolo di schermo sono la pillola del composer (25px), il chip
+     (pillola) e il tasto d'invio (cerchio) — a 10px era il solo spigolo
+     stretto del gruppo. (Il raggio era andato perso del tutto nella correzione
+     del contrasto: per una build il menu e' stato a spigolo vivo.) */
+  border-radius: 16px;
+  /* Ombra esplicita e non `var(--shadow)`: i temi chiari la definiscono al 12%
+     di opacità contro il 50% di quelli scuri, ed è l'unica ragione per cui
+     questo pannello si leggeva sul mockup scuro e spariva sul telefono in
+     pietra. Stessa scelta, e stesso motivo, di `.session-info-popover`. */
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18), 0 2px 8px rgba(0, 0, 0, 0.10);
+}
+.scope-menu.open { display: block; }
+.scope-menu-label {
+  padding: 7px 10px 5px;
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.scope-menu-sep { height: 0.5px; margin: 4px 6px; background: var(--border); }
+.scope-menu-note { padding: 6px 10px 8px; font-size: 11px; color: var(--text-faint); }
+.scope-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  text-align: left;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+  transition: background .12s;
+  -webkit-tap-highlight-color: transparent;
+}
+.scope-menu-item:hover,
+.scope-menu-item:focus-visible { background: var(--overlay-strong); outline: none; }
+.scope-menu-item > i:first-child {
+  flex-shrink: 0;
+  width: 18px;
+  font-size: 15px;
+  color: var(--text-faint);
+}
+.scope-menu-item[data-active="1"] > i:first-child { color: var(--accent); }
+.scope-menu-flower {
+  flex-shrink: 0;
+  width: 18px;
+  font-size: 13px;
+  color: var(--flower);
+  text-align: center;
+}
+.scope-menu-text { flex: 1; min-width: 0; }
+.scope-menu-name {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.scope-menu-item[data-active="1"] .scope-menu-name { font-weight: 500; }
+/* L'ultima attività è il criterio con cui si scelge davvero, appena i
+   progetti passano i tre: si merita la riga. */
+.scope-menu-when {
+  display: block;
+  margin-top: 1px;
+  font-size: 10px;
+  color: var(--text-faint);
+}
+.scope-menu-check { flex-shrink: 0; font-size: 14px; color: var(--accent); }
+.scope-menu-item[data-active="0"] .scope-menu-check { visibility: hidden; }
+.scope-menu-new .scope-menu-name { color: var(--text-muted); }
+@media (prefers-reduced-motion: reduce) {
+  .scope-chip { transition: none; }
+  .scope-chip:active { transform: none; }
+  .scope-menu-item { transition: none; }
 }
 
 /* ── Compose: l'input unico, identico in chat e nella minichat di Jenny.
@@ -5693,8 +5870,8 @@ body {
      taglia, quindi cambiarne una non richiede di ritoccare gli offset. */
   right: calc(var(--jenny-size) * -0.469);
   /* Fissa per tutti gli stati: appena sopra la barra di input (dock +
-     altezza #input-bar). Non deve mai cambiare in Y. */
-  bottom: calc(var(--dock-height) + 58px);
+     altezza #input-bar, riga dello scope inclusa). Non deve mai cambiare in Y. */
+  bottom: calc(var(--dock-height) + 58px + var(--scope-row));
   width: var(--jenny-size);
   z-index: 120;
   background: none;
@@ -5819,7 +5996,7 @@ body {
   /* right tale che la coda (right 12 + mezza base 6) cada sull'asse di Jenny */
   right: 14px;
   /* la coda deve galleggiare sopra l'ahoge, non poggiare sulla testa */
-  bottom: calc(var(--dock-height) + 58px + var(--jenny-size) - 4px);
+  bottom: calc(var(--dock-height) + 58px + var(--scope-row) + var(--jenny-size) - 4px);
   max-width: 74%;
   background: var(--accent);
   color: var(--on-accent);
@@ -5853,7 +6030,7 @@ body {
   display: none;
   position: absolute;
   right: 30px;
-  bottom: calc(var(--dock-height) + 58px + var(--jenny-size) - 4px);
+  bottom: calc(var(--dock-height) + 58px + var(--scope-row) + var(--jenny-size) - 4px);
   font-family: var(--font-mono);
   font-size: 14px;
   color: var(--text);

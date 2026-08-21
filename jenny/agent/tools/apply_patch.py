@@ -277,6 +277,13 @@ class ApplyPatchTool(_FsTool):
 
             try:
                 for path, content in writes.items():
+                    # Dentro il ciclo di scrittura e non insieme al controllo del
+                    # budget qui sopra: quello si pronuncia su tutti i file prima
+                    # che parta la prima scrittura, e degradare li' vorrebbe dire
+                    # archiviare le voci di una patch poi rifiutata. Se il
+                    # rollback scatta dopo resta una voce archiviata che non se
+                    # n'e' andata: dei due versi, quello riparabile.
+                    self._archive_departing(path, content)
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_text(content, encoding="utf-8", newline="")
             except Exception:

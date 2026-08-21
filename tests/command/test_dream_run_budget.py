@@ -456,8 +456,9 @@ class TestTheShippedDefaultsEnforce:
     ``memory_budget_chars`` e ``user_budget_chars`` sono nati a 0 — "misurato ma
     non applicato" — perché servivano le misure vere, e perché un rifiuto poteva
     ancora far avanzare il cursore di Dream buttando via il fatto rifiutato. Ora
-    valgono 2.000, il numero letto sul device, e la precondizione è chiusa
-    (``internal_run_should_commit``).
+    valgono 3.000, il numero letto sul device — la dimensione *non potata* dei
+    due file, non il pavimento che toccavano appena dopo un review — e la
+    precondizione è chiusa (``internal_run_should_commit``).
 
     ``SOUL.md`` resta l'unico a 0, e non per dimenticanza: mescola identità e
     vincoli di piattaforma, e un tetto non sa su quale delle due sta premendo.
@@ -475,7 +476,7 @@ class TestTheShippedDefaultsEnforce:
         await _drain(loop)
 
         assert turn.results and "Write refused" in turn.results[0]
-        assert "over its 2,000 char budget" in turn.results[0]
+        assert "over its 3,000 char budget" in turn.results[0]
         assert memory.memory_file.read_text(encoding="utf-8") == _MEMORY_TEXT
 
     @pytest.mark.asyncio
@@ -505,7 +506,7 @@ class TestTheShippedDefaultsEnforce:
 
         prompt = loop.prompts[0]
         assert "Long-term memory budget" in prompt
-        assert f"MEMORY.md [{len(_MEMORY_TEXT) * 100 // 2000}% — {len(_MEMORY_TEXT)}/2,000" in prompt
+        assert f"MEMORY.md [{len(_MEMORY_TEXT) * 100 // 3000}% — {len(_MEMORY_TEXT)}/3,000" in prompt
         assert "SOUL.md [7 chars — no budget]" in prompt
 
     @pytest.mark.asyncio
@@ -567,3 +568,83 @@ class TestBudgetBranchRunsNothing:
         assert not spy.ran
         # E nemmeno i contatori si muovono: non è passato nessun run.
         assert memory.get_review_state() == (99, 9)
+
+
+# ---------------------------------------------------------------------------
+# "Ha scritto" non è "il batch è atterrato", anche da `/dream`
+# ---------------------------------------------------------------------------
+
+
+class TestTheManualRunHoldsAnUnconsolidatedBatch:
+    """La stessa guardia del percorso cron, su questo percorso.
+
+    Non è simmetria per il gusto della simmetria: questo modulo esiste perché il
+    guard, il gauge e i contatori del review sono arrivati qui **tre commit dopo**
+    che erano nel cron, e ogni volta in silenzio. Una guardia cablata su un solo
+    percorso è la stessa porta di servizio di allora, con un altro nome.
+    """
+
+    @pytest.fixture()
+    def batch_with_facts(self, memory: MemoryStore) -> MemoryStore:
+        # Il seme del fixture non ha tag di ritenzione, quindi da solo non
+        # attiverebbe la guardia: serve una voce che chieda di essere salvata.
+        memory.append_history("- [permanent] Preferisce le riunioni corte del mattino")
+        return memory
+
+    @pytest.mark.asyncio
+    async def test_a_run_that_only_shrinks_does_not_advance_the_cursor(
+        self, router, loop, batch_with_facts, workspace
+    ):
+        """Il run di 12:01: una edit che accorcia, nessun fatto nuovo.
+
+        Il tetto a 23 mette ``MEMORY.md`` (21 caratteri) al 91%: è la pressione
+        senza la quale la guardia crede al modello, come deve — v.
+        ``test_no_pressure_means_the_model_is_believed`` nel percorso cron.
+        """
+        _set_dream_config(workspace, memory_budget_chars=23)
+        memory = batch_with_facts
+        before_cursor = memory.get_last_dream_cursor()
+        # Più corto del seme che sostituisce: il file rimpicciolisce, come sul
+        # device (1.999 → 1.972 caratteri).
+        loop.on_turn = _replace_seed(memory, "- seed")
+
+        await router.dispatch(_ctx(loop, "/dream"))
+        await _drain(loop)
+
+        assert memory.get_last_dream_cursor() == before_cursor
+        assert "consolidated nothing" in loop.published[0].content
+        assert "come back next run" in loop.published[0].content
+
+    @pytest.mark.asyncio
+    async def test_a_run_that_adds_something_advances(
+        self, router, loop, batch_with_facts
+    ):
+        """Controprova: lo stesso batch, ma il file cresce."""
+        memory = batch_with_facts
+        before_cursor = memory.get_last_dream_cursor()
+        loop.on_turn = _replace_seed(
+            memory, "- seed fact\n- [nuovo] preferisce le riunioni corte del mattino"
+        )
+
+        await router.dispatch(_ctx(loop, "/dream"))
+        await _drain(loop)
+
+        assert memory.get_last_dream_cursor() > before_cursor
+        assert "Dream completed" in loop.published[0].content
+        assert "consolidated nothing" not in loop.published[0].content
+
+    @pytest.mark.asyncio
+    async def test_the_entries_really_come_back(
+        self, router, loop, batch_with_facts, workspace
+    ):
+        """Il punto di tenere il cursore: il batch deve ripresentarsi."""
+        _set_dream_config(workspace, memory_budget_chars=23)
+        memory = batch_with_facts
+        loop.on_turn = _replace_seed(memory, "- seed")
+
+        await router.dispatch(_ctx(loop, "/dream"))
+        await _drain(loop)
+
+        again = memory.build_dream_prompt()
+        assert again is not None
+        assert "Preferisce le riunioni corte del mattino" in MemoryStore.dream_prompt_history(again[0])

@@ -236,6 +236,35 @@ class TestShowReport:
         assert f"over budget by {len(_MEMORY_TEXT) - 400:,}" in out.content
 
     @pytest.mark.asyncio
+    async def test_it_says_whose_writes_the_caps_bind(self, router, loop, workspace):
+        """I tetti valgono per Dream, non per l'agente principale.
+
+        È la vista in cui si scelgono i numeri, quindi è dove va detto su chi
+        cadono. Senza, un file portato al cap da una conversazione resta un fatto
+        inspiegato proprio nel posto in cui si viene a spiegarselo — e la
+        catena misurata sul Titan 2 è esattamente quella: un turno di chat satura
+        il file, poi è Dream a non trovare spazio.
+        """
+        await router.dispatch(_ctx(loop, "/dream budget user 400"))
+
+        out = await router.dispatch(_ctx(loop, "/dream budget"))
+
+        assert "Enforced on Dream's own writes only" in out.content
+        assert "A chat turn is never refused" in out.content
+
+    @pytest.mark.asyncio
+    async def test_with_nothing_enforced_it_does_not_say_it(self, router, loop, workspace):
+        """Con tutti e tre i budget a `0` non c'è nessun vincolo di cui dire a chi
+        si applica, e la riga sarebbe solo rumore."""
+        for name in ("memory", "user", "soul"):
+            await router.dispatch(_ctx(loop, f"/dream budget {name} 0"))
+
+        out = await router.dispatch(_ctx(loop, "/dream budget"))
+
+        assert "no budget" in out.content
+        assert "Enforced on Dream" not in out.content
+
+    @pytest.mark.asyncio
     async def test_reading_does_not_rewrite_config(self, router, loop, workspace):
         before = _config_path(workspace).stat().st_mtime_ns
 
@@ -311,8 +340,8 @@ class TestWrite:
         raw = json.loads(_config_path(workspace).read_text(encoding="utf-8"))
         assert raw["agents"]["defaults"]["dream"]["memoryBudgetChars"] == 6000
         # Il "prima" è il default di spedizione, non zero: scritto come `0 → …`
-        # questa assert passava lo stesso, per sottostringa di `2,000 → …`.
-        assert "2,000 → 6,000 chars" in out.content
+        # questa assert passava lo stesso, per sottostringa di `3,000 → …`.
+        assert "3,000 → 6,000 chars" in out.content
 
     @pytest.mark.asyncio
     async def test_each_name_writes_its_own_field(self, router, loop, workspace):
@@ -324,7 +353,7 @@ class TestWrite:
         assert (dream.user_budget_chars, dream.soul_budget_chars) == (1500, 900)
         assert dream.review_every_runs == 4
         # Non nominato, quindi fermo al default di spedizione.
-        assert dream.memory_budget_chars == 2000
+        assert dream.memory_budget_chars == 3000
 
     @pytest.mark.asyncio
     async def test_review_confirmation_speaks_in_runs(self, router, loop):
@@ -447,7 +476,7 @@ class TestValidation:
         out = await router.dispatch(_ctx(loop, "/dream budget memory -1"))
 
         assert _config_path(workspace).stat().st_mtime_ns == before
-        assert _dream_config(workspace).memory_budget_chars == 2000
+        assert _dream_config(workspace).memory_budget_chars == 3000
         assert "cannot be negative" in out.content
         assert "`0`" in out.content
 

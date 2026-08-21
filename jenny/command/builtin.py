@@ -291,6 +291,8 @@ async def cmd_dream(ctx: CommandContext) -> OutboundMessage:
         # erano di là. Qui resta ciò che è davvero di questo percorso: il turno
         # incrementale e la frase da dire a chi ha lanciato il comando.
         from jenny.agent.dream_cycle import (
+            NO_ENTRIES,
+            batch_was_not_consolidated,
             begin_dream_cycle,
             finish_dream_cycle,
             take_dream_snapshot,
@@ -362,6 +364,13 @@ async def cmd_dream(ctx: CommandContext) -> OutboundMessage:
                     await take_dream_snapshot(snapshot_cb)
                 key = dream_session_key()
                 dream_tools = store.build_dream_tools(write_size_guard=prologue.guard)
+                # Legato prima del turno: il ``finally`` qui sotto lo legge, e un
+                # ``process_direct`` che solleva lascerebbe altrimenti il nome non
+                # definito — cioè un ``NameError`` dentro il ``finally``, che si
+                # porterebbe via la chiusura del ciclo. È lo stesso guasto che
+                # quel ``finally`` esiste per chiudere, reintrodotto un livello
+                # più in basso.
+                dream_file_states = getattr(dream_tools, "file_states", None)
                 resp = await loop.process_direct(
                     prompt,
                     session_key=key,
@@ -370,13 +379,39 @@ async def cmd_dream(ctx: CommandContext) -> OutboundMessage:
                     on_progress=_silent,
                 )
                 elapsed = time.monotonic() - t0
-                # ``getattr``: il registry Dream espone ``file_states``, ma il
-                # contratto resta tollerante verso registry di altra provenienza.
-                dream_file_states = getattr(dream_tools, "file_states", None)
                 advanced = MemoryStore.dream_should_advance_cursor(resp, dream_file_states)
+                # Stessa domanda in più del percorso cron, e per la stessa
+                # ragione: "ha scritto" non è "il batch è atterrato". Chi lancia
+                # `/dream` a mano deve vedere lo stesso esito del job, o il
+                # comando torna a essere la porta di servizio del meccanismo.
+                # Il tool per voci del run appena concluso. ``getattr`` con un default
+                # perché ``build_dream_tools`` è sostituito nei test da doppi che non lo
+                # espongono: un run senza quel tool è un run con zero voci, non un errore.
+                entries = getattr(dream_tools, "memory_entries", None) or NO_ENTRIES
+                held_batch = advanced and batch_was_not_consolidated(
+                    before=prologue.report,
+                    history_text=MemoryStore.dream_prompt_history(prompt),
+                    stuck=prologue.stuck + prologue.nothing_new,
+                    # L'esito in voci del run, dal tool esposto sul registry: sono questi
+                    # numeri a rendere la domanda una verifica invece di una stima.
+                    added=entries.entries_added,
+                    replaced=entries.entries_replaced,
+                    already_present=entries.entries_already_present,
+                    # Se non ha tentato nessuna scrittura non ha mancato niente:
+                    # ha deciso che non c'era da scrivere. V. il docstring.
+                    attempted=getattr(dream_file_states, "writes_attempted", 0),
+                )
+                if held_batch:
+                    advanced = False
                 if advanced:
                     store.set_last_dream_cursor(last_cursor)
                     content = f"Dream completed in {elapsed:.1f}s."
+                elif held_batch:
+                    content = (
+                        f"Dream completed in {elapsed:.1f}s but consolidated nothing "
+                        "from its batch (no memory file grew); memory cursor was not "
+                        "advanced, so those entries come back next run."
+                    )
                 elif MemoryStore.dream_run_completed(resp):
                     content = (
                         f"Dream completed in {elapsed:.1f}s but wrote nothing "
@@ -404,6 +439,13 @@ async def cmd_dream(ctx: CommandContext) -> OutboundMessage:
                     advanced=advanced,
                     runs_since_review=prologue.runs_since_review,
                     stuck=prologue.stuck,
+                    nothing_new=prologue.nothing_new,
+                    # La causa, che è ciò che decide quale dei due contatori sale:
+                    # un rifiuto rimasto aperto significa "manca spazio" e un review
+                    # può liberarlo; senza rifiuti non c'è niente da liberare.
+                    refused=_int_or_zero(
+                        getattr(dream_file_states, "unrecovered_refusals", 0)
+                    ),
                 )
         except Exception as e:
             elapsed = time.monotonic() - t0
@@ -599,12 +641,18 @@ def _dream_usage() -> str:
     ])
 
 
+def _int_or_zero(value: object) -> int:
+    """Un contatore che arriva da un doppio può non essere un intero."""
+    return value if isinstance(value, int) else 0
+
+
 def _format_dream_budget_report(
     report: Sequence[FileBudget],
     *,
     review_every_runs: int,
     runs_since_review: int,
     stuck_runs: int,
+    nothing_new_runs: int = 0,
 ) -> str:
     """Vista utente del report di budget.
 
@@ -643,6 +691,21 @@ def _format_dream_budget_report(
                 f"- `{item.label}` — {item.chars:,} chars, no budget "
                 "(measured, not enforced)"
             )
+    if any(item.enforced for item in report):
+        # Chi legge questa vista sta scegliendo dei numeri e deve sapere su chi
+        # cadono: il guard è montato solo sui tool di Dream (v.
+        # ``agent/tools/filesystem.py``, dove l'assenza sull'agente principale è
+        # una scelta motivata). Senza questa riga i tetti sembrano valere per
+        # tutti, e un file arrivato al cap durante una conversazione resta un
+        # fatto inspiegato — proprio nella vista dove si viene a spiegarselo.
+        # Condizionata all'enforcement perché con tutti e tre i budget a `0` non
+        # c'è nessun vincolo di cui dire a chi si applica.
+        lines.extend([
+            "",
+            "Enforced on Dream's own writes only. A chat turn is never refused by these "
+            "numbers, so a conversation can fill a file to its cap — and it is Dream that "
+            "then finds no room.",
+        ])
     lines.extend([
         "",
         (
@@ -650,6 +713,15 @@ def _format_dream_budget_report(
             f"{runs_since_review} runs since the last one, {stuck_runs} stuck runs."
         ),
     ])
+    if nothing_new_runs:
+        # Contatore separato perché ha un rimedio diverso, e dirlo qui è metà del
+        # punto: chi legge "stuck runs: 0" e vede comunque Dream fermo andrebbe a
+        # cercare un tetto da alzare, che è la cosa sbagliata. Compare solo se è
+        # > 0: su un'installazione sana sarebbe una riga di zero informazione.
+        lines.append(
+            f"Plus {nothing_new_runs} runs where nothing landed and nothing was refused "
+            "— no cap is in the way, so a review pass has nothing to free."
+        )
     if stuck_runs >= STUCK_IS_ALARMING:
         over = [item.label for item in report if item.over]
         # Il nome del file è quello che il rifiuto sta colpendo, e senza di esso
@@ -786,11 +858,13 @@ async def _dream_budget_command(ctx: CommandContext, args: str) -> OutboundMessa
 
         if not rest:
             runs_since_review, stuck_runs = memory.get_review_state()
+            nothing_new_runs = memory.get_nothing_new_runs()
             return reply(_format_dream_budget_report(
                 report,
                 review_every_runs=dream.review_every_runs,
                 runs_since_review=runs_since_review,
                 stuck_runs=stuck_runs,
+                nothing_new_runs=nothing_new_runs,
             ))
 
         name = rest[0].lower()

@@ -4,6 +4,7 @@ import { wsManager } from './shared/ws-manager.js';
 import { api } from './shared/api-client.js';
 import { escapeHtml, showToast } from './shared/utils.js';
 import { sessionManager } from './shared/session-manager.js';
+import { scopeChip } from './shared/scope-chip.js';
 import { ImageHandler } from './shared/image-handler.js';
 import { openImageLightbox } from './shared/image-lightbox.js';
 import { i18n } from './shared/i18n.js';
@@ -665,6 +666,10 @@ export class ChatController {
       await api.bootstrap();
       this._initRuntimeModelFromBootstrap();
       const thread = await sessionManager.loadThread(sessionManager.currentKey, 160);
+      // Lo scope mostrato sopra il composer deve venire dal backend, non da un
+      // default del client: e' l'unica cosa che sta tra un messaggio mandato
+      // allo scope sbagliato e l'utente.
+      scopeChip.syncFromSession(sessionManager.currentScope);
       this._renderThreadMessages(thread.messages || []);
       this.historyCursor = thread.page?.before_cursor || null;
       this.hasMoreHistory = thread.page?.has_more_before !== false;

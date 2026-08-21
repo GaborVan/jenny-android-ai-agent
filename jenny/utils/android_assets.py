@@ -269,6 +269,7 @@ _UI_MANIFEST = [
     "assets/shared/pinch-zoom.js",
     "assets/shared/provider-brand.js",
     "assets/shared/rpc-client.js",
+    "assets/shared/scope-chip.js",
     "assets/shared/session-manager.js",
     "assets/shared/state.js",
     "assets/shared/subagent-policy.js",

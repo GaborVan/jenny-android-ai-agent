@@ -19,6 +19,7 @@ from jenny.agent.memory import (
     _ARCHIVE_SUMMARY_MAX_CHARS,
     _RAW_ARCHIVE_MAX_CHARS,
     MemoryStore,
+    iter_fact_lines,
 )
 from jenny.session.manager import Session
 from jenny.utils.helpers import (
@@ -36,6 +37,17 @@ if TYPE_CHECKING:
     from jenny.agent.session_locks import ReentrantSessionLock, SessionLocks
     from jenny.providers.base import LLMProvider
     from jenny.session.manager import SessionManager
+
+
+def _estimate_tokens(text: str) -> int:
+    """Stima in token, con la stessa convenzione di ``truncate_text_to_tokens``.
+
+    Quattro caratteri per token, e conta che sia la *stessa* convenzione del
+    troncatore: se qui si stimasse più fine, il budget sottratto e il budget
+    applicato divergerebbero, e la differenza si manifesterebbe come una
+    richiesta fuori finestra invece che come un troncamento.
+    """
+    return len(text) // 4
 
 
 class Consolidator:
@@ -221,9 +233,17 @@ class Consolidator:
         """Available input token budget for consolidation LLM."""
         return self.context_window_tokens - self.max_completion_tokens - self._SAFETY_BUFFER
 
-    def _truncate_to_token_budget(self, text: str) -> str:
-        """Truncate text so it fits within the consolidation LLM's token budget."""
-        budget = self._input_token_budget
+    def _truncate_to_token_budget(self, text: str, *, reserved_tokens: int = 0) -> str:
+        """Truncate text so it fits within the consolidation LLM's token budget.
+
+        *reserved_tokens* è lo spazio già speso nel system prompt da qualcosa
+        che non è la conversazione — oggi il blocco "già registrato" della
+        fase 4. Va sottratto qui e non altrove: il budget è la finestra del
+        modello meno la risposta, e un blocco aggiunto al system senza toglierlo
+        da questo conto è una richiesta che sfora la finestra, cioè una
+        consolidation che fallisce e raw-dumpa la conversazione in history.
+        """
+        budget = self._input_token_budget - max(0, reserved_tokens)
         if budget <= 0:
             return truncate_text(text, _RAW_ARCHIVE_MAX_CHARS)
         return truncate_text_to_tokens(text, budget)
@@ -249,17 +269,20 @@ class Consolidator:
         messages_to_summarize = summary_messages if summary_messages is not None else messages
         try:
             formatted = MemoryStore._format_messages(messages_to_summarize)
-            formatted = self._truncate_to_token_budget(formatted)
+            # Il blocco sta nel system e non in coda alla conversazione: è
+            # istruzione, non materiale da riassumere, e in fondo al messaggio
+            # utente si leggerebbe come l'ultima cosa detta nella chat.
+            known = self.store.get_known_facts_context()
+            system = render_template("agent/consolidator_archive.md", strip=True)
+            if known:
+                system = f"{system}\n\n{known}"
+            formatted = self._truncate_to_token_budget(
+                formatted, reserved_tokens=_estimate_tokens(known),
+            )
             response = await self.provider.chat_with_retry(
                 model=self.model,
                 messages=[
-                    {
-                        "role": "system",
-                        "content": render_template(
-                            "agent/consolidator_archive.md",
-                            strip=True,
-                        ),
-                    },
+                    {"role": "system", "content": system},
                     {"role": "user", "content": formatted},
                 ],
                 tools=None,
@@ -268,6 +291,7 @@ class Consolidator:
             if response.finish_reason == "error":
                 raise RuntimeError(f"LLM returned error: {response.content}")
             summary = response.content or "[no summary]"
+            self._log_extraction(summary, known, session_key)
             # L'I/O di MemoryStore è bloccante-by-design (open+write+fsync sotto
             # threading.Lock): girando qui in un metodo async, lo spostiamo fuori
             # dall'event loop con to_thread per non bloccare il loop sul fsync.
@@ -284,6 +308,32 @@ class Consolidator:
                 self.store.raw_archive, messages, session_key=session_key
             )
             return None
+
+    @staticmethod
+    def _log_extraction(summary: str, known: str, session_key: str | None) -> None:
+        """La misura della fase 4: quanto di ciò che esce era già dentro.
+
+        ``repeats`` conta le ripetizioni **verbatim**, ed è quindi un limite
+        inferiore: un fatto riestratto con altre parole non lo tocca. È scritto
+        così di proposito — l'alternativa sarebbe un confronto approssimato, che
+        darebbe un numero più alto e meno vero. Serve come segnale, non come
+        percentuale: sopra zero vuol dire che il blocco è nel prompt e il
+        modello lo sta ignorando, che è l'unico esito di questa fase che nessun
+        test locale può vedere.
+        """
+        from jenny.agent.tools.memory_entries import entry_id, parse_entries
+
+        facts = [fact for mark, fact in iter_fact_lines(summary) if mark != "skip"]
+        known_ids = {entry.id for entry in parse_entries(known)} if known else set()
+        repeats = sum(1 for fact in facts if entry_id(f"- {fact}") in known_ids)
+        logger.info(
+            "Consolidation for {}: {} facts extracted, {} already recorded shown, "
+            "{} verbatim repeats",
+            session_key or "-",
+            len(facts),
+            len(known_ids),
+            repeats,
+        )
 
     async def maybe_consolidate_by_tokens(
         self,
