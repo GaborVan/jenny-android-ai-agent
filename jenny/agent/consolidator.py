@@ -272,7 +272,7 @@ class Consolidator:
             # Il blocco sta nel system e non in coda alla conversazione: è
             # istruzione, non materiale da riassumere, e in fondo al messaggio
             # utente si leggerebbe come l'ultima cosa detta nella chat.
-            known = self.store.get_known_facts_context()
+            known = self.store.get_known_facts_context(session_key=session_key)
             system = render_template("agent/consolidator_archive.md", strip=True)
             if known:
                 system = f"{system}\n\n{known}"

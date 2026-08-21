@@ -15,7 +15,11 @@ from typing import TYPE_CHECKING, Any, Iterator
 from loguru import logger
 
 from jenny.agent.memory_archive import archive_dir
-from jenny.session.keys import DREAM_SESSION_PREFIX, is_internal_session_key
+from jenny.session.keys import (
+    DREAM_SESSION_PREFIX,
+    is_internal_session_key,
+    is_personal_session_key,
+)
 from jenny.utils.helpers import (
     ensure_dir,
     strip_think,
@@ -223,6 +227,7 @@ class MemoryStore:
         *,
         max_tokens: int = _KNOWN_FACTS_MAX_TOKENS,
         pending_entries: int = _KNOWN_FACTS_PENDING_ENTRIES,
+        session_key: str | None = None,
     ) -> str:
         """Ciò che la memoria già registra, per il prompt del Consolidator.
 
@@ -233,6 +238,12 @@ class MemoryStore:
         che a valle si legge come "Dream non ha consolidato niente", che è
         falso e che è la ragione per cui a un certo punto è servita una soglia
         di pressione per indovinarlo.
+
+        ``session_key`` è la sessione del consolidamento per cui il blocco viene
+        costruito, e serve solo a filtrare la coda con la stessa regola del
+        prompt di turno (:meth:`read_recent_history_for_prompt`): la propria
+        coda più quella della conversazione personale, non quella di terzi.
+        Omesso, non filtra niente.
 
         **Due sorgenti, e la seconda è quella che conta.** I file caldi dicono
         cosa Dream ha già archiviato; la coda di history oltre il cursore di
@@ -270,7 +281,13 @@ class MemoryStore:
         seen: set[str] = set()
 
         pending_facts: list[str] = []
-        pending = self.read_unprocessed_history(since_cursor=self.get_last_dream_cursor())
+        # Stessa regola di visibilità del prompt di turno, e volutamente la
+        # stessa funzione: questo blocco finisce nel prompt di un consolidamento,
+        # che appartiene a una sessione precisa. Senza ``session_key`` (chiamate
+        # dirette, test) non filtra niente, come prima.
+        pending = self.read_recent_history_for_prompt(
+            self.get_last_dream_cursor(), session_key=session_key,
+        )
         for record in pending[-pending_entries:] if pending_entries > 0 else []:
             for mark, fact in iter_fact_lines(record.get("content", "")):
                 # ``[skip]`` non è un fatto registrato: è un fatto che il
@@ -492,6 +509,24 @@ class MemoryStore:
         if not session_key:
             return False
         return is_internal_session_key(session_key)
+
+    @classmethod
+    def _is_personal_history_session(cls, session_key: str | None) -> bool:
+        """True se la voce di history appartiene alla conversazione personale.
+
+        Whitelist, e non la negazione di :meth:`_is_internal_history_session`,
+        per la ragione spiegata in :func:`jenny.session.keys.is_personal_session_key`:
+        chi la usa decide cosa entra nella memoria di lungo periodo, e per quella
+        decisione l'elenco giusto è quello di chi *può*, non quello di chi non può.
+
+        Una voce senza ``session_key`` conta come personale. È la convenzione
+        conservativa: quel campo è opzionale e assente in tutte le voci scritte
+        prima che l'attribuzione esistesse, e trattarle come non-personali
+        renderebbe invisibile a Dream la storia già sul disco.
+        """
+        if not session_key:
+            return True
+        return is_personal_session_key(session_key)
 
     def read_recent_history_for_prompt(
         self,
@@ -777,7 +812,24 @@ class MemoryStore:
         modulo che quel budget lo impone.
         """
         last_cursor = self.get_last_dream_cursor()
-        entries = self.read_unprocessed_history(since_cursor=last_cursor)
+        # **Il filtro che tiene personale il diario personale.** Dream è l'unico
+        # consumatore di ``history.jsonl`` che scrive in ``MEMORY.md``: quello che
+        # passa da qui diventa un fatto che Jenny sa dell'utente, per sempre. Le
+        # voci di una sessione interna stanno in quel file di proposito — è così
+        # che un job cron ricorda i propri run precedenti (v.
+        # ``read_recent_history_for_prompt``) — ma sono lavoro del sistema, non
+        # cose dette dall'utente, e nel diario non ci devono entrare.
+        #
+        # Il cursore avanza solo fino all'ultima voce *ammessa* del batch: una
+        # coda di sole voci interne lascia il cursore fermo e le fa rileggere
+        # (e riscartare) al run seguente. E' il compromesso conservativo giusto
+        # — costa la rilettura di poche righe, mentre saltare in avanti
+        # rischierebbe di consumare una voce personale senza averla mai letta.
+        entries = [
+            entry
+            for entry in self.read_unprocessed_history(since_cursor=last_cursor)
+            if self._is_personal_history_session(entry.get("session_key"))
+        ]
         if not entries:
             return None
 

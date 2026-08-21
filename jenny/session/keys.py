@@ -12,6 +12,7 @@ __all__ = [
     "UNIFIED_SESSION_KEY",
     "internal_session_kind",
     "is_internal_session_key",
+    "is_personal_session_key",
     "session_key_for_channel",
     "subagent_session_key",
 ]
@@ -93,6 +94,22 @@ def is_internal_session_key(key: str) -> bool:
     interna non richiede di ricordarsi di aggiornare N punti.
     """
     return internal_session_kind(key) is not None
+
+
+def is_personal_session_key(key: str) -> bool:
+    """True se la session key e' la conversazione personale con l'utente.
+
+    Oggi e' l'esatto complemento di :func:`is_internal_session_key`, e il nome
+    e' l'unica differenza. Ma e' la differenza che serve: chi decide *cosa
+    entra nella memoria di lungo periodo* ha bisogno di una whitelist — "solo
+    la conversazione personale" — non della blacklist dei lavori interni. Le
+    due coincidono finche' le categorie sono due; il giorno in cui ne esiste
+    una terza (una sessione legata a un progetto, che e' conversazione con
+    l'utente ma **non** deve alimentare il diario personale) la blacklist
+    diventa silenziosamente sbagliata e questa resta giusta cambiando qui, in
+    un punto solo, senza toccare nessun chiamante.
+    """
+    return not is_internal_session_key(key)
 
 
 def subagent_session_key(lineage_id: str) -> str:
