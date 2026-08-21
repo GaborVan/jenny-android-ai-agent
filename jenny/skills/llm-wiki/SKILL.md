@@ -384,7 +384,7 @@ See `references/audit-guide.md` for the full audit file format.
 
 | Tool | Purpose |
 |------|---------|
-| `scripts/scaffold.py` | Bootstrap a new wiki under `wikis/` and register it in `_index.md` |
+| `scripts/scaffold.py` | Create a wiki under `wikis/` — or top up one that is missing pieces — and register it in `_index.md` |
 | `scripts/reindex_wikis.py` | Regenerate / `--check` the `wikis/_index.md` registry block |
 | `scripts/lint_wiki.py` | Per-wiki health check; `--workspace` lints all wikis + registry |
 | `scripts/audit_review.py` | Group open/resolved audits by target; `--workspace` covers all wikis |
@@ -405,6 +405,8 @@ python_exec(
 ```
 
 Creates the full tree (including `log/<today>.md`, `audit/`, `audit/resolved/`), a blank `CLAUDE.md` based on the new template, and a blank `wiki/index.md` with the recommended category layout. It also registers the new wiki in `wikis/_index.md`.
+
+**Safe to re-run on a wiki that already exists.** Every file is written only when it is absent, so run it on an older wiki to add what the scaffold has grown since — the pieces appear, everything already on disk stays byte-identical, and the return value (also printed) lists what was added. It does *not* append to today's log when that file already exists: read the printed report instead, and log the top-up yourself if the wiki's history should carry it.
 
 After scaffolding:
 1. Fill in `CLAUDE.md` — define scope, naming conventions, initial research questions.

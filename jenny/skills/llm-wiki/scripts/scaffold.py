@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-scaffold.py — Bootstrap a new LLM Wiki directory structure.
+scaffold.py — Create an LLM Wiki directory structure, or top up an existing one.
 
 Usage:
     python3 scaffold.py <wiki-root> "<Topic Title>"
@@ -11,6 +11,11 @@ Example:
 The canonical layout puts every wiki under a workspace's wikis/ directory, so
 <wiki-root> is normally wikis/<name>. After creating the wiki, this script
 registers it in wikis/_index.md via reindex_wikis.regenerate_index().
+
+Safe to re-run on a wiki that already exists: every file is written only when it
+is absent, so nothing already on disk is rewritten. That makes this the way to
+add what a wiki is missing after the scaffold has drifted — it creates the gaps,
+leaves the rest byte-identical, and reports what it added.
 
 Creates:
     <wiki-root>/
@@ -44,7 +49,17 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import reindex_wikis  # noqa: E402  (sibling script, same scripts/ dir)
 
 
-def scaffold(root: str, title: str) -> None:
+def scaffold(root: str, title: str) -> list[str]:
+    """Crea quel che manca sotto ``root``, senza toccare quel che c'e' gia'.
+
+    Ritorna i percorsi creati, relativi a ``root``: su una wiki completa e' una
+    lista vuota, ed e' anche il report che viene stampato.
+    """
+    # Distingue "wiki nuova" da "top-up" per una cosa sola: come si intitola la
+    # voce di log. Il comportamento sui file e' lo stesso nei due casi.
+    root_existed = os.path.isdir(root)
+    created: list[str] = []
+
     today = date.today()
     today_iso = today.isoformat()
     today_compact = today.strftime("%Y%m%d")
@@ -64,13 +79,19 @@ def scaffold(root: str, title: str) -> None:
         "audit/resolved",
     ]
 
-    for d in dirs:
+    new_dirs = [d for d in dirs if not os.path.isdir(os.path.join(root, d))]
+    for d in new_dirs:
         os.makedirs(os.path.join(root, d), exist_ok=True)
-    print(f"✓ Created directory tree under {root}/")
+    created.extend(f"{d}/" for d in new_dirs)
+    if new_dirs:
+        print(f"✓ Created under {root}/: " + ", ".join(f"{d}/" for d in new_dirs))
+    else:
+        print(f"· Directory tree already complete under {root}/")
 
     # .gitkeep for empty audit dirs
-    _write(root, "audit/.gitkeep", "")
-    _write(root, "audit/resolved/.gitkeep", "")
+    for keep in ("audit/.gitkeep", "audit/resolved/.gitkeep"):
+        if _write(root, keep, ""):
+            created.append(keep)
 
     # CLAUDE.md
     claude_md = f"""---
@@ -149,19 +170,11 @@ Sources to ingest:
 - Depth: <survey-level | deep technical>
 - Handling contradictions: state both, cite each, add to Open Research Questions.
 """
-    _write(root, "CLAUDE.md", claude_md)
-    print("✓ Created CLAUDE.md")
-
-    # log/<today>.md
-    log_md = f"""# {today_iso}
-
-## [{now_hm}] scaffold | Initialized {title} knowledge base
-- Created directory tree (raw/, wiki/, log/, audit/, outputs/)
-- Created CLAUDE.md schema template
-- Created wiki/index.md category skeleton
-"""
-    _write(root, f"log/{today_compact}.md", log_md)
-    print(f"✓ Created log/{today_compact}.md")
+    if _write(root, "CLAUDE.md", claude_md):
+        created.append("CLAUDE.md")
+        print("✓ Created CLAUDE.md")
+    else:
+        print("· CLAUDE.md already there — left as it is")
 
     # wiki/index.md
     index_md = f"""# Index — {title}
@@ -187,8 +200,36 @@ Sources to ingest:
 
 - <First research question>
 """
-    _write(root, "wiki/index.md", index_md)
-    print("✓ Created wiki/index.md")
+    if _write(root, "wiki/index.md", index_md):
+        created.append("wiki/index.md")
+        print("✓ Created wiki/index.md")
+    else:
+        print("· wiki/index.md already there — left as it is")
+
+    # log/<today>.md — per ultimo, perche' la sua voce elenca quel che questo run
+    # ha creato davvero, e per saperlo devono essere passati tutti gli altri file.
+    # Se il log di oggi c'e' gia', resta intatto: la voce non viene appesa. La
+    # skill chiede di loggare ogni operazione, ma "non toccare quel che c'e'" e'
+    # la regola che rende un top-up sicuro su una wiki vera, e vince su questa.
+    # Il report finisce su stdout, che e' cio' che l'agente legge comunque.
+    log_rel = f"log/{today_compact}.md"
+    if created:
+        if root_existed:
+            headline = f"Topped up {title} scaffolding"
+            bullets = "".join(f"- Created {c}\n" for c in created)
+        else:
+            headline = f"Initialized {title} knowledge base"
+            bullets = (
+                "- Created directory tree (raw/, wiki/, log/, audit/, outputs/)\n"
+                "- Created CLAUDE.md schema template\n"
+                "- Created wiki/index.md category skeleton\n"
+            )
+        log_md = f"# {today_iso}\n\n## [{now_hm}] scaffold | {headline}\n{bullets}"
+        if _write(root, log_rel, log_md):
+            created.append(log_rel)
+            print(f"✓ Created {log_rel}")
+        else:
+            print(f"· {log_rel} already there — left as it is, nothing appended")
 
     # Register this wiki in the workspace registry (wikis/_index.md).
     wikis_dir = Path(root).resolve().parent
@@ -201,26 +242,44 @@ Sources to ingest:
     index_path = reindex_wikis.regenerate_index(wikis_dir)
     print(f"✓ Registered in {index_path}")
 
-    print(f"""
-✅ Wiki scaffolded at: {root}/
-
-Next steps:
+    if not created:
+        print(f"\n✅ Nothing to add — {root}/ already has the whole scaffolding.")
+    else:
+        verb = "scaffolded" if not root_existed else "topped up"
+        added = "".join(f"  + {c}\n" for c in created)
+        print(f"\n✅ Wiki {verb} at: {root}/\n\nAdded:\n{added}")
+        if not root_existed:
+            print("""Next steps:
   1. Fill in CLAUDE.md — define scope and naming conventions
   2. Add sources to raw/ (copy articles/papers/notes into raw/<subfolder>/)
   3. Run ingest: tell your LLM agent "ingest raw/<file>.md"
   4. Ask questions: "what does the wiki say about X?"
-  5. Run these through python_exec, with working_dir="<workspace>/skills/llm-wiki/scripts":
+""")
+
+    print(f"""Run these through python_exec, with working_dir="<workspace>/skills/llm-wiki/scripts":
        lint:               import lint_wiki; lint_wiki.lint({root!r})
        feedback:           import audit_review; audit_review.main({root!r}, 'open')
        whole workspace:    import lint_wiki; lint_wiki.lint_workspace({str(wikis_dir)!r})
 """)
 
+    return created
 
-def _write(root: str, path: str, content: str) -> None:
+
+def _write(root: str, path: str, content: str) -> bool:
+    """Scrive ``content`` solo se il file non c'e'. True se l'ha creato.
+
+    Prima questa funzione era ``open(full, "w")`` secco: rilanciare lo scaffold
+    su una wiki esistente per "aggiungere quel che manca" ne azzerava
+    ``wiki/index.md`` e riscriveva il log di oggi. Il confine sta qui, in un
+    punto solo, e non in ognuno dei chiamanti.
+    """
     full = os.path.join(root, path)
+    if os.path.exists(full):
+        return False
     os.makedirs(os.path.dirname(full) or ".", exist_ok=True)
     with open(full, "w", encoding="utf-8") as f:
         f.write(content)
+    return True
 
 
 if __name__ == "__main__":
