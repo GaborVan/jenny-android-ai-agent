@@ -31,6 +31,7 @@ from jenny.cron.types import (
 # osservare le sveglie senza un device, e con ``from … import`` la sostituzione
 # non arriverebbe qui.
 from jenny.runtime import power
+from jenny.session.keys import normalize_user_session_key
 from jenny.utils.path import atomic_write
 
 if TYPE_CHECKING:
@@ -64,6 +65,24 @@ def _now_ms() -> int:
 
 
 _CRON_MODES: tuple[str, ...] = ("reminder", "monitor")
+
+
+def _load_session_key(raw: Any) -> str | None:
+    """Legge ``payload.sessionKey`` **da disco** riportandolo alla forma corrente.
+
+    Gli store scritti prima del 2026-08-21 contengono chiavi come
+    ``websocket:default``, che ``CronTool`` fabbricava dal canale: non sono
+    sessioni, e ``bound_runner`` le usa come chiave del turno. Lasciarle passare
+    farebbe girare per sempre quei job in un file di sessione tutto loro, accanto
+    alla conversazione a cui appartengono.
+
+    La migrazione avviene **in memoria**: il file non viene riscritto qui: si
+    aggiorna da solo alla prima modifica dello store. Un caricamento non deve
+    scrivere — se il processo muore a metà, un job non deve poter cambiare forma.
+    """
+    if not isinstance(raw, str) or not raw:
+        return None
+    return normalize_user_session_key(raw)
 
 
 def _parse_mode(raw: Any) -> Literal["reminder", "monitor"]:
@@ -301,7 +320,7 @@ class CronService:
                     kind=j["payload"].get("kind", "agent_turn"),
                     mode=_parse_mode(j["payload"].get("mode")),
                     message=j["payload"].get("message", ""),
-                    session_key=j["payload"].get("sessionKey"),
+                    session_key=_load_session_key(j["payload"].get("sessionKey")),
                     origin_channel=j["payload"].get("originChannel"),
                     origin_chat_id=j["payload"].get("originChatId"),
                     origin_metadata=j["payload"].get("originMetadata") or {},

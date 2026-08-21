@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from jenny.session.keys import UNIFIED_SESSION_KEY
 from jenny.session.manager import Session, SessionManager
 
 # Test constants
@@ -511,7 +512,7 @@ class TestNewCommandArchival:
         from jenny.bus.events import InboundMessage
 
         loop = self._make_loop(tmp_path)
-        session = loop.sessions.get_or_create("internal:test")
+        session = loop.sessions.get_or_create(UNIFIED_SESSION_KEY)
         for i in range(5):
             session.add_message("user", f"msg{i}")
             session.add_message("assistant", f"resp{i}")
@@ -521,7 +522,7 @@ class TestNewCommandArchival:
 
         async def _failing_summarize(_messages, *, session_key=None) -> bool:
             nonlocal call_count
-            assert session_key == "internal:test"
+            assert session_key == UNIFIED_SESSION_KEY
             call_count += 1
             return False
 
@@ -533,7 +534,7 @@ class TestNewCommandArchival:
         assert response.message is not None
         assert "new session started" in response.text.lower()
 
-        session_after = loop.sessions.get_or_create("internal:test")
+        session_after = loop.sessions.get_or_create(UNIFIED_SESSION_KEY)
         assert len(session_after.messages) == 0
 
         await loop.close_background_tasks()
@@ -544,7 +545,7 @@ class TestNewCommandArchival:
         from jenny.bus.events import InboundMessage
 
         loop = self._make_loop(tmp_path)
-        session = loop.sessions.get_or_create("internal:test")
+        session = loop.sessions.get_or_create(UNIFIED_SESSION_KEY)
         for i in range(15):
             session.add_message("user", f"msg{i}")
             session.add_message("assistant", f"resp{i}")
@@ -570,21 +571,21 @@ class TestNewCommandArchival:
 
         await loop.close_background_tasks()
         assert archived_count == 3
-        assert archived_session_key == "internal:test"
+        assert archived_session_key == UNIFIED_SESSION_KEY
 
     @pytest.mark.asyncio
     async def test_new_clears_session_and_responds(self, tmp_path: Path) -> None:
         from jenny.bus.events import InboundMessage
 
         loop = self._make_loop(tmp_path)
-        session = loop.sessions.get_or_create("internal:test")
+        session = loop.sessions.get_or_create(UNIFIED_SESSION_KEY)
         for i in range(3):
             session.add_message("user", f"msg{i}")
             session.add_message("assistant", f"resp{i}")
         loop.sessions.save(session)
 
         async def _ok_summarize(_messages, *, session_key=None) -> bool:
-            assert session_key == "internal:test"
+            assert session_key == UNIFIED_SESSION_KEY
             return True
 
         loop.consolidator.archive = _ok_summarize  # type: ignore[method-assign]
@@ -594,7 +595,7 @@ class TestNewCommandArchival:
 
         assert response.message is not None
         assert "new session started" in response.text.lower()
-        assert loop.sessions.get_or_create("internal:test").messages == []
+        assert loop.sessions.get_or_create(UNIFIED_SESSION_KEY).messages == []
 
     @pytest.mark.asyncio
     async def test_close_background_tasks_drains_background_tasks(self, tmp_path: Path) -> None:
@@ -602,7 +603,7 @@ class TestNewCommandArchival:
         from jenny.bus.events import InboundMessage
 
         loop = self._make_loop(tmp_path)
-        session = loop.sessions.get_or_create("internal:test")
+        session = loop.sessions.get_or_create(UNIFIED_SESSION_KEY)
         for i in range(3):
             session.add_message("user", f"msg{i}")
             session.add_message("assistant", f"resp{i}")
@@ -612,7 +613,7 @@ class TestNewCommandArchival:
         release_archive = asyncio.Event()
 
         async def _slow_summarize(_messages, *, session_key=None) -> bool:
-            assert session_key == "internal:test"
+            assert session_key == UNIFIED_SESSION_KEY
             await release_archive.wait()
             archived.set()
             return True

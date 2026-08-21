@@ -74,7 +74,7 @@ class TestHandleStop:
 
         task = asyncio.create_task(slow_task())
         await asyncio.sleep(0)
-        loop._active_tasks["test:c1"] = [task]
+        loop._active_tasks[UNIFIED_SESSION_KEY] = [task]
 
         msg = InboundMessage(channel="test", sender_id="u1", chat_id="c1", content="/stop")
         ctx = CommandContext(msg=msg, session=None, key=msg.session_key, raw="/stop", loop=loop)
@@ -101,7 +101,7 @@ class TestHandleStop:
 
         tasks = [asyncio.create_task(slow(i)) for i in range(2)]
         await asyncio.sleep(0)
-        loop._active_tasks["test:c1"] = tasks
+        loop._active_tasks[UNIFIED_SESSION_KEY] = tasks
 
         msg = InboundMessage(channel="test", sender_id="u1", chat_id="c1", content="/stop")
         ctx = CommandContext(msg=msg, session=None, key=msg.session_key, raw="/stop", loop=loop)
@@ -823,7 +823,7 @@ class TestStopAbandonsStuckTasks:
 
         loop, bus = _make_loop()
         session = SimpleNamespace(
-            key="test:c1",
+            key=UNIFIED_SESSION_KEY,
             metadata={
                 "runtime_checkpoint": {
                     "phase": "awaiting_tools",
@@ -852,7 +852,7 @@ class TestStopAbandonsStuckTasks:
 
         task, release = self._stubborn_task()
         await asyncio.sleep(0)
-        loop._active_tasks["test:c1"] = [task]
+        loop._active_tasks[UNIFIED_SESSION_KEY] = [task]
 
         msg = InboundMessage(channel="test", sender_id="u1", chat_id="c1", content="/stop")
         ctx = CommandContext(msg=msg, session=None, key=msg.session_key, raw="/stop", loop=loop)
@@ -864,7 +864,7 @@ class TestStopAbandonsStuckTasks:
         assert "runtime_checkpoint" not in session.metadata
         loop.runtime_event_publisher.turn_completed.assert_awaited_once()
         loop.runtime_event_publisher.run_status_changed.assert_awaited_once_with(
-            msg, "test:c1", "idle"
+            msg, UNIFIED_SESSION_KEY, "idle"
         )
         release.set()
         task.cancel()

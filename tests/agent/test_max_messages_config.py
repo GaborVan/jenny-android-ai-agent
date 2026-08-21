@@ -11,6 +11,7 @@ from jenny.agent.loop import AgentLoop
 from jenny.bus.events import InboundMessage
 from jenny.bus.queue import MessageBus
 from jenny.providers.base import LLMResponse
+from jenny.session.keys import UNIFIED_SESSION_KEY
 from jenny.session.manager import Session
 
 DEFAULT_MAX_MESSAGES = 120
@@ -115,7 +116,7 @@ class TestMaxMessagesIntegration:
         loop.tools.get_definitions = MagicMock(return_value=[])
         loop.consolidator.maybe_consolidate_by_tokens = AsyncMock(return_value=False)  # type: ignore[method-assign]
 
-        session = loop.sessions.get_or_create("internal:test")
+        session = loop.sessions.get_or_create(UNIFIED_SESSION_KEY)
         with patch.object(session, "get_history", wraps=session.get_history) as mock_hist:
             result = await loop._process_message(
                 InboundMessage(channel="internal", sender_id="user", chat_id="test", content="hello")
@@ -135,7 +136,7 @@ class TestMaxMessagesIntegration:
         loop.tools.get_definitions = MagicMock(return_value=[])
         loop.consolidator.maybe_consolidate_by_tokens = AsyncMock(return_value=False)  # type: ignore[method-assign]
 
-        session = loop.sessions.get_or_create("internal:test")
+        session = loop.sessions.get_or_create(UNIFIED_SESSION_KEY)
         with patch.object(session, "get_history", wraps=session.get_history) as mock_hist:
             result = await loop._process_message(
                 InboundMessage(channel="internal", sender_id="user", chat_id="test", content="hello")
@@ -158,7 +159,7 @@ class TestMaxMessagesIntegration:
         loop.tools.get_definitions = MagicMock(return_value=[])
         loop.consolidator.maybe_consolidate_by_tokens = AsyncMock(return_value=False)  # type: ignore[method-assign]
 
-        session = loop.sessions.get_or_create("internal:test")
+        session = loop.sessions.get_or_create(UNIFIED_SESSION_KEY)
         session.add_message("user", "old")
         session.add_message("assistant", "old answer")
         session.add_message("user", "long older turn")

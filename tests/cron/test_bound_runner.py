@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 
+from jenny.agent.tools.context import RequestContext
 from jenny.agent.tools.cron import CronTool
 from jenny.agent.tools.registry import ToolRegistry
 from jenny.agent.turn_types import TurnOutcome
@@ -25,6 +26,7 @@ from jenny.cron.bound_runner import (
     MONITOR_KEEP_RECENT_MESSAGES,
     run_bound_cron_job,
 )
+from jenny.cron.service import CronService
 from jenny.cron.session_turns import (
     CRON_DEFER_UNTIL_IDLE_META,
     CRON_MONITOR_META,
@@ -34,6 +36,7 @@ from jenny.cron.session_turns import (
     monitor_session_key,
 )
 from jenny.cron.types import CronJob, CronJobSilencedError, CronPayload
+from jenny.session.keys import UNIFIED_SESSION_KEY
 from jenny.session.turn_visibility import is_silent_turn
 from jenny.utils.prompt_templates import render_template
 from jenny.webui.metadata import WEBUI_MESSAGE_SOURCE_METADATA_KEY, WEBUI_TURN_METADATA_KEY
@@ -171,6 +174,51 @@ class TestIsBoundCronJob:
     def test_false_without_origin_chat_id(self) -> None:
         job = _bound_job(origin_chat_id=None)
         assert is_bound_cron_job(job) is False
+
+
+class TestAReminderRunsInTheConversation:
+    """La sessione in cui gira un promemoria e' quella in cui l'utente parla.
+
+    Il giro completo, perche' il difetto stava fra due pezzi che da soli erano
+    coerenti: ``CronTool`` registrava ``f"{canale}:{chat}"`` per tenere il job
+    "attaccato alla chat che l'ha creato", e ``run_bound_cron_job`` usa quel
+    valore come **chiave del turno**. Risultato: un promemoria creato dalla
+    WebUI girava in ``websocket:default``, un file di sessione tutto suo con il
+    suo consolidamento, accanto alla conversazione a cui il promemoria
+    appartiene. Nessuno dei due lati, guardato da solo, sembrava sbagliato.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_webui_job_survives_a_reload_as_the_one_conversation(
+        self, tmp_path
+    ) -> None:
+        store = tmp_path / "jobs.json"
+        tool = CronTool(CronService(store))
+        tool.set_context(
+            RequestContext(
+                channel="websocket",
+                chat_id="default",
+                metadata={"webui": True},
+                session_key=UNIFIED_SESSION_KEY,
+            )
+        )
+
+        assert (
+            await tool.execute(action="add", message="annaffia le piante", every_seconds=300)
+        ).startswith("Created job")
+
+        job = CronService(store).list_jobs()[0]
+        assert job.payload.session_key == UNIFIED_SESSION_KEY
+        # E resta consegnabile: l'attaccamento alla chat non e' la sessione.
+        assert is_bound_cron_job(job) is True
+        assert (job.payload.origin_channel, job.payload.origin_chat_id) == (
+            "websocket",
+            "default",
+        )
+
+    def test_a_monitor_is_the_exception_and_stays_one(self) -> None:
+        """Un monitor gira in silenzio in una sessione sua: quello e' voluto."""
+        assert monitor_session_key("job-m") != UNIFIED_SESSION_KEY
 
 
 class TestMonitorMetadataHelpers:

@@ -13,6 +13,7 @@ from jenny.bus.queue import MessageBus
 from jenny.command import CommandContext
 from jenny.config.schema import AgentDefaults
 from jenny.providers.base import LLMResponse
+from jenny.session.keys import UNIFIED_SESSION_KEY
 
 
 def _make_loop(
@@ -218,7 +219,10 @@ class TestAgentLoopTTLParam:
             chat_id="direct",
             content="hello",
         )
-        await loop._process_message(msg)
+        # La chiave si passa: da quando ``InboundMessage.session_key`` non
+        # fabbrica piu' ``canale:chat``, un turno interno la nomina, come fa
+        # ogni chiamante di produzione.
+        await loop._process_message(msg, session_key="internal:direct")
         session.get_history.assert_called_once()
         kwargs = session.get_history.call_args.kwargs
         assert isinstance(kwargs.get("max_tokens"), int)
@@ -443,7 +447,7 @@ class TestAutoCompactIdleDetection:
     async def test_auto_compact_triggers_on_idle(self, tmp_path):
         """Proactive auto-new archives expired session; _process_message reloads it."""
         loop = _make_loop(tmp_path, session_ttl_minutes=15)
-        session = loop.sessions.get_or_create("internal:test")
+        session = loop.sessions.get_or_create(UNIFIED_SESSION_KEY)
         _add_turns(session, 6, prefix="old")
         session.updated_at = datetime.now() - timedelta(minutes=20)
         loop.sessions.save(session)
@@ -454,12 +458,12 @@ class TestAutoCompactIdleDetection:
         )
 
         # Simulate proactive archive completing before message arrives
-        await loop.auto_compact._archive("internal:test")
+        await loop.auto_compact._archive(UNIFIED_SESSION_KEY)
 
         msg = InboundMessage(channel="internal", sender_id="user", chat_id="test", content="new msg")
         await loop._process_message(msg)
 
-        session_after = loop.sessions.get_or_create("internal:test")
+        session_after = loop.sessions.get_or_create(UNIFIED_SESSION_KEY)
         assert len(archived_messages) == 4
         assert not any(m["content"] == "old user 0" for m in session_after.messages)
         assert any(m["content"] == "new msg" for m in session_after.messages)
@@ -507,7 +511,7 @@ class TestAutoCompactIdleDetection:
     async def test_auto_compact_with_slash_new(self, tmp_path):
         """Auto-new fires before /new dispatches; session is cleared twice but idempotent."""
         loop = _make_loop(tmp_path, session_ttl_minutes=15)
-        session = loop.sessions.get_or_create("internal:test")
+        session = loop.sessions.get_or_create(UNIFIED_SESSION_KEY)
         for i in range(4):
             session.add_message("user", f"msg{i}")
             session.add_message("assistant", f"resp{i}")
@@ -522,7 +526,7 @@ class TestAutoCompactIdleDetection:
         assert response.message is not None
         assert "new session started" in response.text.lower()
 
-        session_after = loop.sessions.get_or_create("internal:test")
+        session_after = loop.sessions.get_or_create(UNIFIED_SESSION_KEY)
         # Session is empty (auto-new archived and cleared, /new cleared again)
         assert len(session_after.messages) == 0
         await loop.close_background_tasks()
@@ -536,7 +540,7 @@ class TestAutoCompactIdleDetection:
         response = await loop._process_message(msg)
 
         assert response.message is not None
-        session_after = loop.sessions.get_or_create("internal:test")
+        session_after = loop.sessions.get_or_create(UNIFIED_SESSION_KEY)
         assert len(session_after.messages) == 2
         assert session_after.messages[0]["role"] == "user"
         assert session_after.messages[0]["content"] == "/help"
@@ -642,7 +646,7 @@ class TestAutoCompactEdgeCases:
     async def test_auto_compact_preserves_runtime_checkpoint_before_check(self, tmp_path):
         """Short expired sessions keep recent messages; checkpoint restore still works on resume."""
         loop = _make_loop(tmp_path, session_ttl_minutes=15)
-        session = loop.sessions.get_or_create("internal:test")
+        session = loop.sessions.get_or_create(UNIFIED_SESSION_KEY)
         session.metadata[AgentLoop._RUNTIME_CHECKPOINT_KEY] = {
             "assistant_message": {"role": "assistant", "content": "interrupted response"},
             "completed_tool_results": [],
@@ -658,12 +662,12 @@ class TestAutoCompactEdgeCases:
         )
 
         # Simulate proactive archive completing before message arrives
-        await loop.auto_compact._archive("internal:test")
+        await loop.auto_compact._archive(UNIFIED_SESSION_KEY)
 
         msg = InboundMessage(channel="internal", sender_id="user", chat_id="test", content="continue")
         await loop._process_message(msg)
 
-        session_after = loop.sessions.get_or_create("internal:test")
+        session_after = loop.sessions.get_or_create(UNIFIED_SESSION_KEY)
         assert archived_messages == []
         assert any(m["content"] == "previous message" for m in session_after.messages)
         assert any(m["content"] == "interrupted response" for m in session_after.messages)

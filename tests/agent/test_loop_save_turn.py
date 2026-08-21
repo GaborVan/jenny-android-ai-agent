@@ -12,6 +12,7 @@ from jenny.bus.queue import MessageBus
 from jenny.cron.session_turns import CRON_HISTORY_META, CRON_TRIGGER_META
 from jenny.providers.base import LLMResponse
 from jenny.session.goal_state import GOAL_STATE_KEY
+from jenny.session.keys import UNIFIED_SESSION_KEY
 from jenny.session.manager import Session
 from jenny.session.turn_continuation import (
     INTERNAL_CONTINUATION_META,
@@ -472,8 +473,8 @@ async def test_process_message_persists_user_message_before_turn_completes(tmp_p
     with pytest.raises(RuntimeError, match="boom"):
         await loop._process_message(msg)
 
-    loop.sessions.invalidate("websocket:c1")
-    persisted = loop.sessions.get_or_create("websocket:c1")
+    loop.sessions.invalidate(UNIFIED_SESSION_KEY)
+    persisted = loop.sessions.get_or_create(UNIFIED_SESSION_KEY)
     assert [m["role"] for m in persisted.messages] == ["user"]
     assert persisted.messages[0]["content"] == "persist me"
     assert persisted.metadata.get(AgentLoop._PENDING_USER_TURN_KEY) is True
@@ -521,8 +522,8 @@ async def test_process_message_persists_media_paths_on_user_turn(tmp_path: Path)
     with pytest.raises(RuntimeError, match="interrupt"):
         await loop._process_message(msg)
 
-    loop.sessions.invalidate("websocket:c-media")
-    persisted = loop.sessions.get_or_create("websocket:c-media")
+    loop.sessions.invalidate(UNIFIED_SESSION_KEY)
+    persisted = loop.sessions.get_or_create(UNIFIED_SESSION_KEY)
     assert [m["role"] for m in persisted.messages] == ["user"]
     assert persisted.messages[0]["content"] == "look"
     assert persisted.messages[0]["media"] == [str(img_a), str(img_b)]
@@ -553,8 +554,8 @@ async def test_process_message_persists_media_only_turn_without_text(tmp_path: P
     with pytest.raises(RuntimeError):
         await loop._process_message(msg)
 
-    loop.sessions.invalidate("websocket:c-images-only")
-    persisted = loop.sessions.get_or_create("websocket:c-images-only")
+    loop.sessions.invalidate(UNIFIED_SESSION_KEY)
+    persisted = loop.sessions.get_or_create(UNIFIED_SESSION_KEY)
     assert len(persisted.messages) == 1
     assert persisted.messages[0]["role"] == "user"
     assert persisted.messages[0]["content"] == ""
@@ -583,7 +584,7 @@ async def test_process_message_does_not_duplicate_early_persisted_user_message(t
 
     assert result.message is not None
     assert result.text == "done"
-    session = loop.sessions.get_or_create("websocket:c2")
+    session = loop.sessions.get_or_create(UNIFIED_SESSION_KEY)
     assert [
         {k: v for k, v in m.items() if k in {"role", "content"}}
         for m in session.messages
@@ -600,7 +601,7 @@ async def test_internal_continuation_queues_turn_without_fake_user_history(
 ) -> None:
     loop = _make_full_loop(tmp_path)
     loop.consolidator.maybe_consolidate_by_tokens = AsyncMock(return_value=False)  # type: ignore[method-assign]
-    session = loop.sessions.get_or_create("websocket:c-auto")
+    session = loop.sessions.get_or_create(UNIFIED_SESSION_KEY)
     session.metadata[GOAL_STATE_KEY] = {
         "status": "active",
         "objective": "Finish the long goal.",
@@ -646,7 +647,7 @@ async def test_internal_continuation_queues_turn_without_fake_user_history(
     assert queued.metadata[INTERNAL_CONTINUATION_META] is True
     assert "Finish the long goal." in queued.content
 
-    session = loop.sessions.get_or_create("websocket:c-auto")
+    session = loop.sessions.get_or_create(UNIFIED_SESSION_KEY)
     assert [
         {k: v for k, v in m.items() if k in {"role", "content"}}
         for m in session.messages
@@ -656,7 +657,7 @@ async def test_internal_continuation_queues_turn_without_fake_user_history(
 
     assert second.message is not None
     assert second.text == "done"
-    session = loop.sessions.get_or_create("websocket:c-auto")
+    session = loop.sessions.get_or_create(UNIFIED_SESSION_KEY)
     assert [
         {k: v for k, v in m.items() if k in {"role", "content"}}
         for m in session.messages
@@ -672,7 +673,7 @@ async def test_internal_continuation_preserves_streaming_route_metadata(
 ) -> None:
     loop = _make_full_loop(tmp_path)
     loop.consolidator.maybe_consolidate_by_tokens = AsyncMock(return_value=False)  # type: ignore[method-assign]
-    session = loop.sessions.get_or_create("unified:default")
+    session = loop.sessions.get_or_create(UNIFIED_SESSION_KEY)
     session.metadata[GOAL_STATE_KEY] = {
         "status": "active",
         "objective": "Finish the streamed long goal.",
@@ -765,7 +766,7 @@ async def test_websocket_internal_continuation_keeps_single_visible_run(
 ) -> None:
     loop = _make_full_loop(tmp_path)
     loop.consolidator.maybe_consolidate_by_tokens = AsyncMock(return_value=False)  # type: ignore[method-assign]
-    session = loop.sessions.get_or_create("unified:default")
+    session = loop.sessions.get_or_create(UNIFIED_SESSION_KEY)
     session.metadata[GOAL_STATE_KEY] = {
         "status": "active",
         "objective": "Finish the long goal.",
@@ -1049,7 +1050,7 @@ async def test_next_turn_after_crash_closes_pending_user_turn_before_new_input(t
     loop.consolidator.maybe_consolidate_by_tokens = AsyncMock(return_value=False)  # type: ignore[method-assign]
     loop.provider.chat_with_retry = AsyncMock(return_value=MagicMock())  # unused because _run_agent_loop is stubbed
 
-    session = loop.sessions.get_or_create("websocket:c3")
+    session = loop.sessions.get_or_create(UNIFIED_SESSION_KEY)
     session.add_message("user", "old question")
     session.metadata[AgentLoop._PENDING_USER_TURN_KEY] = True
     loop.sessions.save(session)
@@ -1074,7 +1075,7 @@ async def test_next_turn_after_crash_closes_pending_user_turn_before_new_input(t
 
     assert result.message is not None
     assert result.text == "new answer"
-    session = loop.sessions.get_or_create("websocket:c3")
+    session = loop.sessions.get_or_create(UNIFIED_SESSION_KEY)
     assert [
         {k: v for k, v in m.items() if k in {"role", "content"}}
         for m in session.messages
@@ -1155,8 +1156,8 @@ async def test_stop_preserves_runtime_checkpoint_for_next_turn(tmp_path: Path) -
     assert "Stopped 1 task" in stop_result.content
     assert task.done()
 
-    loop.sessions.invalidate("websocket:c4")
-    interrupted = loop.sessions.get_or_create("websocket:c4")
+    loop.sessions.invalidate(UNIFIED_SESSION_KEY)
+    interrupted = loop.sessions.get_or_create(UNIFIED_SESSION_KEY)
     # /stop ha già materializzato il checkpoint in history e ripulito i metadata.
     assert AgentLoop._PENDING_USER_TURN_KEY not in interrupted.metadata
     assert AgentLoop._RUNTIME_CHECKPOINT_KEY not in interrupted.metadata
@@ -1181,7 +1182,7 @@ async def test_stop_preserves_runtime_checkpoint_for_next_turn(tmp_path: Path) -
     assert result.message is not None
     assert result.text == "next answer"
 
-    session = loop.sessions.get_or_create("websocket:c4")
+    session = loop.sessions.get_or_create(UNIFIED_SESSION_KEY)
     assert [
         {k: v for k, v in m.items() if k in {"role", "content", "tool_call_id", "name"}}
         for m in session.messages
@@ -1473,7 +1474,7 @@ async def test_turn_after_unanswered_user_keeps_tool_call_pairing(tmp_path: Path
     loop = _make_full_loop(tmp_path)
     loop.consolidator.maybe_consolidate_by_tokens = AsyncMock(return_value=False)  # type: ignore[method-assign]
 
-    session = loop.sessions.get_or_create("websocket:c-merge")
+    session = loop.sessions.get_or_create(UNIFIED_SESSION_KEY)
     session.add_message("user", "earlier question that never got an answer")
     loop.sessions.save(session)
 
@@ -1509,8 +1510,8 @@ async def test_turn_after_unanswered_user_keeps_tool_call_pairing(tmp_path: Path
     )
 
     assert result.message is not None
-    loop.sessions.invalidate("websocket:c-merge")
-    persisted = loop.sessions.get_or_create("websocket:c-merge")
+    loop.sessions.invalidate(UNIFIED_SESSION_KEY)
+    persisted = loop.sessions.get_or_create(UNIFIED_SESSION_KEY)
 
     declared: set[str] = set()
     for message in persisted.messages:

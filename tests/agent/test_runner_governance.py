@@ -8,6 +8,7 @@ import pytest
 
 from jenny.config.schema import AgentDefaults
 from jenny.providers.base import LLMResponse
+from jenny.session.keys import UNIFIED_SESSION_KEY
 
 _MAX_TOOL_RESULT_CHARS = AgentDefaults().max_tool_result_chars
 
@@ -302,7 +303,7 @@ async def test_backfill_repairs_model_context_without_shifting_save_turn_boundar
     loop.tools.get_definitions = MagicMock(return_value=[])
     loop.consolidator.maybe_consolidate_by_tokens = AsyncMock(return_value=False)  # type: ignore[method-assign]
 
-    session = loop.sessions.get_or_create("internal:test")
+    session = loop.sessions.get_or_create(UNIFIED_SESSION_KEY)
     session.messages = [
         {"role": "user", "content": "old user", "timestamp": "2026-01-01T00:00:00"},
         {
@@ -337,7 +338,7 @@ async def test_backfill_repairs_model_context_without_shifting_save_turn_boundar
     assert len(synthetic) == 1
     assert synthetic[0]["content"] == _BACKFILL_CONTENT
 
-    session_after = loop.sessions.get_or_create("internal:test")
+    session_after = loop.sessions.get_or_create(UNIFIED_SESSION_KEY)
     assert [
         {
             key: value

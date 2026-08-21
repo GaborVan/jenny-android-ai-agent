@@ -9,6 +9,7 @@ import pytest
 
 from jenny.config.schema import AgentDefaults
 from jenny.providers.base import LLMResponse, ToolCallRequest
+from jenny.session.keys import UNIFIED_SESSION_KEY
 
 _MAX_TOOL_RESULT_CHARS = AgentDefaults().max_tool_result_chars
 
@@ -266,7 +267,7 @@ async def test_next_turn_after_llm_error_keeps_turn_boundary(tmp_path):
     assert first.message is not None
     assert first.text == "429 rate limit exceeded"
 
-    session = loop.sessions.get_or_create("internal:test")
+    session = loop.sessions.get_or_create(UNIFIED_SESSION_KEY)
     assert [
         {key: value for key, value in message.items() if key in {"role", "content"}}
         for message in session.messages

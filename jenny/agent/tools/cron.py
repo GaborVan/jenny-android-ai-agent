@@ -15,7 +15,6 @@ from jenny.agent.tools.schema import (
 )
 from jenny.cron.service import CronService
 from jenny.cron.types import CronJob, CronJobState, CronSchedule
-from jenny.session.keys import UNIFIED_SESSION_KEY
 from jenny.utils.helpers import safe_zoneinfo, validate_timezone_name
 
 # Modi accettati da action='add'. Vive qui e non in cron/types.py perché è la
@@ -92,11 +91,22 @@ class CronTool(Tool, ContextAware):
         return cls(cron_service=ctx.cron_service, default_timezone=ctx.timezone)
 
     def set_context(self, ctx: RequestContext) -> None:
-        """Set the current session context for scheduled cron job ownership."""
-        raw_key = f"{ctx.channel}:{ctx.chat_id}" if ctx.channel and ctx.chat_id else ""
-        self._session_key.set(
-            raw_key if ctx.session_key == UNIFIED_SESSION_KEY else (ctx.session_key or "")
-        )
+        """Set the current session context for scheduled cron job ownership.
+
+        La chiave registrata e' **quella del turno**, senza eccezioni. Fino al
+        2026-08-21 un turno sulla conversazione unica veniva registrato come
+        ``f"{channel}:{chat_id}"``: il job restava "attaccato alla chat che lo
+        ha creato", ma quella forma non e' una sessione — ``bound_runner`` la usa
+        come chiave del turno, quindi un promemoria creato dalla WebUI girava in
+        ``websocket:default``, un secondo file di sessione accanto alla
+        conversazione a cui il promemoria appartiene. L'attaccamento alla chat
+        vive dove e' sempre vissuto e dove serve alla consegna:
+        ``origin_channel`` / ``origin_chat_id``, qui sotto.
+
+        Una chiave di sessione esplicita del canale (thread) resta invece
+        l'owner del job, come prima: quella *e'* una sessione.
+        """
+        self._session_key.set(ctx.session_key or "")
         self._origin_channel.set(ctx.channel or "")
         self._origin_chat_id.set(ctx.chat_id or "")
         self._origin_metadata.set(dict(ctx.metadata or {}))

@@ -13,6 +13,7 @@ __all__ = [
     "internal_session_kind",
     "is_internal_session_key",
     "is_personal_session_key",
+    "normalize_user_session_key",
     "session_key_for_channel",
     "subagent_session_key",
 ]
@@ -110,6 +111,30 @@ def is_personal_session_key(key: str) -> bool:
     un punto solo, senza toccare nessun chiamante.
     """
     return not is_internal_session_key(key)
+
+
+# Chiavi utente nella forma vecchia ``<canale>:<chat_id>``. Non esistono piu' come
+# sessioni: le scriveva ``CronTool.set_context`` nei payload dei job, quindi si
+# incontrano solo rileggendo un ``jobs.json`` scritto prima della sessione unica.
+#
+# **Elenco chiuso, e non un pattern.** Un pattern "``<parola>:<parola>``"
+# prenderebbe anche ``project:<id>``, che e' una sessione vera: collassarla sulla
+# conversazione personale farebbe girare un job di progetto nella chat personale,
+# cioe' esattamente la confusione che le sessioni-progetto esistono per evitare.
+_LEGACY_CHANNEL_KEY_PREFIXES: tuple[str, ...] = ("websocket:", "telegram:")
+
+
+def normalize_user_session_key(key: str) -> str:
+    """La session key persistita, riportata alla forma corrente.
+
+    Serve a un solo punto — il caricamento dello store dei job cron — e vive qui
+    perche' la forma delle chiavi la decide questo modulo. Tutto cio' che non e'
+    una chiave utente legacy torna identico: le chiavi interne, la conversazione
+    unica e qualunque categoria futura passano intatte.
+    """
+    if key.startswith(_LEGACY_CHANNEL_KEY_PREFIXES):
+        return UNIFIED_SESSION_KEY
+    return key
 
 
 def subagent_session_key(lineage_id: str) -> str:
