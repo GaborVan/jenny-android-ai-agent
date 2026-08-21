@@ -516,8 +516,17 @@ def build_webui_thread_response(
     session_messages: list[dict[str, Any]] | None = None,
     limit: int | None = None,
     before: str | None = None,
+    allow_empty: bool = False,
 ) -> dict[str, Any] | None:
-    """Return a payload compatible with ``WebuiThreadPersistedPayload``."""
+    """Return a payload compatible with ``WebuiThreadPersistedPayload``.
+
+    ``None`` significa "questa conversazione non esiste", e il chiamante HTTP ne
+    fa un 404. Per una **sessione-progetto** appena creata quella risposta e'
+    sbagliata: la conversazione esiste, e' solo vuota — e un 404 lascerebbe il
+    client senza il payload da cui legge lo scope, quindi il chip tornerebbe a
+    dire "personale" sopra la chat di un progetto. Chi sa di trovarsi in quel
+    caso passa ``allow_empty=True`` e riceve un thread senza messaggi.
+    """
     paginated = limit is not None or before is not None
     page: dict[str, Any] | None = None
     if paginated:
@@ -527,7 +536,15 @@ def build_webui_thread_response(
     if not lines and session_messages:
         lines = _build_synthetic_transcript(session_key, session_messages)
     if not lines:
-        return None
+        if not allow_empty:
+            return None
+        return {
+            "schemaVersion": WEBUI_TRANSCRIPT_SCHEMA_VERSION,
+            "sessionKey": session_key,
+            "messages": [],
+            "has_pending_tool_calls": False,
+            "page": {"has_more_before": False, "loaded_message_count": 0},
+        }
     lines = _inject_missing_user_events_from_session(session_key, lines, session_messages)
     fork_boundary = _fork_boundary_message_count(lines)
     msgs = replay_transcript_to_ui_messages(

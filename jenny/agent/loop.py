@@ -77,7 +77,7 @@ from jenny.session.goal_state import (
     runner_wall_llm_timeout_s,
     sustained_goal_active,
 )
-from jenny.session.keys import UNIFIED_SESSION_KEY, session_key_for_channel
+from jenny.session.keys import session_key_for_channel
 from jenny.session.manager import Session, SessionManager
 from jenny.session.turn_visibility import (
     TurnVisibility,
@@ -195,6 +195,7 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
         hooks: list[AgentHook] | None = None,
         disabled_skills: list[str] | None = None,
         wiki_directory_max_tokens: int | None = None,
+        projects_subdir: str = "wikis",
         tools_config: ToolsConfig | None = None,
         runtime_events: RuntimeEventBus | None = None,
         model_presets_config: dict[str, Any] | None = None,
@@ -262,6 +263,11 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
         self.workspace_scopes = WorkspaceScopeResolver(
             default_workspace=workspace,
             default_restrict_to_workspace=restrict_to_workspace,
+            # Deve essere la stessa cartella che il picker elenca
+            # (``config.wiki.wikis_dir``): se le due divergono, il chip mostra i
+            # progetti di un posto e lo scope li cerca in un altro — cioe' ogni
+            # progetto legato punterebbe a una cartella che non c'e'.
+            projects_subdir=projects_subdir,
         )
         self._start_time = time.time()
         self._last_usage: dict[str, int] = {}
@@ -415,6 +421,7 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             timezone=defaults.timezone,
             disabled_skills=defaults.disabled_skills,
             wiki_directory_max_tokens=defaults.atlas.max_context_tokens,
+            projects_subdir=config.wiki.wikis_dir,
             session_ttl_minutes=defaults.session_ttl_minutes,
             consolidation_ratio=defaults.consolidation_ratio,
             max_messages=defaults.max_messages,
@@ -649,8 +656,23 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
 
 
     def _effective_session_key(self, msg: InboundMessage) -> str:
-        """Return the session key used for task routing and mid-turn injections."""
-        return msg.session_key_override or UNIFIED_SESSION_KEY
+        """Return the session key used for task routing and mid-turn injections.
+
+        Delega a ``InboundMessage.session_key``, che e' l'unico posto dove la
+        regola vive: override esplicito, altrimenti il canale e il ``chat_id``
+        (``jenny.session.keys.session_key_for_channel``).
+
+        **Qui c'era ``UNIFIED_SESSION_KEY`` cablato**, ed era il gemello del
+        difetto della sessione fantasma chiuso il 21/08 — con il verso invertito.
+        Il chiamante subito sotto confronta questo valore con ``msg.session_key``
+        e, se differiscono, *riscrive il messaggio* con un override: una costante
+        qui non ignorava la chiave del messaggio, la sovrascriveva. Un messaggio
+        mandato a ``project:patreon`` finiva percio' nella conversazione
+        personale, e sul telefono si vedeva solo guardando quale file di sessione
+        cresceva. Nessun test lo prendeva, perche' tutti provavano gli anelli e
+        non la catena.
+        """
+        return msg.session_key
 
     def _replay_token_budget(self) -> int:
         """Derive a token budget for session history replay from the context window."""
@@ -798,6 +820,7 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             channel=channel,
             message_metadata=metadata,
             session_metadata=session.metadata if session is not None else None,
+            session_key=active_session_key,
         )
         request_ctx = RequestContext(
             channel=channel,

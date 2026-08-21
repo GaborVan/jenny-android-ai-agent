@@ -21,7 +21,6 @@ trasportare contenuto: framed, UTF-8, autenticato all'handshake.
 from __future__ import annotations
 
 import asyncio
-import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,13 +33,6 @@ from loguru import logger
 # nemmeno poter essere salvato, e il limite deve arrivare all'utente come un
 # messaggio, non come un troncamento silenzioso del trasporto.
 MAX_WRITE_BYTES = 1_000_000
-
-# Nome di un progetto: un nome di cartella, non un percorso. Stesso set di
-# caratteri del dialogo nel chip (`VALID_NAME` in `scope-chip.js`), ma **il gate
-# e' qui**: il controllo lato client e' cortesia, questo e' il confine. La prima
-# lettera non puo' essere un punto — un `.qualcosa` sarebbe una cartella nascosta
-# dentro `wikis/`, e `..` non deve nemmeno arrivare al filesystem.
-_PROJECT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 # La riga di scope sta nel frontmatter di `CLAUDE.md`, che e' YAML: una riga
 # sola, e corta abbastanza da stare nel registro accanto al nome della wiki.
@@ -201,10 +193,14 @@ async def project_create(ctx: CommandContext, params: Mapping[str, Any]) -> dict
     testo libero dell'utente, in italiano e con le emoji che vuole, e la
     superficie ``/api/`` non sa trasportarlo (v. la docstring del modulo).
     """
+    from jenny.session.keys import is_valid_project_name
     from jenny.webui.project_create import ProjectCreateError, create_project
 
+    # La forma del nome la decide ``jenny.session.keys``, che e' anche chi la
+    # applica a ogni ``chat_id`` in arrivo: un nome che qui passasse e li' no
+    # creerebbe un progetto che non si puo' aprire.
     name = _require_str(params, "name").strip()
-    if not _PROJECT_NAME_RE.match(name):
+    if not is_valid_project_name(name):
         raise CommandError("bad_request", "invalid project name")
 
     # Una riga: gli a-capo vengono richiusi invece di far fallire il comando, che

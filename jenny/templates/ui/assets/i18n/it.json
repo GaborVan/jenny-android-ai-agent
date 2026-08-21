@@ -663,7 +663,6 @@
     "createFailed": "Creazione fallita: {error}",
     "created": "Progetto “{name}” creato",
     "askAbout": "Chiedi qualcosa su {name}...",
-    "notBound": "Per ora lo scope e' solo grafico: l'agente non e' ancora ripuntato.",
     "ago": {
       "now": "adesso",
       "minutes": "{n} min fa",

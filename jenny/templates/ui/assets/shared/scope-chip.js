@@ -6,14 +6,14 @@
  * scorre via. Un messaggio mandato allo scope sbagliato non si ritira, ed è il
  * solo guasto irrecuperabile del disegno delle sessioni-progetto.
  *
- * ATTENZIONE — **scegliere** uno scope è per ora solo presentazione. Il
- * collegamento vero (scrivere ``session.metadata["workspace_scope"]``) non
- * esiste ancora: selezionare un progetto cambia il chip e il placeholder e
- * avvisa con un toast, non ripunta l'agente. L'unica funzione da collegare
- * quando arriva il binding è :meth:`select`; il resto non cambia.
+ * Scegliere uno scope cambia **davvero** conversazione: la chiave della
+ * sessione diventa `project:<nome>`, e da quella il gateway ricava sia la
+ * cartella su cui l'agente lavora sia il thread da disegnare. Il chip non manda
+ * mai un percorso: manda un nome, e la cartella la deduce il server — così la
+ * sessione e la sua cartella non possono divergere.
  *
- * **Crearlo** invece è reale: `_createProject` scaffolda una wiki vera, con la
- * riga di scope che l'utente scrive, e l'elenco viene dalle wiki su disco.
+ * Chi possiede la chat passa :attr:`onSwitch`, che viene chiamata dopo il
+ * cambio: ricaricare quel che è a schermo non è mestiere di questo modulo.
  */
 
 import { i18n } from './i18n.js';
@@ -46,6 +46,9 @@ export class ScopeChip {
     this._projects = null;   // cache dell'ultimo elenco letto da disco
     this._dir = DEFAULT_DIR; // nome vero della cartella, dal backend
     this._open = false;
+    // Chiamata dopo un cambio di scope, con la nuova chiave di sessione. La
+    // monta chi possiede la chat; senza, il chip resta presentazione.
+    this.onSwitch = null;
   }
 
   init() {
@@ -283,12 +286,19 @@ export class ScopeChip {
 
   // ── Azioni ─────────────────────────────────────────────────────────────
 
-  /** Cambia lo scope mostrato. **Non** ripunta ancora l'agente: v. il modulo. */
+  /** La chiave di sessione di uno scope. */
+  static keyFor(scope) {
+    return scope.kind === 'project' && scope.name
+      ? `project:${scope.name}`
+      : null;   // null = la conversazione personale, che la conosce il chiamante
+  }
+
+  /** Cambia scope: il chip, il placeholder, e la conversazione sotto. */
   select(scope) {
     const changed = scope.kind !== this.scope.kind || scope.name !== this.scope.name;
     this.scope = scope;
     this.render();
-    if (changed) showToast(i18n.t('scope.notBound'), 'info');
+    if (changed) this.onSwitch?.(ScopeChip.keyFor(scope), scope);
   }
 
   /** Due domande, in quest'ordine: come si chiama, e di cosa si occupa.

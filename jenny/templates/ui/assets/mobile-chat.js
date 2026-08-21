@@ -582,11 +582,27 @@ export class ChatController {
   async _initOnSessionReady() {
     try {
       await sessionManager.init();
+      // Il chip cambia la conversazione; ridisegnarla è di chi la possiede,
+      // cioè di qui. `switchTo` non tocca lo schermo apposta.
+      scopeChip.onSwitch = (key) => this._switchConversation(key);
       if (sessionManager.currentKey) {
         await this.loadInitialHistory();
       }
     } catch (err) {
       console.error('Session init failed:', err);
+    }
+  }
+
+  /* Cambio di conversazione: personale <-> progetto, o fra due progetti.
+     `key` null vuol dire la personale — la chiave la conosce il session manager,
+     non il chip. */
+  async _switchConversation(key) {
+    if (!sessionManager.switchTo(key || sessionManager.personalKey)) return;
+    this.invalidateHistory();
+    try {
+      await this.loadInitialHistory();
+    } catch (err) {
+      console.error('Failed to load the conversation:', err);
     }
   }
 

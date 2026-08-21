@@ -58,6 +58,11 @@ from jenny.channels.ws_parsing import (
     classify_media_item,
 )
 from jenny.channels.ws_sender import OutboundSenderMixin
+from jenny.session.keys import (
+    PROJECT_SESSION_PREFIX,
+    is_project_session_key,
+    is_valid_project_name,
+)
 from jenny.utils.media_decode import (
     FileSizeExceeded,
     save_base64_data_url,
@@ -540,6 +545,30 @@ class WebSocketChannel(OutboundSenderMixin):
             paths.append(saved)
         return paths, None
 
+    @staticmethod
+    def _envelope_chat_id(envelope: dict[str, Any]) -> str:
+        """Il ``chat_id`` di un frame: la chat personale, o quella di un progetto.
+
+        **Qui il ``chat_id`` del frame era ignorato** e sostituito dalla costante
+        ``WEBUI_DEFAULT_CHAT_ID``: era il modo in cui la collassata "una sola
+        sessione" era stata implementata, e va bene finche' di conversazioni ce
+        n'e' una. Con le sessioni-progetto diventa il punto in cui un messaggio
+        mandato a ``project:patreon`` finiva nella chat personale — e non lo
+        diceva nessuno, perche' dal lato client sembrava partito.
+
+        L'elenco delle forme accettate resta chiuso, e la verifica del nome e'
+        quella di ``jenny.session.keys``: un ``chat_id`` che non riconosciamo
+        cade sulla chat personale invece di aprire una conversazione inventata.
+        Il ``chat_id`` e' anche la chiave del *thread* su disco, quindi lasciar
+        passare una stringa arbitraria vorrebbe dire lasciar creare file.
+        """
+        raw = envelope.get("chat_id")
+        if not isinstance(raw, str) or not is_project_session_key(raw):
+            return WEBUI_DEFAULT_CHAT_ID
+        if not is_valid_project_name(raw[len(PROJECT_SESSION_PREFIX):]):
+            return WEBUI_DEFAULT_CHAT_ID
+        return raw
+
     async def _dispatch_envelope(
         self,
         connection: Any,
@@ -549,13 +578,13 @@ class WebSocketChannel(OutboundSenderMixin):
         """Route one typed inbound envelope (``attach`` / ``message`` / ...)."""
         t = envelope.get("type")
         if t == "attach":
-            cid = WEBUI_DEFAULT_CHAT_ID
+            cid = self._envelope_chat_id(envelope)
             self._attach(connection, cid)
             await self._send_event(connection, "attached", chat_id=cid)
             await self._hydrate_after_subscribe(cid)
             return
         if t == "message":
-            cid = WEBUI_DEFAULT_CHAT_ID
+            cid = self._envelope_chat_id(envelope)
             content = envelope.get("content")
             if not isinstance(content, str):
                 await self._send_event(connection, "error", detail="missing content")

@@ -73,6 +73,10 @@ def build_gateway_services(
         session_manager=session_manager,
         default_workspace=workspace_path,
         default_restrict_to_workspace=default_restrict_to_workspace,
+        # La stessa cartella che il picker elenca (``/api/projects``) e che il
+        # turno risolve: se le tre divergono, il chip mostra progetti che lo
+        # scope non trova.
+        projects_subdir=getattr(getattr(config, "wiki", None), "wikis_dir", "wikis"),
     )
     http = GatewayHTTPHandler(
         config=config,

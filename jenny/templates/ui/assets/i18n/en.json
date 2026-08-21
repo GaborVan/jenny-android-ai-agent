@@ -663,7 +663,6 @@
     "createFailed": "Could not create: {error}",
     "created": "Project “{name}” created",
     "askAbout": "Ask something about {name}...",
-    "notBound": "The scope is presentation only for now: the agent is not repointed yet.",
     "ago": {
       "now": "just now",
       "minutes": "{n} min ago",

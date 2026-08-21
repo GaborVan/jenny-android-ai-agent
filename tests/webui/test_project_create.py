@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import urllib.parse
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -29,6 +30,7 @@ from jenny.webui.commands import (
     CommandError,
     dispatch_command,
 )
+from jenny.webui.workspaces import WebUIWorkspaceController
 
 _REPO = Path(__file__).resolve().parents[2]
 _SKILL_SCRIPTS = _REPO / "jenny" / "skills" / "llm-wiki" / "scripts"
@@ -178,6 +180,13 @@ def handler(workspace: Path, monkeypatch):
     from jenny.webui.ws_http import GatewayHTTPHandler
 
     monkeypatch.setattr(paths_mod, "get_workspace_path", lambda: workspace)
+    # Controller vero e non un mock: la route ci legge lo scope da mettere nel
+    # payload, ed e' proprio quello che questi test verificano.
+    workspaces = WebUIWorkspaceController(
+        session_manager=None,
+        default_workspace=workspace,
+        default_restrict_to_workspace=True,
+    )
     return GatewayHTTPHandler(
         config=SimpleNamespace(
             workspace=SimpleNamespace(enabled=True),
@@ -189,7 +198,7 @@ def handler(workspace: Path, monkeypatch):
         runtime_model_name=lambda: "test-model",
         bus=MagicMock(),
         media=MagicMock(),
-        workspaces=MagicMock(),
+        workspaces=workspaces,
         skills_workspace_path=workspace,
     )
 
@@ -247,3 +256,54 @@ def test_il_chip_non_legge_piu_una_cartella_projects():
     assert "createWorkspaceFolder" not in source
     assert "api.listProjects()" in source
     assert "rpc.createProject(" in source
+
+
+# ── aprire la chat di un progetto ────────────────────────────────────────────
+
+
+async def _get_thread(handler, key: str):
+    quoted = urllib.parse.quote(key, safe="")
+    request = WsRequest(
+        path=f"/api/sessions/{quoted}/webui-thread?token={_AUTH_SECRET}", headers=Headers()
+    )
+    return handler._handle_webui_thread_get(request, quoted)
+
+
+class TestIlThreadDiUnProgetto:
+    """La route che serve la conversazione disegnata.
+
+    La sua guardia accettava solo chiavi `websocket:*`, quindi avrebbe risposto
+    **404 a ogni progetto**: la chat di un progetto non si sarebbe potuta aprire,
+    e il sintomo sarebbe stato una schermata vuota senza errori nel client.
+    """
+
+    async def test_una_chiave_di_progetto_non_e_piu_404(self, handler, ctx, workspace):
+        await _create(ctx, name="patreon", seed="di cosa si occupa")
+
+        response = await _get_thread(handler, "project:patreon")
+
+        assert response.status_code != 404, response.body
+
+    async def test_il_payload_porta_la_cartella_del_progetto(self, handler, ctx, workspace):
+        """E la porta **prima del primo messaggio**.
+
+        Il chip legge lo scope da qui: leggendolo dai metadati della sessione —
+        che non esistono finché non si scrive — un progetto appena aperto avrebbe
+        mostrato "sessione personale" sopra il composer. Cioè esattamente la cosa
+        che il chip esiste per non fare.
+        """
+        await _create(ctx, name="patreon", seed="di cosa si occupa")
+
+        response = await _get_thread(handler, "project:patreon")
+        payload = json.loads(response.body.decode("utf-8"))
+
+        scope = payload["workspace_scope"]
+        assert scope["project_name"] == "patreon"
+        assert scope["project_path"].endswith("wikis/patreon")
+        assert scope["access_mode"] == "restricted"
+
+    async def test_una_sessione_interna_resta_illeggibile(self, handler):
+        """Il lato del confine che non doveva allargarsi."""
+        for key in ("cron:job-1", "subagent:L1", "heartbeat", "dream:20260821"):
+            response = await _get_thread(handler, key)
+            assert response.status_code == 404, key

@@ -10,7 +10,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from loguru import logger
+
 from jenny.security.workspace_policy import _safe_expanduser
+from jenny.session.keys import PROJECT_SESSION_PREFIX, is_project_session_key
 
 WorkspaceAccessMode = Literal["restricted", "full"]
 WORKSPACE_SCOPE_METADATA_KEY = "workspace_scope"
@@ -116,6 +119,11 @@ class WorkspaceScopeResolver:
     default_workspace: str | Path
     default_restrict_to_workspace: bool
     scoped_channel: str = "websocket"
+    # Sottocartella che ospita i progetti, relativa al workspace. Un progetto
+    # *e'* una wiki (v. ``roadmap/progetti-passi.md``): non esiste una
+    # ``projects/`` separata. Configurabile perche' lo e' ``config.wiki.wikis_dir``,
+    # e chi costruisce il resolver la passa da li'.
+    projects_subdir: str = "wikis"
 
     @property
     def sandbox_status(self) -> WorkspaceSandboxStatus:
@@ -136,6 +144,7 @@ class WorkspaceScopeResolver:
             channel=getattr(msg, "channel", None),
             message_metadata=getattr(msg, "metadata", None),
             session_metadata=session_metadata,
+            session_key=getattr(msg, "session_key", None),
         )
 
     def for_turn(
@@ -144,15 +153,62 @@ class WorkspaceScopeResolver:
         channel: str | None,
         message_metadata: Any,
         session_metadata: Any,
+        session_key: str | None = None,
     ) -> WorkspaceScope:
+        """Lo scope di questo turno.
+
+        **Per una sessione-progetto la cartella si ricava dalla chiave**, e non
+        dai metadati: ``project:patreon`` -> ``<workspace>/wikis/patreon``. Cosi'
+        la sessione e la sua cartella non possono divergere — non c'e' un secondo
+        dato da tenere allineato, e nessun client puo' chiedere una cartella
+        diversa da quella che il suo nome dichiara. I metadati restano la strada
+        per tutto il resto (uno scope scelto a mano, i test).
+        """
         if channel != self.scoped_channel:
             return self.default()
+        if session_key and is_project_session_key(session_key):
+            return self.for_project(session_key)
         return resolve_effective_workspace_scope(
             message_metadata=message_metadata,
             session_metadata=session_metadata,
             default_workspace=self.default_workspace,
             default_restrict_to_workspace=self.default_restrict_to_workspace,
         )
+
+    def for_project(self, session_key: str) -> WorkspaceScope:
+        """Lo scope di una sessione-progetto, dedotto dalla sua chiave.
+
+        Sempre ``restricted``: la scrittura di un progetto sta nella sua
+        cartella, e non c'e' un modo di chiedere il contrario. (La lettura resta
+        aperta sul workspace — il confine e' asimmetrico, v.
+        ``FileSystemTools._read_allowed_root``.)
+
+        **Una cartella che non esiste non fa ricadere sulla radice personale.**
+        Lo scope viene costruito lo stesso e punta al posto che manca: le
+        scritture falliscono tutte, il che e' scomodo ma onesto, mentre il
+        fallback silenzioso metterebbe il lavoro di un progetto nel workspace
+        personale. Trasformarlo in un rifiuto detto a voce e' il passo 6.
+        """
+        name = session_key[len(PROJECT_SESSION_PREFIX):]
+        root = _safe_expanduser(self.default_workspace).resolve(strict=False)
+        project = (root / self.projects_subdir / name).resolve(strict=False)
+        # Il nome arriva da una session key, che a sua volta arriva da un client:
+        # un ``..`` non deve poter far uscire lo scope dalla cartella dei progetti.
+        projects_root = (root / self.projects_subdir).resolve(strict=False)
+        if project == projects_root or projects_root not in project.parents:
+            logger.warning(
+                "project session {} resolves outside {}; falling back to the default scope",
+                session_key,
+                projects_root,
+            )
+            return self.default()
+        if not project.is_dir():
+            logger.warning(
+                "project session {} points at a missing folder ({}); writes will fail",
+                session_key,
+                project,
+            )
+        return build_workspace_scope(project, "restricted")
 
 
 def workspace_sandbox_status(

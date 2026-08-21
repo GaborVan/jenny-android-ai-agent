@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 __all__ = [
     "ATLAS_SESSION_PREFIX",
     "CRON_SESSION_PREFIX",
@@ -11,10 +13,12 @@ __all__ = [
     "PROJECT_SESSION_PREFIX",
     "SUBAGENT_SESSION_PREFIX",
     "UNIFIED_SESSION_KEY",
+    "WEBUI_CHANNEL",
     "internal_session_kind",
     "is_internal_session_key",
     "is_personal_session_key",
     "is_project_session_key",
+    "is_valid_project_name",
     "normalize_user_session_key",
     "project_session_key",
     "session_key_for_channel",
@@ -23,6 +27,11 @@ __all__ = [
 ]
 
 UNIFIED_SESSION_KEY = "unified:default"
+
+# Il canale della WebUI. E' l'unico su cui un ``chat_id`` puo' nominare un
+# progetto: v. :func:`session_key_for_channel`. Il nome e' quello che
+# ``WebSocketChannel.name`` mette negli ``InboundMessage``.
+WEBUI_CHANNEL = "websocket"
 
 # Prefisso di una sessione-progetto (``project:<id>``): una conversazione con
 # l'utente, legata a una cartella, che **non** alimenta la memoria di lungo
@@ -33,6 +42,20 @@ UNIFIED_SESSION_KEY = "unified:default"
 # e' l'identita'), quindi non e' derivabile dal path: lo assegna chi crea il
 # legame.
 PROJECT_SESSION_PREFIX = "project:"
+
+# La forma di un nome di progetto, che e' un nome di cartella dentro ``wikis/``:
+# niente separatori, niente punto iniziale (sarebbe nascosta), niente ``..``.
+#
+# **Sta qui e non dove viene chiesto all'utente.** Il nome arriva da un client —
+# nel dialogo del chip e, appena dopo, in ogni ``chat_id`` — e i due punti devono
+# rispondere alla stessa domanda: il controllo nel dialogo e' cortesia, questi
+# sono i caratteri che possono diventare una sessione e una cartella.
+_PROJECT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def is_valid_project_name(name: str) -> bool:
+    """True se *name* puo' essere il nome di un progetto."""
+    return bool(_PROJECT_NAME_RE.match(name)) and ".." not in name
 
 # Prefisso delle sessioni Tier-2 dei subagent (``subagent:<lineage_id>``).
 # Sono storia di lavoro interno, non conversazioni: non devono comparire in
@@ -203,7 +226,23 @@ def subagent_session_key(lineage_id: str) -> str:
 def session_key_for_channel(channel: str, chat_id: str) -> str:
     """Return the session key for a channel/chat pair.
 
-    Every channel/chat maps onto the single unified conversation; explicit
-    ``session_key_override`` values (internal keys) bypass this helper.
+    Ogni canale e ogni chat cadono sulla **conversazione unica**, con una sola
+    eccezione: un ``chat_id`` che nomina un progetto (``project:<nome>``) sulla
+    WebUI, che apre la conversazione di quel progetto. Le chiavi interne non
+    passano di qui — usano ``session_key_override``.
+
+    **Qualunque altra cosa cade sulla conversazione personale, e non e' un
+    dettaglio**: il ``chat_id`` arriva da un client, e senza questo un client
+    confuso (o ostile) potrebbe farsi creare una sessione qualsiasi mandando un
+    nome inventato. L'elenco delle forme riconosciute e' chiuso, e il nome deve
+    superare :func:`is_valid_project_name` — ``project:../fuori`` non e' un
+    progetto, e' un tentativo.
+
+    Il canale conta: un messaggio Telegram con dentro ``project:qualcosa`` resta
+    la conversazione personale. Un progetto e' una sessione di lavoro alla
+    tastiera, e la vita "fuori" di Jenny — Telegram, cron, avvisi — non ci entra.
     """
+    if channel == WEBUI_CHANNEL and is_project_session_key(chat_id):
+        if is_valid_project_name(chat_id[len(PROJECT_SESSION_PREFIX):]):
+            return chat_id
     return UNIFIED_SESSION_KEY
