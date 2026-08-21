@@ -21,6 +21,7 @@ trasportare contenuto: framed, UTF-8, autenticato all'handshake.
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +34,17 @@ from loguru import logger
 # nemmeno poter essere salvato, e il limite deve arrivare all'utente come un
 # messaggio, non come un troncamento silenzioso del trasporto.
 MAX_WRITE_BYTES = 1_000_000
+
+# Nome di un progetto: un nome di cartella, non un percorso. Stesso set di
+# caratteri del dialogo nel chip (`VALID_NAME` in `scope-chip.js`), ma **il gate
+# e' qui**: il controllo lato client e' cortesia, questo e' il confine. La prima
+# lettera non puo' essere un punto — un `.qualcosa` sarebbe una cartella nascosta
+# dentro `wikis/`, e `..` non deve nemmeno arrivare al filesystem.
+_PROJECT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+# La riga di scope sta nel frontmatter di `CLAUDE.md`, che e' YAML: una riga
+# sola, e corta abbastanza da stare nel registro accanto al nome della wiki.
+MAX_PROJECT_SEED_CHARS = 500
 
 
 class CommandError(Exception):
@@ -106,6 +118,11 @@ def _require_wiki_enabled() -> None:
         raise CommandError("unavailable", "wiki is disabled")
 
 
+def _skill_scripts_dir(ctx: CommandContext) -> Path:
+    """Il checkout della skill `llm-wiki` nel workspace, dove sta lo scaffolder."""
+    return ctx.get_workspace_root() / "skills" / "llm-wiki" / "scripts"
+
+
 def _wikis_dir(ctx: CommandContext) -> Path:
     from jenny.config.loader import load_config
 
@@ -177,9 +194,52 @@ async def audit_resolve(ctx: CommandContext, params: Mapping[str, Any]) -> dict[
         raise CommandError("bad_request", str(exc)) from exc
 
 
+async def project_create(ctx: CommandContext, params: Mapping[str, Any]) -> dict[str, Any]:
+    """Crea un progetto: una wiki nuova, completa e vuota, piu' la riga dell'utente.
+
+    Sta qui e non su ``/api/`` perche' porta contenuto: la riga di scope e'
+    testo libero dell'utente, in italiano e con le emoji che vuole, e la
+    superficie ``/api/`` non sa trasportarlo (v. la docstring del modulo).
+    """
+    from jenny.webui.project_create import ProjectCreateError, create_project
+
+    name = _require_str(params, "name").strip()
+    if not _PROJECT_NAME_RE.match(name):
+        raise CommandError("bad_request", "invalid project name")
+
+    # Una riga: gli a-capo vengono richiusi invece di far fallire il comando, che
+    # su una tastiera mobile e' quel che l'utente si aspetta.
+    seed = " ".join(_require_str(params, "seed").split())
+    if not seed:
+        raise CommandError("bad_request", "seed required")
+    if len(seed) > MAX_PROJECT_SEED_CHARS:
+        raise CommandError(
+            "too_large",
+            f"scope line too long ({len(seed)} > {MAX_PROJECT_SEED_CHARS} characters)",
+        )
+
+    _require_wiki_enabled()
+
+    try:
+        # Su disco: albero, template, registro. Fuori dall'event loop come le
+        # altre scritture di questo modulo.
+        return await asyncio.to_thread(
+            create_project,
+            wikis_dir=_wikis_dir(ctx),
+            scripts_dir=_skill_scripts_dir(ctx),
+            name=name,
+            seed=seed,
+        )
+    except ProjectCreateError as exc:
+        raise CommandError("bad_request", str(exc)) from exc
+    except OSError as exc:
+        raise CommandError("bad_request", str(exc)) from exc
+
+
 COMMANDS: dict[str, Command] = {
     "workspace.write": workspace_write,
     "audit.resolve": audit_resolve,
+    "project.create": project_create,
 }
 
 

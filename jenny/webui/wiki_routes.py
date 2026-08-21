@@ -62,6 +62,26 @@ def safe_wiki_page_path(input_path: str) -> str | None:
     return normalized
 
 
+def _collect_projects(wikis_dir: Path) -> list[dict[str, Any]]:
+    """``[{name, modified}]`` per ogni wiki, ordinate come le da' la discovery.
+
+    ``modified`` e' l'mtime della radice della wiki, che oggi e' il solo segnale
+    di attivita' disponibile: la conversazione di un progetto non esiste ancora
+    (item 3). Quando esistera', l'ultima attivita' dovra' venire da lei, non dal
+    filesystem — un `lint` non e' attivita' dell'utente.
+    """
+    from jenny.utils.wiki_paths import discover_wiki_roots
+
+    projects: list[dict[str, Any]] = []
+    for name, root in discover_wiki_roots(wikis_dir).items():
+        try:
+            modified = int(root.stat().st_mtime)
+        except OSError:
+            modified = 0
+        projects.append({"name": name, "modified": modified})
+    return projects
+
+
 class WikiRoutes:
     """Route ``/api/{config,tree,graph,page}`` e ``/api/audit*``."""
 
@@ -117,6 +137,8 @@ class WikiRoutes:
     async def dispatch(self, request: WsRequest, path: str) -> Response | None:
         if path == "/api/config":
             return await self._wiki_config(request)
+        if path == "/api/projects":
+            return await self._projects_list(request)
         if path == "/api/tree":
             return await self._wiki_tree(request)
         if path == "/api/graph":
@@ -304,6 +326,26 @@ class WikiRoutes:
                 "homePath": "_index.md",
             }
         )
+
+    async def _projects_list(self, request: WsRequest) -> Response:
+        """Elenco dei progetti per lo scope chip.
+
+        **Un progetto e' una wiki**, quindi l'elenco e' `discover_wiki_roots` e
+        non il contenuto di una cartella `projects/`: quella non esiste, e il
+        chip la leggeva (v. `roadmap/project-sessions.md`, item 10). `dir` viaggia
+        col payload perche' il chip mostra lo scope come un percorso e il nome
+        della cartella e' configurabile (`config.wiki.wikis_dir`).
+        """
+        if not self._check_api_token(request):
+            return http_error(401, "Unauthorized")
+        err = self._check_wiki_enabled()
+        if err:
+            return err
+
+        wikis_dir = self._get_wikis_dir()
+        loop = asyncio.get_running_loop()
+        projects = await loop.run_in_executor(None, _collect_projects, wikis_dir)
+        return http_json_response({"dir": wikis_dir.name, "projects": projects})
 
     # -- audit handlers --
 

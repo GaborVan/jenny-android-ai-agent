@@ -168,6 +168,14 @@ class ApiClient {
     return res.json();
   }
 
+  /** Progetti dello scope chip: un progetto e' una wiki, quindi e' l'elenco
+   *  delle wiki. Ritorna `{ dir, projects: [{ name, modified }] }`. */
+  async listProjects() {
+    const res = await this._fetch('/api/projects');
+    if (!res.ok) throw new Error(`Projects failed: ${res.status}`);
+    return res.json();
+  }
+
   async getTree(wiki) {
     const url = wiki ? `/api/tree?wiki=${encodeURIComponent(wiki)}` : '/api/tree';
     const res = await this._fetch(url);

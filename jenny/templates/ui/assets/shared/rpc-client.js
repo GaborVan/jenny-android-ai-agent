@@ -24,6 +24,13 @@ export const rpc = {
     return wsManager.request('workspace.write', { path, content });
   },
 
+  /** Crea un progetto: una wiki nuova e vuota, piu' la riga di scope che
+   *  l'utente ha scritto. Passa da qui e non da `api` proprio per quella riga:
+   *  e' testo libero, e la superficie /api/ non sa trasportarne. */
+  createProject(name, seed) {
+    return wsManager.request('project.create', { name, seed });
+  },
+
   /** Chiude un item di audit con una nota di risoluzione. */
   resolveAudit(auditId, wiki, resolution) {
     return wsManager.request('audit.resolve', {

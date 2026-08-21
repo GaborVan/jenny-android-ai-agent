@@ -6,20 +6,30 @@
  * scorre via. Un messaggio mandato allo scope sbagliato non si ritira, ed è il
  * solo guasto irrecuperabile del disegno delle sessioni-progetto.
  *
- * ATTENZIONE — questo modulo è per ora **solo presentazione**. Il collegamento
- * vero (scrivere ``session.metadata["workspace_scope"]``) non esiste ancora:
- * scegliere un progetto cambia il chip e il placeholder e avvisa con un toast,
- * non ripunta l'agente. L'unica funzione da collegare quando arriva il binding
- * è :meth:`select`; il resto non cambia.
+ * ATTENZIONE — **scegliere** uno scope è per ora solo presentazione. Il
+ * collegamento vero (scrivere ``session.metadata["workspace_scope"]``) non
+ * esiste ancora: selezionare un progetto cambia il chip e il placeholder e
+ * avvisa con un toast, non ripunta l'agente. L'unica funzione da collegare
+ * quando arriva il binding è :meth:`select`; il resto non cambia.
+ *
+ * **Crearlo** invece è reale: `_createProject` scaffolda una wiki vera, con la
+ * riga di scope che l'utente scrive, e l'elenco viene dalle wiki su disco.
  */
 
 import { i18n } from './i18n.js';
 import { api } from './api-client.js';
+import { rpc } from './rpc-client.js';
 import { showToast } from './utils.js';
 import { promptDialog } from './dialog.js';
 
-/** Cartella che ospita i progetti, relativa alla radice del workspace. */
-const PROJECTS_DIR = 'projects';
+/** Cartella che ospita i progetti, finche' il backend non dice la sua.
+ *
+ *  Un progetto **e' una wiki**: non esiste una `projects/` separata, e questo
+ *  modulo ne leggeva una che non c'era. Il nome vero arriva da `/api/projects`
+ *  (`config.wiki.wikis_dir` e' configurabile); questo e' il valore mostrato nel
+ *  frattempo, cioe' il default della config.
+ */
+const DEFAULT_DIR = 'wikis';
 
 /** Un nome di progetto è un nome di cartella: niente separatori né path. */
 const VALID_NAME = /^[A-Za-z0-9._-]+$/;
@@ -34,6 +44,7 @@ export class ScopeChip {
     // Scope corrente: ``null`` come nome significa sessione personale.
     this.scope = { kind: 'personal', name: null };
     this._projects = null;   // cache dell'ultimo elenco letto da disco
+    this._dir = DEFAULT_DIR; // nome vero della cartella, dal backend
     this._open = false;
   }
 
@@ -62,7 +73,11 @@ export class ScopeChip {
   syncFromSession(workspaceScope) {
     if (!this.enabled) return;
     const path = workspaceScope?.project_path || '';
-    const marker = `/${PROJECTS_DIR}/`;
+    // Se il backend non ha ancora risposto il nome e' il default: sbagliarlo
+    // vorrebbe dire mostrare "personale" per un attimo, non mandare un
+    // messaggio nel posto sbagliato — lo scope mostrato viene comunque
+    // rirenderizzato quando l'elenco arriva.
+    const marker = `/${this._dir}/`;
     const idx = path.indexOf(marker);
     if (idx === -1) {
       this.scope = { kind: 'personal', name: null };
@@ -84,7 +99,7 @@ export class ScopeChip {
   /** Segmenti del percorso mostrati nel chip. */
   get pathSegments() {
     return this.scope.kind === 'project'
-      ? [PROJECTS_DIR, this.scope.name]
+      ? [this._dir, this.scope.name]
       : [this.personalLabel];
   }
 
@@ -152,15 +167,16 @@ export class ScopeChip {
     this.el.setAttribute('aria-expanded', 'false');
   }
 
-  /** Progetti = sottocartelle di ``workspace/projects``. */
+  /** Progetti = le wiki del workspace, lette dal backend. */
   async _loadProjects() {
     try {
-      const items = await api.listWorkspace(PROJECTS_DIR);
-      this._projects = (items || [])
-        .filter(it => it.type === 'directory' && !it.internal)
+      const data = await api.listProjects();
+      this._dir = data?.dir || DEFAULT_DIR;
+      this._projects = (data?.projects || [])
         .map(it => ({ name: it.name, modified: it.modified }));
+      this.render();                    // il nome della cartella puo' essere cambiato
     } catch {
-      // La cartella può semplicemente non esistere ancora: elenco vuoto, non
+      // Nessuna wiki ancora, o la feature spenta in config: elenco vuoto, non
       // un errore da mostrare. Un guasto vero si vede al primo "Nuovo".
       this._projects = [];
     }
@@ -275,6 +291,15 @@ export class ScopeChip {
     if (changed) showToast(i18n.t('scope.notBound'), 'info');
   }
 
+  /** Due domande, in quest'ordine: come si chiama, e di cosa si occupa.
+   *
+   *  La seconda non e' un extra da riempire dopo. Un progetto senza una riga di
+   *  scope lascia il primo turno senza niente su cui appoggiarsi, e uno scope
+   *  indovinato dall'agente e' peggio di nessuno scope, perche' tutto quel che
+   *  viene archiviato dopo lo eredita. Per questo annullarla annulla la
+   *  creazione: meglio nessun progetto che un progetto senza scopo. Niente
+   *  viene creato su disco prima che entrambe le risposte ci siano.
+   */
   async _createProject() {
     const name = await promptDialog(i18n.t('scope.newProjectName'), {
       placeholder: i18n.t('scope.newProjectPlaceholder'),
@@ -285,8 +310,17 @@ export class ScopeChip {
       showToast(i18n.t('scope.invalidName'), 'error');
       return;
     }
+
+    const seed = await promptDialog(i18n.t('scope.newProjectSeed', { name: clean }), {
+      placeholder: i18n.t('scope.newProjectSeedPlaceholder'),
+    });
+    if (!seed || !seed.trim()) {
+      showToast(i18n.t('scope.seedRequired'), 'info');
+      return;
+    }
+
     try {
-      await api.createWorkspaceFolder(`${PROJECTS_DIR}/${clean}`);
+      await rpc.createProject(clean, seed.trim());
     } catch (err) {
       showToast(i18n.t('scope.createFailed', { error: err.message }), 'error');
       return;
