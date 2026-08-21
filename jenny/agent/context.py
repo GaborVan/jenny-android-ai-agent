@@ -58,6 +58,21 @@ class ContextBuilder:
     """Builds the context (system prompt + messages) for the agent."""
 
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md"]
+    # I file che dicono **chi e' Jenny e chi sei tu**: vengono sempre dalla
+    # radice dell'installazione, mai dalla cartella di un progetto.
+    #
+    # Senza questa distinzione, legare uno scope li faceva cercare nella
+    # cartella del progetto, dove non ci sono, e ``_load_bootstrap_files``
+    # saltava i file assenti in silenzio: Jenny perdeva personalita' e tutto
+    # quello che sa dell'utente, senza un errore e senza una riga di log.
+    # ``AGENTS.md`` invece resta legato allo scope apposta — sono *le istruzioni
+    # di quel posto di lavoro*, ed e' il file che ogni progetto ha di suo.
+    #
+    # ``MEMORY.md`` non e' in questo elenco perche' non passa da qui: lo legge
+    # ``MemoryStore``, costruito una volta sulla radice dell'installazione
+    # (v. :meth:`__init__`). Prima era giusto per caso; ora c'e' un test che lo
+    # tiene fermo insieme a questi due.
+    _IDENTITY_FILES = frozenset({"SOUL.md", "USER.md"})
     # File di bootstrap da omettere del tutto quando sono ancora il template
     # intatto. ``USER.md`` e ``AGENTS.md`` intatti non dicono niente né
     # sull'utente né sul workspace: sono l'impalcatura che spiega dove va cosa,
@@ -386,11 +401,20 @@ class ContextBuilder:
         (``_is_template_content``, sopra). Qui però la risposta giusta non è la
         stessa per tutti e tre, perché i tre template non sono la stessa cosa:
         vedi ``_BOOTSTRAP_SKIP_IF_TEMPLATE``.
+
+        **Due radici, non una.** ``workspace`` e' la cartella del turno — quella
+        del progetto, quando la sessione ne ha uno legato — e da li' viene
+        ``AGENTS.md``, che e' le istruzioni di *quel* posto. L'identita'
+        (:attr:`_IDENTITY_FILES`) viene invece sempre dalla radice
+        dell'installazione: e' chi e' Jenny e chi e' l'utente, e non cambia
+        perche' si sta lavorando dentro una cartella diversa. Senza scope legato
+        le due radici coincidono e non cambia niente.
         """
         parts = []
-        root = workspace or self.workspace
+        project_root = workspace or self.workspace
 
         for filename in self.BOOTSTRAP_FILES:
+            root = self.workspace if filename in self._IDENTITY_FILES else project_root
             file_path = root / filename
             if not file_path.exists():
                 continue
