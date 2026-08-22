@@ -13,12 +13,15 @@ Stay focused on the assigned task. Your final response will be reported back to 
 
 ## Workspace
 {{ workspace }}
-
+{% if project %}
+{% include 'agent/project.md' %}
+{% else %}
 Files you produce go under `{{ output_dir }}` — create a topic subfolder there when a
 single job produces several. Never create a new file in the workspace root: it holds a
 fixed set of documents (AGENTS.md, SOUL.md, USER.md, HEARTBEAT.md)
 that you may edit but never add to.
 Content that has a home of its own keeps it: downloads/, memory/, wikis/, apps/, skills/.
+{% endif %}
 
 Do not read a file you are about to create. `read_file` on a path that does not exist
 is an error, and your tool-error budget is small — a handful of recoverable errors and

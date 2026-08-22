@@ -19,7 +19,7 @@ leaves the rest byte-identical, and reports what it added.
 
 Creates:
     <wiki-root>/
-    ├── CLAUDE.md          (schema template)
+    ├── AGENTS.md          (this wiki's scope and notes)
     ├── log/
     │   └── YYYYMMDD.md    (first day's log with scaffold entry)
     ├── audit/
@@ -93,18 +93,22 @@ def scaffold(root: str, title: str) -> list[str]:
         if _write(root, keep, ""):
             created.append(keep)
 
-    # CLAUDE.md
-    claude_md = f"""---
+    # AGENTS.md — le istruzioni di *questa* wiki, e basta.
+    #
+    # Fino al 22/08 qui c'era uno schema da 2,5 kB: convenzioni di naming,
+    # mermaid e KaTeX, policy sui raw, le cinque operazioni. Roba vera, ma
+    # identica in ogni wiki e ricopiata in ognuna — quindi ferma alla versione
+    # in cui la wiki e' stata creata. Ora la dice `agent/project.md`, che sta nel
+    # prompt di sistema e si riscrive a ogni avvio. Qui resta solo cio' che di
+    # questa wiki e' vero e di nessun'altra.
+    #
+    # `summary:` e la riga "What this wiki covers:" non sono decorazione: sono
+    # esattamente cio' che `read_wiki_scope` cerca per comporre `_index.md`.
+    agents_md = f"""---
 summary: <one-line scope — shown next to this wiki in wikis/_index.md>
 ---
 
-# {title} Knowledge Base
-
-> Schema document — read at the start of every session together with this wiki's
-> `wiki/index.md` and the workspace `../_index.md` registry.
-> Update after every major compile, ingest batch, or structural change.
-> This wiki is isolated: never wikilink into another wiki. Cross-wiki references
-> go through `wikis/_index.md` only.
+# {title}
 
 ## Scope
 
@@ -114,67 +118,23 @@ What this wiki covers:
 What this wiki deliberately excludes:
 - <describe out-of-scope areas>
 
-## Operations
+## Notes
 
-This wiki follows the llm-wiki skill's five operations: `compile`, `ingest`, `query`, `lint`, `audit`.
-Every operation appends an entry to `log/YYYYMMDD.md`.
-
-## Naming conventions
-
-- **Concept pages** (`wiki/concepts/`): Title Case noun phrases.
-- **Folder-split concepts** (`wiki/concepts/<topic>/`): used when a topic exceeds ~1200 words. Contains `index.md` + one file per aspect.
-- **Entity pages** (`wiki/entities/`): Proper names.
-- **Summary pages** (`wiki/summaries/`): kebab-case source slug.
-
-All pages require YAML frontmatter: `title`, `type`, `created`, `updated`, `sources`, `tags`.
-
-### Diagrams and formulas
-- All diagrams are **mermaid**. No ASCII art.
-- All formulas are **KaTeX** (inline `$...$` or block `$$...$$`).
-
-### Raw file policy
-- Small text sources → copy into `raw/<subfolder>/`.
-- Large binaries → create a pointer file at `raw/refs/<slug>.md` with `kind: ref` and `external_path` fields. Do not copy the binary.
-
-## Current articles
-
-*None yet — update this list after every compile.*
-
-### Concepts
-*(none)*
-
-### Entities
-*(none)*
-
-### Summaries
-*(none)*
-
-## Open research questions
-
-- <What do you want to understand better?>
-- <What are the key open questions in this domain?>
-
-## Research gaps
-
-Sources to ingest:
-- [ ] <URL or paper title> — why it's relevant
-
-## Audit backlog
-
-*(none — refresh with `python_exec(working_dir="<workspace>/skills/llm-wiki/scripts", code="import audit_review; audit_review.main('<wiki-root>', 'open')")`)*
-
-## Notes for the LLM
-
-- Language: <en | zh | bilingual>
-- Tone: <neutral, academic, conversational, ...>
-- Depth: <survey-level | deep technical>
-- Handling contradictions: state both, cite each, add to Open Research Questions.
+<Anything true of this wiki and no other: sources to prefer, conventions that
+depart from the default, open questions. The folder layout and the five
+operations are not written here — the agent already has them.>
 """
-    if _write(root, "CLAUDE.md", claude_md):
-        created.append("CLAUDE.md")
-        print("✓ Created CLAUDE.md")
+    # Non lo si crea accanto a un `CLAUDE.md`: questo script gira anche in
+    # top-up su wiki vere, e le sette che esistevano prima del rinomino il
+    # proprio file ce l'hanno gia' con quel nome. Aggiungerne un secondo alla
+    # radice produrrebbe di proposito il caso che i lettori sanno solo
+    # disambiguare (`AGENTS.md` vince) e non risolvere. Il rinomino e' il passo 7.
+    schema_name = "CLAUDE.md" if os.path.isfile(os.path.join(root, "CLAUDE.md")) else "AGENTS.md"
+    if schema_name == "AGENTS.md" and _write(root, "AGENTS.md", agents_md):
+        created.append("AGENTS.md")
+        print("✓ Created AGENTS.md")
     else:
-        print("· CLAUDE.md already there — left as it is")
+        print(f"· {schema_name} already there — left as it is")
 
     # wiki/index.md
     index_md = f"""# Index — {title}
@@ -221,7 +181,7 @@ Sources to ingest:
             headline = f"Initialized {title} knowledge base"
             bullets = (
                 "- Created directory tree (raw/, wiki/, log/, audit/, outputs/)\n"
-                "- Created CLAUDE.md schema template\n"
+                f"- Created {schema_name} with the wiki's scope\n"
                 "- Created wiki/index.md category skeleton\n"
             )
         log_md = f"# {today_iso}\n\n## [{now_hm}] scaffold | {headline}\n{bullets}"
@@ -249,8 +209,8 @@ Sources to ingest:
         added = "".join(f"  + {c}\n" for c in created)
         print(f"\n✅ Wiki {verb} at: {root}/\n\nAdded:\n{added}")
         if not root_existed:
-            print("""Next steps:
-  1. Fill in CLAUDE.md — define scope and naming conventions
+            print(f"""Next steps:
+  1. Fill in {schema_name} — define what this wiki covers and what it excludes
   2. Add sources to raw/ (copy articles/papers/notes into raw/<subfolder>/)
   3. Run ingest: tell your LLM agent "ingest raw/<file>.md"
   4. Ask questions: "what does the wiki say about X?"

@@ -77,7 +77,7 @@ from jenny.session.goal_state import (
     runner_wall_llm_timeout_s,
     sustained_goal_active,
 )
-from jenny.session.keys import session_key_for_channel
+from jenny.session.keys import is_project_session_key, session_key_for_channel
 from jenny.session.manager import Session, SessionManager
 from jenny.session.turn_visibility import (
     TurnVisibility,
@@ -87,6 +87,8 @@ from jenny.session.turn_visibility import (
 )
 from jenny.utils.helpers import CONTEXT_BUDGET_SAFETY_BUFFER, reserved_output_tokens
 from jenny.utils.llm_runtime import LLMRuntime
+from jenny.utils.prompt_templates import render_template
+from jenny.utils.wiki_paths import wiki_schema_file
 
 if TYPE_CHECKING:
     from jenny.config.schema import (
@@ -124,6 +126,12 @@ def _new_turn_id(session_key: str) -> str:
 # rimetterebbe la CPU a dormire proprio dove serve; e comunque finita, perche'
 # un wakelock eterno scarica la batteria senza dare spiegazioni.
 _TURN_WAKELOCK_TIMEOUT_S = 1800.0
+
+# ``/init`` non e' nel router (v. ``_expand_project_init``): il letterale sta
+# qui, e la voce che lo fa comparire in ``/help`` sta in
+# ``command/builtin.py::BUILTIN_COMMAND_SPECS``. Sono due posti, ma il secondo
+# e' solo una riga di documentazione — l'unico che decide e' questo.
+PROJECT_INIT_COMMAND = "/init"
 
 
 class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, LoopTasksMixin):
@@ -655,6 +663,61 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             logger.warning("Command '{}' matched but dispatch returned None", raw)
 
 
+    async def _expand_project_init(
+        self, msg: InboundMessage, key: str
+    ) -> InboundMessage | None:
+        """``/init`` diventa un turno normale, o un rifiuto. ``None`` = gia' risposto.
+
+        **Espansione e non comando del router.** Un handler del router
+        *risponde* e basta: non fa girare l'agente, che qui e' tutto il punto —
+        leggere la wiki e scrivere il suo ``AGENTS.md``. Espandendo il messaggio
+        prima del dispatch, il turno eredita dal passo 1 lo scope e il confine di
+        scrittura e dal 2.1 il blocco, senza una seconda strada da tenere
+        allineata.
+
+        Quel che si *vede* in chat resta ``/init``: la trascrizione la scrive il
+        canale (``channels/websocket.py``) prima del bus, e questa sostituzione
+        avviene dopo. Nella sessione — quel che Jenny rilegge — resta invece
+        l'espansione, che e' giusto: e' quello che ha davvero visto.
+        """
+        if not is_project_session_key(key):
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=(
+                    "`/init` only works inside a project — it writes that project's "
+                    "AGENTS.md. Pick one from the chip above the message box first."
+                ),
+                metadata={**dict(msg.metadata or {}), "render_as": "text"},
+            ))
+            return None
+        try:
+            # Il nome del file **si calcola**, non si spera: su una wiki che ha
+            # ancora `CLAUDE.md` il modello, lasciato a se stesso, constata che
+            # `AGENTS.md` non c'e' e ne crea un secondo accanto — visto sul
+            # telefono il 22/08, e con due file alla radice il lettore puo' solo
+            # sceglierne uno e avvisare. Qui invece la destinazione arriva
+            # decisa dallo stesso codice che poi la legge.
+            root = self.workspace_scopes.for_project(key).project_path
+            existing = wiki_schema_file(root)
+            prompt = render_template(
+                "agent/project_init.md",
+                instructions_path=str(existing or root / "AGENTS.md"),
+            )
+        except Exception as exc:
+            # Workspace sincronizzato da una versione precedente, o template
+            # illeggibile. Meglio dirlo che mandare "/init" al modello come
+            # testo: lo interpreterebbe a caso, e scriverebbe comunque un file.
+            logger.warning("could not render agent/project_init.md: {}", exc)
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="`/init` is unavailable: its prompt template could not be loaded.",
+                metadata={**dict(msg.metadata or {}), "render_as": "text"},
+            ))
+            return None
+        return dataclasses.replace(msg, content=prompt)
+
     def _effective_session_key(self, msg: InboundMessage) -> str:
         """Return the session key used for task routing and mid-turn injections.
 
@@ -1012,6 +1075,12 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
 
             raw = msg.content.strip()
             effective_key = self._effective_session_key(msg)
+            if raw == PROJECT_INIT_COMMAND or raw.startswith(f"{PROJECT_INIT_COMMAND} "):
+                expanded = await self._expand_project_init(msg, effective_key)
+                if expanded is None:
+                    continue
+                msg = expanded
+                raw = msg.content.strip()
             if self.commands.is_priority(raw):
                 await self._dispatch_command_inline(
                     msg, effective_key, raw,

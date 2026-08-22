@@ -39,7 +39,12 @@ def registry_block(wikis_dir: Path) -> str:
 
 
 def make_wiki(wikis_dir: Path, name: str, claude_md: str) -> Path:
-    """Minimal wiki (CLAUDE.md + wiki/index.md) without going through scaffold."""
+    """Minimal wiki (CLAUDE.md + wiki/index.md) without going through scaffold.
+
+    Deliberately the *old* name: this fixture stands for the seven wikis that
+    already existed when the file was renamed to AGENTS.md, and reading those
+    is exactly what must keep working.
+    """
     root = wikis_dir / name
     (root / "wiki").mkdir(parents=True, exist_ok=True)
     (root / "CLAUDE.md").write_text(claude_md, encoding="utf-8")
@@ -97,7 +102,7 @@ class ScaffoldAndRegistry(unittest.TestCase):
             quiet(scaffold_mod.scaffold, str(wikis / "loops"), "Loops")
 
             self.assertTrue((wikis / "main" / "wiki" / "index.md").is_file())
-            self.assertTrue((wikis / "main" / "CLAUDE.md").is_file())
+            self.assertTrue((wikis / "main" / "AGENTS.md").is_file())
             self.assertTrue((wikis / "_index.md").is_file())
 
             block = registry_block(wikis)

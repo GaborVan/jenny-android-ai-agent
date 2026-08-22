@@ -16,6 +16,7 @@ from jenny.utils.wiki_paths import (
     iter_wiki_sources,
     read_wiki_scope,
     wiki_fingerprint,
+    wiki_schema_file,
 )
 
 
@@ -87,10 +88,16 @@ class TestScope:
         assert read_wiki_scope(root) == "(no scope set)"
 
     def test_missing_schema_file_is_reported(self, tmp_path):
+        """Il nome nel messaggio e' quello che una wiki dovrebbe avere *oggi*.
+
+        Dal 22/08 il file di istruzioni si chiama ``AGENTS.md``; ``CLAUDE.md``
+        resta letto nelle sette wiki che l'avevano gia' (passo 2.3), ma non e'
+        piu' il nome da suggerire a chi non ce l'ha.
+        """
         root = _make_wiki(tmp_path / "wikis", "main")
         (root / "CLAUDE.md").unlink()
 
-        assert read_wiki_scope(root) == "(no CLAUDE.md)"
+        assert read_wiki_scope(root) == "(no AGENTS.md)"
 
 
 class TestSources:
@@ -167,3 +174,54 @@ class TestFingerprint:
         policy.write_text("only plants with a nickname\n", encoding="utf-8")
 
         assert wiki_fingerprint(wikis, extra_paths=(policy,)) != before
+
+
+class TestQualeFileDiIstruzioni:
+    """Passo 2.3: ``AGENTS.md``, e se non c'e' ``CLAUDE.md``.
+
+    Le sette wiki che esistevano prima del rinomino hanno il vecchio nome scritto
+    a mano, e finche' il passo 7 non le migra e' l'unico posto in cui e' scritto
+    di cosa si occupano. Le nuove nascono col nuovo. Chi legge accetta tutt'e
+    due; chi scrive, solo il nuovo.
+    """
+
+    def test_agents_vince_su_claude(self, tmp_path):
+        root = _make_wiki(tmp_path / "wikis", "main")
+        (root / "AGENTS.md").write_text("---\nsummary: il nuovo\n---\n", encoding="utf-8")
+        (root / "CLAUDE.md").write_text("---\nsummary: il vecchio\n---\n", encoding="utf-8")
+
+        assert wiki_schema_file(root).name == "AGENTS.md"
+        assert read_wiki_scope(root) == "il nuovo"
+
+    def test_claude_resta_leggibile_da_solo(self, tmp_path):
+        root = _make_wiki(tmp_path / "wikis", "main")
+        (root / "CLAUDE.md").write_text("---\nsummary: il vecchio\n---\n", encoding="utf-8")
+
+        assert wiki_schema_file(root).name == "CLAUDE.md"
+        assert read_wiki_scope(root) == "il vecchio"
+
+    def test_senza_nessuno_dei_due_e_none(self, tmp_path):
+        root = _make_wiki(tmp_path / "wikis", "main")
+        (root / "CLAUDE.md").unlink()
+
+        assert wiki_schema_file(root) is None
+
+    def test_limpronta_vede_agents(self, tmp_path):
+        """Il punto che senza ripiego sarebbe rimasto muto.
+
+        Se ``iter_wiki_sources`` guardasse solo il vecchio nome, una wiki che
+        tiene le istruzioni in ``AGENTS.md`` non farebbe mai cambiare l'impronta:
+        la modifichi e Atlas non se ne accorge, senza un errore e senza un log.
+        """
+        wikis = tmp_path / "wikis"
+        root = _make_wiki(wikis, "main", pages={"index.md": "# Index"})
+        (root / "CLAUDE.md").unlink()
+        agents = root / "AGENTS.md"
+        agents.write_text("---\nsummary: prima\n---\n", encoding="utf-8")
+
+        names = {p.relative_to(wikis).as_posix() for p in iter_wiki_sources(wikis)}
+        assert "main/AGENTS.md" in names
+
+        before = wiki_fingerprint(wikis)
+        agents.write_text("---\nsummary: dopo\n---\n", encoding="utf-8")
+        assert wiki_fingerprint(wikis) != before

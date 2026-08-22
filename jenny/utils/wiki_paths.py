@@ -24,7 +24,21 @@ _FRONTMATTER_RE = re.compile(r"^---\n([\s\S]*?)\n---\n?")
 _FINGERPRINT_SKIP_DIRS = frozenset({"log", "audit"})
 
 _WIKI_INDEX_FILENAME = "_index.md"
-_WIKI_SCHEMA_FILENAME = "CLAUDE.md"
+# Il file di istruzioni di una wiki, **in ordine di precedenza**. Le wiki nuove
+# nascono con ``AGENTS.md`` — che e' anche il nome che ``ContextBuilder`` cerca
+# per i file di bootstrap — ma le sette che esistevano prima hanno un
+# ``CLAUDE.md`` scritto a mano, e finche' il passo 7 non le rinomina vanno
+# lette dov'e'. Tutti e due presenti: vince il primo, e chi legge lo dice.
+_WIKI_SCHEMA_FILENAMES = ("AGENTS.md", "CLAUDE.md")
+
+
+def wiki_schema_file(wiki_root: Path) -> Path | None:
+    """Il file di istruzioni di una wiki, o ``None`` se non ne ha nessuno."""
+    for name in _WIKI_SCHEMA_FILENAMES:
+        candidate = wiki_root / name
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 # ── Frontmatter ──────────────────────────────────────────────────────────────
@@ -81,6 +95,18 @@ def strip_frontmatter(text: str) -> tuple[dict[str, Any] | None, str, str | None
 # ── Discovery ────────────────────────────────────────────────────────────────
 
 
+def is_wiki_root(path: Path) -> bool:
+    """Vero se ``path`` e' la radice di una wiki, cioe' contiene ``wiki/``.
+
+    E' la definizione che il picker usa gia' via :func:`discover_wikis`, estratta
+    perche' ora la chiede anche il prompt: ``agent/project.md`` si rende solo
+    quando la cartella del turno e' una wiki, e la stessa domanda gliela fa il
+    subagent (che ha la cartella ma non la chiave di sessione). Un secondo modo
+    di dire "questa e' una wiki" sarebbe un secondo modo di sbagliarlo.
+    """
+    return (path / "wiki").is_dir()
+
+
 def discover_wikis(wikis_dir: Path) -> dict[str, Path]:
     """Scan wikis_dir for subdirectories containing a wiki/ folder.
 
@@ -90,10 +116,8 @@ def discover_wikis(wikis_dir: Path) -> dict[str, Path]:
         return {}
     result: dict[str, Path] = {}
     for child in sorted(wikis_dir.iterdir()):
-        if child.is_dir():
-            wiki_sub = child / "wiki"
-            if wiki_sub.is_dir():
-                result[child.name] = wiki_sub
+        if child.is_dir() and is_wiki_root(child):
+            result[child.name] = child / "wiki"
     return result
 
 
@@ -109,7 +133,8 @@ def discover_wiki_roots(wikis_dir: Path) -> dict[str, Path]:
 def read_wiki_scope(wiki_root: Path) -> str:
     """Riga di scope di una wiki, nello stesso ordine di priorità del registry.
 
-    1. ``summary:`` (o ``scope:``) nel frontmatter di ``CLAUDE.md``.
+    1. ``summary:`` (o ``scope:``) nel frontmatter del file di istruzioni
+       (``AGENTS.md``, o ``CLAUDE.md`` nelle wiki più vecchie).
     2. Primo bullet reale sotto "What this wiki covers" nella sezione ``## Scope``.
     3. Un fallback neutro, così l'output resta deterministico.
 
@@ -118,13 +143,13 @@ def read_wiki_scope(wiki_root: Path) -> str:
     importiamo: quello script è un checkout della skill, destinato a essere
     copiato nel workspace e modificato dall'utente, non una libreria del package.
     """
-    claude = wiki_root / _WIKI_SCHEMA_FILENAME
-    if not claude.is_file():
-        return "(no CLAUDE.md)"
+    schema = wiki_schema_file(wiki_root)
+    if schema is None:
+        return "(no AGENTS.md)"
     try:
-        text = claude.read_text(encoding="utf-8")
+        text = schema.read_text(encoding="utf-8")
     except OSError:
-        return "(unreadable CLAUDE.md)"
+        return f"(unreadable {schema.name})"
 
     explicit = _frontmatter_scalar(text, "summary", "scope")
     if explicit:
@@ -177,8 +202,8 @@ def _frontmatter_scalar(text: str, *keys: str) -> str | None:
 def iter_wiki_sources(wikis_dir: Path) -> Iterator[Path]:
     """I ``.md`` che definiscono il contenuto delle wiki, in ordine stabile.
 
-    Sono il registry ``_index.md``, il ``CLAUDE.md`` di ogni wiki e tutto ciò
-    che sta sotto la sua ``wiki/``. Fuori restano ``log/``, ``audit/`` e i
+    Sono il registry ``_index.md``, il file di istruzioni di ogni wiki
+    (``AGENTS.md`` o ``CLAUDE.md``) e tutto ciò che sta sotto la sua ``wiki/``. Fuori restano ``log/``, ``audit/`` e i
     file nascosti (vedi :data:`_FINGERPRINT_SKIP_DIRS`).
     """
     if not wikis_dir.is_dir():
@@ -187,8 +212,10 @@ def iter_wiki_sources(wikis_dir: Path) -> Iterator[Path]:
     if index.is_file():
         yield index
     for name, root in discover_wiki_roots(wikis_dir).items():
-        schema = root / _WIKI_SCHEMA_FILENAME
-        if schema.is_file():
+        # Senza il ripiego, una wiki che tiene le istruzioni in ``AGENTS.md``
+        # resta fuori dall'impronta: la modifichi e Atlas non se ne accorge mai.
+        schema = wiki_schema_file(root)
+        if schema is not None:
             yield schema
         pages = root / "wiki"
         for path in sorted(pages.rglob("*.md")):

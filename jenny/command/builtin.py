@@ -102,6 +102,12 @@ BUILTIN_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
         "puzzle",
     ),
     BuiltinCommandSpec(
+        "/init",
+        "Write this project's instructions",
+        "Inside a project: read the wiki and write its AGENTS.md.",
+        "file-pen",
+    ),
+    BuiltinCommandSpec(
         "/help",
         "Show help",
         "List available slash commands.",

@@ -1,6 +1,6 @@
-# CLAUDE.md Schema Guide
+# AGENTS.md Schema Guide
 
-`CLAUDE.md` (also read as `AGENTS.md` by some tools) is the **schema document** for a single wiki (`wikis/<name>/CLAUDE.md` — not to be confused with the repo-root `CLAUDE.md`). It tells the LLM agent the scope, conventions, current state, and open questions. A session starts by reading `wikis/_index.md` to pick the target wiki, then this schema together with that wiki's `wiki/index.md`.
+`AGENTS.md` is the **instructions file** for a single wiki (`wikis/<name>/AGENTS.md` — not to be confused with the workspace-root `AGENTS.md`). Wikis created before the rename hold it as `CLAUDE.md`; every reader accepts both, `AGENTS.md` wins when a wiki has both, and nothing new is written under the old name. It tells the LLM agent the scope, conventions, current state, and open questions. A session starts by reading `wikis/_index.md` to pick the target wiki, then this schema together with that wiki's `wiki/index.md`.
 
 ## Why it matters
 

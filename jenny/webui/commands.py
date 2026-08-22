@@ -34,7 +34,7 @@ from loguru import logger
 # messaggio, non come un troncamento silenzioso del trasporto.
 MAX_WRITE_BYTES = 1_000_000
 
-# La riga di scope sta nel frontmatter di `CLAUDE.md`, che e' YAML: una riga
+# La riga di scope sta nel frontmatter dell'`AGENTS.md`, che e' YAML: una riga
 # sola, e corta abbastanza da stare nel registro accanto al nome della wiki.
 MAX_PROJECT_SEED_CHARS = 500
 

@@ -81,7 +81,7 @@ This is a one-time manual operation; the skill doesn't automate it.
 ## What not to put in the log
 
 - **Content**: don't copy-paste chunks of the article you wrote into the log. The log is a pointer, not a diary.
-- **Long rationale**: put design decisions and rationale in `CLAUDE.md` "Notes for the LLM", not in the log.
+- **Long rationale**: put design decisions and rationale in `AGENTS.md` "Notes for the LLM", not in the log.
 - **Secrets / credentials**: never.
 - **Audit file bodies**: only the audit ID and a one-liner. The audit file itself already has the full content.
 

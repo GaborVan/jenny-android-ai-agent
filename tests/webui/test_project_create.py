@@ -3,7 +3,7 @@
 Prima di questo lavoro il chip faceva due cose sbagliate, entrambe silenziose:
 elencava `workspace/projects/`, una cartella che non esiste (i progetti **sono**
 le wiki, `roadmap/project-sessions.md`), e "Nuovo progetto" chiamava
-`/api/workspace/mkdir` — cartella nuda, nessun albero, nessun `CLAUDE.md`,
+`/api/workspace/mkdir` — cartella nuda, nessun albero, nessun `AGENTS.md`,
 nessuna voce nel registro. Una wiki rotta che sembrava un progetto.
 
 Il fixture monta lo scaffolder **vero** della skill nel workspace, perche' e'
@@ -65,7 +65,7 @@ class TestUnProgettoNasceCompleto:
         result = await _create(ctx, name="patreon-creator", seed="Come si cresce su Patreon.")
 
         root = workspace / "wikis" / "patreon-creator"
-        for rel in ("CLAUDE.md", "wiki/index.md", "audit/.gitkeep"):
+        for rel in ("AGENTS.md", "wiki/index.md", "audit/.gitkeep"):
             assert (root / rel).is_file(), rel
         for rel in ("raw/articles", "raw/papers", "raw/notes", "raw/refs", "outputs/queries"):
             assert (root / rel).is_dir(), rel
@@ -73,7 +73,7 @@ class TestUnProgettoNasceCompleto:
         assert result["seeded"] is True
 
         # La riga dell'utente sta dove il registro la va a prendere...
-        schema = (root / "CLAUDE.md").read_text(encoding="utf-8")
+        schema = (root / "AGENTS.md").read_text(encoding="utf-8")
         assert "summary: Come si cresce su Patreon." in schema
         assert "- Come si cresce su Patreon." in schema
         assert "<one-line scope" not in schema
@@ -85,8 +85,8 @@ class TestUnProgettoNasceCompleto:
     async def test_il_titolo_viene_dal_nome_della_cartella(self, ctx, workspace):
         await _create(ctx, name="patreon-creator", seed="x")
 
-        schema = (workspace / "wikis" / "patreon-creator" / "CLAUDE.md").read_text("utf-8")
-        assert "# Patreon Creator Knowledge Base" in schema
+        schema = (workspace / "wikis" / "patreon-creator" / "AGENTS.md").read_text("utf-8")
+        assert "# Patreon Creator" in schema
 
     async def test_e_vuoto_di_contenuto(self, ctx, workspace):
         """"Nuovo" costruisce lo scaffolding, non un primo articolo."""
@@ -155,7 +155,7 @@ class TestIlGateStaSulServer:
         a-capo di troppo non deve costare un errore."""
         await _create(ctx, name="multi", seed="prima riga\nseconda   riga\n")
 
-        schema = (workspace / "wikis" / "multi" / "CLAUDE.md").read_text("utf-8")
+        schema = (workspace / "wikis" / "multi" / "AGENTS.md").read_text("utf-8")
         assert "summary: prima riga seconda riga\n" in schema
 
     async def test_dice_chiaro_quando_manca_lo_scaffolder(self, tmp_path: Path):

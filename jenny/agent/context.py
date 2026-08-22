@@ -7,10 +7,13 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from loguru import logger
+
 from jenny.agent.memory import MemoryStore
 from jenny.agent.skills import SkillsLoader
 from jenny.config.paths import get_output_path
 from jenny.session.goal_state import goal_state_runtime_lines
+from jenny.session.keys import is_project_session_key
 from jenny.utils.android_assets import (
     _RETIRED_TEMPLATE_DIGESTS,
     normalized_template_text,
@@ -24,6 +27,7 @@ from jenny.utils.helpers import (
     truncate_text_to_tokens,
 )
 from jenny.utils.prompt_templates import render_template
+from jenny.utils.wiki_paths import is_wiki_root, wiki_schema_file
 
 # Fallback quando ContextBuilder è costruito senza config (test, tool isolati):
 # stesso valore del default di ``AtlasConfig.max_context_tokens``.
@@ -170,6 +174,31 @@ class ContextBuilder:
         root = workspace or self.workspace
         parts = [self._get_identity(channel=channel, workspace=root, orchestrating=orchestrating)]
 
+        # La cartella del turno e' una wiki: allora e' *quella* la pianta che
+        # vale, non le convenzioni del workspace.
+        #
+        # La domanda e' sulla **cartella** e non sulla sessione apposta: chi ha
+        # bisogno di questa risposta e' anche il subagent, che riceve la radice
+        # dal ``WorkspaceScope`` del turno e la chiave di sessione non ce l'ha
+        # mai. Ed e' il subagent ad aver scritto, il 21/08, il file di prova in
+        # ``wikis/<nome>/output/`` — obbedendo alla lettera al suo prompt, che
+        # gli dava le regole del workspace applicate a una cartella di progetto.
+        # La rubrica qui sotto invece si chiude sulla *sessione*, perche' quella
+        # e' una domanda su chi sta parlando, non su dove si lavora.
+        in_project = is_wiki_root(root)
+        if in_project:
+            with suppress(Exception):  # workspace sincronizzato da una versione precedente
+                parts.append(render_template(
+                    "agent/project.md",
+                    project_path=str(_absolute_workspace(root)),
+                ))
+
+        # Il blocco sta **prima** del bootstrap, al contrario di
+        # ``agent/scheduling.md``: li' la prosa di sistema deve vincere su un
+        # ``AGENTS.md`` vecchio, qui deve perdere. L'``AGENTS.md`` di un
+        # progetto e' il posto in cui tu — o Jenny — scrivete come si lavora
+        # *in questo* progetto, e un'eccezione scritta li' non serve a niente se
+        # la regola generale la segue e la sovrascrive.
         bootstrap = self._load_bootstrap_files(root)
         if bootstrap:
             parts.append(bootstrap)
@@ -200,6 +229,14 @@ class ContextBuilder:
             orchestrator=orchestrating,
             has=self._tool_predicate(tool_names),
             output_path=str(get_output_path(_absolute_workspace(root))),
+            # Due sezioni di quel template parlano del workspace come se fosse
+            # sempre la cartella di lavoro: ``output/`` come destinazione di quel
+            # che si produce, e i quattro documenti alla radice. Dentro una wiki
+            # sono due affermazioni false, e la prima e' quella che ha spedito il
+            # file di prova in ``wikis/<nome>/output/``. La pianta giusta la dice
+            # ``agent/project.md``, quindi qui quelle due sezioni si spengono
+            # invece di essere riscritte: un solo proprietario per regola.
+            project=in_project,
         ))
 
         # Dove va un lavoro ricorrente: heartbeat, `reminder` o `monitor`. Era
@@ -241,9 +278,21 @@ class ContextBuilder:
         memory = self.memory.get_memory_context()
         if memory and not self._is_template_content(self.memory.read_memory(), "memory/MEMORY.md"):
             memory_sections.append(memory)
-        wiki_directory = self.memory.get_wiki_memory_context(self.wiki_directory_max_tokens)
-        if wiki_directory:
-            memory_sections.append(wiki_directory)
+        # La rubrica di Atlas elenca **tutte** le wiki, piu' persone, progetti e
+        # piante. Nella chat personale e' portante — un indice che nessuno sa
+        # esistere non viene mai aperto — ma dentro un progetto risponde a una
+        # domanda gia' risposta: il progetto l'hai scelto tu prima che il turno
+        # cominciasse. Peggio, elenca otto posti in cui la scrittura rimbalza
+        # (v. il confine del passo 1) e ci porta dentro la vita privata.
+        #
+        # Chiusa sulla **sessione** e non sulla cartella: la domanda e' "chi sta
+        # parlando", non "dove si lavora". ``MEMORY.md`` qui sopra resta invece
+        # in tutti e due i casi, ed e' la stessa riga di confine dell'1.2 — chi
+        # sei viaggia, dove altro lavori no.
+        if not is_project_session_key(session_key or ""):
+            wiki_directory = self.memory.get_wiki_memory_context(self.wiki_directory_max_tokens)
+            if wiki_directory:
+                memory_sections.append(wiki_directory)
         # Terza sottosezione, e la piu' economica: una riga che dice che il tier
         # freddo esiste. Senza, l'archivio della fase 2 sarebbe indistinguibile
         # da una cancellazione dal punto di vista di chi deve rispondere — ed e'
@@ -360,7 +409,18 @@ class ContextBuilder:
         workspace: Path | None = None,
         orchestrating: bool | None = None,
     ) -> str:
-        """Get the core identity section."""
+        """Get the core identity section.
+
+        **Due radici, come in :meth:`_load_bootstrap_files`.** ``workspace_path``
+        e' la cartella del turno — quella del progetto, quando la sessione ne ha
+        uno legato — ma ``memory/``, ``history.jsonl`` e ``skills/`` stanno
+        nell'installazione e basta: composti su ``workspace_path`` erano tre
+        percorsi **falsi** nelle prime dieci righe del prompt di ogni turno di
+        progetto (``.../wikis/<nome>/memory/MEMORY.md``, ``.../wikis/<nome>/skills``).
+        Era il resto del lavoro dell'1.2, che aveva sdoppiato la radice dei file
+        di bootstrap e non questa. Fuori da un progetto le due radici coincidono
+        e il prompt resta byte-identico.
+        """
         root = workspace or self.workspace
         workspace_path = str(_absolute_workspace(root))
         runtime = f"Android, Python {platform.python_version()}"
@@ -368,6 +428,7 @@ class ContextBuilder:
         return render_template(
             "agent/identity.md",
             workspace_path=workspace_path,
+            install_path=str(_absolute_workspace(self.workspace)),
             runtime=runtime,
             platform_policy=render_template("agent/platform_policy.md"),
             channel=channel or "",
@@ -414,10 +475,20 @@ class ContextBuilder:
         project_root = workspace or self.workspace
 
         for filename in self.BOOTSTRAP_FILES:
-            root = self.workspace if filename in self._IDENTITY_FILES else project_root
-            file_path = root / filename
-            if not file_path.exists():
+            # Il ramo si sceglie sul **nome**, non sulla radice: senza uno scope
+            # legato le due radici sono lo stesso oggetto, e una guardia
+            # sull'identita' del path mandava anche ``SOUL.md`` e ``USER.md``
+            # dentro la ricerca del file di istruzioni — cioe' via dal prompt.
+            if filename in self._IDENTITY_FILES:
+                file_path = self.workspace / filename
+            else:
+                file_path = self._instructions_file(project_root)
+            if file_path is None or not file_path.exists():
                 continue
+            # Il nome vero del file letto, che dentro una wiki puo' essere
+            # ``CLAUDE.md``: sotto un nome che sul disco non c'e', ogni ``edit``
+            # che il modello prova manca il bersaglio.
+            filename = file_path.name
             content = file_path.read_text(encoding="utf-8")
             if not content.strip():
                 # File esistente ma senza contenuto: un heading con sotto il
@@ -444,6 +515,33 @@ class ContextBuilder:
             parts.append(f"## {filename}\n\n{self._BOOTSTRAP_TEMPLATE_NOTICE}\n\n{content}")
 
         return "\n\n".join(parts) if parts else ""
+
+    def _instructions_file(self, root: Path) -> Path | None:
+        """Il file di istruzioni di ``root``: ``AGENTS.md``, o il vecchio nome.
+
+        Dentro una wiki vale il ripiego su ``CLAUDE.md``, perche' le sette che
+        esistevano prima del rinomino ce l'hanno scritto a mano e finche' il
+        passo 7 non le migra sono l'unico posto in cui e' scritto di cosa si
+        occupa quel progetto. Fuori da una wiki no: la radice
+        dell'installazione, o una cartella ristretta che progetto non e', non
+        devono andare a cercare un file con un altro nome.
+        """
+        agents = root / "AGENTS.md"
+        if not is_wiki_root(root):
+            return agents
+        schema = wiki_schema_file(root)
+        if schema is not None and schema.name == "AGENTS.md":
+            # Precedenza ad ``AGENTS.md``, ma un secondo file alla radice non e'
+            # una scelta di nessuno: qualcuno ha rinominato a meta'. Dirlo, o il
+            # ``CLAUDE.md`` che l'utente continua a modificare resta inerte
+            # senza che niente lo segnali.
+            leftover = next((n for n in ("CLAUDE.md",) if (root / n).is_file()), None)
+            if leftover:
+                logger.warning(
+                    "{}: ci sono sia AGENTS.md sia {} — vince AGENTS.md, l'altro non entra "
+                    "nel prompt", root, leftover,
+                )
+        return schema
 
     @staticmethod
     def _is_template_content(content: str, template_path: str) -> bool:

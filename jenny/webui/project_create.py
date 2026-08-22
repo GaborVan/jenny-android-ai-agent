@@ -4,7 +4,7 @@
 `projects/` separata, quindi "nuovo progetto" vuol dire scaffoldare
 `wikis/<nome>/` e registrarlo in `wikis/_index.md`. Prima di questo modulo il
 chip creava una cartella nuda con `/api/workspace/mkdir`: nessun albero, nessun
-`CLAUDE.md`, nessuna voce nel registro — una wiki rotta che sembrava un
+file di istruzioni, nessuna voce nel registro — una wiki rotta che sembrava un
 progetto.
 
 **Lo scaffolder e' quello della skill, non una copia.** `scaffold.py` vive in
@@ -18,7 +18,7 @@ della skill. Lo carichiamo come fa il builtin `wiki_scaffold` di `python_exec`
 tu qualcosa, sennò la chat è ferma"*: senza una riga di scope il primo turno non
 ha su cosa appoggiarsi, e uno scope indovinato dall'agente e' peggio di nessuno
 scope, perche' tutto quel che viene archiviato dopo lo eredita. Finisce nel
-`summary:` del `CLAUDE.md`, che e' il campo da cui `reindex_wikis` costruisce la
+`summary:` dell'`AGENTS.md`, che e' il campo da cui `reindex_wikis` costruisce la
 riga del registro.
 """
 
@@ -41,7 +41,10 @@ from loguru import logger
 _SUMMARY_PLACEHOLDER = "<one-line scope — shown next to this wiki in wikis/_index.md>"
 _SCOPE_PLACEHOLDER = "- <describe the topic area>"
 
-_SCHEMA_FILENAME = "CLAUDE.md"
+# Il nome con cui una wiki *nasce* dal 22/08. Chi legge accetta anche il
+# vecchio (`utils/wiki_paths.py::wiki_schema_file`), ma chi scrive no: un
+# `CLAUDE.md` nuovo sarebbe un file in piu' da migrare al passo 7.
+_SCHEMA_FILENAME = "AGENTS.md"
 
 _TITLE_SPLIT_RE = re.compile(r"[-_.]+")
 
@@ -54,7 +57,7 @@ def project_title(name: str) -> str:
     """Titolo leggibile da un nome di cartella: ``patreon-creator`` -> ``Patreon Creator``.
 
     Il titolo finisce negli H1 del template e non e' un identificatore: l'utente
-    lo puo' correggere nel `CLAUDE.md`, il nome della cartella no (e' l'indirizzo
+    lo puo' correggere nell'`AGENTS.md`, il nome della cartella no (e' l'indirizzo
     della wiki). Per questo lo deriviamo invece di chiederlo: un campo in piu' nel
     dialogo per un dato che si cambia dopo.
     """
@@ -85,7 +88,7 @@ def load_scaffold_script(scripts_dir: Path) -> ModuleType:
 
 
 def _seed_schema_file(wiki_root: Path, seed: str) -> bool:
-    """Mette *seed* nei placeholder del `CLAUDE.md`. True se ne ha scritto almeno uno."""
+    """Mette *seed* nei placeholder dell'`AGENTS.md`. True se ne ha scritto almeno uno."""
     schema = wiki_root / _SCHEMA_FILENAME
     try:
         text = schema.read_text(encoding="utf-8")

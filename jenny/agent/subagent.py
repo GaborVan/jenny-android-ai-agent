@@ -1581,6 +1581,7 @@ class SubagentManager:
         from jenny.agent.context import ContextBuilder
         from jenny.agent.skills import SkillsLoader
         from jenny.config.paths import get_output_path
+        from jenny.utils.wiki_paths import is_wiki_root
 
         time_ctx = ContextBuilder._build_runtime_context(None, None)
         root = workspace or self.workspace
@@ -1598,6 +1599,16 @@ class SubagentManager:
             # ``create=False``: qui il prompt la nomina soltanto, la directory
             # la crea ``sync_workspace_templates`` una volta per avvio.
             output_dir=str(get_output_path(root)),
+            # Un subagent lanciato dentro un progetto riceve la radice del
+            # progetto, e il paragrafo qui sopra gli dava le regole del
+            # workspace applicate a una cartella che non e' il workspace: e'
+            # cosi' che il 21/08 il file di prova e' finito in
+            # ``wikis/<nome>/output/``, cartella che nello scaffold non esiste
+            # nemmeno. La domanda si fa sulla cartella perche' qui la chiave di
+            # sessione non arriva; ``agent/project.md`` e' lo stesso file che
+            # legge l'agente principale, incluso e non ricopiato.
+            project=is_wiki_root(root),
+            project_path=str(root.resolve()),
             skills_summary=skills_summary or "",
             role_section=self._render_role_section(agent_type),
         )

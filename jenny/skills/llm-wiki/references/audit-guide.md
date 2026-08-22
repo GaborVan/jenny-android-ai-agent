@@ -105,7 +105,7 @@ See `SKILL.md` → "The five operations" → `audit` for the canonical version. 
    - Flip `status: open` → `status: resolved` in the frontmatter.
    - Move the file to `audit/resolved/`.
    - Append a `## [HH:MM] audit | resolved <id> — <one-liner>` entry to `log/YYYYMMDD.md`.
-3. If an audit is deferred (e.g., unresolvable contradiction), leave the file in `audit/` and add the question to `CLAUDE.md` "Open research questions" with a reference to the audit id.
+3. If an audit is deferred (e.g., unresolvable contradiction), leave the file in `audit/` and add the question to `AGENTS.md` "Open research questions" with a reference to the audit id.
 
 ## Resolution section format
 
@@ -124,7 +124,7 @@ Fields:
 - Which files were touched (for non-trivial edits).
 - Pointer to the log entry.
 
-For `rejected` audits: explain **why** — most often "out of scope per CLAUDE.md" or "contradicts more authoritative source X". Rejected audits still move to `resolved/` so they're not processed again, but they remain visible in case the scope changes.
+For `rejected` audits: explain **why** — most often "out of scope per AGENTS.md" or "contradicts more authoritative source X". Rejected audits still move to `resolved/` so they're not processed again, but they remain visible in case the scope changes.
 
 ## Tooling
 

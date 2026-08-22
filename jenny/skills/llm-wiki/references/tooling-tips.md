@@ -18,7 +18,7 @@ python_exec(
 - `lint_wiki.lint('<workspace>/wikis/<name>')` / `lint_wiki.lint_workspace('<workspace>/wikis', fix=False)` — health check one wiki, or all of them plus the registry; `fix=True` repairs registry drift.
 - `audit_review.main('<workspace>/wikis/<name>', 'open')` (modes `open`/`resolved`/`all`) / `audit_review.run_workspace('<workspace>/wikis', 'open')` — group audits.
 
-Each wiki's one-line scope in the registry comes from a `summary:` field in its `CLAUDE.md` frontmatter (fallback: the first `## Scope` bullet). Set `summary:` for a clean registry.
+Each wiki's one-line scope in the registry comes from a `summary:` field in its `AGENTS.md` frontmatter (fallback: the first `## Scope` bullet). Set `summary:` for a clean registry.
 
 ## Obsidian setup
 

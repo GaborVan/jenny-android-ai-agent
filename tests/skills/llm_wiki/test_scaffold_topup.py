@@ -4,7 +4,7 @@ Prima di questa modifica `_write()` era un `open(full, "w")` secco, quindi
 rilanciare lo scaffold su una wiki esistente per "aggiungere quel che manca" ne
 azzerava `wiki/index.md` e riscriveva il log del giorno. La fixture centrale qui
 e' modellata sulla deriva misurata sul telefono tra `main/` e `patreon-creator/`:
-la seconda non ha `CLAUDE.md`, ne' `audit/`, ne' `outputs/`, ma ha contenuto vero
+la seconda non ha il file di istruzioni, ne' `audit/`, ne' `outputs/`, ma ha contenuto vero
 in `wiki/index.md` e nel log di oggi.
 
 Gli script della skill non fanno parte del package `jenny` importabile, quindi la
@@ -50,7 +50,7 @@ def _today_log_name() -> str:
 
 @pytest.fixture
 def drifted_wiki(tmp_path: Path) -> Path:
-    """Una wiki vera e incompleta: manca CLAUDE.md, audit/, outputs/."""
+    """Una wiki vera e incompleta: manca il file di istruzioni, audit/, outputs/."""
     root = tmp_path / "wikis" / "patreon-creator"
     (root / "wiki" / "concepts").mkdir(parents=True)
     (root / "raw" / "notes").mkdir(parents=True)
@@ -75,10 +75,10 @@ def test_topup_crea_i_buchi_e_lascia_intatto_il_resto(scaffold, drifted_wiki, ca
     capsys.readouterr()
 
     # Quel che mancava ora c'e'.
-    assert (drifted_wiki / "CLAUDE.md").is_file()
+    assert (drifted_wiki / "AGENTS.md").is_file()
     assert (drifted_wiki / "audit" / "resolved").is_dir()
     assert (drifted_wiki / "outputs" / "queries").is_dir()
-    assert "CLAUDE.md" in created
+    assert "AGENTS.md" in created
 
     # E niente di quel che c'era prima e' cambiato di un byte. Questo assert sta
     # tra il top-up e lo svuotamento di una wiki vera.
@@ -110,7 +110,7 @@ def test_topup_scrive_il_log_di_oggi_se_manca_ed_elenca_quel_che_ha_aggiunto(
     log = (drifted_wiki / "log" / _today_log_name()).read_text(encoding="utf-8")
     assert log.startswith(f"# {date.today().isoformat()}\n")
     assert "scaffold | Topped up Patreon Creator scaffolding" in log
-    assert "- Created CLAUDE.md" in log
+    assert "- Created AGENTS.md" in log
     # Non annuncia di aver creato quel che c'era gia'.
     assert "wiki/index.md" not in log
 
@@ -148,7 +148,7 @@ def test_una_wiki_nuova_nasce_completa(scaffold, tmp_path: Path, capsys):
     capsys.readouterr()
 
     for rel in (
-        "CLAUDE.md",
+        "AGENTS.md",
         "wiki/index.md",
         f"log/{_today_log_name()}",
         "audit/.gitkeep",
@@ -158,7 +158,7 @@ def test_una_wiki_nuova_nasce_completa(scaffold, tmp_path: Path, capsys):
     for rel in ("raw/articles", "raw/papers", "raw/notes", "raw/refs", "outputs/queries"):
         assert (root / rel).is_dir(), rel
     assert (root.parent / "_index.md").is_file()
-    assert "CLAUDE.md" in created
+    assert "AGENTS.md" in created
 
 
 def test_la_voce_di_log_di_una_wiki_nuova_e_quella_di_prima(scaffold, tmp_path: Path, capsys):
@@ -174,6 +174,65 @@ def test_la_voce_di_log_di_una_wiki_nuova_e_quella_di_prima(scaffold, tmp_path: 
     assert "scaffold | Initialized Nuova knowledge base\n" in log
     assert log.endswith(
         "- Created directory tree (raw/, wiki/, log/, audit/, outputs/)\n"
-        "- Created CLAUDE.md schema template\n"
+        "- Created AGENTS.md with the wiki's scope\n"
         "- Created wiki/index.md category skeleton\n"
     )
+
+
+# ── Il rinomino non deve produrre due file (passo 2.4) ────────────────────
+
+
+@pytest.fixture
+def wiki_col_nome_vecchio(tmp_path: Path) -> Path:
+    """Una delle sette di prima: il file di istruzioni si chiama `CLAUDE.md`.
+
+    Incompleta come le altre — le manca `audit/` — cosi' il top-up ha una ragione
+    vera per girarci sopra, che e' esattamente la situazione in cui il difetto si
+    presenterebbe.
+    """
+    root = tmp_path / "wikis" / "android-rom"
+    (root / "wiki").mkdir(parents=True)
+    (root / "wiki" / "index.md").write_text("# Index\n\nroba vera\n", encoding="utf-8")
+    (root / "CLAUDE.md").write_text(
+        "---\nsummary: architettura delle partizioni Android\n---\n\n# Android ROM\n",
+        encoding="utf-8",
+    )
+    return root
+
+
+def test_il_topup_non_affianca_agents_a_un_claude_esistente(
+    scaffold, wiki_col_nome_vecchio: Path, capsys
+):
+    """Due file di istruzioni alla radice e' uno stato che non sceglie nessuno.
+
+    I lettori (passo 2.3) lo sanno solo disambiguare — vince `AGENTS.md`, l'altro
+    esce dal prompt e un warning lo dice — e crearlo di nascosto durante un
+    top-up vorrebbe dire produrlo di proposito sulle sette wiki vere. Il rinomino
+    e' il passo 7, e passa da li'.
+    """
+    prima = (wiki_col_nome_vecchio / "CLAUDE.md").read_bytes()
+
+    created = scaffold.scaffold(str(wiki_col_nome_vecchio), "Android ROM")
+    capsys.readouterr()
+
+    assert not (wiki_col_nome_vecchio / "AGENTS.md").exists(), (
+        "il top-up ha affiancato un secondo file di istruzioni a quello che c'era"
+    )
+    assert "AGENTS.md" not in created
+    assert (wiki_col_nome_vecchio / "CLAUDE.md").read_bytes() == prima, (
+        "il file di chi l'ha scritto a mano non si tocca: il rinomino e' il passo 7"
+    )
+    # Il resto del top-up deve comunque aver lavorato, sennò il test passerebbe
+    # anche se lo scaffold non avesse fatto niente.
+    assert "audit/" in created
+
+
+def test_la_voce_di_log_nomina_il_file_che_ha_creato_davvero(
+    scaffold, wiki_col_nome_vecchio: Path, capsys
+):
+    """Un log che dice «Created AGENTS.md» dove non c'e' manda a cercare un fantasma."""
+    scaffold.scaffold(str(wiki_col_nome_vecchio), "Android ROM")
+    capsys.readouterr()
+
+    log = (wiki_col_nome_vecchio / "log" / _today_log_name()).read_text(encoding="utf-8")
+    assert "AGENTS.md" not in log
