@@ -43,7 +43,7 @@ _SCOPE_PLACEHOLDER = "- <describe the topic area>"
 
 # Il nome con cui una wiki *nasce* dal 22/08. Chi legge accetta anche il
 # vecchio (`utils/wiki_paths.py::wiki_schema_file`), ma chi scrive no: un
-# `CLAUDE.md` nuovo sarebbe un file in piu' da migrare al passo 7.
+# `CLAUDE.md` nuovo sarebbe un file che dal passo 7.5 nessun lettore guarda.
 _SCHEMA_FILENAME = "AGENTS.md"
 
 _TITLE_SPLIT_RE = re.compile(r"[-_.]+")
@@ -87,6 +87,18 @@ def load_scaffold_script(scripts_dir: Path) -> ModuleType:
     return module
 
 
+def _yaml_scalar(value: str) -> str:
+    """*value* come scalare YAML su una riga, sempre valido.
+
+    Non si usa ``yaml.dump``: quello aggiunge il documento e a volte manda a
+    capo. Qui basta la regola delle virgolette doppie — raddoppiare i backslash,
+    scappare le virgolette — che rende sicuro qualunque testo, due punti e
+    cancelletti compresi.
+    """
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
 def _seed_schema_file(wiki_root: Path, seed: str) -> bool:
     """Mette *seed* nei placeholder dell'`AGENTS.md`. True se ne ha scritto almeno uno."""
     schema = wiki_root / _SCHEMA_FILENAME
@@ -98,7 +110,13 @@ def _seed_schema_file(wiki_root: Path, seed: str) -> bool:
 
     seeded = False
     if _SUMMARY_PLACEHOLDER in text:
-        text = text.replace(_SUMMARY_PLACEHOLDER, seed, 1)
+        # **Quotato.** La riga di scope e' testo libero dell'utente e finisce
+        # *dentro* la frontmatter: un due punti in mezzo — "Prova del passo 7:
+        # la chat segue" — rende il blocco YAML non parsabile, e allora si
+        # perde **tutta** la frontmatter, non solo quella riga. Visto sul
+        # telefono il 22/08 su una wiki appena creata: `read_wiki_scope`
+        # cadeva sul ripiego e l'id della wiki risultava assente.
+        text = text.replace(_SUMMARY_PLACEHOLDER, _yaml_scalar(seed), 1)
         seeded = True
     if _SCOPE_PLACEHOLDER in text:
         text = text.replace(_SCOPE_PLACEHOLDER, f"- {seed}", 1)

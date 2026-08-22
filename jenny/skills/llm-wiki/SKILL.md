@@ -144,7 +144,7 @@ python_exec(
     └── queries/       ← Query answers (promote durable ones to wiki/)
 ```
 
-`AGENTS.md` is the wiki's **instructions file** — what this wiki covers, what it excludes, and anything true of it and no other wiki. Read `references/schema-guide.md` for what to put in it. Read it at the start of every session. In wikis created before the rename the same file is called `CLAUDE.md`: readers accept both, and new wikis get `AGENTS.md`.
+`AGENTS.md` is the wiki's **instructions file** — what this wiki covers, what it excludes, and anything true of it and no other wiki. Read `references/schema-guide.md` for what to put in it. Read it at the start of every session.
 
 The folder layout and the five operations are **not** written there — the agent already carries them, so a copy in each wiki would only go stale.
 

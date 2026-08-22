@@ -60,6 +60,17 @@ async def _create(ctx: CommandContext, **params) -> dict:
 # ── quel che il pulsante deve produrre ───────────────────────────────────────
 
 
+def _frontmatter(text: str) -> dict:
+    """La frontmatter di *text*, parsata. Solleva se il blocco non è YAML valido —
+    che è il punto: una riga di scope scritta dall'utente non deve poterlo rompere."""
+    import yaml
+
+    block = text.split("---", 2)[1]
+    parsed = yaml.safe_load(block)
+    assert isinstance(parsed, dict), f"frontmatter non parsabile: {block!r}"
+    return parsed
+
+
 class TestUnProgettoNasceCompleto:
     async def test_crea_lalbero_il_registro_e_la_riga_di_scope(self, ctx, workspace):
         result = await _create(ctx, name="patreon-creator", seed="Come si cresce su Patreon.")
@@ -74,7 +85,11 @@ class TestUnProgettoNasceCompleto:
 
         # La riga dell'utente sta dove il registro la va a prendere...
         schema = (root / "AGENTS.md").read_text(encoding="utf-8")
-        assert "summary: Come si cresce su Patreon." in schema
+        # Quotata, e provata **parsando** invece di confrontando una stringa: la
+        # vecchia asserzione fissava la forma non quotata, cioè esattamente il
+        # difetto che il 22/08 ha fatto perdere tutta la frontmatter a una wiki
+        # la cui riga di scope conteneva un due punti.
+        assert _frontmatter(schema)["summary"] == "Come si cresce su Patreon."
         assert "- Come si cresce su Patreon." in schema
         assert "<one-line scope" not in schema
         # ...e infatti nel registro c'e'.
@@ -156,7 +171,7 @@ class TestIlGateStaSulServer:
         await _create(ctx, name="multi", seed="prima riga\nseconda   riga\n")
 
         schema = (workspace / "wikis" / "multi" / "AGENTS.md").read_text("utf-8")
-        assert "summary: prima riga seconda riga\n" in schema
+        assert _frontmatter(schema)["summary"] == "prima riga seconda riga"
 
     async def test_dice_chiaro_quando_manca_lo_scaffolder(self, tmp_path: Path):
         """Lo script sta nel workspace ed e' modificabile dall'utente: se non

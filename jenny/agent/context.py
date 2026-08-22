@@ -27,7 +27,12 @@ from jenny.utils.helpers import (
     truncate_text_to_tokens,
 )
 from jenny.utils.prompt_templates import render_template
-from jenny.utils.wiki_paths import is_wiki_root, wiki_schema_file
+from jenny.utils.wiki_paths import (
+    LEGACY_WIKI_SCHEMA_FILENAME,
+    WIKI_SCHEMA_FILENAME,
+    is_wiki_root,
+    wiki_schema_file,
+)
 
 # Fallback quando ContextBuilder è costruito senza config (test, tool isolati):
 # stesso valore del default di ``AtlasConfig.max_context_tokens``.
@@ -547,31 +552,26 @@ class ContextBuilder:
         return "\n\n".join(parts) if parts else ""
 
     def _instructions_file(self, root: Path) -> Path | None:
-        """Il file di istruzioni di ``root``: ``AGENTS.md``, o il vecchio nome.
+        """Il file di istruzioni di ``root``: ``AGENTS.md``, e nient'altro.
 
-        Dentro una wiki vale il ripiego su ``CLAUDE.md``, perche' le sette che
-        esistevano prima del rinomino ce l'hanno scritto a mano e finche' il
-        passo 7 non le migra sono l'unico posto in cui e' scritto di cosa si
-        occupa quel progetto. Fuori da una wiki no: la radice
-        dell'installazione, o una cartella ristretta che progetto non e', non
-        devono andare a cercare un file con un altro nome.
+        Il ripiego sul nome vecchio e' stato tolto nel **7.5**: la migrazione
+        rinomina le wiki a ogni avvio (``utils/wiki_migration.py``), quindi due
+        nomi accettati qui sarebbero due nomi da tenere allineati per sempre in
+        quattro lettori.
+
+        Resta il caso in cui l'utente continua a modificare il file col nome
+        vecchio senza accorgersi che non entra piu' nel prompt: lo si dice, ed e'
+        l'unico segnale che lo distingue da un file inerte.
         """
-        agents = root / "AGENTS.md"
         if not is_wiki_root(root):
-            return agents
-        schema = wiki_schema_file(root)
-        if schema is not None and schema.name == "AGENTS.md":
-            # Precedenza ad ``AGENTS.md``, ma un secondo file alla radice non e'
-            # una scelta di nessuno: qualcuno ha rinominato a meta'. Dirlo, o il
-            # ``CLAUDE.md`` che l'utente continua a modificare resta inerte
-            # senza che niente lo segnali.
-            leftover = next((n for n in ("CLAUDE.md",) if (root / n).is_file()), None)
-            if leftover:
-                logger.warning(
-                    "{}: ci sono sia AGENTS.md sia {} — vince AGENTS.md, l'altro non entra "
-                    "nel prompt", root, leftover,
-                )
-        return schema
+            return root / WIKI_SCHEMA_FILENAME
+        leftover = root / LEGACY_WIKI_SCHEMA_FILENAME
+        if leftover.is_file():
+            logger.warning(
+                "{}: c'e' ancora {} — non entra nel prompt, e la migrazione lo rinomina "
+                "al prossimo avvio", root, leftover.name,
+            )
+        return wiki_schema_file(root)
 
     @staticmethod
     def _is_template_content(content: str, template_path: str) -> bool:

@@ -22,7 +22,7 @@ def _make_wiki(
     root = workspace / "wikis" / name
     (root / "wiki").mkdir(parents=True, exist_ok=True)
     header = f"---\nsummary: {scope}\n---\n\n# {name}\n" if scope else f"# {name}\n"
-    (root / "CLAUDE.md").write_text(header, encoding="utf-8")
+    (root / "AGENTS.md").write_text(header, encoding="utf-8")
     for group, pages in (("entities", entities), ("concepts", concepts)):
         for rel, body in (pages or {}).items():
             target = root / "wiki" / group / rel

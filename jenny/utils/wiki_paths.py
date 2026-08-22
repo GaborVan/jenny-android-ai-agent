@@ -14,6 +14,8 @@ import re
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
+from loguru import logger
+
 _FRONTMATTER_RE = re.compile(r"^---\n([\s\S]*?)\n---\n?")
 
 # Sottocartelle della radice di una wiki escluse dal fingerprint: ``log/`` e
@@ -29,16 +31,32 @@ _WIKI_INDEX_FILENAME = "_index.md"
 # per i file di bootstrap — ma le sette che esistevano prima hanno un
 # ``CLAUDE.md`` scritto a mano, e finche' il passo 7 non le rinomina vanno
 # lette dov'e'. Tutti e due presenti: vince il primo, e chi legge lo dice.
-_WIKI_SCHEMA_FILENAMES = ("AGENTS.md", "CLAUDE.md")
+# Il file di istruzioni di una wiki. **Uno solo**, da quando il passo 7 migra le
+# wiki esistenti a ogni avvio (``utils/wiki_migration.py``).
+#
+# Fino al 22/08 qui c'era anche ``CLAUDE.md``, ed era il ripiego che teneva in
+# piedi le wiki scritte a mano prima che il nome cambiasse. Toglierlo e' il 7.5,
+# e la ragione non e' l'ordine: due nomi per lo stesso file sono due nomi da
+# tenere allineati in ogni lettore, e i lettori sono quattro. Il ripiego era il
+# prezzo che il passo 2 aveva accettato per non toccare cartelle vere; adesso le
+# cartelle vere sono migrate.
+#
+# Cosa si perde: una wiki copiata da un'installazione vecchia **mentre Jenny
+# gira** ha le sue istruzioni invisibili fino al riavvio successivo, che e'
+# quando la migrazione la rinomina. Una finestra piccola e che si chiude da se'.
+WIKI_SCHEMA_FILENAME = "AGENTS.md"
+
+# Il nome di prima. Serve ancora a **due** posti, e a nessun lettore: la
+# migrazione, che lo rinomina, e ``wiki_id``, che deve poter leggere l'identita'
+# di una wiki non ancora migrata — se non ci riuscisse, quella wiki perderebbe la
+# propria chat proprio nella finestra in cui e' piu' fragile.
+LEGACY_WIKI_SCHEMA_FILENAME = "CLAUDE.md"
 
 
 def wiki_schema_file(wiki_root: Path) -> Path | None:
     """Il file di istruzioni di una wiki, o ``None`` se non ne ha nessuno."""
-    for name in _WIKI_SCHEMA_FILENAMES:
-        candidate = wiki_root / name
-        if candidate.is_file():
-            return candidate
-    return None
+    candidate = wiki_root / WIKI_SCHEMA_FILENAME
+    return candidate if candidate.is_file() else None
 
 
 # ── Frontmatter ──────────────────────────────────────────────────────────────
@@ -90,6 +108,98 @@ def strip_frontmatter(text: str) -> tuple[dict[str, Any] | None, str, str | None
         if h1:
             title = h1.group(1)
     return frontmatter, body, title
+
+
+# ── L'identita' di una wiki ──────────────────────────────────────────────────
+
+# La chiave di frontmatter in cui vive l'id, dentro il file di istruzioni della
+# wiki (``AGENTS.md``, o ``CLAUDE.md`` sulle wiki non ancora migrate).
+WIKI_ID_KEY = "id"
+
+# Forma dell'id: 12 caratteri esadecimali. Non finisce **mai** in un nome di
+# file — l'indirizzo di una chat resta il nome della cartella (v.
+# ``roadmap/progetti-passi.md``, passo 7, strada B) — quindi non deve essere
+# leggibile, deve solo essere improbabile da ripetere. Se un domani diventasse
+# l'indirizzo, i nomi dei file diventerebbero ``project_<id>.jsonl``, cioe'
+# illeggibili con adb: e' una delle ragioni per cui non lo e'.
+_WIKI_ID_RE = re.compile(r"^[0-9a-f]{12}$")
+
+
+def is_valid_wiki_id(value: Any) -> bool:
+    return isinstance(value, str) and bool(_WIKI_ID_RE.match(value))
+
+
+def new_wiki_id() -> str:
+    """Un id nuovo. Casuale e non derivato dal nome, che e' il punto: un id
+    derivato dal nome cambierebbe insieme al nome."""
+    import secrets
+
+    return secrets.token_hex(6)
+
+
+def wiki_id(wiki_root: Path) -> str | None:
+    """L'id scritto dentro *wiki_root*, o ``None`` se non ce n'e' uno.
+
+    **Un id assente non e' un errore.** Una wiki senza id si indirizza per nome,
+    cioe' esattamente come prima del passo 7: quel che perde e' la capacita' di
+    ritrovare la propria chat dopo un rinomino. Vale per le wiki create a mano e
+    per quelle copiate da un'altra installazione; quelle create dallo scaffolder
+    l'id ce l'hanno dalla nascita.
+
+    **Si legge con una regex e non con YAML**, al contrario del resto della
+    frontmatter. La ragione e' un difetto vero, visto sul telefono il 22/08: una
+    riga di scope con un due punti dentro — «Prova del passo 7: la chat segue» —
+    rende il blocco non parsabile, e ``yaml.safe_load`` non perde *quella* riga,
+    perde **tutte** le altre. L'id serve a riparare una chat orfana: se lo si
+    leggesse con YAML, sarebbe illeggibile esattamente nei file un po' storti,
+    cioe' quelli in cui serve. La sua forma e' fissa e non ha bisogno di un
+    parser.
+    """
+    schema = wiki_schema_file(wiki_root) or (
+        legacy if (legacy := wiki_root / LEGACY_WIKI_SCHEMA_FILENAME).is_file() else None
+    )
+    if schema is None:
+        return None
+    try:
+        raw, _ = split_frontmatter(schema.read_text(encoding="utf-8"))
+    except OSError:
+        return None
+    match = re.search(rf"^{WIKI_ID_KEY}:\s*(\S+)\s*$", raw, re.M)
+    value = match.group(1).strip("\"'") if match else None
+    return value if is_valid_wiki_id(value) else None
+
+
+def find_wiki_by_id(wikis_dir: Path, target: str) -> Path | None:
+    """La cartella della wiki che dichiara *target*, o ``None``.
+
+    **Rifiuta invece di scegliere quando due wiki dichiarano lo stesso id.** Ci
+    si arriva copiando una cartella, ed e' il caso in cui indovinare mette il
+    lavoro nel posto sbagliato: la lezione del passo 6. Meglio una chat che resta
+    orfana e lo dice.
+
+    Non c'e' nessuna cache e nessun registro: la mappa ``id -> cartella`` si
+    ricalcola dalle cartelle ogni volta che serve. E' la ragione per cui non puo'
+    divergere — non esiste una seconda copia da tenere allineata — e costa una
+    lettura di frontmatter per wiki, su un giro che parte solo quando una
+    cartella legata e' sparita.
+    """
+    if not is_valid_wiki_id(target):
+        return None
+    found: list[Path] = []
+    for index in discover_wikis(wikis_dir).values():
+        root = index.parent
+        if wiki_id(root) == target:
+            found.append(root)
+    if len(found) == 1:
+        return found[0]
+    if len(found) > 1:
+        logger.warning(
+            "wiki id {} dichiarato da {} cartelle ({}): nessuna scelta, e' ambiguo",
+            target,
+            len(found),
+            ", ".join(sorted(p.name for p in found)),
+        )
+    return None
 
 
 # ── Discovery ────────────────────────────────────────────────────────────────

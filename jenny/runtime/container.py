@@ -189,6 +189,7 @@ class GatewayContainer:
 
         try:
             sync_workspace_templates(self.config.workspace_path)
+            self._migrate_wikis()
             self.template_sync_error = None
         except Exception as exc:
             self.template_sync_error = exc
@@ -198,6 +199,25 @@ class GatewayContainer:
                 "essere incompleta; il gateway parte comunque",
                 self.config.workspace_path,
             )
+
+    def _migrate_wikis(self) -> None:
+        """Porta le wiki esistenti alla forma del passo 7: ``AGENTS.md`` e un id.
+
+        Sta dentro ``_sync_templates`` e non accanto, perche' e' la stessa
+        promessa: quel che una versione nuova cambia nel workspace arriva a ogni
+        avvio, o non arriva mai su un telefono installato da mesi. Ed eredita
+        quindi anche il suo ``except``, che e' la scelta giusta per la stessa
+        ragione — il ramo non e' "wiki migrate contro wiki vecchie", e' "wiki
+        vecchie contro **nessun gateway**".
+
+        A regime costa zero scritture: la migrazione e' idempotente e a wiki
+        gia' a posto non tocca niente. V. ``utils/wiki_migration.py``.
+        """
+        from jenny.utils.wiki_migration import migrate_wikis
+
+        wiki_cfg = getattr(self.config, "wiki", None)
+        wikis_dir = getattr(wiki_cfg, "wikis_dir", "wikis") or "wikis"
+        migrate_wikis(self.config.workspace_path / wikis_dir)
 
     def build(self) -> None:
         """Costruisce l'intero grafo di oggetti (composition point)."""

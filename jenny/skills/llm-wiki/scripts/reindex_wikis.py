@@ -94,7 +94,7 @@ def read_wiki_scope(wiki_root: Path, name: str) -> str:
     """One-line scope for a wiki, in priority order:
 
     1. A `summary:` (or `scope:`) field in the instructions file's YAML
-       frontmatter — `AGENTS.md`, or `CLAUDE.md` in wikis created before the
+       frontmatter of `AGENTS.md` (wikis created before the
        rename — the explicit, stable source.
     2. The first real bullet under "What this wiki covers:" in the `## Scope`
        section.
@@ -107,7 +107,9 @@ def read_wiki_scope(wiki_root: Path, name: str) -> str:
     # package. Il motivo e' lo stesso per cui la logica di scope qui sotto e'
     # gia' una seconda copia.
     schema = next(
-        (wiki_root / name for name in ("AGENTS.md", "CLAUDE.md") if (wiki_root / name).is_file()),
+        # Un nome solo, dal passo 7.5. La copia a mano resta (questo script gira
+        # sotto ``python_exec`` e non importa il package), ma la regola no.
+        (wiki_root / name for name in ("AGENTS.md",) if (wiki_root / name).is_file()),
         None,
     )
     if schema is None:

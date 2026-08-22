@@ -65,7 +65,12 @@ def _wiki(root: Path, name: str, schema: str | None) -> Path:
     [
         (None, "AGENTS.md"),          # wiki nuova: il nome di oggi
         ("AGENTS.md", "AGENTS.md"),
-        ("CLAUDE.md", "CLAUDE.md"),   # il caso del difetto: si scrive dov'è già
+        # Dal passo 7.5 ``CLAUDE.md`` non è più un file di istruzioni: la
+        # migrazione lo rinomina a ogni avvio, quindi `/init` scrive dove i
+        # lettori guarderanno. Il difetto originale — creare un *secondo* file
+        # accanto — resta chiuso dal fatto che la destinazione la calcola il
+        # codice, non il modello.
+        ("CLAUDE.md", "AGENTS.md"),
     ],
 )
 async def test_the_prompt_names_the_file_that_already_exists(

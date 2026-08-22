@@ -104,7 +104,15 @@ def scaffold(root: str, title: str) -> list[str]:
     #
     # `summary:` e la riga "What this wiki covers:" non sono decorazione: sono
     # esattamente cio' che `read_wiki_scope` cerca per comporre `_index.md`.
+    # `id:` e' l'identita' della wiki, e serve a una cosa sola: ritrovare la
+    # propria chat se un giorno la cartella cambia nome (passo 7). Non e' un
+    # indirizzo e non finisce in nessun nome di file. Nasce qui perche' una wiki
+    # creata oggi non deve aspettare la migrazione del prossimo avvio;
+    # `secrets` e non `uuid` per la stessa forma da 12 esadecimali che legge
+    # `utils/wiki_paths.py::wiki_id`.
+    wiki_id = __import__("secrets").token_hex(6)
     agents_md = f"""---
+id: {wiki_id}
 summary: <one-line scope — shown next to this wiki in wikis/_index.md>
 ---
 
@@ -124,17 +132,19 @@ What this wiki deliberately excludes:
 depart from the default, open questions. The folder layout and the five
 operations are not written here — the agent already has them.>
 """
-    # Non lo si crea accanto a un `CLAUDE.md`: questo script gira anche in
-    # top-up su wiki vere, e le sette che esistevano prima del rinomino il
-    # proprio file ce l'hanno gia' con quel nome. Aggiungerne un secondo alla
-    # radice produrrebbe di proposito il caso che i lettori sanno solo
-    # disambiguare (`AGENTS.md` vince) e non risolvere. Il rinomino e' il passo 7.
-    schema_name = "CLAUDE.md" if os.path.isfile(os.path.join(root, "CLAUDE.md")) else "AGENTS.md"
-    if schema_name == "AGENTS.md" and _write(root, "AGENTS.md", agents_md):
+    # Non lo si crea accanto a un `CLAUDE.md`. Questo script gira anche in
+    # top-up su wiki vere, e una wiki non ancora migrata quel file ce l'ha col
+    # nome vecchio: aggiungerne un secondo alla radice produrrebbe di proposito
+    # lo stato che la migrazione (`utils/wiki_migration.py`) si rifiuta di
+    # risolvere — e la migrazione, al prossimo avvio, lo rinomina da se'.
+    legacy = os.path.isfile(os.path.join(root, "CLAUDE.md"))
+    if not legacy and _write(root, "AGENTS.md", agents_md):
         created.append("AGENTS.md")
         print("✓ Created AGENTS.md")
+    elif legacy:
+        print("· CLAUDE.md still there — the next start renames it, left as it is")
     else:
-        print(f"· {schema_name} already there — left as it is")
+        print("· AGENTS.md already there — left as it is")
 
     # wiki/index.md
     index_md = f"""# Index — {title}
@@ -181,7 +191,7 @@ operations are not written here — the agent already has them.>
             headline = f"Initialized {title} knowledge base"
             bullets = (
                 "- Created directory tree (raw/, wiki/, log/, audit/, outputs/)\n"
-                f"- Created {schema_name} with the wiki's scope\n"
+                "- Created AGENTS.md with the wiki's scope\n"
                 "- Created wiki/index.md category skeleton\n"
             )
         log_md = f"# {today_iso}\n\n## [{now_hm}] scaffold | {headline}\n{bullets}"
@@ -209,8 +219,8 @@ operations are not written here — the agent already has them.>
         added = "".join(f"  + {c}\n" for c in created)
         print(f"\n✅ Wiki {verb} at: {root}/\n\nAdded:\n{added}")
         if not root_existed:
-            print(f"""Next steps:
-  1. Fill in {schema_name} — define what this wiki covers and what it excludes
+            print("""Next steps:
+  1. Fill in AGENTS.md — define what this wiki covers and what it excludes
   2. Add sources to raw/ (copy articles/papers/notes into raw/<subfolder>/)
   3. Run ingest: tell your LLM agent "ingest raw/<file>.md"
   4. Ask questions: "what does the wiki say about X?"

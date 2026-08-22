@@ -83,6 +83,7 @@ from jenny.session.keys import (
     session_key_for_channel,
 )
 from jenny.session.manager import Session, SessionManager
+from jenny.session.project_rename import PROJECT_WIKI_ID_KEY, follow_renamed_project
 from jenny.session.turn_visibility import (
     TurnVisibility,
     is_silent_turn,
@@ -92,7 +93,7 @@ from jenny.session.turn_visibility import (
 from jenny.utils.helpers import CONTEXT_BUDGET_SAFETY_BUFFER, reserved_output_tokens
 from jenny.utils.llm_runtime import LLMRuntime
 from jenny.utils.prompt_templates import render_template
-from jenny.utils.wiki_paths import wiki_schema_file
+from jenny.utils.wiki_paths import find_wiki_by_id, wiki_id, wiki_schema_file
 
 if TYPE_CHECKING:
     from jenny.config.schema import (
@@ -698,20 +699,104 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
         if root is not None and root.is_dir():
             return False
         name = key[len(PROJECT_SESSION_PREFIX):]
+        # **Prima di dire di no, si prova a ritrovarla** (passo 7): se la
+        # sessione si e' annotata l'id della sua wiki e quella wiki esiste sotto
+        # un altro nome, le tracce della chat prendono il nome nuovo. Il rifiuto
+        # del passo 6 era il solo punto che scopre che una cartella legata e'
+        # sparita, ed e' quindi anche il posto giusto per la riparazione.
+        moved_to, why_not = self._follow_renamed_project(key)
+        if moved_to is not None:
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=(
+                    f"The folder `{name}` was renamed to `{moved_to}`, so I moved this "
+                    "conversation's history there — nothing was lost, and I have not read "
+                    f"your message.\n\nOpen `{moved_to}` from the chip above the message "
+                    "box and it is all where you left it."
+                ),
+                metadata={**dict(msg.metadata or {}), "render_as": "text"},
+            ))
+            return True
+        detail = f" ({why_not})" if why_not else ""
         await self.bus.publish_outbound(OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
             content=(
                 f"The folder for project `{name}` is not there any more, so this "
                 "conversation has nothing to work on and I have not read your message.\n\n"
-                "Nothing is lost: the chat is still here, and it comes back as soon as the "
-                f"folder does. If you renamed it, renaming it back to `{name}` is the fix — "
-                "a project's address is its folder name. Otherwise pick another project, or "
-                "the personal chat, from the chip above the message box."
+                f"I could not find where it went{detail}. Nothing is lost: the chat is still "
+                "here, and it comes back as soon as the folder does. If you renamed it, "
+                f"renaming it back to `{name}` is the fix — a project's address is its folder "
+                "name. Otherwise pick another project, or the personal chat, from the chip "
+                "above the message box."
             ),
             metadata={**dict(msg.metadata or {}), "render_as": "text"},
         ))
         return True
+
+    def _remember_project_id(self, key: str) -> None:
+        """Annota nella sessione l'id della wiki a cui appartiene.
+
+        Una volta sola: se il metadato c'e' gia' non si rilegge niente, quindi il
+        costo e' una lettura di frontmatter al primo turno di ogni chat di
+        progetto — e quel file il prompt lo legge comunque.
+
+        Una wiki **senza** id non e' un errore: quella chat si comporta come
+        prima del passo 7, cioe' un rinomino la lascia indietro. Le wiki create
+        dallo scaffolder l'id ce l'hanno dalla nascita, le sette vere lo prendono
+        dalla migrazione.
+        """
+        if not is_project_session_key(key):
+            return
+        try:
+            session = self.sessions.get_or_create(key)
+            if session.metadata.get(PROJECT_WIKI_ID_KEY):
+                return
+            root = self.workspace_scopes.for_project(key).project_path
+            found = wiki_id(root)
+            if not found:
+                return
+            session.metadata[PROJECT_WIKI_ID_KEY] = found
+            self.sessions.save(session)
+        except Exception:
+            # WARNING e non DEBUG: senza questo metadato quella chat non sa a
+            # quale wiki appartiene, quindi un rinomino della cartella la
+            # lascera' indietro. Non e' fatale, ma e' una capacita' persa in
+            # silenzio — ed e' esattamente il tipo di silenzio per cui il
+            # 22/08 questa riga e' stata alzata di livello: a DEBUG non si
+            # vedeva sul telefono, e il difetto e' stato cercato a mano.
+            logger.opt(exception=True).warning(
+                "Impossibile annotare l'id della wiki per {}: un rinomino della cartella "
+                "lascera' indietro questa conversazione",
+                key,
+            )
+
+    def _follow_renamed_project(self, key: str) -> tuple[str | None, str | None]:
+        """Cerca la wiki della sessione *key* col suo id e le porta dietro la chat.
+
+        Ritorna ``(nome nuovo, motivo del no)``: uno dei due e' sempre ``None``.
+        """
+        try:
+            session = self.sessions.get_or_create(key)
+            recorded = session.metadata.get(PROJECT_WIKI_ID_KEY)
+            if not recorded:
+                return None, "this conversation never recorded which wiki it belongs to"
+            wikis_dir = self.workspace_scopes.for_project(key).project_path.parent
+            target = find_wiki_by_id(wikis_dir, str(recorded))
+            if target is None:
+                return None, "no folder here claims that wiki's id"
+            new_key = f"{PROJECT_SESSION_PREFIX}{target.name}"
+            # La sessione e' in cache e i suoi file stanno per cambiare nome:
+            # tenerla vorrebbe dire riscriverla al vecchio nome al primo salvataggio.
+            self.sessions.invalidate(key)
+            moved, why_not = follow_renamed_project(self.workspace, key, new_key)
+            if not moved:
+                return None, why_not
+            return target.name, None
+        except Exception:
+            logger.opt(exception=True).error("Inseguimento del rinomino fallito per {}", key)
+            return None, "looking for it failed"
 
     async def _expand_project_init(
         self, msg: InboundMessage, key: str
@@ -1129,6 +1214,9 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             # non c'e' piu', il turno non parte.
             if await self._refuse_missing_project(msg, effective_key):
                 continue
+            # La cartella c'e': la sessione si annota di chi e', cosi' il giorno
+            # che la cartella cambia nome c'e' da dove ripartire (passo 7).
+            self._remember_project_id(effective_key)
             if raw == PROJECT_INIT_COMMAND or raw.startswith(f"{PROJECT_INIT_COMMAND} "):
                 expanded = await self._expand_project_init(msg, effective_key)
                 if expanded is None:

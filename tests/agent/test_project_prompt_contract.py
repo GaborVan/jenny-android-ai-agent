@@ -281,11 +281,17 @@ def test_no_other_system_prompt_describes_the_wiki_layout() -> None:
 # ── 2.3 — le sette wiki di prima continuano a parlare ─────────────────────
 
 
-def test_a_wiki_that_still_has_claude_md_reaches_the_prompt(tmp_path) -> None:
-    """È il punto per cui il 2.3 esiste: senza, quattro wiki vere restano mute.
+def test_a_wiki_still_on_the_old_filename_is_mute_until_the_migration(tmp_path) -> None:
+    """**Il 2.3 al contrario, e voluto** (passo 7.5).
 
-    Il contenuto è la riga distintiva di `android-rom` sul telefono — le
-    esclusioni sono la parte che non si trova scritta da nessun'altra parte.
+    Il ripiego su ``CLAUDE.md`` esisteva perché quattro wiki vere lo avevano
+    scritto a mano e il passo 2 non voleva toccare cartelle vere. Il passo 7 le
+    migra a ogni avvio, quindi il ripiego è stato tolto: due nomi per lo stesso
+    file sono due nomi da tenere allineati in ognuno dei quattro lettori.
+
+    Il prezzo, dichiarato: una wiki copiata da un'installazione vecchia *mentre
+    Jenny gira* ha le sue istruzioni invisibili fino al riavvio successivo — che
+    è quando la migrazione la rinomina. Piccola, e si chiude da sé.
     """
     root = tmp_path
     project = _wiki(root, "android-rom")
@@ -298,24 +304,50 @@ def test_a_wiki_that_still_has_claude_md_reaches_the_prompt(tmp_path) -> None:
         workspace=project, session_key="project:android-rom"
     )
 
+    assert "enterprise MDM/Knox deployment" not in prompt
+    assert "## CLAUDE.md" not in prompt
+
+
+def test_the_migration_makes_that_same_wiki_speak(tmp_path) -> None:
+    """La controprova, ed è la ragione per cui il test sopra è accettabile.
+
+    Senza questa, il 7.5 avrebbe solo tolto una capacità.
+    """
+    from jenny.utils.wiki_migration import migrate_wikis
+
+    root = tmp_path
+    project = _wiki(root, "android-rom")
+    (project / "CLAUDE.md").write_text(
+        "# Android ROM\n\n## Scope\n\nWhat this wiki deliberately excludes:\n"
+        "- enterprise MDM/Knox deployment\n",
+        encoding="utf-8",
+    )
+
+    migrate_wikis(root / "wikis")
+    prompt = ContextBuilder(root).build_system_prompt(
+        workspace=project, session_key="project:android-rom"
+    )
+
     assert "enterprise MDM/Knox deployment" in prompt
+    assert "## AGENTS.md" in prompt
 
 
 def test_the_heading_carries_the_name_the_file_really_has(tmp_path) -> None:
     """Sotto un nome che sul disco non c'è, ogni `edit` manca il bersaglio.
 
-    Sul telefono, il 22/08, alla domanda «da quale file l'hai preso?» ha
-    risposto `CLAUDE.md`: è questa riga a renderlo possibile.
+    Ora il nome è uno solo, ma l'intestazione continua a venire dal file **letto**
+    e non da una costante nel template: è la riga che ha fatto rispondere
+    correttamente «da quale file l'hai preso?» il 22/08.
     """
     root = tmp_path
     project = _wiki(root, "android-rom")
-    (project / "CLAUDE.md").write_text("# Android ROM\n", encoding="utf-8")
+    (project / "AGENTS.md").write_text("# Android ROM\n", encoding="utf-8")
     prompt = ContextBuilder(root).build_system_prompt(
         workspace=project, session_key="project:android-rom"
     )
 
-    assert "## CLAUDE.md" in prompt
-    assert "## AGENTS.md" not in prompt
+    assert "## AGENTS.md" in prompt
+    assert "## CLAUDE.md" not in prompt
 
 
 def test_with_both_files_only_agents_md_is_read(tmp_path) -> None:

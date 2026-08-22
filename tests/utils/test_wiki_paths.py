@@ -23,7 +23,7 @@ from jenny.utils.wiki_paths import (
 def _make_wiki(wikis_dir: Path, name: str, *, pages: dict[str, str] | None = None) -> Path:
     root = wikis_dir / name
     (root / "wiki").mkdir(parents=True, exist_ok=True)
-    (root / "CLAUDE.md").write_text(f"# {name}\n", encoding="utf-8")
+    (root / "AGENTS.md").write_text(f"# {name}\n", encoding="utf-8")
     for rel, body in (pages or {}).items():
         target = root / "wiki" / rel
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -64,7 +64,7 @@ class TestDiscovery:
 class TestScope:
     def test_prefers_frontmatter_summary(self, tmp_path):
         root = _make_wiki(tmp_path / "wikis", "main")
-        (root / "CLAUDE.md").write_text(
+        (root / "AGENTS.md").write_text(
             "---\nsummary: AI loops and step executors\n---\n\n# main\n", encoding="utf-8"
         )
 
@@ -72,7 +72,7 @@ class TestScope:
 
     def test_falls_back_to_first_scope_bullet(self, tmp_path):
         root = _make_wiki(tmp_path / "wikis", "main")
-        (root / "CLAUDE.md").write_text(
+        (root / "AGENTS.md").write_text(
             "# main\n\n## Scope\n\nWhat this wiki covers:\n\n- Personal projects\n- Other stuff\n",
             encoding="utf-8",
         )
@@ -81,7 +81,7 @@ class TestScope:
 
     def test_placeholders_do_not_count_as_scope(self, tmp_path):
         root = _make_wiki(tmp_path / "wikis", "main")
-        (root / "CLAUDE.md").write_text(
+        (root / "AGENTS.md").write_text(
             "---\nsummary: <what this wiki is about>\n---\n\n# main\n", encoding="utf-8"
         )
 
@@ -95,7 +95,7 @@ class TestScope:
         piu' il nome da suggerire a chi non ce l'ha.
         """
         root = _make_wiki(tmp_path / "wikis", "main")
-        (root / "CLAUDE.md").unlink()
+        (root / "AGENTS.md").unlink()
 
         assert read_wiki_scope(root) == "(no AGENTS.md)"
 
@@ -110,7 +110,7 @@ class TestSources:
 
         assert names == {
             "_index.md",
-            "main/CLAUDE.md",
+            "main/AGENTS.md",
             "main/wiki/index.md",
             "main/wiki/entities/ada.md",
         }
@@ -125,7 +125,7 @@ class TestSources:
 
         names = {p.relative_to(wikis).as_posix() for p in iter_wiki_sources(wikis)}
 
-        assert names == {"main/CLAUDE.md", "main/wiki/index.md"}
+        assert names == {"main/AGENTS.md", "main/wiki/index.md"}
 
 
 class TestFingerprint:
@@ -177,15 +177,21 @@ class TestFingerprint:
 
 
 class TestQualeFileDiIstruzioni:
-    """Passo 2.3: ``AGENTS.md``, e se non c'e' ``CLAUDE.md``.
+    """Passo 7.5: ``AGENTS.md``, e **solo** quello.
 
-    Le sette wiki che esistevano prima del rinomino hanno il vecchio nome scritto
-    a mano, e finche' il passo 7 non le migra e' l'unico posto in cui e' scritto
-    di cosa si occupano. Le nuove nascono col nuovo. Chi legge accetta tutt'e
-    due; chi scrive, solo il nuovo.
+    Fino al 22/08 i lettori accettavano tutt'e due i nomi: era il ripiego che il
+    passo 2 aveva accettato per non toccare cartelle vere. Il passo 7 le migra a
+    ogni avvio (``utils/wiki_migration.py``), quindi il ripiego e' stato tolto —
+    due nomi per lo stesso file sono due nomi da tenere allineati in ognuno dei
+    quattro lettori.
+
+    Il nome vecchio resta noto a **due** posti, e a nessun lettore: la
+    migrazione, che lo rinomina, e ``wiki_id``, che deve poter leggere l'identita'
+    di una wiki non ancora migrata — se non ci riuscisse, quella wiki perderebbe
+    la propria chat proprio nella finestra in cui e' piu' fragile.
     """
 
-    def test_agents_vince_su_claude(self, tmp_path):
+    def test_agents_e_il_file_di_istruzioni(self, tmp_path):
         root = _make_wiki(tmp_path / "wikis", "main")
         (root / "AGENTS.md").write_text("---\nsummary: il nuovo\n---\n", encoding="utf-8")
         (root / "CLAUDE.md").write_text("---\nsummary: il vecchio\n---\n", encoding="utf-8")
@@ -193,16 +199,31 @@ class TestQualeFileDiIstruzioni:
         assert wiki_schema_file(root).name == "AGENTS.md"
         assert read_wiki_scope(root) == "il nuovo"
 
-    def test_claude_resta_leggibile_da_solo(self, tmp_path):
+    def test_claude_da_solo_non_e_piu_un_file_di_istruzioni(self, tmp_path):
+        """La migrazione lo rinomina al prossimo avvio; fino a la' non si legge.
+
+        E' il prezzo dichiarato del 7.5: una finestra piccola, che si chiude da
+        se'. Il ripiego costava quattro punti da tenere allineati per sempre.
+        """
         root = _make_wiki(tmp_path / "wikis", "main")
+        (root / "AGENTS.md").unlink()
         (root / "CLAUDE.md").write_text("---\nsummary: il vecchio\n---\n", encoding="utf-8")
 
-        assert wiki_schema_file(root).name == "CLAUDE.md"
-        assert read_wiki_scope(root) == "il vecchio"
+        assert wiki_schema_file(root) is None
+
+    def test_ma_l_id_di_una_wiki_non_migrata_si_legge_ancora(self, tmp_path):
+        """Altrimenti un rinomino la perderebbe proprio prima della migrazione."""
+        from jenny.utils.wiki_paths import wiki_id
+
+        root = _make_wiki(tmp_path / "wikis", "main")
+        (root / "AGENTS.md").unlink()
+        (root / "CLAUDE.md").write_text("---\nid: 3f9a2c1b7e04\n---\n", encoding="utf-8")
+
+        assert wiki_id(root) == "3f9a2c1b7e04"
 
     def test_senza_nessuno_dei_due_e_none(self, tmp_path):
         root = _make_wiki(tmp_path / "wikis", "main")
-        (root / "CLAUDE.md").unlink()
+        (root / "AGENTS.md").unlink()
 
         assert wiki_schema_file(root) is None
 
@@ -215,7 +236,7 @@ class TestQualeFileDiIstruzioni:
         """
         wikis = tmp_path / "wikis"
         root = _make_wiki(wikis, "main", pages={"index.md": "# Index"})
-        (root / "CLAUDE.md").unlink()
+        (root / "AGENTS.md").unlink()
         agents = root / "AGENTS.md"
         agents.write_text("---\nsummary: prima\n---\n", encoding="utf-8")
 
