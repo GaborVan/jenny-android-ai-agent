@@ -36,6 +36,14 @@ from jenny.utils.wiki_paths import (
 
 # Fallback quando ContextBuilder è costruito senza config (test, tool isolati):
 # stesso valore del default di ``AtlasConfig.max_context_tokens``.
+# Tetto sulla mappa di progetto iniettata nel blocco (T3). Si paga a **ogni**
+# turno del progetto, quindi e' una soglia sui caratteri e non sui token: e'
+# quella che si legge a occhio nel file, ed e' il numero che il lint di T5
+# usera' per dire a una mappa che si sta gonfiando. Duemila caratteri sono
+# circa una schermata piena sul telefono, cioe' esattamente quel che la mappa
+# dichiara di essere.
+_PROJECT_MAP_MAX_CHARS = 2000
+
 _DEFAULT_WIKI_DIRECTORY_TOKENS = 1200
 
 # Il nome del tool che fa da interruttore ad ``agent/scheduling.md``. Costante e
@@ -206,6 +214,7 @@ class ContextBuilder:
         # e' una domanda su chi sta parlando, non su dove si lavora.
         in_project = is_wiki_root(root)
         if in_project:
+            project_map = self._read_project_map(root)
             with suppress(Exception):  # workspace sincronizzato da una versione precedente
                 parts.append(render_template(
                     "agent/project.md",
@@ -229,6 +238,12 @@ class ContextBuilder:
                     # non e' bastato. Dare un ordine e poi vietarlo due paragrafi
                     # dopo e' un invito a cercare la scappatoia: meglio non darlo.
                     capture=_turn_is_writable(),
+                    # T3, il gradino 1 di P4: la mappa del progetto entra
+                    # **d'ufficio**, non su richiesta. Il giro di wiki parte
+                    # pagato, e la differenza si vede alla prima domanda di una
+                    # sessione nuova: senza, l'agente risponde da quel che ha in
+                    # cronologia — che dopo una settimana e' niente.
+                    project_map=project_map,
                 ))
 
         # Il blocco sta **prima** del bootstrap, al contrario di
@@ -506,6 +521,34 @@ class ContextBuilder:
         if supplemental_lines:
             lines.extend(supplemental_lines)
         return ContextBuilder._RUNTIME_CONTEXT_TAG + "\n" + "\n".join(lines) + "\n" + ContextBuilder._RUNTIME_CONTEXT_END
+
+    def _read_project_map(self, root: Path) -> str:
+        """``wiki/index.md`` del progetto, pronta da mettere nel blocco. T3.
+
+        **Il tetto non tronca in silenzio.** Oltre soglia si taglia e si dice che
+        continua: un inventario tagliato zitto si legge come "e' tutto qui", ed e'
+        la stessa lezione che ``AtlasStore`` ha imparato col suo
+        ``_MAX_INVENTORY_ENTRIES``. Il tetto e' la rete, non la norma — una mappa
+        oltre soglia sta assorbendo contenuto che spetta alle pagine, e il lint
+        (T5) lo dira'.
+
+        Un file assente non e' un errore: le sette wiki di prima hanno un
+        ``index.md`` scritto a mano, e una wiki appena creata a mano potrebbe non
+        averlo affatto. In quel caso il blocco si rende senza la sezione, che e'
+        la verita' — non c'e' una mappa da leggere.
+        """
+        page = root / "wiki" / "index.md"
+        try:
+            text = page.read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
+        if len(text) <= _PROJECT_MAP_MAX_CHARS:
+            return text
+        return (
+            text[:_PROJECT_MAP_MAX_CHARS].rstrip()
+            + f"\n\n[the map continues — {len(text)} characters in all; read "
+            "`wiki/index.md` for the rest]"
+        )
 
     def _load_bootstrap_files(self, workspace: Path | None = None) -> str:
         """Load all bootstrap files from workspace.

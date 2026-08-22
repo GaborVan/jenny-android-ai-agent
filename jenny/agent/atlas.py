@@ -51,10 +51,18 @@ from jenny.utils.wiki_paths import (
 # in silenzio si legge come "la wiki è tutta qui".
 _MAX_INVENTORY_ENTRIES = 300
 
-# Gruppi di pagine da cui si compila la rubrica, in ordine di rilevanza.
-# ``summaries/`` resta fuori: è il livello di citazione delle fonti, non
-# materiale da cui nascono voci di rubrica.
-_INVENTORY_GROUPS = ("entities", "concepts")
+# Sottocartelle di ``wiki/`` **escluse** dalla rubrica. ``summaries/`` è il
+# livello di citazione delle fonti, non materiale da cui nascono voci di rubrica.
+#
+# Dal 22/08 (T3) la rubrica si costruisce **per esclusione e non per elenco**.
+# Prima era ``("entities", "concepts")``, cioè i tre gruppi del pattern di
+# ricerca: su un progetto nel formato nuovo — pagine piatte sotto ``wiki/`` —
+# quell'elenco trovava zero pagine e la rubrica diceva «no entity or concept
+# pages yet» a una cartella piena. Una regola sola che vale per le due forme, e
+# la struttura su disco decide invece di un'etichetta: v.
+# ``roadmap/taccuino-passi.md``.
+_INVENTORY_SKIP_DIRS = frozenset({"summaries"})
+_INVENTORY_INDEX_FILE = "index.md"
 
 _STATE_VERSION = 1
 
@@ -153,48 +161,31 @@ class AtlasStore:
         lines: list[str] = []
         lines.append("### Wikis")
         for name, root in roots.items():
-            pages = root / "wiki"
-            counts = ", ".join(
-                f"{group}: {_count_pages(pages / group)}" for group in _INVENTORY_GROUPS
-            )
-            total = _count_pages(pages)
+            total = len(_inventory_pages(root / "wiki"))
             lines.append(
                 f"- **{name}** — {read_wiki_scope(root)} "
-                f"({counts}, total pages: {total}) → wikis/{name}/wiki/index.md"
+                f"({total} pages) → wikis/{name}/wiki/index.md"
             )
 
         target = self.default_wiki if self.default_wiki in roots else next(iter(roots))
-        pages_dir = roots[target] / "wiki"
         lines.append("")
         lines.append(f"### Pages in `{target}` (directory scope)")
 
-        emitted = 0
-        truncated = False
-        for group in _INVENTORY_GROUPS:
-            group_dir = pages_dir / group
-            entries = _page_entries(group_dir)
-            if not entries:
-                continue
+        entries = _inventory_pages(roots[target] / "wiki")
+        shown = entries[: self.max_entries]
+        if shown:
             lines.append("")
-            lines.append(f"#### {group}/ ({len(entries)})")
-            for rel, title in entries:
-                if emitted >= self.max_entries:
-                    truncated = True
-                    break
-                lines.append(f"- `{group}/{rel}` — {title}")
-                emitted += 1
-            if truncated:
-                break
-
-        if truncated:
+            for rel, title in shown:
+                lines.append(f"- `{rel}` — {title}")
+        if len(entries) > len(shown):
             lines.append("")
             lines.append(
-                f"_(inventory truncated at {self.max_entries} pages — the wiki has more; "
-                "treat the directory as partial and say so in the file header.)_"
+                f"_(inventory truncated at {self.max_entries} pages — the wiki has "
+                f"{len(entries)}; treat the directory as partial and say so in the file header.)_"
             )
-        if emitted == 0:
+        if not shown:
             lines.append("")
-            lines.append("_(no entity or concept pages yet)_")
+            lines.append("_(no pages yet)_")
         return "\n".join(lines)
 
     # -- prompt --------------------------------------------------------------
@@ -310,26 +301,31 @@ class AtlasStore:
         return f"{ATLAS_SESSION_PREFIX}{datetime.now():%Y%m%d-%H%M%S}"
 
 
-def _count_pages(directory: Path) -> int:
-    if not directory.is_dir():
-        return 0
-    return sum(1 for p in directory.rglob("*.md") if not p.name.startswith("."))
+def _inventory_pages(pages_dir: Path) -> list[tuple[str, str]]:
+    """``(path relativo a wiki/, titolo)`` per ogni pagina della rubrica.
 
-
-def _page_entries(group_dir: Path) -> list[tuple[str, str]]:
-    """``(path relativo al gruppo, titolo)`` per ogni pagina, in ordine stabile."""
-    if not group_dir.is_dir():
+    Una regola sola per le due forme: tutto quel che sta sotto ``wiki/``, meno
+    ``summaries/``, meno l'indice (che *è* la mappa, non una voce di rubrica) e
+    meno i file nascosti. Le pagine piatte del formato nuovo e le
+    ``concepts/``/``entities/`` di una wiki di ricerca cadono qui insieme, e il
+    percorso relativo dice da sé in quale delle due si è.
+    """
+    if not pages_dir.is_dir():
         return []
     entries: list[tuple[str, str]] = []
-    for path in sorted(group_dir.rglob("*.md")):
+    for path in sorted(pages_dir.rglob("*.md")):
         if path.name.startswith("."):
             continue
-        stem = path.stem
+        rel = path.relative_to(pages_dir)
+        if rel.parts and rel.parts[0] in _INVENTORY_SKIP_DIRS:
+            continue
+        if rel.as_posix() == _INVENTORY_INDEX_FILE:
+            continue
         try:
-            title = extract_title(path.read_text(encoding="utf-8")) or stem
+            title = extract_title(path.read_text(encoding="utf-8")) or path.stem
         except OSError:
-            title = stem
-        entries.append((path.relative_to(group_dir).as_posix(), title))
+            title = path.stem
+        entries.append((rel.as_posix(), title))
     return entries
 
 

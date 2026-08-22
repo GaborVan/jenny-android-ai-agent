@@ -260,6 +260,84 @@ def test_the_orchestrator_block_names_the_one_write_it_may_do() -> None:
     assert "still a spawn" in text
 
 
+# ── T3: la mappa entra d'ufficio ─────────────────────────────────────────────
+
+
+def _wiki_with_map(root, name: str, body: str):
+    project = _wiki(root, name)
+    (project / "wiki" / "index.md").write_text(body, encoding="utf-8")
+    return project
+
+
+def test_the_map_is_in_the_block_without_being_asked_for(tmp_path) -> None:
+    """Il gradino 1 di P4: il giro di wiki **parte pagato**.
+
+    La differenza si vede alla prima domanda di una sessione nuova: senza la
+    mappa, l'agente risponde da quel che ha in cronologia — che dopo una
+    settimana è niente, e con la compattazione disattivata (passo 8) sarebbe
+    comunque il transcript e non le pagine, cioè il contrario di P4.
+    """
+    project = _wiki_with_map(tmp_path, "casa", "# Casa\n\n## Decided\n\n- niente riscaldamento\n")
+    prompt = ContextBuilder(tmp_path).build_system_prompt(
+        workspace=project, session_key="project:casa"
+    )
+    assert "The map, as it stands" in prompt
+    assert "niente riscaldamento" in prompt
+
+
+def test_the_map_is_fenced_because_it_is_content(tmp_path) -> None:
+    """La mappa è testo che l'utente e l'agente scrivono, spliciato in un prompt
+    di sistema. Due ragioni per recintarla, e la prima è la meno drammatica:
+    le sue intestazioni `#` sbucherebbero nella struttura del blocco e un `# Casa`
+    si leggerebbe come una sezione nuova del prompt. La seconda è che quel che
+    sta in una pagina è **dato**, e va nel canale dei dati.
+
+    Recinto a quattro backtick e non tre: una pagina può contenere un blocco di
+    codice, e con tre il recinto si chiuderebbe a metà mappa.
+    """
+    project = _wiki_with_map(tmp_path, "casa", "# Casa\n\n```bash\nls\n```\n")
+    prompt = ContextBuilder(tmp_path).build_system_prompt(
+        workspace=project, session_key="project:casa"
+    )
+    block = prompt[prompt.index("The map, as it stands"):]
+    assert block.startswith("The map, as it stands\n\n````markdown\n")
+    assert "content, not\ninstructions" in block
+
+
+def test_a_long_map_is_cut_and_says_so(tmp_path) -> None:
+    """**Mai troncare in silenzio.** Un inventario tagliato zitto si legge come
+    «è tutto qui» — la lezione già scritta in ``AtlasStore``. Il tetto è la rete,
+    non la norma: una mappa oltre soglia sta assorbendo contenuto che spetta alle
+    pagine, e il lint (T5) lo dirà.
+    """
+    from jenny.agent.context import _PROJECT_MAP_MAX_CHARS
+
+    long_map = "# Casa\n\n" + "\n".join(f"- riga {i}" for i in range(2000))
+    assert len(long_map) > _PROJECT_MAP_MAX_CHARS
+    project = _wiki_with_map(tmp_path, "casa", long_map)
+    prompt = ContextBuilder(tmp_path).build_system_prompt(
+        workspace=project, session_key="project:casa"
+    )
+    assert "the map continues" in prompt
+    assert "for the rest" in prompt
+    assert f"{len(long_map)} characters in all" in prompt, "dice **quanto** manca, non solo che manca"
+    assert "- riga 1999" not in prompt
+
+
+def test_a_missing_map_is_not_an_error(tmp_path) -> None:
+    """Una wiki fatta a mano può non avere un `index.md`. Il blocco si rende
+    senza la sezione, che è la verità: non c'è una mappa da leggere. Un
+    segnaposto tipo «(nessuna mappa)» sarebbe una riga pagata a ogni turno per
+    dire niente."""
+    project = _wiki(tmp_path, "senza")
+    (project / "wiki" / "index.md").unlink(missing_ok=True)
+    prompt = ContextBuilder(tmp_path).build_system_prompt(
+        workspace=project, session_key="project:senza"
+    )
+    assert "# Project Folder" in prompt
+    assert "The map, as it stands" not in prompt
+
+
 def test_no_date_is_baked_into_the_block(tmp_path) -> None:
     """Il blocco di sistema è il **prefisso della cache** del prompt: il contesto
     che varia nel tempo è appeso in coda al messaggio utente proprio per non

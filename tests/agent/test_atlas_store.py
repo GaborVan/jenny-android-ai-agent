@@ -86,7 +86,11 @@ class TestInventory:
 
         assert "**main** — Personal projects" in inventory
         assert "**loops** — AI loops" in inventory
-        assert "entities: 1" in inventory
+        # Un conteggio solo, non uno per gruppo: dal 22/08 (T3) la rubrica non
+        # nomina più `entities`/`concepts`, perché sono i gruppi del pattern di
+        # ricerca e un progetto nel formato nuovo ha le pagine piatte. Il numero
+        # vale per entrambe le forme.
+        assert "(1 pages)" in inventory
 
     def test_pages_are_listed_only_for_the_default_wiki(self, store):
         _make_wiki(store.workspace, "main", entities={"ada.md": "# Ada Lovelace"})
@@ -126,7 +130,28 @@ class TestInventory:
     def test_empty_wiki_says_so(self, store):
         _make_wiki(store.workspace, "main")
 
-        assert "no entity or concept pages yet" in store.build_inventory()
+        assert "no pages yet" in store.build_inventory()
+
+    def test_flat_pages_are_listed_too(self, store):
+        """Il difetto che T3 chiude: la rubrica elencava solo `entities/` e
+        `concepts/`, cioè i gruppi del pattern di ricerca. Su un progetto nel
+        formato nuovo — pagine piatte sotto `wiki/` — trovava zero voci e
+        dichiarava «no pages yet» a una cartella piena. Il silenzio più
+        pericoloso: una rubrica che dice "non c'è niente" viene creduta.
+        """
+        wiki = store.workspace / "wikis" / "casa" / "wiki"
+        wiki.mkdir(parents=True)
+        (wiki / "index.md").write_text("# Casa\n", encoding="utf-8")
+        (wiki / "riscaldamento.md").write_text("# Riscaldamento\n", encoding="utf-8")
+        (wiki / "proprietario.md").write_text("# Il proprietario\n", encoding="utf-8")
+
+        inventory = store.build_inventory()
+
+        assert "Riscaldamento" in inventory and "Il proprietario" in inventory
+        # L'indice **è** la mappa, non una voce di rubrica: elencarlo fra le
+        # pagine lo farebbe sembrare contenuto.
+        assert "`index.md`" not in inventory
+        assert "(2 pages)" in inventory
 
 
 class TestPrompt:
