@@ -12,7 +12,10 @@ from __future__ import annotations
 import hashlib
 import re
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import TYPE_CHECKING, Any, Iterable, Iterator
+
+if TYPE_CHECKING:
+    from datetime import date
 
 from loguru import logger
 
@@ -51,6 +54,37 @@ WIKI_SCHEMA_FILENAME = "AGENTS.md"
 # di una wiki non ancora migrata — se non ci riuscisse, quella wiki perderebbe la
 # propria chat proprio nella finestra in cui e' piu' fragile.
 LEGACY_WIKI_SCHEMA_FILENAME = "CLAUDE.md"
+
+
+# ── Il diario ────────────────────────────────────────────────────────────────
+
+# Dove una wiki tiene la cattura della conversazione: una pagina al giorno,
+# append-only. Sta sotto ``raw/`` e non sotto ``wiki/`` perche' *e'* materiale
+# grezzo — il taccuino che poi diventa pagine — e per una conseguenza pratica che
+# vale da sola: albero, grafo e ricerca camminano solo ``wiki/``, quindi un
+# diario qui non chiede a nessuno di quei sottosistemi di imparare a non
+# trattarlo da pagina, e il grafo resta la mappa delle *cose* invece di
+# diventare un calendario.
+#
+# In inglese come tutte le sorelle (``wiki/``, ``raw/``, ``log/``, ``audit/``) e
+# come le chiavi di frontmatter che il codice legge (``id:``, ``summary:``):
+# questo nome e' una costante di programma, non testo per l'utente. Quel che
+# l'utente scrive *dentro* e' nella sua lingua.
+JOURNAL_DIRNAME = "raw/journal"
+
+
+def wiki_journal_dir(wiki_root: Path) -> Path:
+    """La cartella del diario di *wiki_root*. Non garantisce che esista."""
+    return wiki_root / JOURNAL_DIRNAME
+
+
+def journal_page_name(day: "date") -> str:
+    """Il nome della pagina di diario di *day*: ``AAAAMMGG.md``.
+
+    Un file per giorno, e il nome ordinabile: un ``ls`` della cartella e' la
+    cronologia, che e' la ragione per cui non e' ``AAAA-MM-GG``.
+    """
+    return f"{day.strftime('%Y%m%d')}.md"
 
 
 def wiki_schema_file(wiki_root: Path) -> Path | None:

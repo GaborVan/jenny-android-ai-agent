@@ -1,0 +1,223 @@
+"""Lo scaffolder dei progetti: la forma con cui una wiki nasce dalla UI.
+
+Passo **T1** di ``roadmap/taccuino-passi.md``. Un progetto nuovo nasce con
+questo albero:
+
+    <progetto>/
+      AGENTS.md            le istruzioni di *questo* progetto (id, summary)
+      wiki/
+        index.md           la mappa: di cosa si tratta, deciso, aperto, le pagine
+      raw/journal/         la cattura della conversazione, una pagina al giorno
+      raw/research/        l'ingest: quel che arriva da fuori, verbatim
+      log/                 una riga per operazione
+      audit/               il canale di correzione umana
+
+**Pagine piatte sotto ``wiki/``, e nessuna tassonomia obbligatoria.** Non
+esistono ``concepts/``, ``entities/``, ``summaries/``: erano la tassonomia del
+pattern document-first (una knowledge base di ricerca che digerisce paper), e
+obbligano a scegliere «concept o entity?» *nel momento peggiore*, cioe' mentre
+si prende un appunto. Le sottocartelle non sono vietate — sono libere, si aprono
+quando un gruppo di pagine se le guadagna. I ``[[link]]`` restano nudi:
+``webui/wiki.py::resolve_wikilink`` risolve per stem in tutto ``wiki/``, quindi
+spostare una pagina in una sottocartella non rompe niente.
+
+**Non e' lo scaffolder della skill, e non lo sostituisce.**
+``skills/llm-wiki/scripts/scaffold.py`` costruisce l'altro formato — la
+biblioteca di ricerca, con ``raw/papers`` e le cinque operazioni — vive nel
+checkout che l'utente puo' modificare, e resta la strada per creare una wiki di
+ricerca (si chiede a Jenny). Questo vive nel package, ha i suoi test nel repo, ed
+e' quel che il picker della UI usa. Due formati nel mondo, confine netto, nessun
+file conteso: la differenza fra i due la dice la **struttura su disco**, e nessun
+consumatore ha bisogno di un'etichetta per leggerla.
+
+**La riga dell'utente entra alla nascita, quotata.** Lo scaffolder della skill
+scrive un segnaposto che il chiamante sostituisce dopo; qui il seme e' un
+argomento, quindi non esiste la finestra in cui il file contiene un placeholder
+al posto di un dato. Quotato perche' finisce *dentro* la frontmatter: un due
+punti nel testo libero rende il blocco YAML non parsabile, e allora si perde
+**tutta** la frontmatter, non solo quella riga (visto sul telefono il 22/08).
+
+**Scrive solo quel che manca.** Ogni file e' scritto se assente e lasciato stare
+se c'e', come il top-up della skill: e' la regola che rende sicuro rilanciarlo su
+una cartella a metà, ed e' anche il motivo per cui ritorna l'elenco di quel che
+ha creato davvero.
+"""
+
+from __future__ import annotations
+
+from datetime import date, datetime
+from pathlib import Path
+
+from loguru import logger
+
+from jenny.utils.path import atomic_write
+from jenny.utils.wiki_paths import (
+    JOURNAL_DIRNAME,
+    WIKI_SCHEMA_FILENAME,
+    new_wiki_id,
+)
+
+# Le cartelle dell'albero. ``wiki/`` per prima perche' e' quella che rende la
+# cartella una wiki per tutti i lettori (``is_wiki_root``): se un giorno lo
+# scaffold morisse a metà, meglio che il pezzo già scritto sia visibile al
+# picker che invisibile.
+PROJECT_DIRS: tuple[str, ...] = (
+    "wiki",
+    JOURNAL_DIRNAME,
+    "raw/research",
+    "log",
+    "audit",
+    "audit/resolved",
+)
+
+# ``.gitkeep`` solo dove serve davvero: ``audit/`` e' l'unica coppia di cartelle
+# che nasce vuota e resta vuota a lungo. ``wiki/`` ha l'indice, ``log/`` la voce
+# di oggi, e ``raw/`` si riempie appena si lavora.
+_GITKEEP_DIRS: tuple[str, ...] = ("audit", "audit/resolved")
+
+
+def _write_if_absent(root: Path, rel: str, content: str) -> bool:
+    """Scrive ``root/rel`` se non c'e'. True se l'ha scritto."""
+    target = root / rel
+    if target.exists():
+        return False
+    target.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(target, content)
+    return True
+
+
+def _agents_md(title: str, seed: str, wiki_id: str, quoted_seed: str) -> str:
+    """``AGENTS.md``: quel che di questo progetto e' vero e di nessun altro.
+
+    Niente convenzioni generali, niente pianta delle cartelle, niente regole di
+    lavoro: le dice ``agent/project.md``, che sta nel prompt di sistema e si
+    riscrive a ogni avvio. Copiarle qui vorrebbe dire congelarle alla versione in
+    cui il progetto e' nato — l'errore che il 22/08 ha tolto da questo file.
+
+    ``summary:`` non e' decorazione: e' il campo da cui ``read_wiki_scope``
+    costruisce la riga del registro. ``id:`` e' l'identita' della wiki, e serve a
+    ritrovare la propria chat se la cartella cambia nome (passo 7): nasce qui
+    perche' un progetto creato oggi non deve aspettare la migrazione del
+    prossimo avvio.
+    """
+    return f"""---
+id: {wiki_id}
+summary: {quoted_seed}
+---
+
+# {title}
+
+## What this is
+
+{seed}
+
+## How we work here
+
+<Anything true of this project and no other: conventions to keep, what it
+deliberately leaves out, open questions about method. The folder layout and the
+general rules are not written here — the agent already carries them.>
+"""
+
+
+def _index_md(title: str, seed: str) -> str:
+    """``wiki/index.md``: **la mappa**, e il posto da cui parte ogni risposta.
+
+    Le quattro sezioni nascono vuote ma nascono: il giardiniere (T4) aggiorna
+    sezioni che esistono invece di inventarsi una struttura ogni volta, che e' il
+    modo in cui due sessioni diverse producono due mappe diverse.
+
+    Piccola **per costituzione**, non per buona volonta': entra nel prompt di
+    ogni turno (T3), quindi ogni riga qui e' un costo per messaggio. Se cresce
+    oltre una schermata sta assorbendo contenuto che spetta alle pagine — la
+    riga di avviso in fondo lo dice a chi la legge, ed e' quel che il lint
+    misurera' (T5).
+
+    Il diario e' citato come **percorso e non come ``[[link]]``**: sta fuori da
+    ``wiki/``, e un wikilink che punta fuori dalle pagine e' un link morto per
+    ``resolve_wikilink`` e per il lint.
+    """
+    return f"""---
+title: {title}
+---
+
+# {title}
+
+> {seed}
+
+## Decided
+
+*(nothing yet)*
+
+## Open
+
+*(nothing yet)*
+
+## Pages
+
+*(none yet)*
+
+---
+
+Working journal: `{JOURNAL_DIRNAME}/` — one file per day, append-only.
+
+<!-- This map is read on every turn: keep it to one screen. When a section
+     outgrows a few lines, that content belongs on its own page under wiki/. -->
+"""
+
+
+def _log_md(title: str, day: date, at: str, created: list[str]) -> str:
+    bullets = "".join(f"- Created {c}\n" for c in created)
+    return f"# {day.isoformat()}\n\n## [{at}] scaffold | Started {title}\n{bullets}"
+
+
+def scaffold_project(
+    root: Path,
+    title: str,
+    seed: str,
+    quoted_seed: str,
+    *,
+    today: date | None = None,
+) -> list[str]:
+    """Crea quel che manca sotto *root*. Ritorna i percorsi creati, relativi.
+
+    *seed* e' la riga dell'utente su cos'e' il progetto, in chiaro; *quoted_seed*
+    la stessa riga resa scalare YAML dal chiamante (che e' l'unico posto in cui
+    quella regola di quoting vive — v. ``project_create._yaml_scalar``).
+
+    *today* esiste per i test: il default e' la data di oggi, e nessun chiamante
+    di produzione lo passa.
+    """
+    day = today or date.today()
+    created: list[str] = []
+
+    for rel in PROJECT_DIRS:
+        d = root / rel
+        if not d.is_dir():
+            d.mkdir(parents=True, exist_ok=True)
+            created.append(f"{rel}/")
+
+    for rel in _GITKEEP_DIRS:
+        if _write_if_absent(root, f"{rel}/.gitkeep", ""):
+            created.append(f"{rel}/.gitkeep")
+
+    if _write_if_absent(root, WIKI_SCHEMA_FILENAME, _agents_md(
+        title, seed, new_wiki_id(), quoted_seed
+    )):
+        created.append(WIKI_SCHEMA_FILENAME)
+
+    if _write_if_absent(root, "wiki/index.md", _index_md(title, seed)):
+        created.append("wiki/index.md")
+
+    # Il log per ultimo: la sua voce elenca quel che questo giro ha creato
+    # davvero, e per saperlo devono essere passati tutti gli altri file. Se il
+    # log di oggi c'e' gia' resta intatto e non si appende niente — «non toccare
+    # quel che c'e'» vince sulla completezza della voce, ed e' la regola che
+    # rende sicuro rilanciare lo scaffold.
+    if created:
+        log_rel = f"log/{day.strftime('%Y%m%d')}.md"
+        at = datetime.now().strftime("%H:%M")
+        if _write_if_absent(root, log_rel, _log_md(title, day, at, created)):
+            created.append(log_rel)
+
+    logger.info("scaffolded project {}: {}", root.name, ", ".join(created) or "nothing to do")
+    return created

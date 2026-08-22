@@ -13,6 +13,14 @@ nessuna delle due distruttiva:
    chat dopo un rinomino della cartella (v. ``session/project_rename.py``): non
    e' un indirizzo, non finisce in nessun nome di file, e una wiki senza id
    continua a funzionare come prima.
+3. Ogni wiki prende il suo **diario** (``raw/journal/``), se non ce l'ha —
+   passo T1 di ``roadmap/taccuino-passi.md``. E' la presa sulla conversazione, e
+   la politica che ci scrive dentro e' **universale**: vale per un progetto
+   creato oggi e per una wiki di ricerca di mesi fa, perche' ogni conversazione
+   di progetto contiene fatti stabili. Legare il diario al formato nuovo
+   vorrebbe dire lasciare le sette wiki vere senza la cosa che il taccuino
+   esiste per dare. E' l'unico dei tre punti che **crea** qualcosa invece di
+   riscriverlo: una cartella vuota, nessun file toccato.
 
 Gira **a ogni avvio**, come l'estrazione dei template, e per la stessa ragione:
 e' l'unico modo in cui arriva su un telefono installato da mesi. Il che vuol dire
@@ -40,6 +48,7 @@ from jenny.utils.wiki_paths import (
     is_valid_wiki_id,
     new_wiki_id,
     strip_frontmatter,
+    wiki_journal_dir,
     wiki_schema_file,
 )
 
@@ -120,18 +129,36 @@ def _ensure_id(root: Path) -> str | None:
     return wiki_id_value
 
 
+def _ensure_journal(root: Path) -> bool:
+    """Crea ``raw/journal/`` se non c'e'. True se l'ha creata.
+
+    Solo la cartella, e nessuna pagina: il diario e' append-only e la sua prima
+    pagina la scrive la prima cattura. Un file vuoto creato qui sarebbe una
+    pagina di un giorno in cui non e' stato detto niente.
+    """
+    journal = wiki_journal_dir(root)
+    if journal.is_dir():
+        return False
+    journal.mkdir(parents=True, exist_ok=True)
+    logger.info("wiki {}: creato il diario in {}", root.name, journal.name)
+    return True
+
+
 def migrate_wikis(wikis_dir: Path) -> dict[str, list[str]]:
     """Porta tutte le wiki sotto *wikis_dir* alla forma del passo 7.
 
-    Ritorna ``{"renamed": [...], "identified": [...]}`` — i nomi delle wiki
-    toccate, così l'avvio può dire cosa ha fatto invece di farlo in silenzio.
-    Non solleva: una wiki illeggibile viene saltata con un log, perché un avvio
-    che muore su una cartella storta non migra nemmeno le altre.
+    Ritorna ``{"renamed": [...], "identified": [...], "journals": [...]}`` — i
+    nomi delle wiki toccate da ciascuno dei tre punti, così l'avvio può dire cosa
+    ha fatto invece di farlo in silenzio. Non solleva: una wiki illeggibile viene
+    saltata con un log, perché un avvio che muore su una cartella storta non
+    migra nemmeno le altre.
     """
     renamed: list[str] = []
     identified: list[str] = []
+    journals: list[str] = []
+    result = {"renamed": renamed, "identified": identified, "journals": journals}
     if not wikis_dir.is_dir():
-        return {"renamed": renamed, "identified": identified}
+        return result
     for index in discover_wikis(wikis_dir).values():
         root = index.parent
         try:
@@ -139,12 +166,15 @@ def migrate_wikis(wikis_dir: Path) -> dict[str, list[str]]:
                 renamed.append(root.name)
             if _ensure_id(root) is not None:
                 identified.append(root.name)
+            if _ensure_journal(root):
+                journals.append(root.name)
         except Exception:
             logger.opt(exception=True).error("Migrazione della wiki {} fallita", root.name)
-    if renamed or identified:
+    if renamed or identified or journals:
         logger.info(
-            "Migrazione wiki: {} rinominate ({}), {} identificate ({})",
+            "Migrazione wiki: {} rinominate ({}), {} identificate ({}), {} col diario nuovo ({})",
             len(renamed), ", ".join(renamed) or "-",
             len(identified), ", ".join(identified) or "-",
+            len(journals), ", ".join(journals) or "-",
         )
-    return {"renamed": renamed, "identified": identified}
+    return result

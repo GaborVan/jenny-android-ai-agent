@@ -244,8 +244,35 @@ def test_the_migration_is_idempotent(wikis: Path) -> None:
     second = migrate_wikis(wikis)
 
     assert sorted(first["identified"]) == ["a", "b"]
-    assert second == {"renamed": [], "identified": []}
+    assert second == {"renamed": [], "identified": [], "journals": []}
     assert {p.name: p.read_text(encoding="utf-8") for p in wikis.rglob("AGENTS.md")} == before
+
+
+def test_every_wiki_gets_its_journal(wikis: Path) -> None:
+    """T1: il diario e' **universale**, non del formato nuovo.
+
+    Una wiki di ricerca di mesi fa lo riceve come un progetto creato oggi,
+    perche' ogni conversazione di progetto contiene fatti stabili e la politica
+    che ci scrive dentro non guarda la forma delle cartelle.
+    """
+    _wiki(wikis, "vecchia", "CLAUDE.md", "---\nsummary: ricerca\n---\n")
+
+    result = migrate_wikis(wikis)
+
+    assert result["journals"] == ["vecchia"]
+    journal = wikis / "vecchia" / "raw" / "journal"
+    assert journal.is_dir()
+    # **Solo la cartella.** La prima pagina la scrive la prima cattura: un file
+    # creato qui sarebbe la pagina di un giorno in cui non e' stato detto niente.
+    assert list(journal.iterdir()) == []
+
+
+def test_the_journal_is_created_once(wikis: Path) -> None:
+    """Il costo a regime resta zero, come per gli altri due punti."""
+    _wiki(wikis, "a")
+    migrate_wikis(wikis)
+
+    assert migrate_wikis(wikis)["journals"] == []
 
 
 def test_a_broken_wiki_does_not_stop_the_others(wikis: Path) -> None:
@@ -261,4 +288,6 @@ def test_a_broken_wiki_does_not_stop_the_others(wikis: Path) -> None:
 
 
 def test_a_missing_wikis_dir_is_not_an_error(tmp_path: Path) -> None:
-    assert migrate_wikis(tmp_path / "mai-esistita") == {"renamed": [], "identified": []}
+    assert migrate_wikis(tmp_path / "mai-esistita") == {
+        "renamed": [], "identified": [], "journals": [],
+    }

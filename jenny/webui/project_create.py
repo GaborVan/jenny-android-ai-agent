@@ -7,19 +7,22 @@ chip creava una cartella nuda con `/api/workspace/mkdir`: nessun albero, nessun
 file di istruzioni, nessuna voce nel registro — una wiki rotta che sembrava un
 progetto.
 
-**Lo scaffolder e' quello della skill, non una copia.** `scaffold.py` vive in
-`workspace/skills/llm-wiki/scripts/`, e' un checkout che l'utente puo'
-modificare, ed e' la fonte di verita' sulla forma dei file: reimplementarne
-l'albero qui vorrebbe dire avere due scaffolder che divergono al primo cambio
-della skill. Lo carichiamo come fa il builtin `wiki_scaffold` di `python_exec`
-(``agent/tools/python_exec_builtins.py``), che e' l'altro chiamante.
+**Lo scaffolder e' `project_scaffold.py`, nel package** *(dal 22/08, passo T1 di
+`roadmap/taccuino-passi.md`)*. Fino a quel giorno era `scaffold.py` della skill,
+per non avere due scaffolder che divergono; ora sono due di proposito, perche'
+costruiscono **due formati diversi**: la skill fa la biblioteca di ricerca
+(`raw/papers`, `concepts|entities|summaries`, le cinque operazioni), e resta la
+strada per crearne una chiedendola a Jenny; il picker della UI fa un progetto —
+pagine piatte, un diario, la mappa. Il confine e' netto e nessun file e'
+conteso.
 
 **La riga dell'utente non e' un extra.** *"Quando crei il progetto devi scrivere
 tu qualcosa, sennò la chat è ferma"*: senza una riga di scope il primo turno non
 ha su cosa appoggiarsi, e uno scope indovinato dall'agente e' peggio di nessuno
-scope, perche' tutto quel che viene archiviato dopo lo eredita. Finisce nel
-`summary:` dell'`AGENTS.md`, che e' il campo da cui `reindex_wikis` costruisce la
-riga del registro.
+scope, perche' tutto quel che viene archiviato dopo lo eredita. Finisce in due
+posti — il `summary:` dell'`AGENTS.md`, da cui `reindex_wikis` costruisce la riga
+del registro, e la mappa del progetto, che e' quel che l'agente legge per primo —
+e ci entra **alla nascita**, non per sostituzione di un segnaposto dopo.
 """
 
 from __future__ import annotations
@@ -29,22 +32,11 @@ import importlib.util
 import io
 import re
 from pathlib import Path
-from types import ModuleType
 from typing import Any
 
 from loguru import logger
 
-# I due placeholder del template di `scaffold.py` in cui va la riga dell'utente.
-# Sostituiti *solo se presenti*: se l'utente ha riscritto il template, un valore
-# vero non va sovrascritto — la stessa regola che rende sicuro il top-up dello
-# scaffold.
-_SUMMARY_PLACEHOLDER = "<one-line scope — shown next to this wiki in wikis/_index.md>"
-_SCOPE_PLACEHOLDER = "- <describe the topic area>"
-
-# Il nome con cui una wiki *nasce* dal 22/08. Chi legge accetta anche il
-# vecchio (`utils/wiki_paths.py::wiki_schema_file`), ma chi scrive no: un
-# `CLAUDE.md` nuovo sarebbe un file che dal passo 7.5 nessun lettore guarda.
-_SCHEMA_FILENAME = "AGENTS.md"
+from jenny.webui.project_scaffold import scaffold_project
 
 _TITLE_SPLIT_RE = re.compile(r"[-_.]+")
 
@@ -65,30 +57,14 @@ def project_title(name: str) -> str:
     return " ".join(w[:1].upper() + w[1:] for w in words) or name
 
 
-def load_scaffold_script(scripts_dir: Path) -> ModuleType:
-    """Carica `scaffold.py` dal checkout della skill nel workspace.
-
-    Nessun fallback su `exec()` come in `python_exec_builtins`: qui l'errore ha
-    un utente davanti e un toast in cui stare, quindi e' meglio dirgli che lo
-    script non c'e' (o non compila) che eseguirne una versione caricata per
-    un'altra strada.
-    """
-    script_path = scripts_dir / "scaffold.py"
-    if not script_path.is_file():
-        raise ProjectCreateError(f"scaffold script not found: {script_path}")
-    spec = importlib.util.spec_from_file_location("scaffold", script_path)
-    if spec is None or spec.loader is None:
-        raise ProjectCreateError(f"scaffold script not loadable: {script_path}")
-    module = importlib.util.module_from_spec(spec)
-    try:
-        spec.loader.exec_module(module)
-    except Exception as exc:
-        raise ProjectCreateError(f"scaffold script failed to load: {exc}") from exc
-    return module
-
-
 def _yaml_scalar(value: str) -> str:
     """*value* come scalare YAML su una riga, sempre valido.
+
+    Perche' quotare: la riga di scope e' testo libero dell'utente e finisce
+    *dentro* la frontmatter. Un due punti in mezzo — "Prova del passo 7: la chat
+    segue" — rende il blocco YAML non parsabile, e allora si perde **tutta** la
+    frontmatter, non solo quella riga. Visto sul telefono il 22/08 su una wiki
+    appena creata: ``read_wiki_scope`` cadeva sul ripiego e l'id risultava assente.
 
     Non si usa ``yaml.dump``: quello aggiunge il documento e a volte manda a
     capo. Qui basta la regola delle virgolette doppie — raddoppiare i backslash,
@@ -97,38 +73,6 @@ def _yaml_scalar(value: str) -> str:
     """
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
-
-
-def _seed_schema_file(wiki_root: Path, seed: str) -> bool:
-    """Mette *seed* nei placeholder dell'`AGENTS.md`. True se ne ha scritto almeno uno."""
-    schema = wiki_root / _SCHEMA_FILENAME
-    try:
-        text = schema.read_text(encoding="utf-8")
-    except OSError as exc:
-        logger.warning("could not read {} to seed the scope: {}", schema, exc)
-        return False
-
-    seeded = False
-    if _SUMMARY_PLACEHOLDER in text:
-        # **Quotato.** La riga di scope e' testo libero dell'utente e finisce
-        # *dentro* la frontmatter: un due punti in mezzo — "Prova del passo 7:
-        # la chat segue" — rende il blocco YAML non parsabile, e allora si
-        # perde **tutta** la frontmatter, non solo quella riga. Visto sul
-        # telefono il 22/08 su una wiki appena creata: `read_wiki_scope`
-        # cadeva sul ripiego e l'id della wiki risultava assente.
-        text = text.replace(_SUMMARY_PLACEHOLDER, _yaml_scalar(seed), 1)
-        seeded = True
-    if _SCOPE_PLACEHOLDER in text:
-        text = text.replace(_SCOPE_PLACEHOLDER, f"- {seed}", 1)
-        seeded = True
-
-    if seeded:
-        schema.write_text(text, encoding="utf-8")
-    else:
-        # Non inventiamo un posto dove metterla: il registro cade sul fallback e
-        # l'utente vede la wiki senza riga di scope, che e' visibile e correggibile.
-        logger.warning("no scope placeholder left in {} — seed not written", schema)
-    return seeded
 
 
 def create_project(
@@ -147,22 +91,15 @@ def create_project(
     if root.exists():
         raise ProjectCreateError(f"project already exists: {name}")
 
-    scaffold_mod = load_scaffold_script(scripts_dir)
-
-    # Lo scaffolder stampa il suo report su stdout: catturato, non perso, cosi'
-    # un'anomalia (una wiki che esisteva a metà) resta nei log del gateway.
-    buffer = io.StringIO()
     try:
-        with contextlib.redirect_stdout(buffer):
-            created = scaffold_mod.scaffold(str(root), project_title(name))
+        created = scaffold_project(root, project_title(name), seed, _yaml_scalar(seed))
     except Exception as exc:
         raise ProjectCreateError(f"scaffold failed: {exc}") from exc
-    logger.info("scaffolded project {}:\n{}", name, buffer.getvalue().strip())
 
-    seeded = _seed_schema_file(root, seed)
-
-    # Il registro va rigenerato *dopo* la riga di scope: `scaffold.py` lo scrive
-    # da se', ma con il placeholder ancora dentro.
+    # Il registro lo scrive il chiamante e non lo scaffolder: quello conosce una
+    # cartella, questo conosce `wikis_dir`. `reindex_wikis` resta della skill —
+    # e' il registro del *workspace*, comune ai due formati, e non c'e' niente da
+    # duplicare.
     registry: str | None = None
     try:
         reindex = importlib.util.spec_from_file_location(
@@ -182,6 +119,10 @@ def create_project(
     return {
         "name": name,
         "created": list(created or []),
-        "seeded": seeded,
+        # La riga di scope entra alla nascita, quindi c'e' sempre: il campo resta
+        # nella risposta perche' il client lo legge, e resta `True` invece di
+        # sparire per non cambiare la forma di un payload per un dettaglio
+        # interno.
+        "seeded": True,
         "registry": registry,
     }

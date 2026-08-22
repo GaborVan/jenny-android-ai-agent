@@ -6,9 +6,11 @@ le wiki, `roadmap/project-sessions.md`), e "Nuovo progetto" chiamava
 `/api/workspace/mkdir` — cartella nuda, nessun albero, nessun `AGENTS.md`,
 nessuna voce nel registro. Una wiki rotta che sembrava un progetto.
 
-Il fixture monta lo scaffolder **vero** della skill nel workspace, perche' e'
-quello che gira in produzione: il comando lo carica da `workspace/skills/`, non
-lo reimplementa.
+Dal 22/08 (**T1** di `roadmap/taccuino-passi.md`) lo scaffolder e' nel package
+(`webui/project_scaffold.py`) e costruisce il **formato nostro**: pagine piatte
+sotto `wiki/`, un diario, la mappa. Il fixture monta comunque il checkout della
+skill nel workspace, perche' da la' viene ancora `reindex_wikis.py` — il registro
+del workspace e' comune ai due formati.
 """
 
 from __future__ import annotations
@@ -43,8 +45,7 @@ def workspace(tmp_path: Path) -> Path:
     root = tmp_path / "workspace"
     scripts = root / "skills" / "llm-wiki" / "scripts"
     scripts.mkdir(parents=True)
-    for name in ("scaffold.py", "reindex_wikis.py"):
-        shutil.copy(_SKILL_SCRIPTS / name, scripts / name)
+    shutil.copy(_SKILL_SCRIPTS / "reindex_wikis.py", scripts / "reindex_wikis.py")
     return root
 
 
@@ -78,7 +79,7 @@ class TestUnProgettoNasceCompleto:
         root = workspace / "wikis" / "patreon-creator"
         for rel in ("AGENTS.md", "wiki/index.md", "audit/.gitkeep"):
             assert (root / rel).is_file(), rel
-        for rel in ("raw/articles", "raw/papers", "raw/notes", "raw/refs", "outputs/queries"):
+        for rel in ("wiki", "raw/journal", "raw/research", "log", "audit/resolved"):
             assert (root / rel).is_dir(), rel
         assert result["name"] == "patreon-creator"
         assert result["seeded"] is True
@@ -90,12 +91,25 @@ class TestUnProgettoNasceCompleto:
         # difetto che il 22/08 ha fatto perdere tutta la frontmatter a una wiki
         # la cui riga di scope conteneva un due punti.
         assert _frontmatter(schema)["summary"] == "Come si cresce su Patreon."
-        assert "- Come si cresce su Patreon." in schema
+        # ...e nella mappa, che è quel che l'agente legge per primo (T3).
+        assert "Come si cresce su Patreon." in (root / "wiki" / "index.md").read_text("utf-8")
+        # Nessun segnaposto: il seme entra alla nascita, non per sostituzione.
         assert "<one-line scope" not in schema
         # ...e infatti nel registro c'e'.
         registry = (workspace / "wikis" / "_index.md").read_text(encoding="utf-8")
         assert "Come si cresce su Patreon." in registry
         assert "[[patreon-creator/wiki/index|patreon-creator]]" in registry
+
+    async def test_non_crea_la_tassonomia_del_pattern_di_ricerca(self, ctx, workspace):
+        """T1: le cartelle che obbligavano a scegliere «concept o entity?» **mentre**
+        si prende un appunto non esistono più. Il pattern document-first resta, ma
+        vive nella skill e nelle sette wiki che ce l'hanno già."""
+        await _create(ctx, name="nuovo", seed="x")
+
+        root = workspace / "wikis" / "nuovo"
+        for rel in ("wiki/concepts", "wiki/entities", "wiki/summaries",
+                    "outputs/queries", "raw/papers", "raw/articles", "raw/refs"):
+            assert not (root / rel).exists(), rel
 
     async def test_il_titolo_viene_dal_nome_della_cartella(self, ctx, workspace):
         await _create(ctx, name="patreon-creator", seed="x")
@@ -108,8 +122,38 @@ class TestUnProgettoNasceCompleto:
         await _create(ctx, name="nuovo", seed="x")
 
         root = workspace / "wikis" / "nuovo"
-        assert list((root / "wiki" / "concepts").iterdir()) == []
-        assert list((root / "raw" / "notes").iterdir()) == []
+        # Sotto `wiki/` c'è la mappa e nient'altro: le pagine le scrive il lavoro.
+        assert [p.name for p in (root / "wiki").iterdir()] == ["index.md"]
+        # Il diario nasce vuoto: la prima pagina la scrive la prima cattura, e un
+        # file creato qui sarebbe il diario di un giorno in cui non si è detto niente.
+        assert list((root / "raw" / "journal").iterdir()) == []
+        assert list((root / "raw" / "research").iterdir()) == []
+
+    async def test_la_mappa_nasce_con_le_sue_sezioni(self, ctx, workspace):
+        """Le sezioni nascono vuote ma nascono: il giardiniere (T4) aggiorna
+        sezioni che esistono, invece di inventarsi una struttura ogni volta — che è
+        il modo in cui due sessioni diverse producono due mappe diverse."""
+        await _create(ctx, name="nuovo", seed="di cosa si tratta")
+
+        mappa = (workspace / "wikis" / "nuovo" / "wiki" / "index.md").read_text("utf-8")
+        for section in ("## Decided", "## Open", "## Pages"):
+            assert section in mappa, section
+        # Il diario è citato come percorso, **non** come `[[link]]`: sta fuori da
+        # `wiki/`, e un wikilink fuori dalle pagine è morto per `resolve_wikilink`.
+        assert "raw/journal" in mappa
+        assert "[[raw/journal" not in mappa
+
+    async def test_rilanciarlo_non_riscrive_niente(self, ctx, workspace):
+        """Lo scaffolder scrive solo quel che manca: è la regola che rende sicuro
+        ripassare su una cartella rimasta a metà."""
+        from jenny.webui.project_scaffold import scaffold_project
+
+        await _create(ctx, name="nuovo", seed="x")
+        root = workspace / "wikis" / "nuovo"
+        before = {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+        assert scaffold_project(root, "Nuovo", "x", '"x"') == []
+        assert {p: p.read_bytes() for p in root.rglob("*") if p.is_file()} == before
 
     async def test_una_wiki_esistente_non_viene_toccata(self, ctx, workspace):
         """Il secondo progetto non deve poter riscrivere il primo."""
@@ -173,17 +217,22 @@ class TestIlGateStaSulServer:
         schema = (workspace / "wikis" / "multi" / "AGENTS.md").read_text("utf-8")
         assert _frontmatter(schema)["summary"] == "prima riga seconda riga"
 
-    async def test_dice_chiaro_quando_manca_lo_scaffolder(self, tmp_path: Path):
-        """Lo script sta nel workspace ed e' modificabile dall'utente: se non
-        c'e', l'errore deve nominarlo, non arrivare come "internal"."""
+    async def test_un_workspace_senza_la_skill_crea_comunque_il_progetto(self, tmp_path: Path):
+        """Fino al 22/08 questo era un errore: lo scaffolder stava nel checkout
+        della skill, quindi un workspace senza `skills/` non poteva creare niente.
+        Ora lo scaffolder e' nel package e dalla skill viene solo `reindex_wikis`,
+        che aggiorna il **registro**: se manca, il progetto nasce completo e il
+        registro resta indietro — un inconveniente che `lint --workspace` ripara,
+        non un fallimento della creazione."""
         empty = tmp_path / "vuoto"
         empty.mkdir()
         ctx = CommandContext(get_workspace_root=lambda: empty)
 
-        with pytest.raises(CommandError) as exc:
-            await _create(ctx, name="x", seed="y")
-        assert exc.value.code == "bad_request"
-        assert "scaffold" in str(exc.value).lower()
+        result = await _create(ctx, name="x", seed="y")
+
+        assert result["registry"] is None
+        assert (empty / "wikis" / "x" / "wiki" / "index.md").is_file()
+        assert (empty / "wikis" / "x" / "raw" / "journal").is_dir()
 
 
 # ── l'elenco che il chip legge ───────────────────────────────────────────────
