@@ -210,6 +210,25 @@ class ContextBuilder:
                 parts.append(render_template(
                     "agent/project.md",
                     project_path=str(_absolute_workspace(root)),
+                    # La politica di cattura vale per **questo** turno, quello in
+                    # cui c'e' un utente che dice qualcosa. Un subagent riceve lo
+                    # stesso file con ``capture=False`` (v. ``agent/subagent.py``):
+                    # non ha un utente, e la sua materia prima e' il prompt che
+                    # gli ha scritto l'agente principale. Se catturasse, nel
+                    # diario finirebbe il suo ragionamento intermedio — e il
+                    # diario e' l'ingresso del giardiniere, quindi quel rumore
+                    # diventerebbe pagine.
+                    #
+                    # **In sola lettura la sezione non si rende affatto**, e non
+                    # e' un'ottimizzazione: misurato sul telefono il 22/08, con la
+                    # regola presente l'agente ha provato **due volte** a
+                    # catturare — e al secondo tentativo ha scritto al subagent
+                    # «se il tool di scrittura ti e' negato, riprova con
+                    # apply_patch». Il divieto di ``agent/readonly.md`` c'era, ed
+                    # e' anche piu' in basso (cioe' vince, v. il test sull'ordine);
+                    # non e' bastato. Dare un ordine e poi vietarlo due paragrafi
+                    # dopo e' un invito a cercare la scappatoia: meglio non darlo.
+                    capture=_turn_is_writable(),
                 ))
 
         # Il blocco sta **prima** del bootstrap, al contrario di

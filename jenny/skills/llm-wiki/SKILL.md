@@ -33,9 +33,17 @@ Instead of RAG (re-retrieving raw docs on every query), the LLM **compiles** raw
 
 The wiki is a living artifact with **five operations** — `compile`, `ingest`, `query`, `lint`, `audit`. See "Session start & wiki selection" below for what to read before doing anything.
 
+## What this skill covers, and what it does not
+
+**This is the manual of the research pattern**: a wiki that digests *documents* — papers, articles, fetched pages — into compiled, cross-linked pages. The layout below, the `concepts`/`entities`/`summaries` split and the five operations all belong to that pattern, and the wikis built on it are the reason this skill exists.
+
+**It is not the authority on how a project is laid out.** Projects created from the app have their own shape — flat pages under `wiki/`, a map at `wiki/index.md`, a working journal under `raw/journal/` — described in the project's system prompt and visible in the folder itself. Two shapes exist on disk; nothing declares which is which, so **read the structure you are in** and treat that project's `AGENTS.md` as the local authority. Where this skill's layout and the folder in front of you disagree, the folder wins.
+
+What still applies everywhere: raw material lands verbatim before it becomes a page; a page cites where it came from; `lint` and `audit` are how quality and human corrections stay visible. And **the conversation itself is raw material** — a stable fact the user tells you is captured in the journal, which is that project's `raw/` for spoken material, not a shortcut around ingest.
+
 ## Workspace layout (canonical)
 
-There is one layout. A workspace holds many **isolated** wikis under `wikis/`, bridged by a single top-level `wikis/_index.md`. Even a single wiki lives at `wikis/<name>/` — there is no standalone-wiki mode.
+This is the research pattern's layout (v. the section above: a project created from the app has its own). A workspace holds many **isolated** wikis under `wikis/`, bridged by a single top-level `wikis/_index.md`. Even a single wiki lives at `wikis/<name>/` — there is no standalone-wiki mode, and the registry is common to both shapes.
 
 ```
 workspace/

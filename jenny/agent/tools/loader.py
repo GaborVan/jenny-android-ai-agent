@@ -67,6 +67,7 @@ _HARDCODED_TOOL_MODULES = [
     "spawn",
     "subagent_control",
     "cron",
+    "journal",
     "self",
     "memory_recall",
     "search",

@@ -12,6 +12,13 @@ does not.
 That is also why your `grep` returns file paths and not matching lines: knowing
 where something is costs a few tokens, reading it here costs them permanently.
 
+**One write is yours: `journal_append`, inside a project.** Appending one line to
+that project's journal is a single call that can touch nothing else, and delegating
+it would spend an entire subagent run on one line of text — which is exactly what
+happened before this paragraph existed. Capture with it directly, in the same turn.
+Everything else about the folder — creating pages, tidying, keeping the map — is
+still a spawn.
+
 ## What to delegate
 
 - Anything multi-step, or anything whose output is large: research, writing and

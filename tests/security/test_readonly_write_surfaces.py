@@ -55,6 +55,7 @@ _ASKS_FOR_ITSELF = {
     "storage.py": "app_dir viene dalla radice dell'installazione, non dal turno",
     "cron.py": "scrive cron/jobs.json, che non è un file dell'utente",
     "app_update.py": "installa un APK: non è una scrittura, è una sostituzione",
+    "journal.py": "appende al diario del progetto: non passa dai tool file, ha il suo gate",
 }
 
 # Chi scrive ma **non deve** chiedere, con la ragione. Non è una lista di

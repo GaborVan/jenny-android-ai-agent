@@ -1,17 +1,50 @@
 # Project Folder
 
-You are working inside one project: `{{ project_path }}`. It is a wiki, and what you produce for
-it goes inside it — filed by kind, never dumped at the root, which holds only this layout:
+You are working inside one project: `{{ project_path }}`. Read anywhere in the installation, but
+**write only inside this folder**: a write outside it is refused, so do not plan one. That
+includes another project — there is no cross-project work.
 
-- `wiki/concepts/`, `wiki/entities/`, `wiki/summaries/` — the pages. `wiki/index.md` catalogues them.
-- `raw/articles|papers|notes/` — sources copied in verbatim. `raw/refs/` — a pointer file for anything too large to copy.
-- `outputs/` — deliverables that are not wiki pages; `outputs/queries/` for the answer to a question.
-- `log/YYYYMMDD.md` — one appended line per operation.
-- `audit/` — open review notes, `audit/resolved/` once closed.
-- `AGENTS.md` — this project's own instructions: scope, conventions, what it deliberately excludes. Read it before working, and keep it current when the answer to "how we work here" changes. It is yours to edit.
+- `wiki/` — the pages, one per thing, flat. Subfolders are allowed, not required: open one when a
+  group of pages has earned it. A page declares `state:` (`open` | `hypothesis` | `decided` |
+  `done`) and `source:` in its frontmatter, and is worth exactly what its state says.
+- `wiki/index.md` — **the map**: what this project is, what is decided, what is open, which pages
+  exist. Read on every turn, so keep it to one screen: what outgrows a few lines becomes a page.
+- `raw/journal/YYYYMMDD.md` — the working journal, one page per day, **append-only**.
+- `raw/research/` — what arrives from outside, copied in verbatim.
+- `log/YYYYMMDD.md` — one line per operation. `audit/` — review notes, `audit/resolved/` once closed.
+- `AGENTS.md` — this project's own instructions: scope, conventions, what it deliberately
+  excludes. Read it before working, and keep it current when the answer to "how we work here"
+  changes. It is yours to edit.
 
-Read anywhere in the installation, but **write only inside this folder**: a write outside it is
-refused, so do not plan one. That includes another project — there is no cross-project work.
+Projects older than this layout have other folders under `wiki/` and `raw/`. Follow the structure
+you find; their `AGENTS.md` is the authority on how that one works.
 
-Depth lives in the `llm-wiki` skill: the five operations, page format and frontmatter, lint and
-audit. Read it when you are about to do one of them, not before.
+{% if capture %}## The conversation is a source
+
+What the user tells you is material, the same way a document is. **If it will still be true next
+week, write it down before you answer.** A constraint, a decision, a preference, a name, a date —
+yes. Mood, courtesies, the thread of the discussion — no.
+
+The gesture is **one `journal_append` call** with the fact in it. Nothing else — no page to
+create, no folder to choose, no subagent to spawn. It is cheap on purpose: a capture that costs a
+decision is a capture that does not happen, and what stays only in the chat is lost to the
+project.
+
+**Do not ask permission to write.** The switch beside the chip above the composer has already
+answered that; asking again in words reopens what the user has closed.
+
+Turning journal lines into pages, and keeping the map current, happens **when the user asks** —
+capture always, author on request. What arrives from outside goes verbatim into `raw/research/`
+first and into a page second, with `source:` pointing back at the raw copy.
+
+{% endif %}## Answer from the pages
+
+Before a substantial answer, read the map and the pages it points to, and say what you leant on:
+`[[page-name]]`. An answer that cites nothing is the visible sign that this project is not
+working yet.
+
+## Depth
+
+The `llm-wiki` skill is the manual of the **research** pattern: its five operations, page format,
+lint and audit. Read it when you are about to do one of those — its folder layout describes that
+pattern, not this project.

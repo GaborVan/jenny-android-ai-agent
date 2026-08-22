@@ -145,6 +145,62 @@ def test_a_turn_with_no_bound_scope_is_writable() -> None:
     assert _turn_is_writable() is True
 
 
+def test_read_only_removes_the_capture_rule(tmp_path) -> None:
+    """T2: la cattura è una scrittura, quindi in sola lettura non si chiede.
+
+    Non c'è un secondo divieto da scrivere: ce n'è uno di **ordine**. Dal 22/08
+    ``agent/project.md`` dice di scrivere nel diario prima di rispondere, e
+    ``agent/readonly.md`` dice che niente su questo telefono può cambiare. Le due
+    frasi si contraddicono per costruzione, e quella che vince è **l'ultima** —
+    per la stessa ragione per cui il blocco readonly sta in fondo (v. il commento
+    in ``context.py``: deve vincere anche su un ``AGENTS.md`` di progetto che
+    dica di scrivere).
+
+    L'ordine dei blocchi resta come era (readonly in fondo, così vince su un
+    ``AGENTS.md`` di progetto che dica di scrivere): quello che cambia è che in
+    sola lettura non c'è più niente da far vincere.
+    """
+    from jenny.agent.context import ContextBuilder
+    from jenny.security.workspace_access import (
+        WorkspaceScope,
+        bind_workspace_scope,
+        reset_workspace_scope,
+        workspace_sandbox_status,
+    )
+
+    project = tmp_path / "wikis" / "viaggio"
+    (project / "wiki").mkdir(parents=True)
+    scope = WorkspaceScope(
+        project_path=project,
+        access_mode="restricted",
+        restrict_to_workspace=True,
+        sandbox_status=workspace_sandbox_status(
+            restrict_to_workspace=True, workspace=project
+        ),
+        writable=False,
+    )
+    token = bind_workspace_scope(scope)
+    try:
+        prompt = ContextBuilder(tmp_path).build_system_prompt(
+            workspace=project, session_key="project:viaggio"
+        )
+    finally:
+        reset_workspace_scope(token)
+
+    assert "# Project Folder" in prompt and "# Read-Only Turn" in prompt
+    # **La regola di cattura non c'è affatto**, ed è la correzione del collaudo
+    # del 22/08: con la regola presente e il divieto più in basso — cioè
+    # nell'ordine che vince — l'agente ha provato due volte a catturare, e al
+    # secondo tentativo ha istruito il subagent a cercare una scappatoia
+    # (`apply_patch`). L'ordine risolve la contraddizione per il modello; non
+    # gli toglie la voglia di provarci. Meglio non dare l'ordine.
+    assert "before you answer" not in prompt
+    assert "Do not ask permission" not in prompt
+    # La pianta però resta: in sola lettura si legge e si descrive, e per farlo
+    # bisogna sapere com'è fatta la cartella.
+    assert "raw/journal/YYYYMMDD.md" in prompt
+
+
 # ── La simmetria col passo 3 ─────────────────────────────────────────────
 
 

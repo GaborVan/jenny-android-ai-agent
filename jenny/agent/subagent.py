@@ -1610,6 +1610,10 @@ class SubagentManager:
             # legge l'agente principale, incluso e non ricopiato.
             project=is_wiki_root(root),
             project_path=str(root.resolve()),
+            # La pianta della cartella gli serve — e' dove scrive. La politica di
+            # cattura no: non ha un utente che gli dica fatti stabili, e quel che
+            # scoprisse va in ``raw/research/`` e in una pagina, non nel diario.
+            capture=False,
             # **L'esecuzione eredita lo scope, la conoscenza no.** Visto sul
             # telefono il 22/08: in sola lettura l'agente principale sapeva di
             # non poter scrivere, ha delegato, e il subagent ha pianificato e
