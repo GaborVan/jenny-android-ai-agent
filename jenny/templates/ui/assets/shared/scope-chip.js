@@ -35,6 +35,30 @@ const DEFAULT_DIR = 'wikis';
 /** Un nome di progetto è un nome di cartella: niente separatori né path. */
 const VALID_NAME = /^[A-Za-z0-9._-]+$/;
 
+/** Quanto del nome entra nel placeholder prima dei puntini.
+ *
+ *  Il chip tronca da sé, in CSS (`max-width: 15ch` sul crumb); il placeholder di
+ *  un `<textarea>` no — sfora la sua scatola e viene tagliato a metà parola,
+ *  senza niente che dica che è tagliato. Un nome arriva a 64 caratteri
+ *  (`is_valid_project_name`), quindi succede davvero: visto sul telefono il
+ *  22/08.
+ */
+const NAME_IN_PLACEHOLDER = 22;
+
+/** Il nome accorciato per il placeholder, **senza** aggiungere i puntini.
+ *
+ *  I puntini ce li ha già la stringa localizzata («Chiedi qualcosa su {name}…»),
+ *  e aggiungerne altri dava `zz-bordi-lunghissimo-……` — visto sul telefono
+ *  subito dopo il primo tentativo. Quindi qui si taglia e si toglie il
+ *  separatore finale, così i puntini del template attaccano a una parola e non
+ *  a un trattino: `zz-bordi-lunghissimo...`
+ */
+function _short(name) {
+  const text = String(name || '');
+  if (text.length <= NAME_IN_PLACEHOLDER) return text;
+  return text.slice(0, NAME_IN_PLACEHOLDER).replace(/[-._]+$/, '');
+}
+
 export class ScopeChip {
   constructor() {
     this.el = document.getElementById('scope-chip');
@@ -180,7 +204,7 @@ export class ScopeChip {
     if (project) {
       input.placeholder = i18n.t(
         readonly ? 'write.askAboutReadonly' : 'scope.askAbout',
-        { name: this.scope.name },
+        { name: _short(this.scope.name) },
       );
       return;
     }

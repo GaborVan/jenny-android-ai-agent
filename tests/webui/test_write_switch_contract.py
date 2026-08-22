@@ -128,6 +128,65 @@ def test_the_switch_sits_in_the_chip_row() -> None:
     assert 'id="scope-chip"' in row.group(1), "chip e interruttore nella stessa riga"
 
 
+def test_the_row_cannot_push_the_switch_off_screen() -> None:
+    """Passo **6**: cosa fa il chip con un nome lungo, ora che la riga è in due.
+
+    Un nome di progetto arriva a 64 caratteri (``is_valid_project_name``), quindi
+    il caso non è teorico. ``max-width: 100%`` da solo non basta: quel 100% è
+    della riga *intera*, e l'interruttore è ``flex-shrink: 0`` — il chip se la
+    prendeva tutta e l'interruttore usciva a destra. ``min-width: 0`` è la metà
+    che si dimentica: senza, un contenuto flex rifiuta di scendere sotto la
+    propria larghezza intrinseca e lo shrink non morde.
+    """
+    css = (ASSETS / "mobile-style.css").read_text(encoding="utf-8")
+    chip = re.search(r"^\.scope-chip \{(.*?)^\}", css, re.S | re.M)
+    assert chip, "regola .scope-chip non trovata"
+    body = chip.group(1)
+    assert re.search(r"flex:\s*0 1 auto", body), "il chip deve poter cedere"
+    assert re.search(r"min-width:\s*0", body), "e poter scendere sotto la larghezza intrinseca"
+
+    switch = re.search(r"^\.write-switch \{(.*?)^\}", css, re.S | re.M)
+    assert switch, "regola .write-switch non trovata"
+    assert re.search(r"flex-shrink:\s*0", switch.group(1)), (
+        "l'interruttore non cede: è lui che deve restare leggibile"
+    )
+
+    crumb = re.search(r"^\.scope-chip-crumb \{(.*?)^\}", css, re.S | re.M)
+    assert crumb, "regola .scope-chip-crumb non trovata"
+    assert re.search(r"max-width:\s*\d+ch", crumb.group(1)), "la troncatura vera sta sul crumb"
+    assert "ellipsis" in crumb.group(1)
+
+
+def test_the_placeholder_shortens_a_long_project_name() -> None:
+    """Il chip tronca in CSS, un placeholder di `<textarea>` no.
+
+    Visto sul telefono il 22/08: con un nome lungo il placeholder sforava la sua
+    scatola e veniva tagliato a metà parola **senza puntini**, che si legge come
+    un testo rotto invece che accorciato.
+    """
+    src = _code(CHIP)
+    assert "NAME_IN_PLACEHOLDER" in src
+    assert re.search(r"_short\(this\.scope\.name\)", src), (
+        "il nome va accorciato prima di finire nel placeholder"
+    )
+    short = re.search(r"function _short\(name\) \{(.*?)\n\}", src, re.S)
+    assert short, "_short non trovata"
+    body = short.group(1)
+    assert "NAME_IN_PLACEHOLDER" in body and "slice(" in body
+    # **Nessun puntino aggiunto qui**: ce li ha già la stringa localizzata, e
+    # raddoppiarli dava `zz-bordi-lunghissimo-……`. Si toglie invece il
+    # separatore finale, così i puntini del template attaccano a una parola.
+    assert "…" not in body, "i puntini vengono dal template, non da qui"
+    assert re.search(r"replace\(/\[-\._\]\+\$/", body), (
+        "il separatore finale va tolto, o i puntini del template attaccano a un trattino"
+    )
+    for lang in ("it", "en"):
+        data = json.loads((ASSETS / "i18n" / f"{lang}.json").read_text(encoding="utf-8"))
+        assert data["scope"]["askAbout"].rstrip().endswith(("...", "…")), (
+            f"{lang}: se il template perde i puntini, un nome tagliato non si vede più"
+        )
+
+
 def test_the_placeholder_repeats_it() -> None:
     """L'ultima cosa che l'occhio attraversa prima di premere invio."""
     body = _method(CHIP, "syncPlaceholder")

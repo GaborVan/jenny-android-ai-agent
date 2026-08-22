@@ -19,8 +19,10 @@ from jenny.apps.manifest import COLLECTION_RE, AppAction
 from jenny.security.workspace_access import (
     READONLY_TOOL_REFUSAL,
     current_turn_is_readonly,
+    current_workspace_scope,
 )
 from jenny.utils.path import atomic_write
+from jenny.utils.wiki_paths import is_wiki_root
 
 DEFAULT_QUERY_LIMIT = 200
 DEFAULT_MAX_COLLECTION_BYTES = 5_000_000
@@ -91,8 +93,29 @@ def _new_record(params: dict) -> dict:
 
 
 # Le op che cambiano il contenuto di una collezione. ``query`` non c'e' apposta:
-# in sola lettura una mini-app deve poter ancora *mostrare* i suoi dati.
+# una mini-app deve poter ancora *mostrare* i suoi dati.
 _MUTATING_OPS = frozenset({"append", "set", "update", "delete"})
+
+# Il rifiuto dentro un progetto. Dice **dove** si fa, come quello dei promemoria
+# del passo 3: e' l'unico posto in cui Jenny lo viene a sapere, e da cui lo
+# ridice all'utente.
+_PROJECT_REFUSAL = (
+    "Not from here: the mini-apps and their data are personal, and this is a project "
+    "conversation, which writes only inside its own folder. Reading them works — this is "
+    "about changing them. Tell the user to switch to the personal chat (the chip above the "
+    "composer) if they want it saved there; do not look for another way to write it."
+)
+
+
+def _in_a_project() -> bool:
+    """Se il turno in corso e' la conversazione di un progetto.
+
+    Si chiede allo **scope** e non alla chiave di sessione, che qui non arriva —
+    stessa ragione di ``ContextBuilder``: chi ha bisogno di questa risposta e'
+    anche il subagent, che la chiave non ce l'ha mai.
+    """
+    scope = current_workspace_scope()
+    return scope is not None and is_wiki_root(scope.project_path)
 
 
 def _dump(record: dict) -> str:
@@ -120,13 +143,23 @@ async def execute_storage_action(
 ) -> dict:
     """Execute one storage op; returns a JSON-safe result dict."""
     assert action.collection is not None and action.op is not None
-    # Sola lettura: ``query`` passa, le quattro mutazioni no. Questa e' la
-    # scrittura che il 22/08 e' uscita da dentro un progetto — la Todo
-    # *personale* aggiornata da una chat di lavoro — e la ragione e' che
-    # ``app_dir`` viene dalla radice dell'installazione, non da quella del
-    # turno, quindi il confine di scrittura non la vede passare.
-    if action.op in _MUTATING_OPS and current_turn_is_readonly():
-        raise StorageError(READONLY_TOOL_REFUSAL)
+    # Due chiusure, e sono regole diverse. ``query`` passa in entrambe: una
+    # mini-app deve poter *mostrare* i suoi dati sempre.
+    #
+    # 1. Sola lettura (passo 4): questo turno non cambia niente sul telefono.
+    # 2. Progetto (passo 6): **le app sono personali** — deciso il 22/08.
+    #    ``app_dir`` viene dalla radice dell'installazione e non da quella del
+    #    turno, quindi il confine di scrittura non la vedeva passare: il 22/08
+    #    la Todo personale e' stata aggiornata da dentro un progetto, mentre il
+    #    prompt di quel progetto diceva «scrivi solo dentro questa cartella».
+    #    L'alternativa era dichiarare le app condivise e spendere una riga di
+    #    prompt a ogni turno per l'eccezione; una Todo per progetto darebbe
+    #    sette liste vuote invece di quella che usi.
+    if action.op in _MUTATING_OPS:
+        if current_turn_is_readonly():
+            raise StorageError(READONLY_TOOL_REFUSAL)
+        if _in_a_project():
+            raise StorageError(_PROJECT_REFUSAL)
     path = _collection_path(app_dir, action.collection)
 
     async with _lock_for(path):

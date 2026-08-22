@@ -648,6 +648,17 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  /* Cede lui, non l'interruttore. Da quando la riga tiene due controlli,
+     `max-width: 100%` non basta: il 100% e' della riga *intera*, quindi con un
+     nome di progetto lungo il chip se la prendeva tutta e l'interruttore — che
+     e' `flex-shrink: 0` — usciva a destra. Un nome di progetto arriva a 64
+     caratteri (`is_valid_project_name`), quindi il caso non e' teorico.
+     `min-width: 0` e' la meta' che si dimentica: senza, il contenuto flex
+     rifiuta di scendere sotto la propria larghezza intrinseca e lo shrink non
+     morde. La troncatura vera resta sul crumb (`max-width: 15ch`); questo e'
+     il tetto che tiene la riga dentro lo schermo comunque. */
+  flex: 0 1 auto;
+  min-width: 0;
   max-width: 100%;
   padding: 4px 10px 4px 9px;
   background: var(--overlay);
@@ -727,6 +738,7 @@ body {
   align-items: center;
   gap: 5px;
   min-width: 0;
+  overflow: hidden;
 }
 .scope-chip-crumb {
   max-width: 15ch;

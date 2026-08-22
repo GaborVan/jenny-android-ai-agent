@@ -77,7 +77,11 @@ from jenny.session.goal_state import (
     runner_wall_llm_timeout_s,
     sustained_goal_active,
 )
-from jenny.session.keys import is_project_session_key, session_key_for_channel
+from jenny.session.keys import (
+    PROJECT_SESSION_PREFIX,
+    is_project_session_key,
+    session_key_for_channel,
+)
 from jenny.session.manager import Session, SessionManager
 from jenny.session.turn_visibility import (
     TurnVisibility,
@@ -663,6 +667,52 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             logger.warning("Command '{}' matched but dispatch returned None", raw)
 
 
+    async def _refuse_missing_project(self, msg: InboundMessage, key: str) -> bool:
+        """Rifiuta il turno se la cartella del progetto non esiste piu'.
+
+        ``True`` = gia' risposto, il turno non deve partire.
+
+        Fino al passo 6 lo scope veniva costruito comunque e puntava al posto che
+        manca: le scritture fallivano tutte, il che era scomodo ma onesto — e
+        soprattutto **non era un fallback sulla radice personale**, che avrebbe
+        messo il lavoro di un progetto fra i file personali. Qui quel
+        comportamento diventa una frase: meglio dirlo prima che scoprirlo a meta'
+        turno, dopo che il modello ha letto il contesto e pianificato.
+
+        La causa piu' probabile e' un rinomino della cartella: fino al passo 7
+        l'indirizzo di un progetto **e' il nome della sua cartella**, quindi
+        rinominarla lascia la chat indietro. Il rifiuto lo dice, perche' e'
+        anche il modo di recuperare — rimettere il nome di prima.
+
+        Non tocca la conversazione personale ne' le sessioni interne: senza una
+        chiave ``project:`` non c'e' niente da controllare, e la radice
+        dell'installazione esiste per definizione (se non esistesse, non
+        saremmo qui).
+        """
+        if not is_project_session_key(key):
+            return False
+        try:
+            root = self.workspace_scopes.for_project(key).project_path
+        except Exception:  # pragma: no cover - uno scope irrisolvibile e' gia' un rifiuto
+            root = None
+        if root is not None and root.is_dir():
+            return False
+        name = key[len(PROJECT_SESSION_PREFIX):]
+        await self.bus.publish_outbound(OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=(
+                f"The folder for project `{name}` is not there any more, so this "
+                "conversation has nothing to work on and I have not read your message.\n\n"
+                "Nothing is lost: the chat is still here, and it comes back as soon as the "
+                f"folder does. If you renamed it, renaming it back to `{name}` is the fix — "
+                "a project's address is its folder name. Otherwise pick another project, or "
+                "the personal chat, from the chip above the message box."
+            ),
+            metadata={**dict(msg.metadata or {}), "render_as": "text"},
+        ))
+        return True
+
     async def _expand_project_init(
         self, msg: InboundMessage, key: str
     ) -> InboundMessage | None:
@@ -1075,6 +1125,10 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
 
             raw = msg.content.strip()
             effective_key = self._effective_session_key(msg)
+            # Prima di tutto il resto, ``/init`` compreso: se la cartella legata
+            # non c'e' piu', il turno non parte.
+            if await self._refuse_missing_project(msg, effective_key):
+                continue
             if raw == PROJECT_INIT_COMMAND or raw.startswith(f"{PROJECT_INIT_COMMAND} "):
                 expanded = await self._expand_project_init(msg, effective_key)
                 if expanded is None:
