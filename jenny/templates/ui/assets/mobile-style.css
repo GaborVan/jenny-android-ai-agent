@@ -631,7 +631,7 @@ body {
    Il chip dice a quale scope va il prossimo messaggio ed è il modo di
    cambiarlo. Costruito con l'idioma dei chip che l'app ha già
    (`.chat-tool-header`, `.tool-events-header`): inline-flex, fondo `--overlay`,
-   bordo da mezzo pixel, `--radius-seg`. Nessun valore nuovo.
+   bordo da mezzo pixel. Nessun valore nuovo.
    La tendina prende il contenitore da `.wiki-popover` e le righe da
    `.oc-sheet-action`, e si apre verso l'ALTO: sotto ci sono solo composer e
    dock. Vive sopra la mascotte (z-index 120) perché il tap sul chip non deve
@@ -652,7 +652,12 @@ body {
   padding: 4px 10px 4px 9px;
   background: var(--overlay);
   border: 0.5px solid var(--border);
-  border-radius: var(--radius-seg);
+  /* `--radius-pill` e non `--radius-seg`: quel token e' il raggio dei controlli
+     segmentati e kyoto lo porta a 2px, quindi il chip usciva a spigolo vivo su
+     un tema solo. La pillola non e' decorazione: e' il tratto che distingue
+     questo chip — che si apre — dalle etichette squadrate intorno, e deve
+     leggersi uguale ovunque. `--radius-pill` nessun tema lo ridefinisce. */
+  border-radius: var(--radius-pill);
   font-family: var(--font-sans);
   font-size: 11px;
   line-height: 1.45;
@@ -703,8 +708,16 @@ body {
   bottom: calc(100% + 6px);
   z-index: 122;
   display: none;
+  flex-direction: column;
   min-width: 232px;
   max-width: min(340px, calc(100vw - 40px));
+  /* Il pannello cresceva con l'elenco: a sette wiki usciva dallo schermo
+     dall'alto, e quel che spariva era la testa — la sezione "personale", cioe'
+     la voce con cui si torna indietro. Un tetto, e la lista sotto scorre.
+     Il numero e' lo spazio che chip, composer e dock lasciano libero sopra di
+     se'. Nessun secondo limite sulla lista: il tetto e' uno solo ed e' lei che
+     cede, per flex, cosi' non ci sono due misure da tenere d'accordo. */
+  max-height: min(320px, calc(100vh - 172px));
   padding: 4px;
   /* Superficie ALZATA, non incassata: `--surface-2` è più scuro di `--bg` in
      tutti e sette i temi (è il token dell'incassato), e un pannello che
@@ -730,7 +743,16 @@ body {
      pietra. Stessa scelta, e stesso motivo, di `.session-info-popover`. */
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18), 0 2px 8px rgba(0, 0, 0, 0.10);
 }
-.scope-menu.open { display: block; }
+.scope-menu.open { display: flex; }
+/* Scorre solo l'elenco dei progetti: "personale" in cima e "nuovo" in fondo
+   restano fermi, perche' sono le due voci che si cercano senza guardare. */
+.scope-menu-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
 .scope-menu-label {
   padding: 7px 10px 5px;
   font-size: 9px;

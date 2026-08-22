@@ -175,8 +175,15 @@ export class ScopeChip {
     try {
       const data = await api.listProjects();
       this._dir = data?.dir || DEFAULT_DIR;
+      // Dal piu' recente: l'ordine alfabetico del backend mette in cima la
+      // wiki con la lettera piu' bassa, che non e' mai quella che si cerca.
+      // Il criterio e' lo stesso `modified` che ogni riga stampa accanto al
+      // nome, quindi l'elenco non puo' contraddire quel che mostra; a parita'
+      // (mtime uguale, o mancante e quindi 0) decide il nome, per non avere
+      // un ordine che cambia a ogni apertura.
       this._projects = (data?.projects || [])
-        .map(it => ({ name: it.name, modified: it.modified }));
+        .map(it => ({ name: it.name, modified: it.modified }))
+        .sort((a, b) => (b.modified || 0) - (a.modified || 0) || a.name.localeCompare(b.name));
       this.render();                    // il nome della cartella puo' essere cambiato
     } catch {
       // Nessuna wiki ancora, o la feature spenta in config: elenco vuoto, non
@@ -196,18 +203,27 @@ export class ScopeChip {
 
     this.menu.appendChild(this._sep());
     this.menu.appendChild(this._label(i18n.t('scope.projectsSection')));
+    // Solo i progetti stanno nel riquadro che scorre: il resto della tendina
+    // e' alto quanto e' alto, e non deve sparire quando l'elenco cresce.
+    const list = document.createElement('div');
+    list.className = 'scope-menu-scroll';
+    this.menu.appendChild(list);
+    let activeEl = null;
     if (this._projects === null) {
-      this.menu.appendChild(this._note(i18n.t('scope.loading')));
+      list.appendChild(this._note(i18n.t('scope.loading')));
     } else if (!this._projects.length) {
-      this.menu.appendChild(this._note(i18n.t('scope.noProjects')));
+      list.appendChild(this._note(i18n.t('scope.noProjects')));
     } else {
       for (const project of this._projects) {
-        this.menu.appendChild(this._item({
+        const active = this.scope.kind === 'project' && this.scope.name === project.name;
+        const item = this._item({
           name: project.name, icon: 'ti-folder',
           when: this._ago(project.modified),
-          active: this.scope.kind === 'project' && this.scope.name === project.name,
+          active,
           onPick: () => this.select({ kind: 'project', name: project.name }),
-        }));
+        });
+        if (active) activeEl = item;
+        list.appendChild(item);
       }
     }
 
@@ -218,6 +234,12 @@ export class ScopeChip {
     });
     add.classList.add('scope-menu-new');
     this.menu.appendChild(add);
+
+    // Con l'elenco piu' lungo del riquadro il progetto in cui si sta puo'
+    // essere sotto la piega: aprire la tendina senza vedere dove si e' toglie
+    // alla tendina meta' del suo mestiere. `nearest` non muove niente quando
+    // e' gia' visibile.
+    activeEl?.scrollIntoView({ block: 'nearest' });
   }
 
   _label(text) {
