@@ -151,7 +151,16 @@ class MobileApp {
       this._navPos = typeof state.pos === 'number' ? state.pos : 0;
       if (state.wikiPage) {
         this.switchMode('wiki', false);
-        this.controllers.wiki.loadWikiPage(state.wiki, state.page || 'index.md', false);
+        // Una entry lasciata da un altro progetto non ci riporta dentro, ma un
+        // Indietro deve pur disegnare qualcosa: si atterra sull'indice del
+        // progetto aperto. Il rifiuto parlante di `loadWikiPage` è per i link,
+        // dove l'utente ha appena chiesto quella pagina; qui non l'ha chiesta.
+        const pin = this.controllers.wiki.pinnedWiki;
+        if (pin && state.wiki && state.wiki !== pin) {
+          this.controllers.wiki.loadWikiPage(pin, 'index.md', false);
+        } else {
+          this.controllers.wiki.loadWikiPage(state.wiki, state.page || 'index.md', false);
+        }
       } else if (state.mode === 'wiki') {
         this.switchMode('wiki', false);
         this.controllers.wiki.loadHome(false);

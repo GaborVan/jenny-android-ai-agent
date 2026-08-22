@@ -17,6 +17,7 @@
  */
 
 import { i18n } from './i18n.js';
+import { AppState } from './state.js';
 import { api } from './api-client.js';
 import { rpc } from './rpc-client.js';
 import { showToast } from './utils.js';
@@ -91,7 +92,25 @@ export class ScopeChip {
       this.scope = { kind: 'project', name: rest.split('/')[0] || null };
       if (!this.scope.name) this.scope = { kind: 'personal', name: null };
     }
+    this._publishPin();
     this.render();
+  }
+
+  /** Pubblica su ``AppState`` la wiki a cui le viste sono agganciate.
+   *
+   *  Le viste wiki e grafo hanno bisogno della stessa risposta che il chip ha
+   *  gia' — *in quale progetto siamo* — e questo e' l'unico punto in cui
+   *  cambia. Passa da ``AppState`` e non da un import diretto del chip perche'
+   *  ``set`` avvisa chi ascolta: cambiare progetto mentre una vista e' aperta
+   *  la deve riagganciare, e senza notifica resterebbe sul progetto di prima.
+   *
+   *  ``null`` = sessione personale, cioe' nessun aggancio: le viste tornano a
+   *  mostrare tutte le wiki, che e' la Home di sempre.
+   */
+  _publishPin() {
+    const pinned = this.scope.kind === 'project' ? this.scope.name : null;
+    if (AppState.pinnedWiki === pinned) return;
+    AppState.set('pinnedWiki', pinned);
   }
 
   /** Nome mostrato per la sessione personale (non è un nome di cartella). */

@@ -492,7 +492,8 @@
     "severitySuggest": "suggerimento",
     "severityWarn": "avviso",
     "severityError": "errore",
-    "submit": "Invia"
+    "submit": "Invia",
+    "onlyThisProject": "Questa vista mostra solo il progetto {name}."
   },
   "graph": {
     "failedToLoad": "Caricamento grafo fallito",

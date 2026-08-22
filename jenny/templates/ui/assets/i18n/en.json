@@ -492,7 +492,8 @@
     "severitySuggest": "suggest",
     "severityWarn": "warn",
     "severityError": "error",
-    "submit": "Submit"
+    "submit": "Submit",
+    "onlyThisProject": "This view only shows the {name} project."
   },
   "graph": {
     "failedToLoad": "Failed to load graph",

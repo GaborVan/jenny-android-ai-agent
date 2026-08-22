@@ -46,10 +46,37 @@ export class WikiController {
     // vista (activate), così non si sovrascrive l'header di un'altra vista.
     this._localeDirty = false;
     i18n.onLocaleChange(() => this._onLocaleChange());
+    // Cambiare progetto mentre la wiki è aperta la riaggancia; se è aperta
+    // un'altra vista basta marcare sporco, e ci pensa `activate()`.
+    AppState.on('pinnedWiki', () => this._onPinChange());
     this._ready = this.init();
   }
 
   get ready() { return this._ready; }
+
+  /** La wiki a cui questa vista è agganciata, o `null` nella chat personale.
+   *
+   *  Dentro un progetto le viste mostrano *quel* progetto e basta: la Home
+   *  elenca tutte le wiki, e quell'elenco è esattamente quello che il prompt
+   *  di un progetto ha smesso di portarsi dietro nel 2.2 — Claude Code non ti
+   *  parla degli altri tuoi repository. Il valore lo pubblica lo scope chip,
+   *  che è l'unico a sapere in che conversazione siamo.
+   */
+  get pinnedWiki() { return AppState.pinnedWiki || null; }
+
+  /** Riaggancia la vista dopo un cambio di progetto (o il ritorno alla
+   *  personale, che scioglie l'aggancio e rimette la Home). */
+  _onPinChange() {
+    // Niente disegnato: `activate()` partirà comunque dalla vista giusta.
+    if (!this._settled) return;
+    if (window.mobileApp?.currentMode !== 'wiki') {
+      this._settled = false;   // ricalcolo al rientro
+      return;
+    }
+    const pin = this.pinnedWiki;
+    if (pin) this.loadWikiPage(pin, 'index.md', false);
+    else this.loadHome(false);
+  }
 
   showLoading() {
     if (this.loadingEl) this.loadingEl.classList.add('active');
@@ -101,8 +128,12 @@ export class WikiController {
   _loadInitialView() {
     if (this._settled || this._inFlightGen === this._gen) return;
     const params = new URLSearchParams(window.location.search);
-    const wiki = params.get('wiki');
-    if (wiki) this.loadWikiPage(wiki, params.get('page') || 'index.md', false);
+    // L'aggancio vince sull'URL: una `?wiki=` di un altro progetto è una vista
+    // che questa conversazione non deve avere, da qualunque parte arrivi.
+    const pin = this.pinnedWiki;
+    const wiki = pin || params.get('wiki');
+    const page = (!pin || pin === params.get('wiki')) ? (params.get('page') || 'index.md') : 'index.md';
+    if (wiki) this.loadWikiPage(wiki, page, false);
     else this.loadHome(false);
   }
 
@@ -176,6 +207,10 @@ export class WikiController {
   }
 
   async loadHome(pushHistory = true) {
+    // Unico imbuto verso la Home: breadcrumb, `_index.md` dell'albero e
+    // wikilink passano tutti di qui, quindi chiuderla qui le chiude tutte.
+    const pin = this.pinnedWiki;
+    if (pin) return this.loadWikiPage(pin, 'index.md', pushHistory);
     const token = ++this._loadToken;
     const gen = this._gen;
     this._inFlightGen = gen;
@@ -241,6 +276,14 @@ export class WikiController {
   }
 
   async loadWikiPage(wiki, page, pushHistory = true) {
+    const pin = this.pinnedWiki;
+    if (pin && wiki && wiki !== pin) {
+      // Un link che porta fuori dal progetto non ci porta: si resta dove si è
+      // e lo si dice, invece di cambiare progetto sotto ai piedi.
+      showToast(i18n.t('wiki.onlyThisProject', { name: pin }), 'error');
+      return;
+    }
+    if (pin && !wiki) wiki = pin;
     const token = ++this._loadToken;
     const gen = this._gen;
     this._inFlightGen = gen;
@@ -292,7 +335,11 @@ export class WikiController {
       wrap.innerHTML = `<span class="bc-current">${i18n.t('wiki.home')}</span>`;
     } else {
       const crumbs = [];
-      crumbs.push(`<a class="bc-link" data-home href="/?mode=wiki">${i18n.t('wiki.home')}</a>`);
+      // Dentro un progetto la Home non è raggiungibile: un crumb che non
+      // naviga è peggio che assente, perché promette una via d'uscita.
+      if (!this.pinnedWiki) {
+        crumbs.push(`<a class="bc-link" data-home href="/?mode=wiki">${i18n.t('wiki.home')}</a>`);
+      }
 
       // Segmenti del path: cartelle intermedie + foglia (senza estensione).
       let segs = (this.currentPath || '')

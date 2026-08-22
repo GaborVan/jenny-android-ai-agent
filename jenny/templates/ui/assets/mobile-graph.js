@@ -2,6 +2,7 @@ import { api } from './shared/api-client.js';
 import { escapeHtml, hashString } from './shared/utils.js';
 import { i18n } from './shared/i18n.js';
 import { WikiSearchIndex } from './shared/wiki-search.js';
+import { AppState } from './shared/state.js';
 
 export class GraphController {
   constructor() {
@@ -36,8 +37,22 @@ export class GraphController {
         this.loadGraph(this.currentWiki, false);
       }
     });
+    // Cambiare progetto riaggancia il grafo, come la wiki (v. lì). Fuori vista
+    // basta spostare `currentWiki`: è da lì che riparte `activate()`, e senza
+    // questa riga il rientro disegnava il grafo del progetto di prima — o, al
+    // ritorno sulla personale, restava sull'ultimo progetto invece che sulla
+    // Home. Vale anche per `null`: le due viste devono rispondere uguale.
+    AppState.on('pinnedWiki', (pin) => {
+      this.currentWiki = pin || null;
+      if (window.mobileApp?.currentMode === 'graph') this.loadGraph(this.currentWiki, false);
+    });
     this._initSearchUI();
   }
+
+  /** La wiki a cui il grafo è agganciato, o `null` nella chat personale.
+   *  Stessa ragione della wiki: senza aggancio il grafo home ha per nodi *le
+   *  wiki*, cioè l'elenco degli altri progetti. */
+  get pinnedWiki() { return AppState.pinnedWiki || null; }
 
   /* ── Ricerca ──────────────────────────────────────────────────────────────
      La barra vive nel DOM statico, non nel grafo: sopravvive a un reload della
@@ -129,7 +144,7 @@ export class GraphController {
     // grafo overview, non su una wiki specifica).
     const pending = window.mobileApp?.takePendingGraph?.() || null;
     if (pending) this.loadGraph(pending.wiki, pending.push === true);
-    else this.loadGraph(this.currentWiki, false);
+    else this.loadGraph(this.pinnedWiki || this.currentWiki, false);
   }
 
   deactivate() {
@@ -168,6 +183,10 @@ export class GraphController {
   }
 
   async loadGraph(wiki = null, pushHistory = true) {
+    // L'aggancio vince su qualunque chiamante — history, header, link. Senza
+    // wiki si finirebbe sul grafo home, i cui nodi sono le altre wiki.
+    const pin = this.pinnedWiki;
+    if (pin) wiki = pin;
     // Catturati prima del primo await: la fetch del grafo può essere superata
     // da un altro caricamento o dall'uscita dalla sezione, e disegnare dopo
     // significherebbe sovrascrivere il grafo di qualcun altro (o quello di
@@ -228,6 +247,11 @@ export class GraphController {
 
     if (!wiki) {
       wrap.innerHTML = `<span class="bc-current">${i18n.t('graph.wikis')}</span>`;
+    } else if (this.pinnedWiki) {
+      // Dentro un progetto il grafo home non è raggiungibile: il crumb "Wikis"
+      // resterebbe lì a promettere una via d'uscita che `loadGraph` riaggancia
+      // subito. Stessa scelta della vista wiki.
+      wrap.innerHTML = `<span class="bc-current">${escapeHtml(wiki)}</span>`;
     } else {
       wrap.innerHTML = `
         <a class="bc-link" data-home href="/?mode=graph">${i18n.t('graph.wikis')}</a>
