@@ -2,6 +2,7 @@
 
 import { api } from './api-client.js';
 import { i18n } from './i18n.js';
+import { AppState } from './state.js';
 
 class WebSocketManager extends EventTarget {
   constructor() {
@@ -131,6 +132,12 @@ class WebSocketManager extends EventTarget {
     if (!this.chatWs || this.chatWs.readyState !== WebSocket.OPEN) return false;
     const clean = this._stripPrefix(chatId);
     const payload = { type: 'message', chat_id: clean, content: text, webui: true };
+    // Sola lettura: **in ogni messaggio**, e non in uno stato sul server. Il
+    // gateway non se la ricorda apposta — se la ricordasse potrebbe applicare
+    // al turno un modo diverso da quello che l'utente aveva sotto gli occhi, e
+    // un messaggio partito non si ritira. Si manda solo quando è accesa: il
+    // gateway accende su `true` e ignora tutto il resto.
+    if (AppState.readonlyTurn === true) payload.readonly = true;
     if (media.length) payload.media = media;
     this.chatWs.send(JSON.stringify(payload));
     this.dispatchEvent(new CustomEvent('chat:sent', { detail: { chat_id: clean } }));

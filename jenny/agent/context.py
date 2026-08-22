@@ -41,6 +41,20 @@ _DEFAULT_WIKI_DIRECTORY_TOKENS = 1200
 _CRON_TOOL_NAME = "cron"
 
 
+def _turn_is_writable() -> bool:
+    """Se il turno in corso può cambiare qualcosa.
+
+    Wrapper di una riga sopra ``current_workspace_scope`` per una ragione sola:
+    ``ContextBuilder`` costruisce il prompt anche fuori da un turno (test,
+    ispezione, sessioni interne), e là non c'è nessuno scope legato — che vuol
+    dire scrivibile, non il contrario.
+    """
+    from jenny.security.workspace_access import current_workspace_scope
+
+    scope = current_workspace_scope()
+    return scope is None or scope.writable
+
+
 def _absolute_workspace(root: Path) -> Path:
     """La radice del workspace in forma assoluta e normalizzata.
 
@@ -263,6 +277,22 @@ class ContextBuilder:
             # precedente, dove questo template non è ancora stato estratto.
             with suppress(Exception):
                 parts.append(render_template("agent/scheduling.md"))
+
+        # Sola lettura: **una riga nel prompt qui se la guadagna**, al contrario
+        # del rifiuto dei promemoria (passo 3), che sta solo nel tool. Il
+        # criterio è lo stesso e decide al contrario: una regola merita spazio
+        # nel blocco quando ci sbatteresti addosso di continuo e ti costringe a
+        # ripianificare. Un promemoria è raro e sta in piedi da solo; scrivere è
+        # quel che si fa a ogni turno, e scoprirlo a metà lavoro butta la
+        # chiamata *e* il piano.
+        #
+        # Sta in fondo, come ``agent/scheduling.md`` e per la stessa ragione: è
+        # la prosa più vicina alla fine a decidere le contraddizioni, e questa
+        # deve vincere su qualunque istruzione più su che dica di scrivere —
+        # comprese quelle di un ``AGENTS.md`` di progetto.
+        if not _turn_is_writable():
+            with suppress(Exception):  # workspace sincronizzato da una versione precedente
+                parts.append(render_template("agent/readonly.md"))
 
         if orchestrating:
             parts.append(render_template("agent/orchestrator.md"))

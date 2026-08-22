@@ -6,7 +6,7 @@ import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -17,6 +17,15 @@ from jenny.session.keys import PROJECT_SESSION_PREFIX, is_project_session_key
 
 WorkspaceAccessMode = Literal["restricted", "full"]
 WORKSPACE_SCOPE_METADATA_KEY = "workspace_scope"
+# Sola lettura: **un dato a parte, e non un terzo valore di ``access_mode``.**
+# I due assi sono indipendenti — un progetto in sola lettura e' *restricted E*
+# non scrivibile, e un enum a tre valori non sa dirlo senza rendere ambiguo
+# ``restrict_to_workspace``, che governa anche il confine di lettura.
+#
+# Arriva **nel messaggio** e non dalla chiave di sessione, al contrario della
+# cartella (v. ``for_turn``): la cartella non deve poter divergere, la
+# scrivibilita' deve essere quella che l'utente vedeva quando ha premuto invio.
+WORKSPACE_READONLY_METADATA_KEY = "readonly"
 _ACCESS_MODES = {"restricted", "full"}
 
 _TRUE_VALUES = {"1", "true", "yes", "on", "enabled"}
@@ -77,10 +86,31 @@ class WorkspaceScope:
     access_mode: WorkspaceAccessMode
     restrict_to_workspace: bool
     sandbox_status: WorkspaceSandboxStatus
+    # Se questo turno puo' cambiare qualcosa. ``False`` = sola lettura, cioe'
+    # "non cambia niente sul telefono": file, download, storage delle app,
+    # memoria, cron, installazione dell'app. Restano possibili l'invio di
+    # messaggi e ``ssh_exec``, che sono un altro asse (deciso il 22/08).
+    #
+    # **Il default e' scrivibile, e deve restarlo.** Il flag arriva da un
+    # messaggio dell'utente; le sessioni interne (cron, Dream, heartbeat) non ne
+    # hanno uno, e un default a ``False`` le spegnerebbe tutte in silenzio.
+    writable: bool = True
 
     @property
     def project_name(self) -> str:
         return self.project_path.name or str(self.project_path)
+
+    def without_write_access(self) -> "WorkspaceScope":
+        """Lo stesso scope, senza il permesso di scrivere.
+
+        Il nome evita ``read_only``, che su ``Tool`` esiste gia' e vuol dire
+        un'altra cosa — "privo di effetti collaterali, parallelizzabile" — e il
+        cui default e' ``False`` per ogni tool che nessuno ha classificato.
+        Quel flag **non e' l'inventario** delle scritture: usarlo per decidere
+        chi gira in sola lettura spegnerebbe decine di letture innocue, che e'
+        l'errore "filtra la cassetta dei tool" travestito.
+        """
+        return self if not self.writable else replace(self, writable=False)
 
     def metadata(self) -> dict[str, str]:
         return {
@@ -93,6 +123,7 @@ class WorkspaceScope:
             **self.metadata(),
             "project_name": self.project_name,
             "restrict_to_workspace": self.restrict_to_workspace,
+            "writable": self.writable,
             "sandbox_status": self.sandbox_status.as_dict(),
         }
 
@@ -104,6 +135,10 @@ class ToolWorkspace:
     project_path: Path | None
     restrict_to_workspace: bool
     scope: WorkspaceScope | None = None
+    # v. ``WorkspaceScope.writable``. **Non si esprime con ``allowed_root``**:
+    # li' ``None`` significa gia' "nessuna restrizione", quindi una radice nulla
+    # per dire "sola lettura" aprirebbe tutto invece di chiudere tutto.
+    writable: bool = True
 
     @property
     def allowed_root(self) -> Path | None:
@@ -167,13 +202,20 @@ class WorkspaceScopeResolver:
         if channel != self.scoped_channel:
             return self.default()
         if session_key and is_project_session_key(session_key):
-            return self.for_project(session_key)
-        return resolve_effective_workspace_scope(
-            message_metadata=message_metadata,
-            session_metadata=session_metadata,
-            default_workspace=self.default_workspace,
-            default_restrict_to_workspace=self.default_restrict_to_workspace,
-        )
+            scope = self.for_project(session_key)
+        else:
+            scope = resolve_effective_workspace_scope(
+                message_metadata=message_metadata,
+                session_metadata=session_metadata,
+                default_workspace=self.default_workspace,
+                default_restrict_to_workspace=self.default_restrict_to_workspace,
+            )
+        # La sola lettura si applica **dopo**, a qualunque scope sia uscito.
+        # Dentro un progetto il ramo sopra torna prima di guardare i metadati —
+        # e' la decisione del 21/08, la cartella si deduce dalla chiave — quindi
+        # un flag letto solo la' verrebbe ignorato proprio nei progetti, cioe'
+        # dove serve di piu'.
+        return scope.without_write_access() if readonly_from_metadata(message_metadata) else scope
 
     def for_project(self, session_key: str) -> WorkspaceScope:
         """Lo scope di una sessione-progetto, dedotto dalla sua chiave.
@@ -209,6 +251,49 @@ class WorkspaceScopeResolver:
                 project,
             )
         return build_workspace_scope(project, "restricted")
+
+
+def readonly_from_metadata(message_metadata: Any) -> bool:
+    """Se questo messaggio chiede la sola lettura.
+
+    Solo ``True`` accende: un valore assente, non booleano o mal formato lascia
+    il turno scrivibile. E' il verso giusto per un flag che arriva da un client
+    — sbagliarlo in chiusura spegnerebbe le scritture senza che nessuno l'abbia
+    chiesto, e il caso da difendere e' l'opposto (l'utente lo ha chiesto e il
+    turno scrive comunque), che qui non puo' capitare perche' il client lo manda
+    a ogni messaggio.
+    """
+    if not isinstance(message_metadata, dict):
+        return False
+    return message_metadata.get(WORKSPACE_READONLY_METADATA_KEY) is True
+
+
+# Il rifiuto che un TOOL restituisce al modello quando il turno e' in sola
+# lettura. Testo unico per i cinque che scrivono fuori dai cancelli, perche' e'
+# la stessa regola e cinque parafrasi la farebbero sembrare cinque regole.
+# I cancelli di percorso sollevano invece ``ReadOnlyTurnError``: la' l'errore
+# deve assomigliare a un errore di filesystem, qui a una risposta.
+READONLY_TOOL_REFUSAL = (
+    "Not now: this conversation is read-only, so nothing on the device can be changed "
+    "(files, downloads, app data, memory, scheduled jobs, app updates). Do not look for "
+    "another tool or another path — there isn't one. Describe what you would have done, "
+    "and tell the user they can turn writing back on with the switch next to the chip "
+    "above the composer if they want it applied."
+)
+
+
+def current_turn_is_readonly() -> bool:
+    """Se il turno in corso e' in sola lettura.
+
+    Per i tool che scrivono **fuori** dai tre cancelli del confine di scrittura
+    (``download``, lo storage delle app, la memoria, ``cron``, l'aggiornamento
+    dell'app): quelli hanno una destinazione fissa e non passano da
+    ``resolve_allowed_path``, quindi il cancello non li vede e devono chiedere.
+    L'inventario di chi deve chiamarla sta in
+    ``tests/security/test_readonly_write_surfaces.py``.
+    """
+    scope = current_workspace_scope()
+    return scope is not None and not scope.writable
 
 
 def workspace_sandbox_status(
@@ -422,6 +507,7 @@ def current_tool_workspace(
         project_path=project_path,
         restrict_to_workspace=restrict,
         scope=scope,
+        writable=scope.writable if scope is not None else True,
     )
 
 

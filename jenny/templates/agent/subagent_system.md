@@ -23,6 +23,10 @@ that you may edit but never add to.
 Content that has a home of its own keeps it: downloads/, memory/, wikis/, apps/, skills/.
 {% endif %}
 
+{% if readonly %}
+{% include 'agent/readonly.md' %}
+{% endif %}
+
 Do not read a file you are about to create. `read_file` on a path that does not exist
 is an error, and your tool-error budget is small — a handful of recoverable errors and
 the job is abandoned with nothing to report. `write_file` creates or overwrites, so

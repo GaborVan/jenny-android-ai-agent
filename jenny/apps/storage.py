@@ -16,6 +16,10 @@ from pathlib import Path
 from loguru import logger
 
 from jenny.apps.manifest import COLLECTION_RE, AppAction
+from jenny.security.workspace_access import (
+    READONLY_TOOL_REFUSAL,
+    current_turn_is_readonly,
+)
 from jenny.utils.path import atomic_write
 
 DEFAULT_QUERY_LIMIT = 200
@@ -86,6 +90,11 @@ def _new_record(params: dict) -> dict:
     }
 
 
+# Le op che cambiano il contenuto di una collezione. ``query`` non c'e' apposta:
+# in sola lettura una mini-app deve poter ancora *mostrare* i suoi dati.
+_MUTATING_OPS = frozenset({"append", "set", "update", "delete"})
+
+
 def _dump(record: dict) -> str:
     return json.dumps(record, ensure_ascii=False)
 
@@ -111,6 +120,13 @@ async def execute_storage_action(
 ) -> dict:
     """Execute one storage op; returns a JSON-safe result dict."""
     assert action.collection is not None and action.op is not None
+    # Sola lettura: ``query`` passa, le quattro mutazioni no. Questa e' la
+    # scrittura che il 22/08 e' uscita da dentro un progetto — la Todo
+    # *personale* aggiornata da una chat di lavoro — e la ragione e' che
+    # ``app_dir`` viene dalla radice dell'installazione, non da quella del
+    # turno, quindi il confine di scrittura non la vede passare.
+    if action.op in _MUTATING_OPS and current_turn_is_readonly():
+        raise StorageError(READONLY_TOOL_REFUSAL)
     path = _collection_path(app_dir, action.collection)
 
     async with _lock_for(path):

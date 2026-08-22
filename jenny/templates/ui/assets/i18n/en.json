@@ -671,5 +671,14 @@
       "yesterday": "yesterday",
       "days": "{n} days ago"
     }
+  },
+  "write": {
+    "write": "Writes",
+    "readonly": "Read-only",
+    "change": "Write or read-only",
+    "writeHint": "This chat can change files. Tap to switch to read-only.",
+    "readonlyHint": "This chat changes nothing on the device. Tap to allow writing again.",
+    "askReadonly": "Ask something (read-only)…",
+    "askAboutReadonly": "Ask about {name} (read-only)…"
   }
 }

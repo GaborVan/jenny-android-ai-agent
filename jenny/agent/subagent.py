@@ -63,6 +63,7 @@ from jenny.providers.base import LLMProvider
 from jenny.runtime.context import get_android_context
 from jenny.security.workspace_access import (
     WorkspaceScope,
+    current_workspace_scope,
     enter_workspace_scope,
     workspace_sandbox_status,
 )
@@ -1609,6 +1610,15 @@ class SubagentManager:
             # legge l'agente principale, incluso e non ricopiato.
             project=is_wiki_root(root),
             project_path=str(root.resolve()),
+            # **L'esecuzione eredita lo scope, la conoscenza no.** Visto sul
+            # telefono il 22/08: in sola lettura l'agente principale sapeva di
+            # non poter scrivere, ha delegato, e il subagent ha pianificato e
+            # scritto sei file — tutti rifiutati dal cancello. Il confine ha
+            # tenuto, il lavoro e' stato buttato. Lo stesso file che legge
+            # l'agente principale, incluso e non ricopiato.
+            readonly=not (
+                (scope := current_workspace_scope()) is None or scope.writable
+            ),
             skills_summary=skills_summary or "",
             role_section=self._render_role_section(agent_type),
         )

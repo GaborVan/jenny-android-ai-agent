@@ -68,6 +68,11 @@ export class ScopeChip {
       this.render();
       if (this._open) this._renderMenu();
     });
+    // Il placeholder dipende da due cose con due proprietari: lo scope (questo
+    // modulo) e il modo di scrittura (`write-switch.js`). Iscriversi invece di
+    // farsi chiamare rende l'ordine dei due `syncFromSession` irrilevante —
+    // altrimenti chi sincronizza per secondo lascia il testo del primo.
+    AppState.on('readonlyTurn', () => this.syncPlaceholder());
     this.render();
   }
 
@@ -154,16 +159,32 @@ export class ScopeChip {
       pathEl.appendChild(crumb);
     });
 
-    this._syncPlaceholder();
+    this.syncPlaceholder();
   }
 
-  /** Il placeholder nomina lo scope: è il testo su cui si sta per scrivere. */
-  _syncPlaceholder() {
+  /** Il placeholder nomina lo scope: è il testo su cui si sta per scrivere.
+   *
+   *  Nomina anche la **sola lettura**, e non è un dettaglio: quel testo è
+   *  l'ultima cosa che l'occhio attraversa prima di premere invio, e un
+   *  messaggio partito credendo di poter scrivere (o di non poterlo) non si
+   *  ritira. Il chip dice *dove* va, il placeholder ripete *come* parte.
+   *
+   *  Pubblico perché lo richiama chi possiede il composer quando cambia il modo
+   *  di scrittura: quel cambio non passa da qui.
+   */
+  syncPlaceholder() {
     const input = document.getElementById('chat-input');
     if (!input) return;
-    input.placeholder = this.scope.kind === 'project'
-      ? i18n.t('scope.askAbout', { name: this.scope.name })
-      : i18n.t('chat.placeholder');
+    const project = this.scope.kind === 'project';
+    const readonly = AppState.readonlyTurn === true;
+    if (project) {
+      input.placeholder = i18n.t(
+        readonly ? 'write.askAboutReadonly' : 'scope.askAbout',
+        { name: this.scope.name },
+      );
+      return;
+    }
+    input.placeholder = i18n.t(readonly ? 'write.askReadonly' : 'chat.placeholder');
   }
 
   // ── Tendina ────────────────────────────────────────────────────────────

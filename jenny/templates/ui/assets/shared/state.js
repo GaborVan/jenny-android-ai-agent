@@ -12,6 +12,11 @@ export const AppState = {
   // leggono le viste wiki e grafo per mostrare quel progetto e non gli altri.
   pinnedWiki: null,
 
+  // Se il prossimo messaggio parte in sola lettura. Lo scrive soltanto
+  // `write-switch.js`; lo leggono il placeholder del composer e `ws-manager`,
+  // che lo mette nell'envelope di ogni invio.
+  readonlyTurn: false,
+
   // State change listeners
   _listeners: new Map(),
 

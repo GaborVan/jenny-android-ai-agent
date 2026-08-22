@@ -894,6 +894,30 @@ def _patch_asyncio_thread_hops() -> None:
     loop_cls.run_in_executor = _guarded_run_in_executor  # type: ignore[method-assign]
 
 
+def _refuse_write_if_readonly(op: str) -> None:
+    """Chiude una mutazione quando il turno è in sola lettura.
+
+    Funzione di modulo perché la usano i tre patch che stanno FUORI dal loop di
+    ``_patch_os_path_surface`` — ``os.open`` (solo con flag di scrittura),
+    ``os.symlink`` e ``shutil.rmtree``. Import locale: a livello di modulo
+    ``workspace_access`` chiuderebbe un ciclo.
+    """
+    from jenny.security.workspace_access import current_turn_is_readonly
+    from jenny.security.workspace_policy import ReadOnlyTurnError
+
+    if current_turn_is_readonly():
+        raise ReadOnlyTurnError(f"refused {op}")
+
+
+# Flag di ``os.open`` che significano "questa apertura può cambiare il file".
+# ``O_RDONLY`` è 0, quindi non c'è un bit da testare per la lettura: si guarda
+# l'insieme dei bit di scrittura, ed è per questo che l'espressione è una
+# maschera e non un confronto.
+_OS_OPEN_WRITE_FLAGS = (
+    os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_TRUNC
+)
+
+
 def _real_builtins_open() -> Any:
     """L'``open`` vero, saltando il wrapper globale se è già montato.
 
@@ -1201,10 +1225,22 @@ class PythonNamespace:
         solo igiene sui log: è ciò che impedisce al wrapper di rientrare in sé
         stesso attraverso il proprio macchinario.
         """
-        from jenny.security.workspace_policy import _resolve_logical_path, resolve_allowed_path
+        from jenny.security.workspace_access import current_turn_is_readonly
+        from jenny.security.workspace_policy import (
+            ReadOnlyTurnError,
+            _resolve_logical_path,
+            resolve_allowed_path,
+        )
 
         root = boundary or self.workspace
         if for_write:
+            # Sola lettura: il terzo cancello. Qui passano ``open(..., 'w')``,
+            # i patch di ``io``/``os`` e ``io.FileIO`` — cioe' ogni scrittura che
+            # non usa i builtin del namespace. Il controllo sta prima della
+            # risoluzione del confine perche' non e' una questione di *dove*:
+            # non c'e' un percorso che vada bene.
+            if current_turn_is_readonly():
+                raise ReadOnlyTurnError(f"refused write to {file}")
             # **Il confine di scrittura non e' quello di lettura.** Dentro una
             # sessione-progetto si legge in tutto il workspace — la skill, le
             # altre wiki se l'utente le chiede — e si scrive solo nella cartella
@@ -1607,6 +1643,11 @@ class PythonNamespace:
                 raise OSError("os.open with file descriptor is not allowed")
             if dir_fd is not None:
                 raise OSError("os.open with dir_fd is not allowed")
+            # In sola lettura si chiude solo l'apertura che PUÒ cambiare il
+            # file: `os.open(p, os.O_RDONLY)` deve continuare a funzionare, o
+            # l'interruttore impedirebbe anche di leggere.
+            if flags & _OS_OPEN_WRITE_FLAGS:
+                _refuse_write_if_readonly("os.open for writing")
             # La base si legge PRIMA del bypass: sotto bypass
             # `_active_path_base()` ritorna None per costruzione, e leggerla
             # dentro riporterebbe la base al confine, rendendo `working_dir`
@@ -1740,6 +1781,22 @@ class PythonNamespace:
         ("link", "src", "dst"),
     )
 
+    # Chi delle due tabelle qui sopra **cambia qualcosa**, e quindi è chiuso
+    # quando il turno è in sola lettura. Non è una terza tabella: sono nomi che
+    # devono esistere in una delle due, e `tests/agent/tools/
+    # test_readonly_python_exec.py` lo verifica — un mutatore aggiunto là e non
+    # qui è un buco, e un nome qui che là non c'è è una riga morta.
+    #
+    # Le sonde e gli enumeratori (`stat`, `access`, `listdir`, `walk`, i
+    # `getxattr`/`listxattr`) restano APERTI di proposito: in sola lettura si
+    # legge, e chiuderli renderebbe l'interruttore inutilizzabile invece che
+    # sicuro. `symlink` ha un patch suo (`_patch_os_symlink`) e si chiude lì.
+    _OS_MUTATING_FUNCTIONS: frozenset[str] = frozenset({
+        "remove", "unlink", "rmdir", "mkdir", "makedirs", "truncate",
+        "chmod", "utime", "setxattr", "removexattr",
+        "rename", "replace", "link",
+    })
+
     # Un descrittore di directory scavalca del tutto la risoluzione: con
     # `dir_fd` il percorso è relativo al descrittore, quindi `../../etc` da un
     # fd legittimo esce dal workspace senza passare da `resolve_allowed_path`.
@@ -1851,6 +1908,22 @@ class PythonNamespace:
         ``_patch_os_open``, e che una finestra di ``_path_guard_bypass()``
         spegne anche qui).
         """
+        mutating = self._OS_MUTATING_FUNCTIONS
+
+        def _refuse_os_if_readonly(op: str) -> None:
+            """Chiude i soli mutatori quando il turno è in sola lettura.
+
+            Dentro il wrapper e non prima: la tabella si installa una volta per
+            processo, mentre la scrivibilità è del *turno*.
+            """
+            if op.removeprefix("os.") not in mutating:
+                return
+            from jenny.security.workspace_access import current_turn_is_readonly
+            from jenny.security.workspace_policy import ReadOnlyTurnError
+
+            if current_turn_is_readonly():
+                raise ReadOnlyTurnError(f"refused {op}")
+
         for name, param, default in self._OS_SINGLE_PATH_FUNCTIONS:
             real = self._real_os_fn(mod, name)
             if real is None:
@@ -1867,6 +1940,7 @@ class PythonNamespace:
                 boundary = _active_path_boundary()
                 if boundary is None:
                     return _real(*args, **kwargs)
+                _refuse_os_if_readonly(_op)
                 self._reject_fd_kwargs(_op, kwargs)
                 if args:
                     raw, rest = args[0], args[1:]
@@ -1898,6 +1972,7 @@ class PythonNamespace:
                 boundary = _active_path_boundary()
                 if boundary is None:
                     return _real(*args, **kwargs)
+                _refuse_os_if_readonly(_op)
                 self._reject_fd_kwargs(_op, kwargs)
                 rest = list(args)
                 raw_src = rest.pop(0) if rest else kwargs.pop(_src, None)
@@ -1931,6 +2006,7 @@ class PythonNamespace:
             boundary = _active_path_boundary()
             if boundary is None:
                 return real(*args, **kwargs)
+            _refuse_write_if_readonly("os.symlink")
             self._reject_fd_kwargs("os.symlink", kwargs)
             rest = list(args)
             raw_src = rest.pop(0) if rest else kwargs.pop("src", None)
@@ -2008,6 +2084,7 @@ class PythonNamespace:
             boundary = _active_path_boundary()
             if boundary is None:
                 return real(path, *args, **kwargs)
+            _refuse_write_if_readonly("shutil.rmtree")
             self._reject_fd_kwargs("shutil.rmtree", kwargs)
             self._reject_rmtree_callbacks(args, kwargs)
             target = self._guarded_os_path(path, op="shutil.rmtree", boundary=boundary)

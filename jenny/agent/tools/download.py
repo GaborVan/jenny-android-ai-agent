@@ -28,6 +28,10 @@ from loguru import logger
 from jenny.agent.tools.base import Tool, tool_parameters
 from jenny.agent.tools.schema import StringSchema, tool_parameters_schema
 from jenny.security.network import validate_url_target
+from jenny.security.workspace_access import (
+    READONLY_TOOL_REFUSAL,
+    current_turn_is_readonly,
+)
 from jenny.security.workspace_policy import _safe_expanduser
 from jenny.utils.helpers import detect_image_mime, ensure_dir, safe_filename
 from jenny.utils.path import atomic_write
@@ -155,6 +159,13 @@ class DownloadFileTool(Tool):
         self._client = client
 
     async def execute(self, url: str, filename: str | None = None, **kwargs: Any) -> str:
+        # Prima della rete, non dopo: scaricare 20 MB per poi rifiutare la
+        # scrittura sarebbe traffico buttato. La destinazione di questo tool e'
+        # fissa (``<installazione>/downloads/``) e non passa da
+        # ``resolve_allowed_path``, quindi il cancello non la vede: il controllo
+        # va chiesto qui.
+        if current_turn_is_readonly():
+            return READONLY_TOOL_REFUSAL
         url = url.strip(" \t\r\n`\"'")
         if not url.lower().startswith(("http://", "https://")):
             return "Error: url must be http(s)"

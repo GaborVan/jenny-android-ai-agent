@@ -90,6 +90,18 @@ def _register_builtin_functions(
 
         return _active_path_base() or workspace
 
+    def _refuse_if_readonly(detail: str) -> None:
+        """Ferma una scrittura quando il turno e' in sola lettura.
+
+        Import locale come gli altri di questo modulo: a livello di modulo
+        sarebbe un ciclo.
+        """
+        from jenny.security.workspace_access import current_turn_is_readonly
+        from jenny.security.workspace_policy import ReadOnlyTurnError
+
+        if current_turn_is_readonly():
+            raise ReadOnlyTurnError(detail)
+
     def _write_root() -> str | None:
         """La radice entro cui una SCRITTURA deve restare, adesso.
 
@@ -139,6 +151,11 @@ def _register_builtin_functions(
 
     def _write_path(path: str) -> Path:
         """Percorso di una scrittura: confinato alla cartella del progetto."""
+        # La sola lettura si controlla qui e **non** in ``_enforce_path``: quello
+        # e' condiviso con ``_wiki_root``, da cui passano anche ``wiki_lint`` e
+        # ``wiki_audit``, che leggono. Bloccare la' avrebbe spento due letture
+        # per chiudere una scrittura.
+        _refuse_if_readonly(f"refused write to {path}")
         return _enforce_path(path, for_write=True)
 
     # File I/O
@@ -438,6 +455,7 @@ def _register_builtin_functions(
 
     def wiki_scaffold(root: str, title: str) -> str:
         """Bootstrap a new LLM Wiki directory structure at root."""
+        _refuse_if_readonly(f"refused wiki_scaffold in {root}")
         import contextlib
 
         mod = _load_wiki_script("scaffold.py")

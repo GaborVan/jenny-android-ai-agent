@@ -5,6 +5,7 @@ import { api } from './shared/api-client.js';
 import { escapeHtml, showToast } from './shared/utils.js';
 import { sessionManager } from './shared/session-manager.js';
 import { scopeChip } from './shared/scope-chip.js';
+import { writeSwitch } from './shared/write-switch.js';
 import { ImageHandler } from './shared/image-handler.js';
 import { openImageLightbox } from './shared/image-lightbox.js';
 import { i18n } from './shared/i18n.js';
@@ -686,6 +687,9 @@ export class ChatController {
       // default del client: e' l'unica cosa che sta tra un messaggio mandato
       // allo scope sbagliato e l'utente.
       scopeChip.syncFromSession(sessionManager.currentScope);
+      // L'interruttore è per conversazione: la chiave la conosce il session
+      // manager, non lui. Stesso punto del chip perché è lo stesso evento.
+      writeSwitch.syncFromSession(sessionManager.currentKey);
       this._renderThreadMessages(thread.messages || []);
       this.historyCursor = thread.page?.before_cursor || null;
       this.hasMoreHistory = thread.page?.has_more_before !== false;

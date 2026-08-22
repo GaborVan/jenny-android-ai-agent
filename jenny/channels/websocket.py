@@ -19,6 +19,7 @@ from jenny.bus.queue import MessageBus
 from jenny.config.paths import get_uploads_dir
 from jenny.config.schema import Base
 from jenny.pydantic_compat import Field, field_validator, model_validator
+from jenny.security.workspace_access import WORKSPACE_READONLY_METADATA_KEY
 from jenny.session.webui_turns import websocket_turn_wall_started_at
 
 if TYPE_CHECKING:
@@ -621,6 +622,13 @@ class WebSocketChannel(OutboundSenderMixin):
             self._attach(connection, cid)
             await self._hydrate_after_subscribe(cid)
             metadata: dict[str, Any] = {"remote": getattr(connection, "remote_address", None)}
+            # Sola lettura: viaggia **nel messaggio**, come lo scope. Il server
+            # non la tiene da nessuna parte — se la tenesse potrebbe raccontare
+            # al client uno stato diverso da quello con cui il messaggio e'
+            # partito, che e' il solo guasto che conta qui. Solo ``True`` accende
+            # (v. ``readonly_from_metadata``).
+            if envelope.get(WORKSPACE_READONLY_METADATA_KEY) is True:
+                metadata[WORKSPACE_READONLY_METADATA_KEY] = True
             if envelope.get("webui") is True:
                 metadata["webui"] = True
                 metadata.update(self._transcripts.client_turn_metadata(envelope.get("turn_id")))

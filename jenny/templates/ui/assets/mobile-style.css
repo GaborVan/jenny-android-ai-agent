@@ -683,6 +683,44 @@ body {
   line-height: 1;
   color: var(--flower);
 }
+/* Interruttore scrittura / sola lettura: stessa pillola del chip, perché
+   risponde alla stessa domanda e si legge nella stessa occhiata. `--radius-pill`
+   per la ragione scritta sopra, e non `--radius-seg`. */
+.write-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  padding: 4px 9px;
+  background: var(--overlay);
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius-pill);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  transition: background .16s ease, border-color .16s ease, color .16s ease;
+}
+.write-switch:hover { background: var(--overlay-strong); }
+.write-switch:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+.write-switch:active { transform: scale(0.98); }
+/* La sola lettura è lo stato da notare: scrivere è il default, e resta quieto.
+   Stessa logica del chip, dove è "essere in un progetto" a farsi vedere. */
+.write-switch[data-mode="readonly"] {
+  background: var(--overlay-strong);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+.write-switch-mark {
+  flex-shrink: 0;
+  font-size: 12px;
+  line-height: 1;
+}
+.write-switch[data-mode="readonly"] .write-switch-mark { color: var(--accent); }
+.write-switch-label { font-weight: 500; white-space: nowrap; }
 .scope-chip[data-scope="project"] .scope-chip-mark { color: var(--accent); }
 .scope-chip-path {
   display: inline-flex;

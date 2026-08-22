@@ -15,6 +15,10 @@ from jenny.agent.tools.schema import (
 )
 from jenny.cron.service import CronService
 from jenny.cron.types import CronJob, CronJobState, CronSchedule
+from jenny.security.workspace_access import (
+    READONLY_TOOL_REFUSAL,
+    current_turn_is_readonly,
+)
 from jenny.session.keys import is_project_session_key
 from jenny.utils.helpers import safe_zoneinfo, validate_timezone_name
 
@@ -203,6 +207,13 @@ class CronTool(Tool, ContextAware):
         # lavori no"), e ``remove`` la cancellerebbe da li' dentro.
         if is_project_session_key(self._session_key.get()):
             return _PROJECT_REFUSAL
+        # Seconda chiusura, e regola diversa: quella sopra dice *dove* si
+        # programma, questa dice *se questo turno* puo' cambiare qualcosa. Vale
+        # anche nella chat personale, ed e' la sola lettura del passo 4. Un job
+        # e' fra le cose piu' durature che Jenny possa creare: sopravvive al
+        # turno, alla conversazione e al riavvio.
+        if current_turn_is_readonly():
+            return READONLY_TOOL_REFUSAL
         if action == "add":
             if self._in_cron_context.get():
                 return "Error: cannot schedule new jobs from within a cron job execution"

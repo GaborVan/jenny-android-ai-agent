@@ -24,6 +24,10 @@ from typing import Any
 
 from jenny.agent.tools.base import Tool, tool_parameters
 from jenny.agent.tools.schema import BooleanSchema, tool_parameters_schema
+from jenny.security.workspace_access import (
+    READONLY_TOOL_REFUSAL,
+    current_turn_is_readonly,
+)
 
 _ANDROID_ONLY = "The in-app updater only exists in the Android app."
 
@@ -133,6 +137,11 @@ class InstallUpdateTool(_AppUpdateTool):
 
     async def execute(self, confirm: bool = False, **kwargs: Any) -> str:
         from jenny.runtime.update_install import start_install
+
+        # Il piu' irreversibile di tutti: sostituisce l'app sotto i piedi del
+        # processo. Se l'interruttore e' giu', non parte nemmeno con `confirm`.
+        if current_turn_is_readonly():
+            return json.dumps({"ok": False, "state": "error", "detail": READONLY_TOOL_REFUSAL})
 
         if not bool(kwargs.pop("confirm", confirm)):
             return json.dumps(

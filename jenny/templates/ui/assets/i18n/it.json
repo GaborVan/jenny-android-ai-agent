@@ -671,5 +671,14 @@
       "yesterday": "ieri",
       "days": "{n} giorni fa"
     }
+  },
+  "write": {
+    "write": "Scrive",
+    "readonly": "Sola lettura",
+    "change": "Scrittura o sola lettura",
+    "writeHint": "Questa chat può modificare i file. Tocca per passare in sola lettura.",
+    "readonlyHint": "Questa chat non cambia niente sul telefono. Tocca per riattivare la scrittura.",
+    "askReadonly": "Chiedi qualcosa (sola lettura)…",
+    "askAboutReadonly": "Chiedi qualcosa su {name} (sola lettura)…"
   }
 }

@@ -23,8 +23,8 @@ from jenny.agent.tools.schema import (
     tool_parameters_schema,
 )
 from jenny.config.tool_schemas import FileToolsConfig  # re-export (def in config.tool_schemas)
-from jenny.security.workspace_access import current_tool_workspace
-from jenny.security.workspace_policy import _safe_expanduser
+from jenny.security.workspace_access import current_tool_workspace, current_turn_is_readonly
+from jenny.security.workspace_policy import ReadOnlyTurnError, _safe_expanduser
 from jenny.utils.helpers import build_image_content_blocks, detect_image_mime
 
 # Gancio pre-scrittura: riceve il path risolto e il testo esatto che finirebbe su
@@ -228,6 +228,12 @@ class _FsTool(Tool):
         # Dream lo usa per non avanzare il cursore quando ha provato a scrivere
         # ma è stato bloccato.
         self._file_states.record_write_attempt()
+        # La sola lettura si controlla **qui**, cioe' nello stesso punto in cui
+        # si conta l'intento di scrittura: e' l'imbuto di write_file, edit_file e
+        # apply_patch, e un tentativo rifiutato resta un tentativo (Dream ci si
+        # appoggia per non avanzare il cursore).
+        if current_turn_is_readonly():
+            raise ReadOnlyTurnError(f"refused write to {path}")
         if self._write_files_only:
             # Bypassa ``_effective_allowed_root``: passare ``allowed_dir=None``
             # più un'allowlist di file non vuota fa scattare la modalità
