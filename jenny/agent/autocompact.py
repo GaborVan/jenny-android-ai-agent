@@ -12,6 +12,7 @@ from jenny.session.keys import (
     ATLAS_SESSION_PREFIX,
     DREAM_SESSION_PREFIX,
     UNIFIED_SESSION_KEY,
+    is_project_session_key,
 )
 from jenny.session.manager import Session, SessionManager
 
@@ -32,6 +33,19 @@ class AutoCompact:
     # I prefissi arrivano comunque dalle costanti condivise, cosi la *forma*
     # della chiave non puo divergere dal lato che la scrive.
     _INTERNAL_SESSION_PREFIXES = (DREAM_SESSION_PREFIX, ATLAS_SESSION_PREFIX)
+
+    # Le sessioni che il giro per inattivita' prende in considerazione, **prima**
+    # del recinto di :meth:`_may_archive_for_idleness`. Oggi una sola.
+    #
+    # E' un attributo e non una costante dentro ``_idle_candidates`` per una
+    # ragione precisa: cosi' un test puo' allargare l'*elenco* lasciando in
+    # piedi il filtro vero. Con l'elenco cablato nel metodo, l'unico modo di
+    # provare il filtro era sovrascrivere il metodo — e un test che
+    # sovrascrive il metodo prova la propria copia, non il codice (misurato per
+    # mutazione il 22/08: togliere il filtro non faceva cadere niente).
+    #
+    # E' anche il punto che una generalizzazione allargherebbe.
+    _IDLE_CANDIDATE_KEYS: tuple[str, ...] = (UNIFIED_SESSION_KEY,)
 
     def __init__(self, sessions: SessionManager, consolidator: Consolidator,
                  session_ttl_minutes: int = 0):
@@ -57,21 +71,78 @@ class AutoCompact:
     def _is_internal_session(cls, key: str) -> bool:
         return key.startswith(cls._INTERNAL_SESSION_PREFIXES)
 
+    @staticmethod
+    def _may_archive_for_idleness(key: str) -> bool:
+        """Se questa sessione puo' essere archiviata perche' e' stata zitta.
+
+        La regola e' **«non un progetto»**, e la classificazione arriva dal
+        predicato canonico di :mod:`jenny.session.keys`: la tassonomia delle
+        sessioni vive la' e non si riscrive il confronto qui.
+
+        Perche' i progetti no: archiviare per *tempo passato* la storia lunga di
+        un argomento butta esattamente la cosa che rende un progetto utile. Un
+        progetto puo' stare fermo tre settimane e riprendere dove era: e' il suo
+        mestiere. Quel che non perde e' la compattazione per **lunghezza**, che
+        gira a ogni turno di ogni sessione
+        (``Consolidator.maybe_consolidate_by_tokens``, v. ``loop.py``): il
+        recinto e' sul tempo, non sulla dimensione.
+
+        **E perche' non una whitelist**, che sarebbe la forma piu' prudente e che
+        qui e' stata provata e scartata. Due ragioni. La prima: una whitelist
+        "solo la personale" bloccherebbe la generalizzazione per cui questo passo
+        esiste — la riga del piano dice che l'archiviazione *puo'* girare su tutte
+        le sessioni, purche' non trascini il lavoro interno nel diario e lasci
+        stare i progetti. La seconda: la prudenza che una whitelist compra qui
+        non c'e' comunque, perche' :func:`jenny.session.keys.session_kind` chiude
+        la tassonomia a tre etichette e fa cadere **su "personal"** tutto quel
+        che non riconosce. Una quarta forma di chiave risulterebbe personale in
+        entrambe le forme; fingere il contrario sarebbe una falsa sicurezza.
+
+        Fino al passo 8 questa regola non era scritta: :meth:`check_expired`
+        aveva ``UNIFIED_SESSION_KEY`` cablato dentro, quindi i progetti erano
+        salvi **per accidente** e non per decisione. Sta qui e non nel chiamante
+        perche' chi generalizzera' questa funzione toccherebbe lei.
+        """
+        return not is_project_session_key(key)
+
+    def _idle_candidates(self) -> tuple[str, ...]:
+        """Le sessioni che questo giro puo' guardare.
+
+        Oggi una sola — la conversazione personale — ma passa dal filtro invece
+        di essere una costante, e la differenza non e' cosmetica: **una guardia
+        che non puo' scattare non e' provabile**, e una guardia non provabile
+        non e' una guardia. Prima questa funzione aveva
+        ``UNIFIED_SESSION_KEY`` cablato e un ``if`` subito sotto: togliere
+        quell'``if`` non faceva cadere nessun test, perche' la sola chiave che ci
+        arrivava era comunque ammessa (misurato per mutazione il 22/08).
+
+        E' anche la riga che una generalizzazione allargherebbe: estendere
+        l'elenco qui fa passare le sessioni nuove dal recinto senza doverselo
+        ricordare.
+        """
+        return tuple(
+            key for key in self._IDLE_CANDIDATE_KEYS if self._may_archive_for_idleness(key)
+        )
+
     def check_expired(self, schedule_background: Callable[[Coroutine], None],
                       active_session_keys: Collection[str] = ()) -> None:
-        """Schedule archival of the unified session when idle, unless a task is in flight."""
-        key = UNIFIED_SESSION_KEY
-        if key in self._archiving or key in active_session_keys:
-            return
-        info = self.sessions.read_session_metadata(key)
-        if info is None:
-            return
-        if self._is_expired(info.get("updated_at")):
-            self._archiving.add(key)
-            schedule_background(self._archive(key))
+        """Schedule archival of idle sessions, unless a task is in flight."""
+        for key in self._idle_candidates():
+            if key in self._archiving or key in active_session_keys:
+                continue
+            info = self.sessions.read_session_metadata(key)
+            if info is None:
+                continue
+            if self._is_expired(info.get("updated_at")):
+                self._archiving.add(key)
+                schedule_background(self._archive(key))
 
     async def _archive(self, key: str) -> None:
-        if self._is_internal_session(key):
+        # Secondo controllo, e non e' ridondante: ``_archive`` e' una coroutine
+        # che qualcuno pianifica, quindi e' raggiungibile senza passare da
+        # ``check_expired`` — ed e' l'ultimo punto prima di riscrivere la
+        # sessione. Il primo guardia l'ingresso, questo la scrittura.
+        if not self._may_archive_for_idleness(key) or self._is_internal_session(key):
             self._archiving.discard(key)
             return
         try:
