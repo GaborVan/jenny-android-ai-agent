@@ -8,6 +8,11 @@ altre non le vedeva nemmeno. La riga del piano dice che quel giro *potrà* girar
 su tutte le sessioni — e che quando lo farà deve lasciare stare i progetti.
 Questo file è il recinto messo prima, così quel giorno non serve ricordarselo.
 
+**Da T6.5 questo file ha una seconda metà: la manopola.** Il recinto non è stato
+demolito — ``compact_projects_when_idle`` (spenta di default) lo apre, e ogni test
+qui sopra continua a descrivere il comportamento con la manopola spenta. È quel
+che rende accendere P4 una prova reversibile invece di una scommessa.
+
 **Le due metà vanno lette insieme.** Da sola, la prima si legge come «i progetti
 non si compattano», che è falso e sarebbe una brutta sorpresa al primo progetto
 da duecento turni: la compattazione per **lunghezza** li raggiunge come tutti, a
@@ -149,3 +154,134 @@ def test_length_based_compaction_runs_for_every_session_including_projects() -> 
             f"la compattazione per lunghezza è diventata condizionale ({sospetto}): "
             "i progetti non hanno più niente che li contenga"
         )
+
+# ── L'interruttore di P4 ─────────────────────────────────────────────────
+#
+# Accendere ``compact_projects_when_idle`` è l'ultimo gradino: da quel momento la
+# conversazione di un progetto non è più l'unico depositario di niente — la
+# verità sta nelle pagine, che entrano in contesto d'ufficio (T3 e T6.4) — quindi
+# archiviarla non butta via nulla.
+#
+# Nota su cosa si perde comunque: il transcript **visibile** (``.jenny/webui/``)
+# non viene toccato dalla compattazione, che riscrive ``sessions/``. L'amnesia è
+# dell'agente, non del registro: una persona può ancora rileggere.
+
+
+@pytest.fixture
+def switched_on(tmp_path: Path) -> AutoCompact:
+    consolidator = MagicMock()
+    consolidator.compact_idle_session = AsyncMock(return_value="riassunto")
+    return AutoCompact(
+        sessions=SessionManager(tmp_path),
+        consolidator=consolidator,
+        session_ttl_minutes=30,
+        compact_projects=True,
+    )
+
+
+def test_the_switch_opens_the_fence(switched_on: AutoCompact) -> None:
+    assert switched_on._may_archive_for_idleness(PROJECT) is True
+
+
+def test_opening_the_fence_alone_would_do_nothing(switched_on: AutoCompact) -> None:
+    """**Il test che conta.** Il recinto e l'elenco dei candidati sono due cose
+    diverse: l'elenco ne conteneva **una sola** (la conversazione personale),
+    quindi allargare il solo filtro avrebbe lasciato i progetti fuori dal giro
+    senza che nulla lo dicesse. La manopola deve fare entrambe le cose.
+    """
+    _stale(switched_on, PROJECT)
+
+    candidates = switched_on._idle_candidates()
+
+    assert PROJECT in candidates
+    assert PERSONAL in candidates
+
+
+def test_with_the_switch_off_the_project_is_not_even_looked_at(
+    autocompact: AutoCompact,
+) -> None:
+    _stale(autocompact, PROJECT)
+
+    assert autocompact._idle_candidates() == (PERSONAL,)
+
+
+def test_a_project_with_no_conversation_is_not_a_candidate(switched_on: AutoCompact) -> None:
+    """Si guardano i **file di sessione**, non le wiki: un progetto con cui non si
+    è mai parlato non ha niente da compattare."""
+    assert PROJECT not in switched_on._idle_candidates()
+
+
+def test_a_project_name_with_an_underscore_survives_the_round_trip(
+    switched_on: AutoCompact,
+) -> None:
+    """``project:mia_wiki`` diventa il file ``project_mia_wiki.jsonl``, e torna
+    chiave sostituendo **solo il primo** underscore. Sbagliare qui produce una
+    chiave che non corrisponde a nessuna sessione, cioè un progetto che non si
+    compatta mai — in silenzio."""
+    _stale(switched_on, "project:mia_wiki")
+
+    assert "project:mia_wiki" in switched_on._idle_candidates()
+
+
+def test_the_transcript_files_are_not_mistaken_for_sessions(
+    switched_on: AutoCompact,
+) -> None:
+    """Accanto a ``project_x.jsonl`` vive ``websocket_project_x.jsonl``, che è
+    un'altra cosa. Il glob è ancorato all'inizio del nome, e questo test lo
+    tiene tale.
+
+    **Si nega la forma, non una chiave.** La prima stesura negava esattamente
+    ``"websocket:project:patreon"`` — e con il glob allargato il transcript entra
+    come ``websocket:project_patreon``, che è una chiave *diversa*: l'asserzione
+    passava e la mutazione sopravviveva. Quel che va escluso è qualunque
+    candidato che non sia una sessione-progetto.
+    """
+    _stale(switched_on, "websocket:project:patreon")
+    _stale(switched_on, PROJECT)
+
+    candidates = switched_on._idle_candidates()
+
+    assert PROJECT in candidates
+    assert not [k for k in candidates if "websocket" in k], candidates
+
+
+@pytest.mark.asyncio
+async def test_the_switch_lets_an_idle_project_be_archived(switched_on: AutoCompact) -> None:
+    _stale(switched_on, PROJECT)
+    scheduled: list[object] = []
+
+    switched_on.check_expired(scheduled.append)
+
+    assert len(scheduled) == 1
+    await scheduled[0]
+    switched_on.consolidator.compact_idle_session.assert_awaited_once()
+    assert switched_on.consolidator.compact_idle_session.await_args[0][0] == PROJECT
+
+
+@pytest.mark.asyncio
+async def test_internal_work_stays_out_even_with_the_switch_on(
+    switched_on: AutoCompact,
+) -> None:
+    """La seconda guardia di ``_archive`` non è ridondante e non è coperta dalla
+    manopola: un run di Dream o di Atlas non è una conversazione, e archiviarlo
+    gli toglierebbe la coda di lavoro con cui si ricorda dei propri run."""
+    _stale(switched_on, "dream:20260823-120000")
+
+    await switched_on._archive("dream:20260823-120000")
+
+    switched_on.consolidator.compact_idle_session.assert_not_awaited()
+
+
+def test_the_knob_reaches_autocompact_from_the_config() -> None:
+    """Il knob è inutile se non arriva: ``AgentDefaults`` →
+    ``AgentLoop`` → ``AutoCompact``. Senza questo test la manopola si potrebbe
+    accendere in ``config.json`` senza che cambi niente."""
+    import inspect
+
+    from jenny.agent.loop import AgentLoop
+    from jenny.config.schema import AgentDefaults
+
+    assert AgentDefaults().compact_projects_when_idle is False
+    source = inspect.getsource(AgentLoop)
+    assert "compact_projects=compact_projects_when_idle" in source
+    assert "compact_projects_when_idle=defaults.compact_projects_when_idle" in source

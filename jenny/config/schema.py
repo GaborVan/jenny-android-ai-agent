@@ -312,6 +312,28 @@ class AgentDefaults(Base):
         validation_alias=AliasChoices("idleCompactAfterMinutes"),
         serialization_alias="idleCompactAfterMinutes",
     )
+    # **L'interruttore di P4.** Con ``False`` (il default) la cronologia di un
+    # progetto non viene mai archiviata per inattività: un progetto può stare
+    # fermo tre settimane e riprendere dove era, ed è il suo mestiere. Con
+    # ``True`` la conversazione di un progetto si compatta come quella personale,
+    # perché la verità non sta più lì — sta nelle pagine.
+    #
+    # È una **manopola e non una rimozione del recinto**, e la differenza è
+    # tutta nella prova: accendere P4 diventa reversibile con un'impostazione, e
+    # la suite che pinna il recinto resta verde cambiando significato — da muro a
+    # descrizione della manopola spenta.
+    #
+    # Cosa si perde accendendolo: l'agente non ha più in contesto quel che è
+    # stato *detto*, solo quel che è stato *scritto*. Il transcript visibile
+    # (``.jenny/webui/``) non viene toccato, quindi una persona può ancora
+    # rileggere — l'amnesia è dell'agente, non del registro.
+    compact_projects_when_idle: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "compactProjectsWhenIdle", "compact_projects_when_idle"
+        ),
+        serialization_alias="compactProjectsWhenIdle",
+    )
     max_messages: int = Field(default=120, ge=0)
     consolidation_ratio: float = Field(default=0.5, ge=0.1, le=0.95)
     dream: DreamConfig = Field(default_factory=DreamConfig)

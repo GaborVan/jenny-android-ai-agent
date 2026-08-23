@@ -203,6 +203,7 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
         session_manager: SessionManager | None = None,
         timezone: str | None = None,
         session_ttl_minutes: int = 0,
+        compact_projects_when_idle: bool = False,
         consolidation_ratio: float = 0.5,
         max_messages: int = 120,
         hooks: list[AgentHook] | None = None,
@@ -379,6 +380,7 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             sessions=self.sessions,
             consolidator=self.consolidator,
             session_ttl_minutes=session_ttl_minutes,
+            compact_projects=compact_projects_when_idle,
         )
         self.model_presets: dict[str, Any] = dict(model_presets_config) if model_presets_config else {}
         self._active_preset: str | None = None
@@ -440,6 +442,7 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             wiki_directory_max_tokens=defaults.atlas.max_context_tokens,
             projects_subdir=config.wiki.wikis_dir,
             session_ttl_minutes=defaults.session_ttl_minutes,
+            compact_projects_when_idle=defaults.compact_projects_when_idle,
             consolidation_ratio=defaults.consolidation_ratio,
             max_messages=defaults.max_messages,
             tools_config=config.tools,

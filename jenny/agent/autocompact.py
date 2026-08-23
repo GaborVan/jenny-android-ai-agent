@@ -11,6 +11,7 @@ from loguru import logger
 from jenny.session.keys import (
     ATLAS_SESSION_PREFIX,
     DREAM_SESSION_PREFIX,
+    PROJECT_SESSION_PREFIX,
     UNIFIED_SESSION_KEY,
     is_project_session_key,
 )
@@ -48,10 +49,16 @@ class AutoCompact:
     _IDLE_CANDIDATE_KEYS: tuple[str, ...] = (UNIFIED_SESSION_KEY,)
 
     def __init__(self, sessions: SessionManager, consolidator: Consolidator,
-                 session_ttl_minutes: int = 0):
+                 session_ttl_minutes: int = 0,
+                 compact_projects: bool = False):
         self.sessions = sessions
         self.consolidator = consolidator
         self._ttl = session_ttl_minutes
+        # L'interruttore di P4 (``config.agents.defaults.compact_projects_when_idle``).
+        # Spento, il recinto sotto vale come prima; acceso, la conversazione di un
+        # progetto si compatta come quella personale — perche' la verita' non sta
+        # piu' li', sta nelle pagine.
+        self._compact_projects = compact_projects
         self._archiving: set[str] = set()
         self._summaries: dict[str, tuple[str, datetime]] = {}
 
@@ -71,8 +78,7 @@ class AutoCompact:
     def _is_internal_session(cls, key: str) -> bool:
         return key.startswith(cls._INTERNAL_SESSION_PREFIXES)
 
-    @staticmethod
-    def _may_archive_for_idleness(key: str) -> bool:
+    def _may_archive_for_idleness(self, key: str) -> bool:
         """Se questa sessione puo' essere archiviata perche' e' stata zitta.
 
         La regola e' **«non un progetto»**, e la classificazione arriva dal
@@ -102,7 +108,17 @@ class AutoCompact:
         aveva ``UNIFIED_SESSION_KEY`` cablato dentro, quindi i progetti erano
         salvi **per accidente** e non per decisione. Sta qui e non nel chiamante
         perche' chi generalizzera' questa funzione toccherebbe lei.
+
+        **E da T6.5 c'e' una manopola** (``compact_projects_when_idle``, spenta di
+        default). Accenderla e' l'ultimo gradino di P4: da quel momento la
+        conversazione di un progetto non e' piu' l'unico depositario di niente,
+        quindi archiviarla non butta via nulla — la verita' sta nelle pagine, che
+        entrano in contesto d'ufficio (T3 e T6.4). Il recinto resta la posizione
+        di partenza, e resta reversibile: e' quel che rende accendere P4 una prova
+        invece di una scommessa.
         """
+        if self._compact_projects:
+            return True
         return not is_project_session_key(key)
 
     def _idle_candidates(self) -> tuple[str, ...]:
@@ -120,9 +136,33 @@ class AutoCompact:
         l'elenco qui fa passare le sessioni nuove dal recinto senza doverselo
         ricordare.
         """
-        return tuple(
-            key for key in self._IDLE_CANDIDATE_KEYS if self._may_archive_for_idleness(key)
-        )
+        keys = list(self._IDLE_CANDIDATE_KEYS)
+        if self._compact_projects:
+            # **Aprire il recinto non basta.** L'elenco dei candidati contiene
+            # una chiave sola, quindi con il solo filtro allargato nessun
+            # progetto verrebbe mai *guardato*: il recinto e la lista sono due
+            # cose diverse, e la seconda e' quella che decide chi entra nel giro.
+            keys.extend(self._project_session_keys())
+        return tuple(key for key in keys if self._may_archive_for_idleness(key))
+
+    def _project_session_keys(self) -> tuple[str, ...]:
+        """Le sessioni-progetto che esistono su disco.
+
+        Si guardano i **file**, non le wiki: un progetto senza conversazione non
+        ha niente da compattare, e un progetto la cui cartella e' stata rinominata
+        conserva la propria sessione (passo 7). Lo stesso mestiere che
+        ``MemoryStore.prune_internal_sessions`` fa per i run interni, con la
+        stessa traduzione nome-file -> chiave.
+        """
+        directory = getattr(self.sessions, "sessions_dir", None)
+        if directory is None:
+            return ()
+        prefix = PROJECT_SESSION_PREFIX[:-1]  # "project", senza i due punti
+        try:
+            files = sorted(directory.glob(f"{prefix}_*.jsonl"))
+        except OSError:
+            return ()
+        return tuple(path.stem.replace("_", ":", 1) for path in files)
 
     def check_expired(self, schedule_background: Callable[[Coroutine], None],
                       active_session_keys: Collection[str] = ()) -> None:
