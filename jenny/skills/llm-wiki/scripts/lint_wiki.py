@@ -32,6 +32,29 @@ Per-wiki checks:
  11. Summary completeness — every ingested text source (raw/articles,
      raw/papers, raw/notes) must have a matching wiki/summaries/<slug>.md
 
+Checks 9-11 are the research pattern's, and they only fire where its folders
+exist. Two layouts live in the world and no flag tells them apart: the structure
+on disk is the declaration (see `is_research_layout`).
+
+Every wiki, whatever its layout:
+ 12. Journal shape and integrity — raw/journal/YYYYMMDD.md, lines as
+     `- HH:MM — text`, and **append-only verified against the previous lint**:
+     a file that shrank, or whose already-written head changed, is reported. The
+     journal is the only record of what was said, so a line that changes leaves
+     behind a page nothing supports.
+ 15. Map size — wiki/index.md is injected into every turn of every conversation
+     in that project, and past a ceiling the rest is not injected at all.
+
+Notebook layout only (flat pages, no concepts/entities/summaries):
+ 13. Page state — every page declares `state:` from a closed vocabulary. A page
+     is worth exactly what its state says.
+ 14. Cross-linking — a page with no link in or out is a note in a folder. Being
+     listed in the map is not a link.
+
+State: check 12 keeps one digest per journal file under <wiki>/.jenny/, which is
+the only way to answer "did a line change since last time". It is machinery, not
+the user's material — same place and same reason as the gardener's cursor.
+
 Workspace checks (--workspace): lints every wiki under <wikis-dir>, then:
   8. wikis/_index.md exists and its wiki-registry block is in sync with the
      wikis on disk (via reindex_wikis.check_index). Add --fix to repair drift.
@@ -41,6 +64,8 @@ Exit codes:
   1 — issues found (printed to stdout)
 """
 
+import hashlib
+import json
 import os
 import re
 import sys
@@ -69,6 +94,80 @@ LOG_ENTRY_RE = re.compile(r"^## \[\d{2}:\d{2}\] (\S+)")
 
 # Stop-words dropped when comparing page titles for near-duplicates.
 TITLE_STOPWORDS = {"a", "an", "the", "of", "and", "to", "for", "in", "on", "vs", "with"}
+
+# ── Il taccuino: quel che il formato nuovo aggiunge ─────────────────────────
+#
+# Due layout esistono nel mondo e **nessun flag li distingue**: la struttura su
+# disco è la dichiarazione. Una wiki di ricerca ha ``concepts/``/``entities/``/
+# ``summaries/`` sotto ``wiki/``; un taccuino ha pagine piatte. I controlli del
+# pattern di ricerca (passi 9-11) sono già ristretti a ``concepts``/``entities``
+# e su un taccuino non scattano; questi sono il loro specchio.
+
+RESEARCH_SUBDIRS = ("concepts", "entities", "summaries")
+
+# Il vocabolario di ``state:``. Una pagina vale quanto il suo stato dice, ed è
+# l'anticorpo alla deriva auto-confermante: senza stato, un'ipotesi appuntata di
+# passaggio si rilegge fra un mese come un fatto stabilito.
+PAGE_STATES = {"open", "hypothesis", "decided", "done"}
+
+# Tetto della mappa, in caratteri. **Non è un numero scelto qui**: è la soglia
+# oltre la quale il blocco di progetto smette di iniettare la mappa intera in
+# ogni turno (``jenny/agent/context.py::_PROJECT_MAP_MAX_CHARS``). Oltre, il
+# resto della mappa esiste ma l'agente non lo vede senza aprire il file — quindi
+# è un avviso che vale per **tutti** i layout, perché la mappa la riceve ogni
+# progetto.
+MAP_MAX_CHARS = 2000
+
+JOURNAL_FILENAME_RE = re.compile(r"^(\d{4})(\d{2})(\d{2})\.md$")
+JOURNAL_ENTRY_RE = re.compile(r"^- \d{2}:\d{2} \u2014 \S")
+
+# Lo stato del lint, dentro la cartella nascosta del progetto: macchinario, non
+# materiale dell'utente — come il cursore del giardiniere, e per la stessa
+# ragione sta fuori da ``wiki/`` (viste, grafo e impronta di Atlas non lo vedono).
+LINT_STATE_REL = ".jenny/lint_journal.json"
+
+
+def is_research_layout(wiki_path: Path) -> bool:
+    """Se questa wiki è una biblioteca di ricerca, letto dalla struttura."""
+    return any((wiki_path / name).is_dir() for name in RESEARCH_SUBDIRS)
+
+
+def journal_files(root_path: Path) -> list[Path]:
+    journal = root_path / "raw" / "journal"
+    return sorted(journal.glob("*.md")) if journal.is_dir() else []
+
+
+def head_digest(path: Path, size: int) -> str | None:
+    """Digest dei primi *size* byte di *path*, o ``None`` se illeggibile.
+
+    È il pezzo che rende esatto il controllo dell'append-only: la testa di oggi
+    deve essere identica al file di ieri, byte per byte.
+    """
+    try:
+        with path.open("rb") as fh:
+            return hashlib.sha256(fh.read(size)).hexdigest()
+    except OSError:
+        return None
+
+
+def read_lint_state(root_path: Path) -> dict:
+    try:
+        data = json.loads((root_path / LINT_STATE_REL).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data.get("digests", {}) if isinstance(data, dict) else {}
+
+
+def write_lint_state(root_path: Path, digests: dict) -> None:
+    path = root_path / LINT_STATE_REL
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"version": 1, "digests": digests}, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass  # il lint riporta, non deve fallire per non aver salvato lo stato
 
 
 def dup_key(title: str) -> str:
@@ -508,6 +607,139 @@ def lint(root: str) -> int:
             issues += len(missing_summaries)
         elif raw_sources:
             print("✅ Every raw source has a summary page")
+
+    # ── Pass 12: il diario (ogni wiki) ───────────────────────────────────────
+    # Universale, perché il diario è universale: ogni wiki l'ha guadagnato, e la
+    # cattura scrive lì indipendentemente dal layout delle pagine.
+    journals = journal_files(root_path)
+    if journals:
+        bad_names = [j for j in journals if not JOURNAL_FILENAME_RE.match(j.name)]
+        if bad_names:
+            print(f"\n🟡 Journal files with an unexpected name ({len(bad_names)}):")
+            for j in bad_names:
+                print(f"   {j.relative_to(root_path)} — expected YYYYMMDD.md")
+            issues += len(bad_names)
+
+        malformed: list[tuple[str, int, str]] = []
+        digests: dict[str, dict] = {}
+        for j in journals:
+            try:
+                raw = j.read_bytes()
+            except OSError:
+                continue
+            digests[j.relative_to(root_path).as_posix()] = {
+                "sha": hashlib.sha256(raw).hexdigest(),
+                "size": len(raw),
+            }
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                print(f"\n🔴 Journal file is not UTF-8: {j.relative_to(root_path)}")
+                issues += 1
+                continue
+            for n, line in enumerate(text.splitlines(), start=1):
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                if not JOURNAL_ENTRY_RE.match(stripped):
+                    malformed.append((j.relative_to(root_path).as_posix(), n, stripped[:60]))
+        if malformed:
+            print(f"\n🟡 Journal lines not in `- HH:MM — text` form ({len(malformed)}):")
+            for rel, n, sample in malformed[:20]:
+                print(f"   {rel}:{n}  {sample}")
+            print("   (one fact per line, and the timestamp is added by the tool —")
+            print("    a line the gardener cannot read is a fact that never becomes a page)")
+            issues += len(malformed)
+
+        # L'append-only **verificato**, non predicato. Il diario è l'input del
+        # giardiniere e la sola fonte di verità di quel che è stato detto: se una
+        # riga già promossa cambia, la pagina che ne è nata resta a dire un'altra
+        # cosa e nessuno se ne accorge — il file è intatto e il cursore è
+        # plausibile. Confrontare col run precedente è l'unico modo di vederlo.
+        #
+        # Il confronto è **esatto** e costa due letture: se il file è più corto
+        # di prima è stato troncato; se è più lungo o uguale, la sua *testa*
+        # (i primi ``size`` byte di allora) deve avere lo stesso digest di
+        # allora. Un digest sul file intero non basterebbe: non distingue
+        # "cresciuto" — che è il caso normale — da "riscritto".
+        previous = read_lint_state(root_path)
+        violations: list[tuple[str, str]] = []
+        for rel, now in sorted(digests.items()):
+            before = previous.get(rel)
+            if not isinstance(before, dict):
+                continue
+            old_size, old_sha = before.get("size"), before.get("sha")
+            if not isinstance(old_size, int) or not isinstance(old_sha, str):
+                continue
+            if now["size"] < old_size:
+                violations.append((rel, f"truncated ({old_size} → {now['size']} bytes)"))
+            elif head_digest(root_path / rel, old_size) != old_sha:
+                violations.append((rel, "an already-written line was changed"))
+        if violations:
+            print(f"\n🔴 Journal files that are no longer append-only ({len(violations)}):")
+            for rel, why in violations:
+                print(f"   {rel} — {why}")
+            print("   (the journal is the gardener's input and the only record of what")
+            print("    was said. A page promoted from a line that no longer exists now")
+            print("    says something nothing supports.)")
+            issues += len(violations)
+        elif previous:
+            print("✅ Journal is append-only since the last lint")
+        else:
+            print("ℹ️  Journal baseline recorded (append-only checked from the next lint)")
+        write_lint_state(root_path, digests)
+
+    # ── Pass 13-14: il formato taccuino ──────────────────────────────────────
+    if not is_research_layout(wiki_path):
+        flat_pages = [p for p in all_wiki_files if p != index_path]
+
+        # ``state:`` è obbligatorio e chiuso a vocabolario. Una pagina vale
+        # quanto il suo stato dice; senza, un'ipotesi appuntata di passaggio si
+        # rilegge fra un mese come un fatto stabilito.
+        bad_state: list[tuple[str, str]] = []
+        for page in flat_pages:
+            fm = parse_frontmatter(page.read_text(encoding="utf-8")) or {}
+            value = str(fm.get("state", "")).strip()
+            if value not in PAGE_STATES:
+                bad_state.append((
+                    page.relative_to(root_path).as_posix(), value or "(missing)"
+                ))
+        if bad_state:
+            print(f"\n🔴 Pages with no valid `state:` ({len(bad_state)}):")
+            for rel, value in bad_state:
+                print(f"   {rel} — {value}")
+            print(f"   (one of: {', '.join(sorted(PAGE_STATES))})")
+            issues += len(bad_state)
+        elif flat_pages:
+            print("✅ Every page declares a valid state:")
+
+        # Una pagina che non linka niente è una nota in una cartella, non una
+        # voce di wiki: la stessa regola del passo 10, per le pagine piatte.
+        unlinked = [
+            page for page in flat_pages
+            if not extract_wikilinks(page.read_text(encoding="utf-8"))
+            and not inbound_non_index.get(page.stem)
+        ]
+        if unlinked:
+            print(f"\n🟡 Pages with no link in or out ({len(unlinked)}):")
+            for page in unlinked:
+                print(f"   {page.relative_to(root_path)}")
+            print("   (being listed in the map is not a link — that is what makes")
+            print("    this a wiki instead of a folder)")
+            issues += len(unlinked)
+
+    # ── Pass 15: la mappa entra in ogni turno ────────────────────────────────
+    # Vale per tutti i layout: il blocco di progetto inietta ``wiki/index.md`` in
+    # ogni turno di ogni conversazione dentro quella cartella, quindi ogni riga
+    # in più si paga a ogni messaggio — e oltre il tetto il resto non arriva.
+    if index_path.exists():
+        size = len(index_path.read_text(encoding="utf-8"))
+        if size > MAP_MAX_CHARS:
+            print(f"\n🟡 The map is {size} characters (over {MAP_MAX_CHARS}):")
+            print(f"   {index_path.relative_to(root_path)}")
+            print("   (it is injected into every turn, and past that ceiling the rest")
+            print("    is not injected at all. What outgrew a few lines belongs on a page.)")
+            issues += 1
 
     # ── Summary ─────────────────────────────────────────────────────────────
     print(f"\n{'─'*40}")
