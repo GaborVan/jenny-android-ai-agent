@@ -115,6 +115,27 @@ class TestTheTarget:
         _project(tmp_path)
         assert GardenerStore.for_project(tmp_path, name) is None
 
+    def test_a_workspace_reachable_under_two_names_still_gives_one_path(self, tmp_path):
+        """**Il difetto del 23/08, sul telefono.** Su Android la dir dati e'
+        raggiungibile come ``/data/user/0/<pkg>`` e ``Path.resolve()`` la riscrive
+        in ``/data/data/<pkg>``. Il progetto arrivava risolto e il workspace no,
+        quindi ``relative_to`` alzava ``ValueError`` e il prompt diceva
+        ``zz-t4/wiki/`` invece di ``wikis/zz-t4/wiki/``: il modello ha scritto
+        quattro pagine perfette e sono state **rifiutate tutte**.
+
+        Qui la doppia via e' un symlink, che e' la stessa cosa vista da macOS.
+        """
+        real = tmp_path / "real"
+        real.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(real)
+        _project(real, "zz-t4")
+
+        store = GardenerStore.for_project(link, "zz-t4")
+
+        assert store is not None
+        assert store.rel_root == "wikis/zz-t4"
+
     def test_paths_in_the_prompt_are_relative_to_the_workspace(self, tmp_path):
         """Non è estetica: la base dei percorsi relativi è ``project_path`` dello
         scope legato, che per un turno interno è la radice dell'installazione. E

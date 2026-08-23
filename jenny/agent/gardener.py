@@ -96,8 +96,15 @@ class GardenerStore:
         max_delta_lines: int = MAX_DELTA_LINES,
         today: Any = None,
     ) -> None:
-        self.root = root
-        self.workspace = workspace
+        # **Entrambi risolti, qui e non ai punti d'uso.** Su Android la dir dati
+        # e' raggiungibile come ``/data/user/0/<pkg>`` e ``Path.resolve()`` la
+        # riscrive in ``/data/data/<pkg>``: se una delle due radici arriva
+        # risolta e l'altra no, ``relative_to`` alza ``ValueError`` e il percorso
+        # che finisce nel prompt e' sbagliato. Misurato sul telefono il 23/08 —
+        # il modello ha scritto quattro pagine perfette in ``zz-t4/wiki/`` invece
+        # di ``wikis/zz-t4/wiki/``, e sono state rifiutate tutte.
+        self.root = root.resolve(strict=False)
+        self.workspace = workspace.resolve(strict=False)
         self.max_delta_lines = max_delta_lines
         # Iniettabile per i test; in produzione nessuno lo passa.
         self._today = today or date.today
@@ -139,6 +146,17 @@ class GardenerStore:
         try:
             return self.root.relative_to(self.workspace).as_posix()
         except ValueError:
+            # Non deve capitare — le due radici sono risolte alla costruzione, e
+            # un progetto sta sempre dentro il workspace. Se capita e' un difetto
+            # di programmazione, e va **detto**: il fallback restituisce un
+            # percorso dall'aria giusta su cui ogni scrittura verra' rifiutata in
+            # silenzio, che e' esattamente come questo bug si e' presentato la
+            # prima volta.
+            logger.error(
+                "gardener: {} non e' dentro il workspace {}: i percorsi del prompt "
+                "saranno rifiutati",
+                self.root, self.workspace,
+            )
             return self.root.name
 
     # -- input ---------------------------------------------------------------
