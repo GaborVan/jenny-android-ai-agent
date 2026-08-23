@@ -59,8 +59,10 @@ Work only from those.
   turn of every conversation in this project, so every line you add there is paid for again and
   again. What outgrows a few lines belongs on a page.
 - **Never delete a page**, and never delete a section of one. If two pages contradict each other,
-  or a journal line denies a page that says `decided`, say so in your reply and leave both alone:
-  a human decides that one.
+  or a journal line denies a page that says `decided`, leave both alone and **write the question
+  into the map's open section** — one line, naming both pages. That section is read at the start of
+  every conversation in this project, so a question left there reaches the person who can settle
+  it. Deciding it yourself is the one thing you must not do.
 - **Follow the structure you find.** If the pages under `wiki/` are flat, add flat pages, and open
   a subfolder only when a group of pages has clearly earned one. If they are already organised in
   folders, put yours where that organisation says. The folder is the authority, not your
@@ -71,3 +73,17 @@ Work only from those.
 Say so in one line and stop. Do not invent a page to justify the pass, do not tidy something that
 was not asked for, do not re-read the wiki looking for work. Passes that write nothing are the
 normal case and cost almost nothing — that is what makes the ones that write worth trusting.
+
+## How to end
+
+Nobody reads your reply as prose, so end it with exactly one of these two lines and nothing after
+it:
+
+    NOTHING TO FLAG
+
+    FLAG: <one line — what a person has to look at, and which pages>
+
+`FLAG:` is for what you could not settle on your own and left in the map's open section: a
+contradiction between pages, a journal line that denies something marked `decided`, a page whose
+source no longer exists. It is not for reporting what you did — the folder shows that. One line,
+and only when a person genuinely has to look.

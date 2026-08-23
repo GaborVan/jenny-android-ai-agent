@@ -69,6 +69,7 @@ class _FakeAgent:
         self._stop_reason = stop_reason
         self.evicted: list[str] = []
         self.snapshots: list[str] = []
+        self.reply = "NOTHING TO FLAG"
 
     async def take_snapshot(self, trigger: str) -> bool:
         self.snapshots.append(trigger)
@@ -76,7 +77,9 @@ class _FakeAgent:
 
     async def process_direct(self, prompt: str, **kwargs):
         self.calls.append({"prompt": prompt, **kwargs})
-        return SimpleNamespace(metadata={"_stop_reason": self._stop_reason}, usage={})
+        return SimpleNamespace(
+            metadata={"_stop_reason": self._stop_reason}, usage={}, content=self.reply,
+        )
 
     def evict_pruned_sessions(self, keys) -> None:
         self.evicted.extend(keys)
@@ -491,3 +494,135 @@ class TestTheCheckpoint:
 
         for promise in ("snapshot", "reversible", "checkpoint", "undo", "restore"):
             assert promise not in prompt, f"il prompt promette una rete: {promise}"
+
+# ── Quel che la passata trova ────────────────────────────────────────────────
+
+
+class TestTheFlag:
+    """Il canale nasce da un buco: la risposta della passata serviva solo al
+    predicato di commit e alla contabilità token, e il **testo** veniva buttato —
+    quindi il prompt diceva «se due pagine si contraddicono, dillo» e quel report
+    non arrivava a nessuno.
+
+    Due destinazioni per due pubblici: la sezione aperta della **mappa**, che il
+    modello scrive da sé e che entra nel prompt di ogni turno (quindi raggiunge la
+    conversazione), e una riga nel **log**, che è la storia che una persona
+    rilegge. Qui si prova la seconda.
+    """
+
+    @pytest.mark.parametrize("reply,expected", [
+        ("ho fatto le pagine.\n\nNOTHING TO FLAG", None),
+        ("fatto.\n\nFLAG: treno.md e tappe.md dicono due orari diversi",
+         "treno.md e tappe.md dicono due orari diversi"),
+        ("solo prosa senza formula", None),
+        ("", None),
+        ("FLAG:", None),
+    ])
+    def test_the_marker_is_read_and_prose_is_not(self, reply, expected):
+        from jenny.agent.gardener import extract_flag
+
+        assert extract_flag(SimpleNamespace(content=reply)) == expected
+
+    def test_it_reads_the_marker_from_the_end(self):
+        """Dal fondo, perché **il marcatore chiude** la risposta: cercandolo
+        dall'inizio si prende la riga in cui il modello *cita* il contratto
+        mentre ragiona, e si inventa una segnalazione che non c'è.
+
+        La forma del test è quella che discrimina, e ci è voluta una mutazione
+        per trovarla: la citazione deve stare a **inizio riga**, perché è così
+        che un modello che ragiona sul proprio contratto scrive. Con la citazione
+        in mezzo alla riga le due direzioni danno lo stesso risultato e il test
+        non prova niente — era la prima stesura.
+        """
+        from jenny.agent.gardener import extract_flag
+
+        quoting_then_clearing = (
+            "FLAG: is for things I cannot settle on my own.\n"
+            "Here the two pages agree, so nothing applies.\n"
+            "NOTHING TO FLAG"
+        )
+        quoting_then_flagging = (
+            "NOTHING TO FLAG would be wrong here: le pagine si contraddicono.\n"
+            "FLAG: budget.md e tappe.md non concordano"
+        )
+
+        assert extract_flag(SimpleNamespace(content=quoting_then_clearing)) is None
+        assert extract_flag(SimpleNamespace(content=quoting_then_flagging)) == (
+            "budget.md e tappe.md non concordano"
+        )
+
+    def test_a_long_flag_is_cut_not_dropped(self):
+        """Il log è «una riga per operazione»: un paragrafo lo rende illeggibile,
+        ed è l'unico registro che c'è. Ma tagliare è meglio che perdere."""
+        from jenny.agent.gardener import extract_flag
+
+        flag = extract_flag(SimpleNamespace(content="FLAG: " + "x" * 500))
+
+        assert flag is not None and len(flag) == 300
+
+    def test_a_reply_with_no_content_is_not_an_error(self):
+        from jenny.agent.gardener import extract_flag
+
+        assert extract_flag(None) is None
+        assert extract_flag(SimpleNamespace(metadata={})) is None
+
+    async def test_a_flag_reaches_the_log(self, tmp_path):
+        root = _project(tmp_path)
+        agent = _FakeAgent(tmp_path)
+        agent.reply = "fatto.\n\nFLAG: due pagine dicono orari diversi"
+
+        await run_gardener(agent, _with_states(_store(tmp_path), _states(attempted=1, ok=1)))
+
+        log = (root / "log" / "20260823.md").read_text(encoding="utf-8")
+        assert "- flagged: due pagine dicono orari diversi" in log
+
+    async def test_no_flag_leaves_the_log_line_alone(self, tmp_path):
+        root = _project(tmp_path)
+
+        await run_gardener(
+            _FakeAgent(tmp_path), _with_states(_store(tmp_path), _states(attempted=1, ok=1))
+        )
+
+        assert "flagged" not in (root / "log" / "20260823.md").read_text(encoding="utf-8")
+
+    async def test_a_flag_is_kept_even_when_the_pass_promoted_nothing(self, tmp_path):
+        """Una passata a vuoto non lascia traccia — era la regola e resta — ma una
+        segnalazione è la cosa più importante che una passata possa dire, e non si
+        perde per non aver promosso niente."""
+        root = _project(tmp_path)
+        agent = _FakeAgent(tmp_path)
+        agent.reply = "niente da promuovere.\n\nFLAG: la pagina treno cita una fonte assente"
+
+        outcome = await run_gardener(
+            agent, _with_states(_store(tmp_path), _states(attempted=0, ok=0))
+        )
+
+        assert outcome.status == "nothing_to_promote"
+        assert "la pagina treno cita una fonte assente" in (
+            root / "log" / "20260823.md"
+        ).read_text(encoding="utf-8")
+
+
+class TestTheClosingContract:
+    def _prompt(self, tmp_path) -> str:
+        _project(tmp_path)
+        store = _store(tmp_path)
+        return store.build_prompt(store.read_delta())
+
+    @pytest.mark.parametrize("piece", ["NOTHING TO FLAG", "FLAG:"])
+    def test_the_two_closing_lines_are_specified(self, tmp_path, piece):
+        assert piece in self._prompt(tmp_path)
+
+    def test_a_contradiction_goes_into_the_map_not_into_prose(self, tmp_path):
+        """La destinazione scartata era ``audit/``: vuole ``anchor_before`` e
+        ``target_lines``, cioè è ancorata a un intervallo di righe perché nasce
+        per correggere un testo. «Queste due pagine si contraddicono» non ha
+        un'ancora, e inventarne una vuol dire scrivere un'ancora finta in un
+        canale che il lint verifica."""
+        prompt = self._prompt(tmp_path)
+
+        assert "write the question" in prompt and "open section" in prompt
+        assert "say so in your reply" not in prompt
+
+    def test_deciding_it_alone_is_the_forbidden_thing(self, tmp_path):
+        assert "Deciding it yourself is the one thing you must not do" in self._prompt(tmp_path)

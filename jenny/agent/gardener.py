@@ -68,6 +68,17 @@ _MAX_INVENTORY_ENTRIES = 300
 _MAX_MAP_CHARS = 8000
 _MAX_AGENTS_CHARS = 4000
 
+# Il marcatore con cui la passata chiude. **Un marcatore e non prosa**:
+# interpretare testo libero e' il modo in cui questo genere di cose smette di
+# funzionare senza che nessuno se ne accorga — un giorno il modello scrive la
+# stessa cosa con altre parole e il canale e' morto in silenzio.
+_FLAG_MARKER = "FLAG:"
+_NO_FLAG_MARKER = "NOTHING TO FLAG"
+
+# Tetto della riga di segnalazione nel log. Il log e' "una riga per operazione":
+# un paragrafo qui lo rende illeggibile, ed e' l'unico registro che c'e'.
+_MAX_FLAG_CHARS = 300
+
 
 @dataclass(frozen=True)
 class GardenerOutcome:
@@ -304,7 +315,14 @@ class GardenerStore:
         """Chiave della passata, es. ``gardener:viaggio-20260823-213000``."""
         return f"{GARDENER_SESSION_PREFIX}{self.name}-{datetime.now():%Y%m%d-%H%M%S}"
 
-    def log_pass(self, delta: JournalDelta, *, elapsed: float, writes: int) -> None:
+    def log_pass(
+        self,
+        delta: JournalDelta,
+        *,
+        elapsed: float,
+        writes: int,
+        flag: str | None = None,
+    ) -> None:
         """Una riga in ``log/AAAAMMGG.md``: il solo posto dove si vede la passata.
 
         Si scrive **solo se qualcosa è stato scritto**: una passata che non
@@ -318,6 +336,8 @@ class GardenerStore:
             f"## [{datetime.now():%H:%M}] gardener | {delta.line_count} journal lines "
             f"({days}) → {writes} writes in {elapsed:.1f}s\n"
         )
+        if flag:
+            entry += f"- flagged: {flag}\n"
         try:
             page.parent.mkdir(parents=True, exist_ok=True)
             fresh = not page.exists()
@@ -333,6 +353,38 @@ class GardenerStore:
 
 async def _silent(*_args: Any, **_kwargs: Any) -> None:
     pass
+
+
+def extract_flag(reply: Any) -> str | None:
+    """La riga di segnalazione con cui la passata ha chiuso, o ``None``.
+
+    Il canale nasce da un buco: la risposta della passata serviva al predicato di
+    commit e alla contabilita' token, e il **testo** veniva buttato — quindi il
+    prompt diceva «se due pagine si contraddicono, dillo» e quel report non
+    arrivava a nessuno.
+
+    Adesso la contraddizione ha due destinazioni, per due pubblici diversi: la
+    sezione aperta della **mappa**, che il modello scrive da se' e che entra nel
+    prompt di ogni turno (quindi raggiunge la conversazione), e una riga nel
+    **log**, che e' la storia che una persona rilegge. Qui si estrae la seconda.
+
+    Si cerca il marcatore e nient'altro. Un testo senza marcatore non e' un
+    errore — una passata che ha scritto le pagine giuste e si e' scordata la
+    formula ha fatto il lavoro — e vale "niente da segnalare".
+    """
+    text = getattr(reply, "content", None)
+    if not isinstance(text, str):
+        return None
+    # Dal fondo: il marcatore chiude la risposta, e cercandolo dall'inizio si
+    # prenderebbe la riga in cui il modello *cita* il contratto ragionando.
+    for line in reversed(text.strip().splitlines()):
+        line = line.strip()
+        if line.startswith(_NO_FLAG_MARKER):
+            return None
+        if line.startswith(_FLAG_MARKER):
+            flag = line[len(_FLAG_MARKER):].strip()
+            return flag[:_MAX_FLAG_CHARS] or None
+    return None
 
 
 async def _checkpoint(agent: Any) -> None:
@@ -422,11 +474,18 @@ async def run_gardener(agent: Any, store: GardenerStore) -> GardenerOutcome:
         # esito, e riproporre le stesse righe al giro dopo darebbe la stessa
         # risposta a un costo nuovo.
         store.commit(delta)
-        if writes:
-            store.log_pass(delta, elapsed=elapsed, writes=writes)
-            status = "written"
-        else:
-            status = "nothing_to_promote"
+        flag = extract_flag(resp)
+        if flag:
+            # A WARNING: e' la sola cosa che una passata puo' dire e che vale la
+            # pena vedere passando dai log, senza aprire il file.
+            logger.warning("gardener: {} segnala — {}", store.name, flag)
+        # Il log si scrive se qualcosa e' stato scritto **oppure** se c'e' una
+        # segnalazione: una passata a vuoto non lascia traccia (era la regola, e
+        # resta), ma una segnalazione e' la cosa piu' importante che una passata
+        # possa dire e non si perde per non aver promosso niente.
+        if writes or flag:
+            store.log_pass(delta, elapsed=elapsed, writes=writes, flag=flag)
+        status = "written" if writes else "nothing_to_promote"
         logger.info(
             "gardener: {} — {} righe, {} scritture, {} in {:.1f}s",
             store.name, delta.line_count, writes, status, elapsed,
