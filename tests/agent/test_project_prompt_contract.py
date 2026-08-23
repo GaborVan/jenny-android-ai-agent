@@ -634,3 +634,169 @@ def test_a_restricted_folder_that_is_not_a_wiki_gets_no_fallback(tmp_path) -> No
     prompt = ContextBuilder(root).build_system_prompt(workspace=narrowed)
 
     assert "roba di un'app" not in prompt
+
+# ── T6.4 — Gradino 2: le pagine entrano in contesto ──────────────────────────
+#
+# La mappa dice *cosa esiste*; questo mette in mano *cosa dicono*. È la
+# differenza fra un agente che sa di avere una pagina sul furgone e un agente che
+# sa cosa c'è scritto — la prima costa una lettura a ogni domanda, la seconda no.
+# È la definizione operativa di P4: il turno si costruisce dalle note.
+
+
+def _wiki_with_pages(root, name: str, pages: dict[str, str]):
+    project = _wiki_with_map(root, name, f"# {name}\n\n## Pages\n")
+    for rel, body in pages.items():
+        page = project / "wiki" / rel
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text(body, encoding="utf-8")
+    return project
+
+
+def _pages_prompt(tmp_path, pages: dict[str, str]) -> str:
+    project = _wiki_with_pages(tmp_path, "casa", pages)
+    return ContextBuilder(tmp_path).build_system_prompt(
+        workspace=project, session_key="project:casa"
+    )
+
+
+def test_the_pages_are_in_the_block_with_their_content(tmp_path) -> None:
+    prompt = _pages_prompt(tmp_path, {
+        "furgone.md": "---\nstate: open\n---\n\n# Furgone\n\nDucato 2011, turbo da cambiare.",
+    })
+
+    assert "The pages, as they stand" in prompt
+    assert "turbo da cambiare" in prompt
+    assert "`furgone.md`" in prompt
+
+
+def test_the_pages_are_fenced_like_the_map(tmp_path) -> None:
+    """Quattro backtick: una pagina può contenere un blocco di codice, e le sue
+    intestazioni ``#`` sbucherebbero nella struttura del prompt. E quel che sta in
+    un file dell'utente è **dato**, quindi va nel canale dei dati."""
+    prompt = _pages_prompt(tmp_path, {"furgone.md": "# Furgone\n\n```py\nx = 1\n```"})
+
+    assert "````markdown" in prompt.split("The pages, as they stand")[1]
+
+
+def test_the_order_is_stable_because_the_prefix_is_cached(tmp_path) -> None:
+    """**Il vincolo è la cache.** Il blocco di sistema è il prefisso cacheato:
+    una selezione che dipendesse dal messaggio corrente produrrebbe un prefisso
+    diverso a ogni turno, cioè cache buttata a ogni messaggio. Due render dello
+    stesso stato devono dare la stessa stringa, byte per byte."""
+    pages = {"zeta.md": "# Zeta\n\nz", "alfa.md": "# Alfa\n\na", "mezzo.md": "# Mezzo\n\nm"}
+    project = _wiki_with_pages(tmp_path, "casa", pages)
+    builder = ContextBuilder(tmp_path)
+
+    first = builder.build_system_prompt(workspace=project, session_key="project:casa")
+    second = builder.build_system_prompt(workspace=project, session_key="project:casa")
+
+    assert first == second
+    section = first.split("The pages, as they stand")[1]
+    assert section.index("`alfa.md`") < section.index("`mezzo.md`") < section.index("`zeta.md`")
+
+
+def test_no_page_is_cut_in_half(tmp_path) -> None:
+    """**Mezza pagina si legge come una pagina intera**, ed è peggio di una pagina
+    assente — che la mappa segnala comunque. Oltre il tetto si smette di
+    aggiungere pagine *interne*, non si taglia quella in corso."""
+    from jenny.agent.context import _PROJECT_PAGES_MAX_CHARS
+
+    body = "# Grande\n\n" + ("parola " * 900)
+    assert len(body) > _PROJECT_PAGES_MAX_CHARS
+    prompt = _pages_prompt(tmp_path, {"aaa.md": body, "zzz.md": "# Zzz\n\ncorta"})
+
+    section = prompt.split("The pages, as they stand")[1]
+    # La prima entra intera anche se sfonda il tetto da sola: una pagina sola e
+    # troncata sarebbe una bugia, e senza nessuna pagina il gradino non esiste.
+    assert body.strip() in section
+    assert "1 more page(s) are not here" in section
+
+
+def test_the_pages_left_out_are_declared(tmp_path) -> None:
+    from jenny.agent.context import _PROJECT_PAGES_MAX_CHARS
+
+    pages = {f"p{i:02d}.md": f"# P{i}\n\n" + ("x" * 1000) for i in range(12)}
+    prompt = _pages_prompt(tmp_path, pages)
+
+    assert "more page(s) are not here" in prompt
+    assert "the map lists them" in prompt
+    # Solo una parte delle dodici pagine entra: il tetto ha morso.
+    assert sum(f"`p{i:02d}.md`" in prompt for i in range(12)) < 12
+    assert _PROJECT_PAGES_MAX_CHARS > 0
+
+
+def test_a_project_with_no_pages_has_no_section(tmp_path) -> None:
+    """Una sezione vuota è una riga pagata a ogni turno per dire niente — e a un
+    progetto che parte dal diario direbbe anche una cosa scoraggiante."""
+    prompt = _pages_prompt(tmp_path, {})
+
+    assert "The pages, as they stand" not in prompt
+
+
+def test_the_index_is_not_repeated_among_the_pages(tmp_path) -> None:
+    """``index.md`` **è** la mappa, e ha già la sua sezione: elencarlo di nuovo
+    pagherebbe due volte la stessa cosa."""
+    prompt = _pages_prompt(tmp_path, {"furgone.md": "# Furgone\n\nx"})
+
+    assert "`index.md`" not in prompt.split("The pages, as they stand")[1]
+
+
+def test_an_unreadable_page_does_not_break_the_turn(tmp_path) -> None:
+    project = _wiki_with_pages(tmp_path, "casa", {"buona.md": "# Buona\n\nok"})
+    (project / "wiki" / "rotta.md").write_bytes(b"\xff\xfe non utf-8")
+
+    prompt = ContextBuilder(tmp_path).build_system_prompt(
+        workspace=project, session_key="project:casa"
+    )
+
+    assert "# Buona" in prompt
+
+
+def test_the_answer_must_name_the_pages_it_used(tmp_path) -> None:
+    """Senza questa riga il gradino 2 è invisibile: le pagine entrano, la risposta
+    ne esce e nessuno sa se ci ha poggiato sopra. La bibliografia è il solo
+    segnale leggibile a occhio."""
+    prompt = _pages_prompt(tmp_path, {"furgone.md": "# Furgone\n\nx"})
+
+    assert "name the ones you used" in prompt
+
+
+def test_a_page_absent_from_the_block_is_not_declared_missing(tmp_path) -> None:
+    """Il gradino 1 resta sotto: quel che non è qui la mappa lo elenca comunque, e
+    ``read_file`` lo apre. Senza questa riga l'agente concluderebbe che una pagina
+    fuori dal tetto non esiste — che è il difetto misurato in T3 al contrario."""
+    prompt = _pages_prompt(tmp_path, {"furgone.md": "# Furgone\n\nx"})
+
+    assert "is not missing" in prompt
+
+
+def test_the_injected_block_has_a_ceiling_too(tmp_path) -> None:
+    """Il tetto sulla **prosa** del template (``test_the_block_stays_small``) non
+    dice niente sul costo vero: quel che si paga a ogni turno è prosa + mappa +
+    pagine. Questo lo pinna, così nessuno alza i due tetti senza accorgersene.
+    """
+    from jenny.agent.context import _PROJECT_MAP_MAX_CHARS, _PROJECT_PAGES_MAX_CHARS
+    from jenny.utils.prompt_templates import render_template
+
+    del render_template  # la prosa si misura per differenza, non rendendola a parte
+
+    # Si misura la **differenza** fra un progetto pieno e uno vuoto: una fetta di
+    # stringa dal titolo del blocco arriverebbe alla fine del prompt intero e
+    # conterebbe anche le sezioni che vengono dopo (prima stesura di questo test).
+    empty = _wiki(tmp_path, "vuota")
+    full = _wiki_with_pages(
+        tmp_path, "casa",
+        {f"p{i:02d}.md": f"# P{i}\n\n" + ("x" * 2000) for i in range(20)},
+    )
+    (full / "wiki" / "index.md").write_text("# Casa\n\n" + "y" * 9000, encoding="utf-8")
+    builder = ContextBuilder(tmp_path)
+
+    baseline = builder.build_system_prompt(workspace=empty, session_key="project:vuota")
+    loaded = builder.build_system_prompt(workspace=full, session_key="project:casa")
+    injected = len(loaded) - len(baseline)
+
+    ceiling = _PROJECT_MAP_MAX_CHARS + _PROJECT_PAGES_MAX_CHARS + 1500
+    assert injected <= ceiling, (
+        f"il progetto inietta {injected} caratteri contro un tetto di {ceiling}: "
+        "è il costo di **ogni** turno del progetto"
+    )

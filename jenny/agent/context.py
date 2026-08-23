@@ -31,6 +31,7 @@ from jenny.utils.wiki_paths import (
     LEGACY_WIKI_SCHEMA_FILENAME,
     WIKI_SCHEMA_FILENAME,
     is_wiki_root,
+    iter_wiki_pages,
     wiki_schema_file,
 )
 
@@ -43,6 +44,18 @@ from jenny.utils.wiki_paths import (
 # circa una schermata piena sul telefono, cioe' esattamente quel che la mappa
 # dichiara di essere.
 _PROJECT_MAP_MAX_CHARS = 2000
+
+# Tetto sul **contenuto delle pagine** iniettato nel blocco di progetto (T6.4, il
+# gradino 2 di P4): oltre la mappa entrano anche le note, cosi' il turno si
+# costruisce dalle pagine e non dalla cronologia.
+#
+# Tre volte la mappa, e non e' un numero tondo per caso: la mappa e' un indice e
+# si paga per stare corta, le pagine sono la sostanza. Seimila caratteri sono
+# ~1500 token su un turno di progetto che oggi costa ~15k, e sono la wiki intera
+# di un progetto giovane (venti pagine da trecento caratteri). Il giorno che il
+# tetto morde davvero, quello e' il segnale che serve la selezione — cioe' il
+# problema "con cinquecento pagine grep non basta", che si affronta quando arriva.
+_PROJECT_PAGES_MAX_CHARS = 6000
 
 _DEFAULT_WIKI_DIRECTORY_TOKENS = 1200
 
@@ -215,6 +228,7 @@ class ContextBuilder:
         in_project = is_wiki_root(root)
         if in_project:
             project_map = self._read_project_map(root)
+            project_pages = self._read_project_pages(root)
             with suppress(Exception):  # workspace sincronizzato da una versione precedente
                 parts.append(render_template(
                     "agent/project.md",
@@ -244,6 +258,10 @@ class ContextBuilder:
                     # sessione nuova: senza, l'agente risponde da quel che ha in
                     # cronologia — che dopo una settimana e' niente.
                     project_map=project_map,
+                    # T6.4, il gradino 2: oltre alla mappa entra il **contenuto**
+                    # delle pagine. Il turno si costruisce dalle note, che e' la
+                    # definizione operativa di P4.
+                    project_pages=project_pages,
                 ))
 
         # Il blocco sta **prima** del bootstrap, al contrario di
@@ -549,6 +567,57 @@ class ContextBuilder:
             + f"\n\n[the map continues — {len(text)} characters in all; read "
             "`wiki/index.md` for the rest]"
         )
+
+    def _read_project_pages(self, root: Path) -> str:
+        """Il contenuto delle pagine del progetto, pronto per il blocco. **T6.4.**
+
+        Il gradino 2 di P4: la mappa dice *cosa esiste*, questo mette in mano
+        *cosa dicono*. E' la differenza fra un agente che sa di avere una pagina
+        sul furgone e un agente che sa cosa c'e' scritto — la prima costa una
+        lettura a ogni domanda, la seconda no.
+
+        **L'ordine e' alfabetico, e il vincolo e' la cache.** Il blocco di sistema
+        e' il prefisso cacheato: una selezione che dipendesse dal messaggio
+        corrente produrrebbe un prefisso diverso a ogni turno, cioe' cache buttata
+        a ogni messaggio. Alfabetico e' stabile e spiegabile; ordinare per data di
+        modifica sposterebbe tutte le pagine successive a ogni tocco, invalidando
+        piu' prefisso di quanto ne cambi il contenuto.
+
+        **Nessuna pagina entra a meta'.** Oltre il tetto si smette di aggiungere
+        pagine *interne* e si dice quante restano fuori: mezza pagina si legge
+        come una pagina intera, ed e' peggio di una pagina assente — che la mappa
+        segnala comunque.
+        """
+        entries = iter_wiki_pages(root / "wiki")
+        if not entries:
+            return ""
+        blocks: list[str] = []
+        total = 0
+        left_out = 0
+        for rel, _title in entries:
+            if left_out:
+                left_out += 1
+                continue
+            try:
+                text = (root / "wiki" / rel).read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeDecodeError):
+                continue
+            if not text:
+                continue
+            if blocks and total + len(text) > _PROJECT_PAGES_MAX_CHARS:
+                left_out = 1
+                continue
+            total += len(text)
+            # Recinto a quattro backtick come la mappa: una pagina puo' contenere
+            # un blocco di codice, e le sue intestazioni ``#`` sbucherebbero nella
+            # struttura del prompt.
+            blocks.append(f"`{rel}`\n\n````markdown\n{text}\n````")
+        if left_out:
+            blocks.append(
+                f"[{left_out} more page(s) are not here — the map lists them, and "
+                "`read_file` opens them]"
+            )
+        return "\n\n".join(blocks)
 
     def _load_bootstrap_files(self, workspace: Path | None = None) -> str:
         """Load all bootstrap files from workspace.
