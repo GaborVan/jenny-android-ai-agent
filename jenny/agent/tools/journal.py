@@ -80,9 +80,26 @@ class JournalAppendTool(Tool):
     # si ritrova a fare a mano quel che qui e' una chiamata.
     _scopes = {"core", "orchestrator", "subagent"}
 
-    def __init__(self, today: Any = None) -> None:
+    def __init__(
+        self,
+        today: Any = None,
+        root: Path | None = None,
+        origin_marker: str = "",
+    ) -> None:
         # Iniettabile per i test; in produzione nessuno lo passa.
         self._today = today or date.today
+        # **Il progetto iniettato invece di dedotto.** Su un turno dell'utente il
+        # progetto si ricava dallo scope legato, ed e' giusto: la cartella non
+        # deve poter divergere dalla conversazione. Ma una **passata interna**
+        # gira con lo scope di default (l'installazione), quindi la deduzione
+        # darebbe "nessun progetto" e il tool rifiuterebbe. Chi costruisce la
+        # cassetta di una passata sa su quale progetto sta lavorando, e lo passa.
+        self._root = root
+        # Marcatore d'origine, per una riga che non arriva dalla conversazione ma
+        # da un recupero a posteriori. Sta nel **codice** e non nel prompt perche'
+        # e' l'unico modo che ha di non essere dimenticato, e una riga di diario
+        # senza origine e' indistinguibile da una detta a voce quel giorno.
+        self._origin_marker = origin_marker
 
     @classmethod
     def enabled(cls, ctx: Any) -> bool:
@@ -113,6 +130,8 @@ class JournalAppendTool(Tool):
     @tool_parameters(_PARAMETERS)
     async def execute(self, text: str = "", **_: Any) -> str:
         line = " ".join((text or "").split())
+        if line and self._origin_marker:
+            line = f"{self._origin_marker} {line}"
         if not line:
             return "Nothing to append: `text` was empty."
         if len(line) > _MAX_TEXT_CHARS:
@@ -127,7 +146,7 @@ class JournalAppendTool(Tool):
         # mette a cercare l'interruttore per un problema che l'interruttore non
         # risolve.
         scope = current_workspace_scope()
-        root = scope.project_path if scope is not None else None
+        root = self._root or (scope.project_path if scope is not None else None)
         if root is None or not is_wiki_root(root):
             return _NO_PROJECT_REFUSAL
         if current_turn_is_readonly():

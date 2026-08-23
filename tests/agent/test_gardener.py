@@ -15,6 +15,7 @@ cadere nessun test sulla allowlist.
 
 from __future__ import annotations
 
+import json
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -175,6 +176,13 @@ class TestTheToolbox:
         ``python_exec``, ``message``: uno solo di questi e la superficie chiusa
         non esiste più, per interposta persona — e nessun test sulla allowlist
         di scrittura se ne accorgerebbe. Da cui l'elenco, per nome.
+
+        ``journal_append`` è entrato in T6.3, ed è l'unica scrittura fuori da
+        ``wiki/`` che si concede. È ammesso per una ragione precisa e non per
+        comodità: **non può violare la regola che protegge**. Appende in coda per
+        costruzione — un solo file possibile, nessun modo di riscrivere una riga —
+        quindi non tocca la fonte da cui la passata sta promuovendo. Un tool che
+        potesse riscrivere il diario non entrerebbe qui nemmeno se servisse.
         """
         _project(tmp_path)
         tools = _store(tmp_path).build_tools()
@@ -182,7 +190,17 @@ class TestTheToolbox:
         assert set(tools.tool_names) == {
             "read_file", "list_dir", "find_files", "grep",
             "write_file", "edit_file", "apply_patch",
+            "journal_append",
         }
+
+    @pytest.mark.parametrize("door", ["spawn_subagent", "python_exec", "message", "cron"])
+    def test_the_toolbox_has_no_door(self, tmp_path, bound, door):
+        """Il test sopra cadrebbe comunque, ma dice «l'insieme è cambiato» e non
+        «è entrata una via d'uscita». Questo nomina le porte, così il giorno che
+        una compare il messaggio dice cosa è successo."""
+        _project(tmp_path)
+
+        assert door not in set(_store(tmp_path).build_tools().tool_names)
 
     async def test_it_writes_a_page(self, tmp_path, bound):
         _project(tmp_path)
@@ -626,3 +644,228 @@ class TestTheClosingContract:
 
     def test_deciding_it_alone_is_the_forbidden_thing(self, tmp_path):
         assert "Deciding it yourself is the one thing you must not do" in self._prompt(tmp_path)
+
+# ── Il controllo incrociato ──────────────────────────────────────────────────
+
+
+def _transcript_path(name: str) -> Path:
+    from jenny.config.paths import get_webui_dir
+
+    return get_webui_dir() / f"websocket_project_{name}.jsonl"
+
+
+@pytest.fixture(autouse=True)
+def _no_leftover_transcript():
+    """La dir della WebUI è **condivisa** dalla fixture di workspace, che è di
+    sessione: un transcript scritto da un test resta lì per il successivo. Visto
+    subito (un test che verificava l'assenza della sezione la trovava), e vale la
+    pena tenerlo pulito qui invece che ricordarselo in ogni test."""
+    yield
+    for name in ("orto", "viaggio"):
+        _transcript_path(name).unlink(missing_ok=True)
+
+
+def _transcript(tmp_path: Path, name: str, *messages: str) -> Path:
+    """Il transcript di un progetto, nella forma che scrive la WebUI."""
+    path = _transcript_path(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for i, message in enumerate(messages):
+        rows.append(json.dumps({
+            "event": "user", "chat_id": f"project:{name}", "text": message,
+            "turn_id": f"t{i}", "turn_phase": "user", "turn_seq": i,
+        }))
+        # Il ragionamento **nomina l'utente**, ed è la forma vera: sul telefono
+        # una riga di reasoning dice letteralmente «The user is telling me facts
+        # about…». Un testo di prova che non contiene la parola veniva scartato
+        # dal filtro grezzo, quindi il filtro vero risultava non provato —
+        # trovato per mutazione, ed è il terzo dato di prova irrealistico di
+        # oggi.
+        # Due righe di rumore, e la seconda è quella che conta. Il codice ha un
+        # pre-filtro grezzo (``'"user"' not in raw``) che scarta la gran parte dei
+        # delta senza parsarli, e un controllo vero su ``event``/``role``. Una
+        # riga di ragionamento normale è scartata dal pre-filtro, quindi da sola
+        # **non prova** il controllo vero: ci vuole una riga che il pre-filtro
+        # ammette — e un modello che ragiona scrive davvero `the "user" wants`,
+        # col termine fra virgolette. Trovato per mutazione, due volte di fila.
+        rows.append(json.dumps({
+            "event": "reasoning_delta", "chat_id": f"project:{name}",
+            "text": "The user is telling me facts; pensiero che non deve entrare nel confronto",
+        }))
+        rows.append(json.dumps({
+            "event": "reasoning_delta", "chat_id": f"project:{name}",
+            "text": 'quoting the "user" verbatim: ragionamento che non è una cosa detta',
+        }))
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    return path
+
+
+class TestReadingWhatWasSaid:
+    """Il lato «detto» del controllo incrociato.
+
+    Nessun cursore sul transcript, ed è una decisione: le righe non portano un
+    timestamp e il file attivo **ruota** in segmenti, quindi un conteggio di righe
+    si azzererebbe senza dirlo. Le ultime N invece sono sempre leggibili, e lo
+    stato del confronto è **il diario stesso** — quel che è stato recuperato ci
+    sta dentro, quindi il giro dopo non si recupera due volte.
+    """
+
+    def test_it_reads_only_the_user_turns(self, tmp_path):
+        from jenny.agent.gardener import read_recent_user_messages
+
+        _transcript(tmp_path, "orto", "primo messaggio", "secondo messaggio")
+
+        said, truncated = read_recent_user_messages("orto")
+
+        assert said == ["primo messaggio", "secondo messaggio"]
+        assert truncated is False
+
+    def test_a_project_that_never_talked_gives_nothing(self, tmp_path):
+        from jenny.agent.gardener import read_recent_user_messages
+
+        assert read_recent_user_messages("mai-parlato") == ([], False)
+
+    def test_it_keeps_the_tail_and_says_it_cut(self, tmp_path):
+        """Taglia **dalla testa**: i messaggi più recenti sono quelli che la
+        cattura può aver mancato adesso."""
+        from jenny.agent.gardener import read_recent_user_messages
+
+        _transcript(tmp_path, "orto", *[f"messaggio {i}" for i in range(10)])
+
+        said, truncated = read_recent_user_messages("orto", limit=3)
+
+        assert said == ["messaggio 7", "messaggio 8", "messaggio 9"]
+        assert truncated is True
+
+    def test_the_char_ceiling_also_cuts_from_the_head(self, tmp_path):
+        from jenny.agent.gardener import read_recent_user_messages
+
+        _transcript(tmp_path, "orto", "x" * 100, "y" * 100, "z" * 100)
+
+        said, truncated = read_recent_user_messages("orto", max_chars=150)
+
+        assert said == ["z" * 100]
+        assert truncated is True
+
+    def test_a_broken_line_does_not_stop_the_rest(self, tmp_path):
+        from jenny.agent.gardener import read_recent_user_messages
+        from jenny.config.paths import get_webui_dir
+
+        path = _transcript(tmp_path, "orto", "buono")
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write('{"event":"user","text":"rotto\n')
+        assert get_webui_dir().is_dir()
+
+        said, _ = read_recent_user_messages("orto")
+
+        assert said == ["buono"]
+
+
+class TestTheCrossCheck:
+    def _prompt(self, tmp_path, *messages: str):
+        _project(tmp_path, "orto")
+        if messages:
+            _transcript(tmp_path, "orto", *messages)
+        store = _store(tmp_path, "orto")
+        return store.build_prompt(store.read_delta())
+
+    def test_what_was_said_reaches_the_prompt(self, tmp_path):
+        prompt = self._prompt(tmp_path, "il furgone ha le gomme da cambiare")
+
+        assert "What the user actually said" in prompt
+        assert "gomme da cambiare" in prompt
+
+    def test_the_journal_of_those_days_comes_with_it(self, tmp_path):
+        """Il delta contiene solo le righe **nuove**, e un fatto già catturato sta
+        spesso *sotto* il cursore: confrontare il detto col solo delta
+        segnalerebbe come mancante tutto quel che una passata precedente aveva già
+        letto — cioè, sulla seconda passata di una giornata, quasi tutto."""
+        prompt = self._prompt(tmp_path, "una cosa detta")
+
+        assert "What the journal recorded on those days, in full" in prompt
+
+    def test_without_a_transcript_the_section_is_absent(self, tmp_path):
+        """Nessun transcript vuol dire nessun confronto: una sezione vuota
+        chiederebbe al modello di cercare in un posto che non c'è."""
+        prompt = self._prompt(tmp_path)
+
+        assert "What the user actually said" not in prompt
+
+    def test_the_thinking_of_past_turns_is_not_offered_as_something_said(self, tmp_path):
+        """Un transcript è fatto in gran parte di ragionamento e delta. Prenderli
+        per «cose dette dall'utente» farebbe recuperare nel diario i pensieri del
+        modello — cioè trasformerebbe l'anticorpo nella malattia."""
+        prompt = self._prompt(tmp_path, "cosa vera")
+
+        assert "pensiero che non deve entrare" not in prompt
+        assert "ragionamento che non è una cosa detta" not in prompt
+
+    @pytest.mark.parametrize("rule", [
+        "a stable fact they said that the journal never recorded",
+        "When in doubt, leave it",
+        "still be true next week",
+        "cannot change the journal, only add to it",
+    ])
+    def test_the_task_and_its_three_limits_are_stated(self, tmp_path, rule):
+        assert rule in self._prompt(tmp_path, "una cosa")
+
+
+class TestRecovering:
+    async def test_a_recovered_line_is_marked_and_appended(self, tmp_path):
+        """Il marcatore sta nel **codice** e non nel prompt, perché è l'unico modo
+        che ha di non essere dimenticato: una riga di diario senza origine è
+        indistinguibile da una detta a voce quel giorno."""
+        from jenny.agent.gardener import RECOVERED_MARKER
+
+        root = _project(tmp_path, "orto")
+        token = bind_workspace_scope(default_workspace_scope(tmp_path, True))
+        try:
+            tool = _store(tmp_path, "orto").build_tools().get("journal_append")
+            out = await tool.execute(text="il vicino si chiama Enzo")
+        finally:
+            reset_workspace_scope(token)
+
+        from datetime import date
+
+        # Il recupero va nella pagina di **oggi**, non nel giorno che stava
+        # confrontando: quella riga la scrive adesso, e datarla ieri la
+        # nasconderebbe sotto il cursore di una passata già fatta.
+        today = root / "raw" / "journal" / f"{date.today():%Y%m%d}.md"
+        yesterday = root / "raw" / "journal" / "20260822.md"
+
+        text = today.read_text(encoding="utf-8")
+        assert RECOVERED_MARKER in text
+        assert "il vicino si chiama Enzo" in text
+        assert "journal" in out
+        assert RECOVERED_MARKER not in yesterday.read_text(encoding="utf-8")
+
+    async def test_it_appends_and_leaves_the_earlier_lines_alone(self, tmp_path):
+        """La proprietà per cui questo tool può entrare in una cassetta chiusa:
+        appende, e non c'è modo di riscrivere la fonte da cui sta promuovendo."""
+        root = _project(tmp_path, "orto")
+        page = next(iter((root / "raw" / "journal").glob("*.md")))
+        before = page.read_bytes()
+        token = bind_workspace_scope(default_workspace_scope(tmp_path, True))
+        try:
+            tool = _store(tmp_path, "orto").build_tools().get("journal_append")
+            await tool.execute(text="recuperato")
+        finally:
+            reset_workspace_scope(token)
+
+        assert page.read_bytes().startswith(before)
+
+    async def test_the_project_is_injected_not_deduced(self, tmp_path):
+        """Su un turno dell'utente il progetto si deduce dallo scope, ed è giusto.
+        Ma una passata interna gira con lo scope **di default**, quindi la
+        deduzione darebbe «nessun progetto» e il tool rifiuterebbe: chi costruisce
+        la cassetta sa su quale progetto sta lavorando e lo passa."""
+        root = _project(tmp_path, "orto")
+        token = bind_workspace_scope(default_workspace_scope(tmp_path, True))
+        try:
+            tool = _store(tmp_path, "orto").build_tools().get("journal_append")
+            out = await tool.execute(text="un fatto")
+        finally:
+            reset_workspace_scope(token)
+
+        assert "No journal here" not in out
+        assert list((root / "raw" / "journal").glob("*.md"))

@@ -38,6 +38,7 @@ Tre cose che questo modulo sa e che vale scrivere:
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -78,6 +79,20 @@ _NO_FLAG_MARKER = "NOTHING TO FLAG"
 # Tetto della riga di segnalazione nel log. Il log e' "una riga per operazione":
 # un paragrafo qui lo rende illeggibile, ed e' l'unico registro che c'e'.
 _MAX_FLAG_CHARS = 300
+
+# Quanti messaggi **dell'utente** entrano nel controllo incrociato, e il tetto in
+# caratteri che li contiene comunque. Non c'e' un cursore sul transcript, e la
+# scelta e' deliberata: le righe del transcript non portano un timestamp e il file
+# attivo **ruota** in segmenti, quindi un conteggio di righe si azzererebbe senza
+# dirlo. Le ultime N invece sono sempre leggibili, e lo stato del confronto e' il
+# **diario stesso**: quel che e' stato recuperato ci sta dentro, quindi il giro
+# dopo non si recupera due volte. Idempotente per costruzione, senza stato nuovo.
+_RECENT_USER_MESSAGES = 40
+_MAX_TRANSCRIPT_CHARS = 6000
+
+# Il marcatore di una riga di diario nata da un recupero e non dalla
+# conversazione. Sta nel codice (v. ``JournalAppendTool.origin_marker``).
+RECOVERED_MARKER = "[recovered]"
 
 
 @dataclass(frozen=True)
@@ -219,6 +234,22 @@ class GardenerStore:
             )
         return body
 
+    def read_journal_days(self, delta: JournalDelta) -> str:
+        """I file di diario che il delta tocca, **per intero**.
+
+        Serve al controllo incrociato e non alla promozione: il delta contiene
+        solo le righe *nuove*, e un fatto già catturato sta spesso **sotto** il
+        cursore. Confrontare il detto col solo delta segnalerebbe come mancante
+        tutto quello che una passata precedente aveva già letto — cioè, sulla
+        seconda passata di una giornata, quasi tutto.
+        """
+        blocks: list[str] = []
+        for page in delta.files:
+            text = self._read_capped(self.root / page.path, _MAX_MAP_CHARS, "The journal")
+            if text:
+                blocks.append(f"**{page.path}**\n\n{text}")
+        return "\n\n".join(blocks)
+
     def build_prompt(self, delta: JournalDelta) -> str:
         """Prompt completo della passata: meccanismo, poi i dati, ognuno recintato.
 
@@ -243,6 +274,25 @@ class GardenerStore:
             ),
             "## Pages that already exist\n\n" + self.build_inventory(),
         ]
+        said, said_truncated = read_recent_user_messages(self.name)
+        if said:
+            # Il lato "detto" e il lato "registrato", **accanto**: il confronto è
+            # una lettura, non una ricerca.
+            lines = "\n".join(f"- {message}" for message in said)
+            if said_truncated:
+                lines += "\n- _(older messages not shown: this is the recent tail)_"
+            parts.append(
+                "## What the user actually said, most recent last\n\n````text\n"
+                + lines
+                + "\n````"
+            )
+            recorded = self.read_journal_days(delta)
+            if recorded:
+                parts.append(
+                    "## What the journal recorded on those days, in full\n\n````markdown\n"
+                    + recorded
+                    + "\n````"
+                )
         agents = self._read_capped(
             self.root / "AGENTS.md", _MAX_AGENTS_CHARS, "This project's instructions"
         )
@@ -306,6 +356,14 @@ class GardenerStore:
                 file_states=file_states,
                 restrict_to_workspace=True,
             ))
+        # ``journal_append`` è **l'unica scrittura fuori da ``wiki/``** che si
+        # concede, e la ragione è che non può violare la regola che protegge:
+        # appende in coda per costruzione, quindi non riscrive la fonte da cui sta
+        # promuovendo. Il progetto è iniettato perché una passata interna gira con
+        # lo scope di default e la deduzione darebbe "nessun progetto".
+        from jenny.agent.tools.journal import JournalAppendTool
+
+        tools.register(JournalAppendTool(root=root, origin_marker=RECOVERED_MARKER))
         tools.file_states = file_states
         return tools
 
@@ -353,6 +411,81 @@ class GardenerStore:
 
 async def _silent(*_args: Any, **_kwargs: Any) -> None:
     pass
+
+
+def read_recent_user_messages(
+    name: str,
+    *,
+    limit: int = _RECENT_USER_MESSAGES,
+    max_chars: int = _MAX_TRANSCRIPT_CHARS,
+) -> tuple[list[str], bool]:
+    """Gli ultimi messaggi **dell'utente** in quel progetto, e se sono stati tagliati.
+
+    Letti dal codice e messi nel prompt, **non** esposti come file: la cassetta
+    del giardiniere resta chiusa sulla cartella del progetto, e il transcript sta
+    fuori (``.jenny/webui/``). Allargargli la superficie di lettura per questa
+    cosa sola sarebbe pagare in permessi quel che si puo' pagare in prompt.
+
+    Il transcript non e' il registro del modello: la compattazione riscrive
+    ``sessions/``, non questo file. E' per questo che serve — e' il solo posto
+    dove resta quel che l'utente ha detto davvero.
+    """
+    from jenny.session.keys import WEBUI_CHANNEL, project_session_key
+    from jenny.webui.transcript_store import webui_transcript_path
+
+    try:
+        path = webui_transcript_path(f"{WEBUI_CHANNEL}:{project_session_key(name)}")
+    except Exception:  # noqa: BLE001 — senza transcript il controllo salta, non rompe
+        return [], False
+    if not path.is_file():
+        return [], False
+
+    said: list[str] = []
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for raw in fh:
+                raw = raw.strip()
+                if not raw or "user" not in raw:
+                    # Filtro grezzo prima di parsare: un transcript e' fatto in
+                    # gran parte di delta, e parsarli tutti per buttarli costa.
+                    #
+                    # **Soprainsieme, e non quasi-esatto.** Prima cercava
+                    # ``'"user"'`` con le virgolette, che e' quasi la condizione
+                    # finale — e siccome ``json.dumps`` scappa le virgolette nei
+                    # testi, nessuna riga di ragionamento realistica poteva
+                    # passare qui. Risultato: il controllo vero sotto era
+                    # irraggiungibile, quindi **non provabile** (tre mutazioni di
+                    # fila sopravvissute prima di capirlo). Un filtro grezzo deve
+                    # ammettere piu' del necessario e lasciar decidere il
+                    # controllo vero; il prezzo e' parsare i delta che nominano
+                    # l'utente, che e' una minoranza.
+                    continue
+                try:
+                    row = json.loads(raw)
+                except ValueError:
+                    continue
+                if row.get("event") != "user" and row.get("role") != "user":
+                    continue
+                text = row.get("text") or row.get("content")
+                if isinstance(text, str) and text.strip():
+                    said.append(" ".join(text.split()))
+    except OSError as exc:
+        logger.warning("gardener: transcript di {} illeggibile: {}", name, exc)
+        return [], False
+
+    truncated = len(said) > limit
+    said = said[-limit:]
+    # Il tetto in caratteri toglie **dalla testa**: i messaggi piu' recenti sono
+    # quelli che la cattura puo' aver mancato adesso.
+    total = 0
+    kept: list[str] = []
+    for message in reversed(said):
+        total += len(message)
+        if total > max_chars and kept:
+            truncated = True
+            break
+        kept.append(message)
+    return list(reversed(kept)), truncated
 
 
 def extract_flag(reply: Any) -> str | None:

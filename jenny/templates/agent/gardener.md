@@ -40,6 +40,25 @@ Work only from those.
    The links are what make this a wiki instead of a folder.
 4. **Then fix the map**, and last: it describes what now exists.
 
+## What the user said, and what the journal caught
+
+When you are also given the user's recent messages and the journal for those days, do one more
+thing before anything else: **look for a stable fact they said that the journal never recorded.**
+Capture happens live, in the middle of a conversation, and it misses things.
+
+If you find one, record it with `journal_append` — one line, in their terms. It lands marked as
+recovered, and the next pass promotes it like any other line. That is the whole of it: you recover
+the *line*, you do not write the page from the message.
+
+Three limits, and they matter more than the task:
+
+- **When in doubt, leave it.** A fact already in the journal in other words is not missing. A
+  duplicate line is not free — it becomes a second page, or a page that argues with itself.
+- **Only what will still be true next week.** The same test as capture: a constraint, a decision, a
+  preference, a name, a date. Not mood, not the thread of the discussion, not what they asked you.
+- **You cannot change the journal, only add to it.** It is the record of what was said and the
+  input you are reading. Appending is the one thing that does not damage it.
+
 ## The rules that keep this from degrading
 
 - **Add and promote. Do not rewrite.** On a page that already exists you append, or you change its
