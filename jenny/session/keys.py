@@ -8,6 +8,7 @@ __all__ = [
     "ATLAS_SESSION_PREFIX",
     "CRON_SESSION_PREFIX",
     "DREAM_SESSION_PREFIX",
+    "GARDENER_SESSION_PREFIX",
     "HEARTBEAT_SESSION_KEY",
     "INTERNAL_SESSION_PREFIX",
     "PROJECT_SESSION_PREFIX",
@@ -68,6 +69,14 @@ CRON_SESSION_PREFIX = "cron:"
 # Prefisso dei run di Dream (``dream:<timestamp>``, v. ``agent/memory``).
 DREAM_SESSION_PREFIX = "dream:"
 
+# Prefisso di una passata del giardiniere
+# (``gardener:<progetto>-<timestamp>``, v. ``agent/gardener``). Il nome del
+# progetto sta nella chiave perche' le passate di due progetti sono lavori
+# distinti; il timestamp perche' **ogni passata parte da zero**: il giardiniere
+# non ha memoria dei propri giri, la sua memoria sono le pagine che ha scritto e
+# il cursore.
+GARDENER_SESSION_PREFIX = "gardener:"
+
 # Prefisso dei run di Atlas (``atlas:<timestamp>``, v. ``agent/atlas``).
 ATLAS_SESSION_PREFIX = "atlas:"
 
@@ -94,6 +103,7 @@ _INTERNAL_KIND_BY_PREFIX: tuple[tuple[str, str], ...] = (
     (CRON_SESSION_PREFIX, "cron"),
     (DREAM_SESSION_PREFIX, "dream"),
     (ATLAS_SESSION_PREFIX, "atlas"),
+    (GARDENER_SESSION_PREFIX, "gardener"),
     (INTERNAL_SESSION_PREFIX, "internal"),
 )
 

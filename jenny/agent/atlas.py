@@ -40,7 +40,7 @@ from jenny.utils.path import atomic_write
 from jenny.utils.prompt_templates import render_template
 from jenny.utils.wiki_paths import (
     discover_wiki_roots,
-    extract_title,
+    iter_wiki_pages,
     read_wiki_scope,
     wiki_fingerprint,
 )
@@ -61,9 +61,6 @@ _MAX_INVENTORY_ENTRIES = 300
 # pages yet» a una cartella piena. Una regola sola che vale per le due forme, e
 # la struttura su disco decide invece di un'etichetta: v.
 # ``roadmap/taccuino-passi.md``.
-_INVENTORY_SKIP_DIRS = frozenset({"summaries"})
-_INVENTORY_INDEX_FILE = "index.md"
-
 _STATE_VERSION = 1
 
 
@@ -161,7 +158,7 @@ class AtlasStore:
         lines: list[str] = []
         lines.append("### Wikis")
         for name, root in roots.items():
-            total = len(_inventory_pages(root / "wiki"))
+            total = len(iter_wiki_pages(root / "wiki"))
             lines.append(
                 f"- **{name}** — {read_wiki_scope(root)} "
                 f"({total} pages) → wikis/{name}/wiki/index.md"
@@ -171,7 +168,7 @@ class AtlasStore:
         lines.append("")
         lines.append(f"### Pages in `{target}` (directory scope)")
 
-        entries = _inventory_pages(roots[target] / "wiki")
+        entries = iter_wiki_pages(roots[target] / "wiki")
         shown = entries[: self.max_entries]
         if shown:
             lines.append("")
@@ -299,34 +296,6 @@ class AtlasStore:
     def session_key() -> str:
         """Session key di un run, es. ``atlas:20260806-100000``."""
         return f"{ATLAS_SESSION_PREFIX}{datetime.now():%Y%m%d-%H%M%S}"
-
-
-def _inventory_pages(pages_dir: Path) -> list[tuple[str, str]]:
-    """``(path relativo a wiki/, titolo)`` per ogni pagina della rubrica.
-
-    Una regola sola per le due forme: tutto quel che sta sotto ``wiki/``, meno
-    ``summaries/``, meno l'indice (che *è* la mappa, non una voce di rubrica) e
-    meno i file nascosti. Le pagine piatte del formato nuovo e le
-    ``concepts/``/``entities/`` di una wiki di ricerca cadono qui insieme, e il
-    percorso relativo dice da sé in quale delle due si è.
-    """
-    if not pages_dir.is_dir():
-        return []
-    entries: list[tuple[str, str]] = []
-    for path in sorted(pages_dir.rglob("*.md")):
-        if path.name.startswith("."):
-            continue
-        rel = path.relative_to(pages_dir)
-        if rel.parts and rel.parts[0] in _INVENTORY_SKIP_DIRS:
-            continue
-        if rel.as_posix() == _INVENTORY_INDEX_FILE:
-            continue
-        try:
-            title = extract_title(path.read_text(encoding="utf-8")) or path.stem
-        except OSError:
-            title = path.stem
-        entries.append((rel.as_posix(), title))
-    return entries
 
 
 async def _silent(*_args: Any, **_kwargs: Any) -> None:

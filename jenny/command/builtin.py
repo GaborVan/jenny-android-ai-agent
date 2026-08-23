@@ -17,6 +17,7 @@ from jenny.utils.helpers import build_status_content
 if TYPE_CHECKING:
     from jenny.agent.atlas import AtlasOutcome
     from jenny.agent.dream_review import ReviewOutcome
+    from jenny.agent.gardener import GardenerOutcome
     from jenny.agent.memory_budget import FileBudget
 
 
@@ -94,6 +95,16 @@ BUILTIN_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
         "Rebuild the wiki directory in memory/WIKI.md. Add 'force' to skip the change check.",
         "map",
         "[force]",
+    ),
+    BuiltinCommandSpec(
+        "/gardener",
+        "Run the gardener",
+        (
+            "Turn this project's new journal lines into pages and update its map. Inside a "
+            "project it works on that one; elsewhere name it: '/gardener <project>'."
+        ),
+        "sprout",
+        "[project]",
     ),
     BuiltinCommandSpec(
         "/skill",
@@ -980,6 +991,110 @@ def _format_atlas_outcome(outcome: "AtlasOutcome") -> str:
     return f"Atlas failed after {elapsed}: {outcome.detail}"
 
 
+async def cmd_gardener(ctx: CommandContext) -> OutboundMessage:
+    """Run one gardener pass on a project, now.
+
+    Il comando esiste per due ragioni, e la seconda è la vera. La prima: un
+    utente che vuole vedere le pagine adesso invece di fra sei ore. La seconda:
+    **senza di lui il passo non è collaudabile**. I tre orologi dell'innesco
+    (delta, trenta minuti di fermo, sei ore di distanza) rendono la strada
+    naturale impossibile da percorrere in una sessione di prova, ed è la stessa
+    ragione per cui ``/atlas`` e ``/dream`` esistono.
+    """
+    from jenny.session.keys import PROJECT_SESSION_PREFIX, is_project_session_key
+
+    loop = ctx.loop
+    msg = ctx.msg
+    named = ctx.args.strip()
+    if named:
+        target = named
+    elif is_project_session_key(ctx.key):
+        target = ctx.key[len(PROJECT_SESSION_PREFIX):]
+    else:
+        # Un rifiuto che dice **dove**, non solo che qui non si può: la lezione
+        # dei rifiuti del passo 6, e la stessa forma del rifiuto di
+        # ``journal_append`` fuori da un progetto.
+        return _reply(msg, _gardener_no_target())
+
+    async def _run():
+        from jenny.agent.gardener import GardenerStore, run_gardener
+        from jenny.config.loader import load_config
+
+        try:
+            config = load_config()
+            wikis_dir = getattr(getattr(config, "wiki", None), "wikis_dir", "wikis") or "wikis"
+            store = GardenerStore.for_project(
+                config.workspace_path, target, wikis_dir_name=wikis_dir
+            )
+            if store is None:
+                content = (
+                    f"`{target}` is not a project I can garden: I look for "
+                    f"`{wikis_dir}/{target}/wiki/`, and there is nothing there."
+                )
+            else:
+                content = _format_gardener_outcome(target, await run_gardener(loop, store))
+        except Exception as e:
+            content = f"The gardener failed: {e}"
+        await loop.bus.publish_outbound(OutboundMessage(
+            channel=msg.channel, chat_id=msg.chat_id, content=content,
+            metadata={"render_as": "text"},
+        ))
+
+    asyncio.create_task(_run())
+    return OutboundMessage(
+        channel=msg.channel, chat_id=msg.chat_id,
+        content=f"Gardening {target}...",
+    )
+
+
+def _reply(msg, content: str) -> OutboundMessage:
+    return OutboundMessage(
+        channel=msg.channel, chat_id=msg.chat_id, content=content,
+        metadata={"render_as": "text"},
+    )
+
+
+def _gardener_no_target() -> str:
+    return (
+        "The gardener works on one project at a time, and this conversation is not a project.\n\n"
+        "Run it from inside a project, or name one: `/gardener <project>`."
+    )
+
+
+def _format_gardener_outcome(name: str, outcome: "GardenerOutcome") -> str:
+    """Messaggio utente per una passata.
+
+    Gli esiti "non ho fatto niente" hanno frasi distinte, come per Atlas: un
+    comando che risponde "fatto" senza aver fatto niente è peggio di uno che dice
+    perché — e qui i modi di non fare niente sono tre, e vogliono dire cose molto
+    diverse.
+    """
+    elapsed = f"{outcome.elapsed:.1f}s"
+    if outcome.status == "skipped_no_delta":
+        return (
+            f"Nothing new in {name}'s journal since the last pass, so there was nothing to "
+            "promote — no tokens spent."
+        )
+    if outcome.status == "written":
+        return (
+            f"The gardener read {outcome.lines} journal lines in {name} and wrote "
+            f"{outcome.writes} times, in {elapsed}. See `wiki/index.md` and today's `log/`."
+        )
+    if outcome.status == "nothing_to_promote":
+        return (
+            f"The gardener read {outcome.lines} journal lines in {name} in {elapsed} and "
+            "judged that none of them earned a page. The journal is marked as read."
+        )
+    if outcome.status == "no_write":
+        return (
+            f"The gardener finished in {elapsed} without writing (attempts blocked or refused); "
+            "the journal was left unread, so the next pass will try again."
+        )
+    if outcome.status == "incomplete":
+        return f"The gardener did not finish after {elapsed}; nothing was changed."
+    return f"The gardener failed after {elapsed}: {outcome.detail}"
+
+
 _HISTORY_DEFAULT_COUNT = 10
 _HISTORY_MAX_COUNT = 50
 _HISTORY_MAX_CONTENT_CHARS = 200
@@ -1138,5 +1253,7 @@ def register_builtin_commands(router: CommandRouter) -> None:
     router.prefix("/dream ", cmd_dream)
     router.exact("/atlas", cmd_atlas)
     router.prefix("/atlas ", cmd_atlas)
+    router.exact("/gardener", cmd_gardener)
+    router.prefix("/gardener ", cmd_gardener)
     router.exact("/skill", cmd_skill)
     router.exact("/help", cmd_help)

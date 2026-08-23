@@ -148,6 +148,48 @@ def strip_frontmatter(text: str) -> tuple[dict[str, Any] | None, str, str | None
 
 # La chiave di frontmatter in cui vive l'id, dentro il file di istruzioni della
 # wiki (``AGENTS.md``, o ``CLAUDE.md`` sulle wiki non ancora migrate).
+# Sottocartelle di ``wiki/`` che non contengono pagine di contenuto.
+# ``summaries/`` e' il layer di citazione del pattern di ricerca: un riassunto
+# per documento grezzo, non una cosa di cui la wiki parla.
+WIKI_PAGES_SKIP_DIRS = frozenset({"summaries"})
+
+# L'indice **e'** la mappa, non una voce dell'elenco delle pagine.
+WIKI_INDEX_FILENAME = "index.md"
+
+
+def iter_wiki_pages(pages_dir: Path) -> list[tuple[str, str]]:
+    """``(percorso relativo a wiki/, titolo)`` per ogni pagina di contenuto.
+
+    **Una regola sola per le due forme** su disco: tutto quel che sta sotto
+    ``wiki/``, meno ``summaries/``, meno l'indice e meno i file nascosti. Le
+    pagine piatte del formato nuovo e le ``concepts/``/``entities/`` di una wiki
+    di ricerca cadono qui insieme, e il percorso relativo dice da se' in quale
+    delle due si e'.
+
+    Sta in questo strato perche' ha due consumatori: l'inventario della rubrica
+    di Atlas e quello che il giardiniere si mette nel prompt. Prima era privata
+    dentro ``agent/atlas.py``, ed elencare le pagine di una wiki non e' un
+    mestiere di Atlas.
+    """
+    if not pages_dir.is_dir():
+        return []
+    entries: list[tuple[str, str]] = []
+    for path in sorted(pages_dir.rglob("*.md")):
+        if path.name.startswith("."):
+            continue
+        rel = path.relative_to(pages_dir)
+        if rel.parts and rel.parts[0] in WIKI_PAGES_SKIP_DIRS:
+            continue
+        if rel.as_posix() == WIKI_INDEX_FILENAME:
+            continue
+        try:
+            title = extract_title(path.read_text(encoding="utf-8")) or path.stem
+        except (OSError, UnicodeDecodeError):
+            title = path.stem
+        entries.append((rel.as_posix(), title))
+    return entries
+
+
 WIKI_ID_KEY = "id"
 
 # Forma dell'id: 12 caratteri esadecimali. Non finisce **mai** in un nome di
