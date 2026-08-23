@@ -190,6 +190,11 @@ async def cmd_new(ctx: CommandContext) -> OutboundMessage:
     session.clear()
     loop.sessions.save(session)
     loop.sessions.invalidate(session.key)
+    # La conversazione e' vuota, quindi non contiene piu' il contenuto di nessun
+    # file: il dedup delle letture va dimenticato insieme ai messaggi, o la prima
+    # lettura della sessione nuova torna «invariato dall'ultima lettura» a chi non
+    # ha mai letto niente.
+    loop.forget_file_reads(session.key)
     if snapshot:
         loop._schedule_background(loop.consolidator.archive(snapshot, session_key=ctx.key))
     return OutboundMessage(

@@ -1919,6 +1919,16 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             self._record_channel_delivery_locked(session_key, content, media)
         )
 
+    def forget_file_reads(self, session_key: str) -> None:
+        """Dichiara che *session_key* non contiene piu' il contenuto di nessun file.
+
+        La chiama chi svuota una conversazione (``/new``). Senza, la prima
+        lettura della conversazione nuova torna come stub «invariato dall'ultima
+        lettura» — vero per il file, falso per chi legge: quella conversazione non
+        l'ha mai visto.
+        """
+        self._file_state_store.drop(session_key)
+
     def active_session_keys(self) -> tuple[str, ...]:
         """Le sessioni con un turno in volo **adesso**.
 
