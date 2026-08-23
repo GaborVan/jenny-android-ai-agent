@@ -191,12 +191,32 @@ def page_title(path: Path) -> str:
 
 
 def load_pages(wiki_dir: Path) -> dict[str, Path]:
+    """Indice dei nomi con cui una pagina è raggiungibile.
+
+    **Le chiavi sono minuscole, e la ragione arriva dal campo.** Chi risolve i
+    link davvero — ``jenny/webui/wiki.py::resolve_wikilink`` — prova esatto, poi
+    ``.md``, poi **case-insensitive**, poi lo stem. Il lint confrontava con
+    `==` sensibile alle maiuscole, quindi segnalava come morto un link che l'app
+    apre senza problemi.
+
+    Non è un caso limite: il giardiniere scrive `[[Rondine]]` per una pagina
+    `rondine.md` — i nomi propri li scrive maiuscoli, come farebbe una persona —
+    e misurato sul telefono il 23/08 la prima mappa che ha prodotto conteneva
+    esattamente questo. Un lint che grida al lupo su un link sano è un lint che
+    si impara a ignorare, cioè peggio di nessun lint.
+    """
     pages: dict[str, Path] = {}
     for p in wiki_dir.rglob("*.md"):
-        pages[p.stem] = p
+        pages[p.stem.lower()] = p
         rel = p.relative_to(wiki_dir)
-        pages[str(rel.with_suffix(""))] = p
+        pages[str(rel.with_suffix("")).lower()] = p
     return pages
+
+
+def page_for_link(pages: dict[str, Path], link: str) -> Path | None:
+    """La pagina a cui punta *link*, con la stessa tolleranza dell'app."""
+    link = link.strip().lower()
+    return pages.get(link) or pages.get(Path(link).stem)
 
 
 def extract_wikilinks(text: str) -> list[str]:
@@ -300,12 +320,11 @@ def lint(root: str) -> int:
         text = md_file.read_text(encoding="utf-8")
         for link in extract_wikilinks(text):
             link = link.strip()
-            if link not in pages and Path(link).stem not in pages:
+            target = page_for_link(pages, link)
+            if target is None:
                 dead_links.append((str(md_file.relative_to(root_path)), link))
             else:
-                target = pages.get(link) or pages.get(Path(link).stem)
-                if target:
-                    inbound[target.stem].append(md_file.stem)
+                inbound[target.stem].append(md_file.stem)
 
     if dead_links:
         print(f"\n🔴 Dead wikilinks ({len(dead_links)}):")
@@ -360,7 +379,7 @@ def lint(root: str) -> int:
 
     missing_pages = [
         (link, count) for link, count in link_counts.items()
-        if count >= 3 and link not in pages and Path(link).stem not in pages
+        if count >= 3 and page_for_link(pages, link) is None
     ]
     if missing_pages:
         print(f"\n🟡 Frequently linked but no page ({len(missing_pages)}):")
@@ -565,7 +584,7 @@ def lint(root: str) -> int:
             continue
         for link in extract_wikilinks(md_file.read_text(encoding="utf-8")):
             link = link.strip()
-            target = pages.get(link) or pages.get(Path(link).stem)
+            target = page_for_link(pages, link)
             if target:
                 inbound_non_index[target.stem].append(md_file.stem)
 

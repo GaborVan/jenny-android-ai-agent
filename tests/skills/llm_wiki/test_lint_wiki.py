@@ -440,3 +440,39 @@ def test_a_wiki_without_a_journal_says_nothing_about_one(lint_wiki, tmp_path, ca
 
     assert "Journal" not in out
     assert not (root / ".jenny").exists()
+
+def test_a_link_the_app_resolves_is_not_reported_dead(lint_wiki, tmp_path, capsys):
+    """**Misurato sul telefono il 23/08.** Chi risolve i link davvero
+    (``webui/wiki.py::resolve_wikilink``) prova esatto, poi ``.md``, poi
+    **case-insensitive**, poi lo stem. Il lint confrontava con `==` sensibile
+    alle maiuscole, quindi segnalava come morto un link che l'app apre.
+
+    Non è un caso limite: il giardiniere scrive `[[Rondine]]` per una pagina
+    `rondine.md` — i nomi propri li scrive maiuscoli, come una persona — e la
+    prima mappa che ha prodotto sul telefono conteneva esattamente questo. Un
+    lint che grida al lupo su un link sano è un lint che si impara a ignorare.
+    """
+    root = _notebook(tmp_path)
+    (root / "wiki" / "index.md").write_text(
+        "# Orto\n\n- [[Semine]]\n- [[TERRENO]]\n", encoding="utf-8"
+    )
+    _journal(root, "un fatto")
+
+    out = _run(lint_wiki, root, capsys)
+
+    assert "Dead wikilinks" not in out
+    assert "No dead wikilinks" in out
+
+
+def test_a_genuinely_missing_page_is_still_reported(lint_wiki, tmp_path, capsys):
+    """Il controllo di tenuta del test sopra: tollerare le maiuscole non deve
+    diventare tollerare tutto."""
+    root = _notebook(tmp_path)
+    (root / "wiki" / "index.md").write_text(
+        "# Orto\n\n- [[semine]]\n- [[fantasma]]\n", encoding="utf-8"
+    )
+    _journal(root, "un fatto")
+
+    out = _run(lint_wiki, root, capsys)
+
+    assert "Dead wikilinks" in out and "fantasma" in out
