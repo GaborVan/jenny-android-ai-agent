@@ -68,6 +68,11 @@ class _FakeAgent:
         self.calls: list[dict] = []
         self._stop_reason = stop_reason
         self.evicted: list[str] = []
+        self.snapshots: list[str] = []
+
+    async def take_snapshot(self, trigger: str) -> bool:
+        self.snapshots.append(trigger)
+        return True
 
     async def process_direct(self, prompt: str, **kwargs):
         self.calls.append({"prompt": prompt, **kwargs})
@@ -416,3 +421,73 @@ def test_the_state_survives_a_restart(tmp_path):
 
     assert read_state(root) != GardenerState()
     assert _store(tmp_path).read_delta().is_empty
+
+# ── Il checkpoint ────────────────────────────────────────────────────────────
+
+
+class TestTheCheckpoint:
+    """Il giardiniere è il primo lavoro periodico che scrive dentro le cartelle
+    *dell'utente*, non in un file derivato: Atlas ricostruisce ``memory/WIKI.md``
+    al run dopo, una pagina scritta a mano e sovrascritta non si ricostruisce da
+    niente — il diario copre solo quel che dal diario è nato."""
+
+    async def test_a_pass_checkpoints_the_workspace_first(self, tmp_path):
+        _project(tmp_path)
+        agent = _FakeAgent(tmp_path)
+
+        await run_gardener(agent, _with_states(_store(tmp_path), _states(attempted=1, ok=1)))
+
+        assert agent.snapshots == ["pre_gardener"]
+
+    async def test_a_tick_with_nothing_to_read_does_not_scan_the_workspace(self, tmp_path):
+        """Uno snapshot per tick a vuoto sarebbe una scansione del workspace ogni
+        mezz'ora per niente: il checkpoint sta **dopo** il cancello del delta."""
+        _project(tmp_path, journal=False)
+        agent = _FakeAgent(tmp_path)
+
+        await run_gardener(agent, _store(tmp_path))
+
+        assert agent.snapshots == []
+
+    async def test_a_failing_checkpoint_does_not_stop_the_pass(self, tmp_path):
+        """**Fail-open, e non è pigrizia.** Il verso opposto — «nessuna passata
+        senza checkpoint» — trasformerebbe uno store di snapshot pieno in un
+        taccuino che smette di lavorare in silenzio: un guasto peggiore di quello
+        che previene. Il checkpoint è una rete, non un permesso."""
+        _project(tmp_path)
+
+        class _Broken(_FakeAgent):
+            async def take_snapshot(self, trigger: str) -> bool:
+                raise RuntimeError("snapshot store full")
+
+        outcome = await run_gardener(
+            _Broken(tmp_path), _with_states(_store(tmp_path), _states(attempted=1, ok=1))
+        )
+
+        assert outcome.status == "written"
+
+    async def test_no_hook_at_all_is_not_an_error(self, tmp_path):
+        """Fuori dal gateway la rete non c'è (test, ispezione): la passata gira."""
+        _project(tmp_path)
+
+        class _Bare(_FakeAgent):
+            take_snapshot = None
+
+        outcome = await run_gardener(
+            _Bare(tmp_path), _with_states(_store(tmp_path), _states(attempted=1, ok=1))
+        )
+
+        assert outcome.status == "written"
+
+    def test_the_model_is_not_told_it_is_protected(self, tmp_path):
+        """Dream ha un ramo di prompt che promette la reversibilità, e serve a
+        fargli potare di più. Qui non c'è e non ci va: aggiungere-e-promuovere
+        vale *anche* con la rete, e prometterla sposterebbe il giudizio nella
+        direzione sbagliata — verso il rimpasto."""
+        _project(tmp_path)
+        store = _store(tmp_path)
+
+        prompt = store.build_prompt(store.read_delta()).lower()
+
+        for promise in ("snapshot", "reversible", "checkpoint", "undo", "restore"):
+            assert promise not in prompt, f"il prompt promette una rete: {promise}"

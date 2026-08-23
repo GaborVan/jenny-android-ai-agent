@@ -153,9 +153,25 @@ class GatewayContainer:
         ``False`` e lascia proseguire il consolidamento. Qui inghiottirle
         vorrebbe dire decidere due cose in un posto solo.
         """
+        return await self._take_snapshot("pre_dream")
+
+    async def _take_snapshot(self, trigger: str) -> bool:
+        """Checkpoint del workspace con l'etichetta *trigger*.
+
+        Il **meccanismo** dietro i checkpoint pre-lavoro, uno solo. I contratti
+        che ci stanno sopra sono invece due e restano distinti, perché dicono
+        cose diverse al modello: Dream usa il booleano per scegliere un ramo di
+        prompt ("le tue modifiche sono reversibili", che serve a far potare di
+        più), il giardiniere no e non deve — aggiungere-non-riscrivere vale
+        *anche* con la rete, e prometterla sposterebbe il suo giudizio.
+
+        Ritorna ``False`` con gli snapshot spenti, e le eccezioni si propagano:
+        il fail-open sta nei chiamanti, che sono gli unici a sapere se il proprio
+        lavoro deve procedere senza rete.
+        """
         if not self.snapshot:
             return False
-        await self.snapshot.snapshot_now("pre_dream")
+        await self.snapshot.snapshot_now(trigger)
         return True
 
     # -- costruzione del grafo ----------------------------------------------
@@ -460,6 +476,9 @@ class GatewayContainer:
         # con provider mancante), e questo è il punto che entrambe le nascite
         # attraversano.
         agent.snapshot_before_dream = self._snapshot_before_dream
+        # Il checkpoint generico, per chi non ha il contratto di Dream: il
+        # giardiniere lo chiama con il proprio trigger prima di scrivere pagine.
+        agent.take_snapshot = self._take_snapshot
         return agent
 
     # -- onboarding: creazione differita dell'agent (DeferredAgentActivator) --

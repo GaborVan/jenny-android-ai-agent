@@ -335,6 +335,37 @@ async def _silent(*_args: Any, **_kwargs: Any) -> None:
     pass
 
 
+async def _checkpoint(agent: Any) -> None:
+    """Checkpoint del workspace prima che la passata scriva. **Fail-open.**
+
+    Il giardiniere è il primo lavoro periodico che scrive dentro le cartelle
+    *dell'utente* e non in un file derivato: Atlas ricostruisce ``memory/WIKI.md``
+    al run dopo, una pagina scritta a mano che venisse sovrascritta non si
+    ricostruisce da niente — il diario copre solo quel che dal diario è nato.
+
+    **Fail-open, e non è pigrizia:** il verso opposto («nessuna passata senza
+    checkpoint») trasformerebbe uno store di snapshot pieno in un taccuino che
+    smette di lavorare in silenzio, che è un guasto peggiore di quello che
+    previene. Il checkpoint è una rete, non un permesso.
+
+    E **al modello non si dice niente.** Dream ha un ramo di prompt che promette
+    la reversibilità, e serve a fargli potare di più; qui non c'è e non ci va:
+    aggiungere-e-promuovere è la regola *anche* con la rete, e prometterla
+    sposterebbe il giudizio nella direzione sbagliata.
+    """
+    hook = getattr(agent, "take_snapshot", None)
+    if not callable(hook):
+        # Fuori dal gateway (test, ispezione) la rete non c'è. Si dice a DEBUG e
+        # si prosegue: che in produzione ci sia lo garantisce il container, e un
+        # test sul cablaggio.
+        logger.debug("gardener: nessun gancio di snapshot, passata senza rete")
+        return
+    try:
+        await hook("pre_gardener")
+    except Exception:
+        logger.exception("gardener: snapshot pre-passata fallito; si prosegue")
+
+
 async def run_gardener(agent: Any, store: GardenerStore) -> GardenerOutcome:
     """Esegue una passata su un progetto e restituisce l'esito.
 
@@ -352,6 +383,11 @@ async def run_gardener(agent: Any, store: GardenerStore) -> GardenerOutcome:
     if delta.is_empty:
         logger.debug("gardener: niente da leggere in {}", store.name)
         return GardenerOutcome(status="skipped_no_delta")
+
+    # Dopo il cancello del delta e prima di qualunque scrittura: una passata che
+    # non parte non ha niente da proteggere, e uno snapshot per tick a vuoto
+    # sarebbe una scansione del workspace ogni mezz'ora per niente.
+    await _checkpoint(agent)
 
     t0 = time.monotonic()
     resp = None

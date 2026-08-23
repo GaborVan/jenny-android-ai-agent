@@ -271,6 +271,10 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
         # senza gateway: ``dream_cycle.take_dream_snapshot`` lo traduce in
         # ``snapshotted=False``, cioè nel ramo conservativo del prompt.
         self.snapshot_before_dream: Callable[[], Awaitable[bool]] | None = None
+        # Checkpoint del workspace con un trigger a scelta, per chi non ha il
+        # contratto di Dream. Lo collega il container; ``None`` fuori dal
+        # gateway, e chi lo usa deve trattarlo come rete assente e proseguire.
+        self.take_snapshot: Callable[[str], Awaitable[bool]] | None = None
         self.restrict_to_workspace = restrict_to_workspace
         self.extract_document_text = extract_document_text
         self.workspace_scopes = WorkspaceScopeResolver(
