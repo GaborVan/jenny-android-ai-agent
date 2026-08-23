@@ -1919,6 +1919,18 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             self._record_channel_delivery_locked(session_key, content, media)
         )
 
+    def active_session_keys(self) -> tuple[str, ...]:
+        """Le sessioni con un turno in volo **adesso**.
+
+        Lo stesso segnale che l'autocompact riceve per non archiviare una
+        sessione mentre lavora (v. ``run``), esposto perche' serve a un secondo
+        lettore: il giardiniere (T4.3) gira su una chiave sua e non condivide il
+        lock della conversazione di un progetto, quindi l'unico modo che ha di
+        non riscrivere la mappa sotto le mani di chi la sta usando e' chiedere se
+        quella conversazione e' in volo.
+        """
+        return tuple(self._pending_queues)
+
     async def process_direct(
         self,
         content: str,

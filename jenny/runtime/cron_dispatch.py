@@ -77,6 +77,10 @@ class CronCapableAgent(BoundCronAgent, Protocol):
     context: "ContextBuilder"  # con ``.memory`` (MemoryStore)
     sessions: "SessionManager"  # con get_or_create / save / sessions_dir
 
+    def active_session_keys(self) -> tuple[str, ...]:
+        """Le sessioni con un turno in volo: il giardiniere non entra li'."""
+        ...
+
     async def process_direct(
         self,
         content: str,
@@ -291,6 +295,8 @@ class CronDispatcher:
             return await self._run_dream(agent)
         if job.name == "atlas":
             return await self._run_atlas(agent)
+        if job.name == "gardener":
+            return await self._run_gardener(agent)
         if job.name == "heartbeat":
             return await self._run_heartbeat(agent, job)
         if job.name == "update_check":
@@ -315,6 +321,43 @@ class CronDispatcher:
         store = AtlasStore.from_config(self._config.workspace_path, self._config)
         outcome = await run_atlas(agent, store=store)
         logger.debug("Atlas cron job: {}", outcome.status)
+        return None
+
+    async def _run_gardener(self, agent: "CronCapableAgent") -> str | None:
+        """Il giardiniere: una passata su un progetto, se uno è pronto.
+
+        Come per Atlas, qui resta solo l'instradamento: i tre orologi stanno in
+        ``agent/gardener_schedule.py`` e la passata in ``agent/gardener.py``,
+        condivisa con lo slash command ``/gardener``.
+
+        Il controllo su ``enabled`` è **qui e non solo alla registrazione**:
+        ``register_system_job`` non ha una controparte che deregistri, quindi un
+        job registrato da un avvio precedente resta nello store del cron anche
+        dopo che la sezione è stata spenta. È la stessa ragione per cui
+        ``_run_update_check`` esce prima della rete.
+        """
+        from jenny.agent.gardener import run_gardener
+        from jenny.agent.gardener_schedule import pick_project
+
+        cfg = self._config.agents.defaults.gardener
+        if not cfg.enabled:
+            logger.debug("Gardener: disabled")
+            return None
+
+        pick = pick_project(
+            self._config.workspace_path,
+            idle_min=cfg.idle_min,
+            min_hours_between_passes=cfg.min_hours_between_passes,
+            sessions=agent.sessions,
+            active_session_keys=agent.active_session_keys(),
+            wikis_dir_name=getattr(self._config.wiki, "wikis_dir", "wikis") or "wikis",
+        )
+        if pick is None:
+            logger.debug("Gardener: no project ready")
+            return None
+
+        outcome = await run_gardener(agent, pick.store)
+        logger.debug("Gardener cron job: {} on {}", outcome.status, pick.store.name)
         return None
 
     async def _run_dream(self, agent: "CronCapableAgent") -> str | None:

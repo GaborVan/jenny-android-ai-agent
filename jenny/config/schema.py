@@ -184,6 +184,63 @@ class AtlasConfig(Base):
         return f"every {hours}h"
 
 
+class GardenerConfig(Base):
+    """Il giardiniere: promuove il diario dei progetti in pagine, a mente fredda.
+
+    Terzo lavoro periodico interno dopo Dream e Atlas, e come loro **acceso di
+    default**. La ragione è la stessa dei fratelli, e vale la pena scriverla
+    perché questo è il primo che scrive dentro le cartelle *dell'utente* e non in
+    un file derivato: senza righe di diario nuove il tick esce prima di qualunque
+    chiamata al provider, quindi su un'installazione che non usa i progetti costa
+    zero. E se si spegne, ``/gardener`` resta la strada a mano.
+    """
+
+    _MINUTE_MS = 60_000
+
+    enabled: bool = True
+
+    # Ogni quanto si *guarda*, non ogni quanto si lavora: un tick che non trova
+    # nulla non spende niente. Mezz'ora è la scala dei tre orologi qui sotto —
+    # guardare più spesso non anticipa niente, perché a decidere è il fermo.
+    interval_min: int = Field(
+        default=30,
+        ge=1,
+        validation_alias=AliasChoices("intervalMin", "interval_min"),
+        serialization_alias="intervalMin",
+    )
+
+    # Da quanto la conversazione di quel progetto deve essere zitta. Il
+    # giardiniere lavora **a mente fredda**: entrare mentre si sta parlando
+    # significa promuovere metà di un discorso, e riscrivere la mappa sotto le
+    # mani di chi la sta leggendo.
+    idle_min: int = Field(
+        default=30,
+        ge=0,
+        validation_alias=AliasChoices("idleMin", "idle_min"),
+        serialization_alias="idleMin",
+    )
+
+    # Distanza minima fra due passate **sulla stessa materia**. È la lezione del
+    # degrado del Dream scritta come numero: un secondo giro ravvicinato sullo
+    # stesso argomento è quello che rimpasta invece di aggiungere. Per wiki e non
+    # globale, perché il degrado è per materia.
+    min_hours_between_passes: int = Field(
+        default=6,
+        ge=0,
+        validation_alias=AliasChoices("minHoursBetweenPasses", "min_hours_between_passes"),
+        serialization_alias="minHoursBetweenPasses",
+    )
+
+    def build_schedule(self) -> CronSchedule:
+        return CronSchedule(kind="every", every_ms=self.interval_min * self._MINUTE_MS)
+
+    def describe_schedule(self) -> str:
+        return (
+            f"every {self.interval_min}min, on projects idle {self.idle_min}min "
+            f"and not gardened for {self.min_hours_between_passes}h"
+        )
+
+
 class AgentDefaults(Base):
     """Default agent configuration."""
 
@@ -259,6 +316,7 @@ class AgentDefaults(Base):
     consolidation_ratio: float = Field(default=0.5, ge=0.1, le=0.95)
     dream: DreamConfig = Field(default_factory=DreamConfig)
     atlas: AtlasConfig = Field(default_factory=AtlasConfig)
+    gardener: GardenerConfig = Field(default_factory=GardenerConfig)
     model_preset: str | None = Field(
         default=None,
         validation_alias=AliasChoices("modelPreset", "model_preset"),

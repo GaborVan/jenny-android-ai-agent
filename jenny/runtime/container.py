@@ -365,6 +365,23 @@ class GatewayContainer:
         else:
             logger.info("Atlas: disabled")
 
+        # Register the Gardener system job (idempotent on restart). Nessuno
+        # snapshot pre-run: il giardiniere **aggiunge e promuove**, non riscrive,
+        # e non tocca né il diario (il suo input) né AGENTS.md. Quel che scrive
+        # sono pagine nuove sotto wiki/, che l'utente può correggere leggendole —
+        # a differenza di Dream, che riscrive memoria irrecuperabile.
+        gardener_cfg = config.agents.defaults.gardener
+        if gardener_cfg.enabled:
+            self.cron.register_system_job(CronJob(
+                id="gardener",
+                name="gardener",
+                schedule=gardener_cfg.build_schedule(),
+                payload=CronPayload(kind="system_event"),
+            ))
+            logger.info("Gardener: {}", gardener_cfg.describe_schedule())
+        else:
+            logger.info("Gardener: disabled")
+
         # Register Heartbeat system job (idempotent on restart).
         if hb_cfg.enabled:
             self.cron.register_system_job(CronJob(
