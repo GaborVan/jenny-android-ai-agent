@@ -28,6 +28,16 @@ fact from a held batch landing after room is freed — was finally seen on 2026-
   something to truncate. See [3.1](#31-the-measurement--done-2026-08-20-and-it-argues-against-most-of-this-phase).
 - **6.1** — lowering `reviewEveryRuns` below 12. Phase 2 removed the reason the floor existed, but a
   faster cadence *and* a fresh permission is two changes at once, and no run has asked for it.
+
+  > **The 12 is now enforced, 2026-08-23.** It had been a decision written in three places and
+  > held by none: `/dream budget review 1` was accepted, and the only defence was a printed note
+  > whose threshold was 6 (`docs/using/memory.md` said 6 too). The floor lives in
+  > `command/builtin.py::_REVIEW_CADENCE_FLOOR` — the command refuses below it — and the schema
+  > deliberately stays `ge=1`, because raising a bound on a shipped field quarantines the
+  > `config.json` of anyone who already has a lower value. The escape hatch is a typed phrase,
+  > `i-accept-back-to-back-reviews`, and it exists *for this item*: every device measurement in
+  > this plan was taken at `reviewEveryRuns: 1`, and there is no root shell on the phone. So 6.1
+  > is still reachable from chat — it just has to say so out loud.
 - **7.2** — embeddings. The plan says not to build them early and there is now a log that will say
   when the index outgrows a context. At 4k of a 24k cap, that day is not close.
 
@@ -705,8 +715,11 @@ permission being used, not just tolerated.
 All six are in `memory/archive/`; nothing was lost, checked line by line against the copy taken
 before the run. And 6.2 said so, by name rather than by count:
 
-> `Dream review demoted 6 entries to memory/archive/ in one pass: Preferisce le riunioni corte del mattino e
-> paura di scegliere male…; **Language**: Italiano (primaria)…`
+> `Dream review demoted 6 entries to memory/archive/ in one pass: Preferisce le riunioni corte del
+> mattino e rifiuta quelle del venerdì…; **Strumenti**: usa il portatile solo in trasferta…`
+
+*(Both entries above are invented — the repo is public. The shape is the real one: the first line of
+each demoted fact, truncated, and as many as the note names.)*
 
 That is the pair working as intended: a broader permission, and a line in the log that tells you it
 was used and on what. **6.1 stays untouched** — `reviewEveryRuns` is back at 12. One run is not a
