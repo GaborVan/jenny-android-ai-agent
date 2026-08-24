@@ -20,8 +20,8 @@ import { i18n } from './i18n.js';
 import { AppState } from './state.js';
 import { api } from './api-client.js';
 import { rpc } from './rpc-client.js';
-import { showToast } from './utils.js';
-import { confirmDialog, promptDialog } from './dialog.js';
+import { escapeHtml, showToast } from './utils.js';
+import { confirmDialog, detailDialog, promptDialog } from './dialog.js';
 
 /** Cartella che ospita i progetti, finche' il backend non dice la sua.
  *
@@ -563,6 +563,22 @@ export class ScopeChip {
     if (changed) this.onSwitch?.(ScopeChip.keyFor(scope), scope);
   }
 
+  /** Lascia *name* se e' lo scope corrente, tornando alla conversazione
+   *  personale. Da chiamare quando quel progetto smette di esistere.
+   *
+   *  Senza, dopo una cancellazione il chip continua a nominare un progetto che
+   *  non c'e' piu' e la chat ne mostra la trascrizione: niente si rompe — il
+   *  primo messaggio verrebbe rifiutato dal server, che la cartella la cerca —
+   *  ma e' uno schermo che dice il falso, ed e' il tipo di falso che poi si
+   *  scambia per il difetto che questa cancellazione e' venuta a chiudere.
+   */
+  leaveIfSelected(name) {
+    if (this.scope.kind !== 'project' || this.scope.name !== name) return false;
+    this._projects = null;              // l'elenco su disco e' cambiato
+    this.select({ kind: 'personal', name: null });
+    return true;
+  }
+
   /** Due domande, in quest'ordine: come si chiama, e di cosa si occupa.
    *
    *  La seconda non e' un extra da riempire dopo. Un progetto senza una riga di
@@ -612,7 +628,35 @@ export class ScopeChip {
     }
 
     try {
-      await rpc.createProject(clean, seed.trim());
+      const first = await rpc.createProject(clean, seed.trim());
+      /* **Un nome libero di cartella puo' non essere un nome libero.** Le tracce
+         di una conversazione stanno fuori da `wikis/`, quindi un nome che il
+         picker non elenca puo' portarsi dietro la chat di un progetto
+         cancellato. Il server non sceglie per noi: torna con
+         `conversation_exists` e il conto, e la scelta e' qui.
+
+         Le due risposte sono **entrambe legittime** — «l'avevo cancellato per
+         sbaglio» e «riparto pulito» — ed e' la ragione per cui questo e' un
+         dialogo a tre uscite e non una conferma: chiudere senza scegliere non
+         crea niente, che e' la terza risposta e quella piu' facile da dare per
+         sbaglio se le uscite fossero due. */
+      if (first?.status === 'conversation_exists') {
+        const count = first?.conversation?.messages;
+        const choice = await detailDialog({
+          title: i18n.t('scope.leftoverChatTitle', { name: clean }),
+          bodyHtml: `<p>${escapeHtml(
+            count
+              ? i18n.t('scope.leftoverChatBody', { name: clean, count })
+              : i18n.t('scope.leftoverChatBodyNoCount', { name: clean }),
+          )}</p>`,
+          actions: [
+            { id: 'keep', label: i18n.t('scope.leftoverChatKeep'), variant: 'primary' },
+            { id: 'discard', label: i18n.t('scope.leftoverChatDiscard') },
+          ],
+        });
+        if (!choice) return;
+        await rpc.createProject(clean, seed.trim(), choice);
+      }
     } catch (err) {
       // Un rifiuto non porta dentro niente. Il server ne ha due — «ce l'hai
       // già» e «c'è qualcosa di mezzo che non è un progetto» — e nel secondo

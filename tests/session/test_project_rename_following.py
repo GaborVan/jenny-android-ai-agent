@@ -41,12 +41,11 @@ from jenny.agent.loop import AgentLoop
 from jenny.bus.events import InboundMessage
 from jenny.bus.queue import MessageBus
 from jenny.session.project_rename import (
-    PROJECT_WIKI_ID_KEY,
     follow_renamed_project,
     pending_project_renames,
-    project_trace_paths,
     repair_pending_project_renames,
 )
+from jenny.session.project_traces import PROJECT_WIKI_ID_KEY, project_trace_paths
 
 WIKI_ID = "3f9a2c1b7e04"
 

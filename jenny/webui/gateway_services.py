@@ -102,7 +102,17 @@ def build_gateway_services(
         # Radice risolta a call-time come per le route del file manager: un
         # cambio di workspace a runtime non deve lasciare i comandi ancorati
         # alla vecchia directory.
-        commands=CommandContext(get_workspace_root=_current_workspace_root),
+        commands=CommandContext(
+            get_workspace_root=_current_workspace_root,
+            # ``project.delete`` toglie i file di una sessione: se quella restasse
+            # in cache, il primo salvataggio la riscriverebbe sotto il nome
+            # appena liberato. Risolto a call-time perche' il session manager e'
+            # opzionale — senza di lui non c'e' nessuna cache da sgomberare, e
+            # nemmeno nessuno che possa riscrivere il file.
+            invalidate_session=lambda key: (
+                session_manager.invalidate(key) if session_manager is not None else None
+            ),
+        ),
         session_manager=session_manager,
         get_subagent_manager=get_subagent_manager,
     )

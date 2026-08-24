@@ -421,7 +421,11 @@
       "soul": "Chi è Jenny e come si comporta: il carattere, il modo di parlare, quello che fa e quello che non fa mai. E le regole fisse che le hai dato tu — come rivolgersi a te, cosa evitare, dove andarci piano.\n\nLo mantiene Dream, la consolidazione che gira dopo le conversazioni: una correzione che le fai a voce finisce qui. Puoi leggerlo e sistemarlo, ma di solito non serve scriverci a mano.\n\nNon qui: i fatti su di te (USER.md), le convenzioni di lavoro (AGENTS.md), le procedure ripetibili (le Skill). E nemmeno come si comporta l'app: cosa accetta uno strumento, cosa rifiuta la sandbox, dov'è un limite — è uguale su ogni installazione e glielo dice già il prompt di sistema.",
       "memory": "La memoria a lungo termine: quello che deve restare da una sessione all'altra — contesto dei progetti, fatti utili, note da ricordare.\n\nLa mantiene Dream, la consolidazione che gira dopo le conversazioni. Puoi leggerla e correggerla, ma di solito non serve scriverci a mano.\n\nNon qui: i fatti su di te (USER.md), le convenzioni di lavoro (AGENTS.md), le procedure ripetibili (le Skill).",
       "heartbeat": "I controlli ricorrenti che Jenny ripassa a ogni battito.\n\nVanno scritti sotto «## Active Tasks»: è l'unica sezione che viene letta. Quando un'attività è finita, cancellala invece di lasciarla lì — un elenco di cose già fatte viene riletto a ogni battito.\n\nNon qui: le richieste una tantum (basta chiederle in chat) e le procedure ripetibili (le Skill)."
-    }
+    },
+    "deleteProjectConfirm": "Eliminare il progetto “{name}”? Sparisce la cartella e sparisce anche la conversazione: sono due cose diverse su disco, e questa le toglie tutte e due.",
+    "deleteProjectConfirmWithChat": "Eliminare il progetto “{name}”? Sparisce la cartella e con lei la conversazione: {count} messaggi.",
+    "deleteProjectFailed": "Non ho potuto eliminare il progetto “{name}”. Non ho toccato niente.",
+    "deletedProject": "Progetto “{name}” eliminato, conversazione compresa"
   },
   "apps": {
     "jennyApps": "Jenny Apps",
@@ -681,7 +685,12 @@
       "hours": "{n} ore fa",
       "yesterday": "ieri",
       "days": "{n} giorni fa"
-    }
+    },
+    "leftoverChatTitle": "“{name}” ha ancora una conversazione",
+    "leftoverChatBody": "Sotto questo nome c'è ancora la chat di un progetto che non c'è più: {count} messaggi. Posso riprenderla — se l'avevi cancellato per sbaglio è tutta lì — oppure partire pulito e buttarla.",
+    "leftoverChatBodyNoCount": "Sotto questo nome c'è ancora la chat di un progetto che non c'è più. Posso riprenderla — se l'avevi cancellato per sbaglio è tutta lì — oppure partire pulito e buttarla.",
+    "leftoverChatKeep": "Riprendila",
+    "leftoverChatDiscard": "Parti pulito"
   },
   "write": {
     "write": "Scrive",

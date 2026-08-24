@@ -31,6 +31,68 @@ from jenny.channels.http_utils import (
 QueryParams = dict[str, list[str]]
 
 
+
+def _project_delete_refusal(workspace_root: Path, target: Path) -> str | None:
+    """Il motivo per cui *target* non si cancella da qui, o ``None``.
+
+    **La delete del file manager non deve poter cancellare un progetto**, e il
+    perche' non e' che sia pericolosa: e' che e' *parziale*. Un progetto vive in
+    due domini — l'albero sotto ``wikis/<nome>/`` e le quattro tracce della sua
+    conversazione, che stanno altrove (v.
+    ``session/project_rename.py::project_trace_paths``). Una ``rmtree`` raggiunge
+    il primo e non sa del secondo, quindi libera il *nome* senza liberare la
+    conversazione: il progetto successivo creato con quel nome se la riprende
+    tutta. Riprodotto sul telefono il 24/08/2026.
+
+    Il rifiuto **dice dove**, che e' la forma degli altri rifiuti di questo
+    codice (``command/builtin.py::_gardener_no_target``, il rifiuto di
+    ``journal_append`` fuori da un progetto): su un telefono un divieto che non
+    indica la strada e' un vicolo cieco.
+
+    Due bersagli, non uno. La radice del progetto e' quello ovvio; la sua
+    ``wiki/`` e' lo stesso guasto per un'altra porta, perche' senza quella
+    cartella ``is_wiki_root`` diventa falso e il progetto sparisce dal picker
+    **con la chat ancora attaccata al nome** — cioe' di nuovo l'orfano.
+
+    Solo i figli diretti di ``wikis_dir``: ``is_wiki_root`` da solo direbbe di si'
+    a qualunque cartella che contenga una ``wiki/``, e bloccherebbe
+    cancellazioni legittime altrove nel workspace.
+    """
+    from jenny.session.keys import is_valid_project_name
+    from jenny.utils.wiki_paths import is_wiki_root
+
+    try:
+        from jenny.config.loader import load_config
+
+        wikis_dir = workspace_root / (load_config().wiki.wikis_dir or "wikis")
+    except Exception:  # noqa: BLE001 — senza config si usa il nome di default
+        wikis_dir = workspace_root / "wikis"
+
+    if target.parent == wikis_dir and is_wiki_root(target):
+        name = target.name
+    elif (
+        target.name == "wiki"
+        and target.parent.parent == wikis_dir
+        and is_wiki_root(target.parent)
+    ):
+        name = target.parent.name
+    else:
+        return None
+    if not is_valid_project_name(name):
+        # Una cartella il cui nome non puo' essere il nome di una conversazione
+        # (``wikis/Ricerca ETF``, v. ``_collect_projects``) non ha una chat da
+        # orfanare, e ``project.delete`` la rifiuterebbe proprio per quel nome:
+        # rifiutare qui la renderebbe incancellabile da qualunque porta.
+        return None
+    return (
+        f"`{name}` is a project, not just a folder: its conversation lives outside "
+        "this tree, and deleting the folder here would leave that behind under a name "
+        "anything else could take. Deleting a project is its own operation and it "
+        "removes both — the file browser uses it for you, so if you are seeing this "
+        "the app is out of date or something else made the call."
+    )
+
+
 class WorkspaceRoutes:
     """Route ``/api/workspace/*`` (CRUD file del workspace)."""
 
@@ -216,6 +278,9 @@ class WorkspaceRoutes:
         workspace_root = self._get_workspace_root()
         try:
             full_path = validate_path(workspace_root, rel_path)
+            refusal = _project_delete_refusal(workspace_root, full_path)
+            if refusal:
+                return http_error(403, refusal)
             delete_path(full_path)
             return http_json_response({"success": True, "path": rel_path})
         except ValueError as e:

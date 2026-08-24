@@ -27,13 +27,18 @@ e ci entra **alla nascita**, non per sostituzione di un segnaposto dopo.
 
 from __future__ import annotations
 
-import importlib.util
 import re
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
 
+from jenny.session.keys import project_session_key
+from jenny.session.project_traces import (
+    delete_project_traces,
+    describe_project_traces,
+    recorded_wiki_id,
+)
 from jenny.utils.path import atomic_write
 from jenny.utils.wiki_paths import (
     LEGACY_WIKI_SCHEMA_FILENAME,
@@ -42,6 +47,7 @@ from jenny.utils.wiki_paths import (
     is_wiki_root,
 )
 from jenny.webui.project_scaffold import scaffold_project
+from jenny.webui.wiki_registry import refresh_wiki_registry
 
 _TITLE_SPLIT_RE = re.compile(r"[-_.]+")
 
@@ -163,6 +169,8 @@ def create_project(
     scripts_dir: Path,
     name: str,
     seed: str,
+    workspace: Path | None = None,
+    conversation: str = "refuse",
 ) -> dict[str, Any]:
     """Scaffolda `wikis_dir/name`, ci scrive la riga di scope, aggiorna il registro.
 
@@ -178,6 +186,24 @@ def create_project(
     perche' la creazione e' morta a meta'. Prima di questo, quella cartella era
     irrecuperabile: elencata dal picker, senza mappa, e su un telefono l'utente
     non ha modo di ripararla a mano.
+
+    **E su un nome che ha ancora una conversazione non decide: chiede.**
+    *workspace* serve a saperlo (le tracce di una chat stanno fuori da
+    ``wikis/``) e *conversation* a rispondere:
+
+    - ``refuse``, il default — non tocca niente e torna con
+      ``status: "conversation_exists"`` e il conto di cosa c'e'. Non e' un
+      errore: e' una domanda, e sollevarla la renderebbe indistinguibile da un
+      guasto.
+    - ``discard`` — toglie le tracce, poi crea. Il progetto nasce con la chat
+      vuota, che e' quel che «progetto nuovo» di solito vuol dire.
+    - ``keep`` — crea **adottando l'id della wiki che quella chat ricorda**, cosi'
+      la conversazione riprende ed e' davvero sua. Senza l'adozione il primo
+      turno verrebbe rifiutato per discordanza di identita', giustamente.
+
+    Senza *workspace* il controllo non si fa e il comportamento e' quello di
+    prima: e' il default dei chiamanti che non hanno una radice da dare (i test
+    che scaffoldano e basta), non una scorciatoia per la produzione.
     """
     root = wikis_dir / name
     if root.exists():
@@ -189,8 +215,46 @@ def create_project(
             )
         logger.info("project {}: half-built tree, completing it instead of refusing", name)
 
+    # **Un nome libero di cartella puo' non essere un nome libero.** Le tracce di
+    # una conversazione stanno fuori da ``wikis/`` (v.
+    # ``session/project_traces.py``), quindi un nome che qui sembra vergine puo'
+    # portarsi dietro la chat di un progetto cancellato — che e' come il difetto
+    # del 24/08/2026 arrivava all'utente: progetto nuovo, memoria di un altro.
+    #
+    # **Una domanda non e' un errore.** Le due risposte sono entrambe legittime
+    # — «l'avevo cancellato per sbaglio, ridammela» e «riparto pulito» — e
+    # indovinare vuol dire sbagliarne una in silenzio. Quindi non si solleva: si
+    # torna con uno stato che il client sa trasformare in una scelta, e il
+    # disco non si tocca.
+    adopt_id: str | None = None
+    if workspace is not None and not root.exists():
+        key = project_session_key(name)
+        traces = describe_project_traces(workspace, key)
+        if traces.exists:
+            if conversation == "refuse":
+                return {
+                    "status": "conversation_exists",
+                    "name": name,
+                    "conversation": {
+                        "files": traces.files,
+                        "bytes": traces.bytes,
+                        "messages": traces.messages,
+                    },
+                }
+            if conversation == "discard":
+                delete_project_traces(workspace, key)
+            elif conversation == "keep":
+                # Riprendere la chat vuol dire dire che questo *e'* quel
+                # progetto, e la forma in cui lo si dice e' il suo id: senza,
+                # il primo turno verrebbe rifiutato per discordanza.
+                adopt_id = recorded_wiki_id(workspace, key)
+            else:
+                raise ProjectCreateError(f"unknown conversation choice: {conversation}")
+
     try:
-        created = scaffold_project(root, project_title(name), seed, _yaml_scalar(seed))
+        created = scaffold_project(
+            root, project_title(name), seed, _yaml_scalar(seed), adopt_id=adopt_id
+        )
     except Exception as exc:
         raise ProjectCreateError(f"scaffold failed: {exc}") from exc
 
@@ -204,39 +268,10 @@ def create_project(
     # cartella, questo conosce `wikis_dir`. `reindex_wikis` resta della skill —
     # e' il registro del *workspace*, comune ai due formati, e non c'e' niente da
     # duplicare.
-    registry: str | None = None
-    try:
-        reindex = importlib.util.spec_from_file_location(
-            "reindex_wikis", scripts_dir / "reindex_wikis.py"
-        )
-        if reindex is not None and reindex.loader is not None:
-            module = importlib.util.module_from_spec(reindex)
-            reindex.loader.exec_module(module)
-            # **Niente ``redirect_stdout`` qui.** Questa funzione gira dentro un
-            # ``asyncio.to_thread`` (v. ``webui/commands.py::project_create``), e
-            # ``redirect_stdout`` muta ``sys.stdout`` **di processo**: per tutta
-            # la finestra, l'output di *ogni altro* thread finisce nel buffer che
-            # buttiamo via. Non è teorico: ``python_exec`` cattura quel che il
-            # codice del modello stampa proprio via ``sys.stdout``, e ha
-            # sostituito il proprio ``redirect_stdout`` con un proxy per-thread
-            # esattamente per questo (v. il commento lungo in
-            # ``agent/tools/python_exec.py``, «cattura di stdout PER THREAD»).
-            # Il proxy però si consulta al momento della scrittura, e chi scrive
-            # legge ``sys.stdout``: con la nostra ``StringIO`` al suo posto, un
-            # ``print()`` del modello nel turno accanto sparisce in silenzio.
-            #
-            # E non c'era niente da nascondere: ``regenerate_index`` stampa una
-            # riga sola, su **stderr** (il caso «_index.md senza marcatori»), che
-            # un ``redirect_stdout`` non tocca nemmeno. Costo del silenzio: zero.
-            # Rischio: l'output di un altro turno.
-            registry = str(module.regenerate_index(wikis_dir))
-    except Exception as exc:
-        # La wiki esiste ed e' completa: un registro non aggiornato e' un
-        # inconveniente che `lint --workspace` sa riparare, non un fallimento
-        # della creazione.
-        logger.warning("could not refresh {} after seeding: {}", wikis_dir, exc)
+    registry = refresh_wiki_registry(wikis_dir, scripts_dir)
 
     return {
+        "status": "created",
         "name": name,
         "created": list(created or []),
         # La riga di scope entra alla nascita, quindi su un progetto nuovo e'

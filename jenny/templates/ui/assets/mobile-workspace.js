@@ -9,6 +9,7 @@ import { currentTheme } from './shared/theme.js';
 import { advancedMode } from './shared/advanced-mode.js';
 import { openImageLightbox } from './shared/image-lightbox.js';
 import { setupLongPress } from './shared/longpress.js';
+import { scopeChip } from './shared/scope-chip.js';
 
 const CM_THEMES = { dark: 'darcula', light: 'eclipse' };
 
@@ -700,6 +701,22 @@ export class WorkspaceController {
         break;
       }
       case 'delete': {
+        /* **Un progetto non e' una cartella qualunque, e cancellarlo non e' una
+           `rmtree`.** La sua conversazione vive fuori da questo albero (quattro
+           file, v. `session/project_traces.py`), quindi togliere la cartella da
+           qui liberava il *nome* senza liberare la chat: il progetto successivo
+           creato con lo stesso nome se la riprendeva intera. Riprodotto sul
+           telefono il 24/08/2026.
+
+           Il server rifiuta ormai `/api/workspace/delete` su una radice di
+           progetto, e quel rifiuto resta la garanzia meccanica — vale anche per
+           un client vecchio o per una chiamata diretta. Qui non si aspetta di
+           essere rifiutati: si usa la porta giusta, e la conferma dice **anche
+           quanta conversazione** sta per sparire, che di una cancellazione e' la
+           meta' che la rende sicura. */
+        const project = await this._projectAt(path);
+        if (project) return this._deleteProject(project, path);
+
         const confirmed = await confirmDialog(i18n.t('workspace.deleteConfirm', { name: info.name }));
         if (!confirmed) return;
         try {
@@ -720,6 +737,64 @@ export class WorkspaceController {
         break;
       }
     }
+  }
+
+  /** Il nome del progetto che vive esattamente in *path*, o `null`.
+
+   *  Il confronto e' col percorso **intero**, non col nome del file: una
+   *  cartella `output/viaggio` ha lo stesso basename di un progetto, e
+   *  scambiarli vorrebbe dire cancellare il progetto al posto suo. La cartella
+   *  delle wiki e' configurabile (`config.wiki.wikis_dir`), quindi la si chiede
+   *  al server invece di scriverla qui: `dir` viaggia gia' con l'elenco.
+   */
+  async _projectAt(path) {
+    try {
+      const { dir, projects } = await api.listProjects();
+      const match = (projects || []).find(it => `${dir}/${it.name}` === path);
+      return match ? match.name : null;
+    } catch (err) {
+      // Non sapere non deve bloccare una cancellazione: si prosegue per la
+      // strada generica, e se quella cartella era un progetto il rifiuto del
+      // server lo dice. Fallire *chiuso* qui vorrebbe dire che un gateway
+      // lento rende incancellabile qualunque cartella.
+      console.warn('project lookup failed, falling back to the generic delete:', err);
+      return null;
+    }
+  }
+
+  /** Cancella un progetto per intero, dopo averlo detto per intero. */
+  async _deleteProject(name, path) {
+    let described = null;
+    try {
+      described = await api.describeProject(name);
+    } catch (err) {
+      console.warn('project describe failed:', err);
+    }
+    const messages = described?.conversation?.messages;
+    const question = messages
+      ? i18n.t('workspace.deleteProjectConfirmWithChat', { name, count: messages })
+      : i18n.t('workspace.deleteProjectConfirm', { name });
+    if (!(await confirmDialog(question))) return;
+    try {
+      await rpc.deleteProject(name);
+    } catch (err) {
+      console.warn('project.delete failed:', err?.code || '(no code)', err?.message);
+      showToast(i18n.t('workspace.deleteProjectFailed', { name }), 'error');
+      return;
+    }
+    // Il progetto non esiste piu': se la chat era la sua, il chip lo deve
+    // smettere di nominare. Prima del ritorno anticipato, perche' quel ramo
+    // riguarda il file aperto nell'editor e non ha niente a che vedere con lo
+    // scope della conversazione.
+    scopeChip.leaveIfSelected(name);
+    if (this.currentPath === path || this.currentPath.startsWith(path + '/')) {
+      this._dirty = false;
+      this.currentPath = '';
+      this.backToExplorer();
+      return;
+    }
+    showToast(i18n.t('workspace.deletedProject', { name }), 'success');
+    await this.navigateTo(this.currentDir);
   }
 
   // ── File editor ──

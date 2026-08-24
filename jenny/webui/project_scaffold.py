@@ -189,6 +189,7 @@ def scaffold_project(
     quoted_seed: str,
     *,
     today: date | None = None,
+    adopt_id: str | None = None,
 ) -> list[str]:
     """Crea quel che manca sotto *root*. Ritorna i percorsi creati, relativi.
 
@@ -198,6 +199,14 @@ def scaffold_project(
 
     *today* esiste per i test: il default e' la data di oggi, e nessun chiamante
     di produzione lo passa.
+
+    *adopt_id* fa nascere la wiki con un id **gia' esistente** invece di uno
+    nuovo. Serve a un caso solo: l'utente ricrea un progetto il cui nome porta
+    ancora una conversazione e dice di volerla riprendere. Dire "questo *e'*
+    quel progetto" e ridargli il suo id sono la stessa frase, e senza di essa la
+    chat ripresa verrebbe rifiutata al primo turno da
+    ``AgentLoop._refuse_reincarnated_project`` — giustamente, perche' fino a
+    quel momento sarebbe la chat di un'altra wiki.
     """
     day = today or date.today()
     created: list[str] = []
@@ -213,7 +222,7 @@ def scaffold_project(
             created.append(f"{rel}/.gitkeep")
 
     if _write_if_absent(root, WIKI_SCHEMA_FILENAME, _agents_md(
-        title, seed, new_wiki_id(), quoted_seed
+        title, seed, adopt_id or new_wiki_id(), quoted_seed
     )):
         created.append(WIKI_SCHEMA_FILENAME)
 

@@ -186,6 +186,8 @@ class WikiRoutes:
             return await self._wiki_config(request)
         if path == "/api/projects":
             return await self._projects_list(request)
+        if path == "/api/project/describe":
+            return await self._project_describe(request)
         if path == "/api/tree":
             return await self._wiki_tree(request)
         if path == "/api/graph":
@@ -410,6 +412,42 @@ class WikiRoutes:
         return http_json_response(
             {"dir": wikis_dir.name, "projects": projects, "unopenable": unopenable}
         )
+
+    async def _project_describe(self, request: WsRequest) -> Response:
+        """Cosa porterebbe via la cancellazione di un progetto. Sole letture.
+
+        Sta qui e non fra i comandi perche' e' una **lettura**: quella superficie
+        esiste per le scritture che portano contenuto (v. la docstring di
+        ``webui/commands.py``), e un nome di progetto sta in una query string.
+
+        Serve alla conferma, che e' meta' del fix del 24/08: una cancellazione e'
+        sicura quando la conferma dice il vero su cosa sparisce. La conferma
+        vecchia diceva solo *Delete "viaggio"?* e taceva la conversazione,
+        che era proprio la meta' che non spariva.
+        """
+        if not self._check_api_token(request):
+            return http_error(401, "Unauthorized")
+        err = self._check_wiki_enabled()
+        if err:
+            return err
+
+        from jenny.session.keys import is_valid_project_name
+        from jenny.webui.project_delete import describe_project
+
+        name = (query_first(parse_query(request.path), "name") or "").strip()
+        if not is_valid_project_name(name):
+            return http_error(400, "invalid project name")
+
+        wikis_dir = self._get_wikis_dir()
+        workspace = self._get_workspace_root()
+        loop = asyncio.get_running_loop()
+        described = await loop.run_in_executor(
+            None,
+            lambda: describe_project(wikis_dir=wikis_dir, workspace=workspace, name=name),
+        )
+        if not described["exists"] and not described["orphan"]:
+            return http_error(404, "project not found")
+        return http_json_response(described)
 
     # -- audit handlers --
 

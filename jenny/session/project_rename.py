@@ -15,6 +15,10 @@ piu' si cerca fra le wiki quella con quell'id, e se si trova le tracce della cha
 prendono il nome nuovo. Cosi' la riparazione gira **solo quando qualcosa e' gia'
 andato storto**, invece di mettersi sul percorso di ogni turno.
 
+**L'elenco delle tracce non e' piu' qui**: vive in
+:mod:`jenny.session.project_traces`, da quando a chiederlo non e' piu' solo il
+rinomino ma anche la cancellazione di un progetto.
+
 **Le tracce sono tre, non quattro.** La quarta —
 ``<progetto>/.jenny/tool-results/project_<nome>/`` — vive *dentro* la cartella
 della wiki, quindi con il rinomino si e' già spostata da sé; il suo nome resta
@@ -66,46 +70,13 @@ from pathlib import Path
 from loguru import logger
 
 from jenny.session.keys import PROJECT_SESSION_PREFIX, is_valid_project_name
-from jenny.session.manager import SessionManager
+from jenny.session.project_traces import project_trace_paths
 from jenny.utils.path import atomic_write
-
-# Chiave nei metadati di sessione in cui vive l'id della wiki di appartenenza.
-# Scritta una volta, al primo turno in cui la cartella c'e' — v.
-# ``AgentLoop._remember_project_id``.
-PROJECT_WIKI_ID_KEY = "project_wiki_id"
 
 # Il giornale degli spostamenti aperti. Vive accanto ai file di sessione perche'
 # e' di quelli che parla, e il nome comincia con un punto per non finire fra le
 # tracce che qualcuno elenca.
 RENAME_JOURNAL_NAME = ".project-rename-pending.json"
-
-
-def project_trace_paths(workspace: Path, session_key: str) -> list[Path]:
-    """I percorsi che portano il nome di *session_key*, esistenti o no.
-
-    Sono le tracce che un rinomino deve portarsi dietro. L'elenco sta qui e non
-    sparso fra i tre sottosistemi che le scrivono: quando ne nascera' una quarta,
-    questo e' il posto in cui aggiungerla — e
-    ``tests/session/test_project_session_files.py`` e' quello che se ne accorge.
-    """
-    # Import locali, e non e' igiene: ``agent/subagent_records`` tira dentro
-    # ``agent/loop``, che importa questo modulo — un ciclo, e un modulo di
-    # ``session/`` che importa ``agent/`` a livello di modulo e' anche
-    # un'inversione di layer. Preso da ``tests/session/test_cold_imports.py``,
-    # che prova ogni modulo come **primo** import di un interprete.
-    from jenny.agent.subagent_records import _RECORDS_DIRNAME, SUBAGENTS_DIRNAME
-    from jenny.config.paths import get_webui_dir
-
-    stem = SessionManager.safe_key(session_key)
-    webui_stem = SessionManager.safe_key(f"websocket:{session_key}")
-    webui = get_webui_dir()
-    return [
-        workspace / "sessions" / f"{stem}.jsonl",
-        webui / f"{webui_stem}.jsonl",
-        webui / f"{webui_stem}.segments",
-        webui / f"{webui_stem}.json",  # thread legacy, se questa installazione ne ha uno
-        workspace / SUBAGENTS_DIRNAME / _RECORDS_DIRNAME / f"{stem}.jsonl",
-    ]
 
 
 def _can_be_opened(key: str) -> bool:

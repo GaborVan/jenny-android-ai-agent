@@ -85,10 +85,10 @@ from jenny.session.keys import (
 )
 from jenny.session.manager import Session, SessionManager
 from jenny.session.project_rename import (
-    PROJECT_WIKI_ID_KEY,
     follow_renamed_project,
     pending_project_renames,
 )
+from jenny.session.project_traces import PROJECT_WIKI_ID_KEY
 from jenny.session.turn_visibility import (
     TurnVisibility,
     is_silent_turn,
@@ -714,6 +714,88 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
         else:
             logger.warning("Command '{}' matched but dispatch returned None", raw)
 
+
+    async def _refuse_reincarnated_project(self, msg: InboundMessage, key: str) -> bool:
+        """Rifiuta il turno se la cartella al nome di *key* non e' la sua cartella.
+
+        ``True`` = gia' risposto, il turno non deve partire.
+
+        **Il gemello di :meth:`_refuse_missing_project`, per il caso opposto.**
+        Quello scopre che la cartella legata e' *sparita*; questo scopre che ce
+        n'e' una, con il nome giusto, e un'anima diversa.
+
+        L'indirizzo di una conversazione di progetto e' il nome della cartella;
+        il legame vero e' l'id della wiki, che ogni sessione si annota al primo
+        turno (:meth:`_remember_project_id`). Fino al 24/08/2026 quell'id si
+        interrogava **solo quando la cartella mancava**: finche' al suo nome
+        c'era *una* cartella, nessuno chiedeva se fosse *quella*. Cancellando la
+        cartella dal file manager e ricreando un progetto con lo stesso nome, la
+        conversazione vecchia riappariva intera nel progetto nuovo — i due id
+        erano gia' su disco, diversi, e nessuno li confrontava.
+
+        Le due porte da cui ci si arrivava sono chiuse (la delete generica
+        rifiuta una radice di progetto, la creazione chiede cosa fare di una
+        conversazione rimasta). Questo controllo resta perche' e' l'unico che
+        copre le strade che non passano dalla UI — ``adb``, un ripristino, una
+        sincronizzazione, un difetto futuro — e gli stati gia' su disco.
+
+        **Non si indovina quale delle due storie l'utente voglia**, come non lo
+        indovina ``find_wiki_by_id`` davanti a due cartelle con lo stesso id:
+        si rifiuta, si dice cos'e' successo e si danno le due strade.
+
+        Costa la lettura di una frontmatter, e solo per le chat di progetto la
+        cui sessione ha gia' un id annotato. Una wiki **senza** id non fa
+        scattare niente: un id assente non e' un errore (v. ``wiki_paths.wiki_id``),
+        e trattarlo come discordanza rifiuterebbe ogni wiki fatta a mano.
+        """
+        if not is_project_session_key(key):
+            return False
+        try:
+            session = self.sessions.get_or_create(key)
+            recorded = session.metadata.get(PROJECT_WIKI_ID_KEY)
+            if not recorded:
+                return False
+            root = self.workspace_scopes.for_project(key).project_path
+            if not root.is_dir():
+                # Non e' il nostro caso: la cartella che manca ha gia' il suo
+                # rifiuto, ed e' quello che sa anche inseguire un rinomino.
+                return False
+            current = wiki_id(root)
+            if current is None or current == str(recorded):
+                return False
+        except Exception:
+            # Un controllo che non si puo' fare non deve fermare una chat: il
+            # difetto che copre e' raro, e bloccare tutto per non saper guardare
+            # sarebbe peggio del difetto.
+            logger.opt(exception=True).warning(
+                "Controllo dell'identita' del progetto non riuscito per {}", key
+            )
+            return False
+
+        name = key[len(PROJECT_SESSION_PREFIX):]
+        logger.warning(
+            "Progetto reincarnato: la sessione {} appartiene alla wiki {}, la cartella "
+            "ora e' {}; turno rifiutato", key, recorded, current,
+        )
+        await self.bus.publish_outbound(OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=(
+                f"This conversation belongs to a different `{name}` from the one that "
+                "is there now.\n\nThe folder was replaced — deleted and created again, "
+                "or restored from somewhere else — so what I remember here is another "
+                "project's. I have not read your message and I have changed nothing, "
+                "because answering out of the wrong history is the one mistake you "
+                "could not check.\n\nTwo ways out. If the folder now at `"
+                f"{name}` is the one you want, delete that project from the workspace "
+                "file browser — hold it and pick Delete — and create it again: that "
+                "clears this history too, and tells you what it is removing first. If "
+                "instead the old folder should come back, put it back and this chat is "
+                "exactly where you left it."
+            ),
+            metadata={**dict(msg.metadata or {}), "render_as": "text"},
+        ))
+        return True
 
     async def _refuse_missing_project(self, msg: InboundMessage, key: str) -> bool:
         """Rifiuta il turno se la cartella del progetto non esiste piu'.
@@ -1373,6 +1455,9 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             # Prima di tutto il resto, ``/init`` compreso: se la cartella legata
             # non c'e' piu', il turno non parte.
             if await self._refuse_missing_project(msg, effective_key):
+                continue
+            # La cartella c'e' — ma e' **quella**? Il nome non basta a dirlo.
+            if await self._refuse_reincarnated_project(msg, effective_key):
                 continue
             # La cartella c'e': la sessione si annota di chi e', cosi' il giorno
             # che la cartella cambia nome c'e' da dove ripartire (passo 7).

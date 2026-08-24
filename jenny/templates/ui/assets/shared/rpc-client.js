@@ -27,8 +27,19 @@ export const rpc = {
   /** Crea un progetto: una wiki nuova e vuota, piu' la riga di scope che
    *  l'utente ha scritto. Passa da qui e non da `api` proprio per quella riga:
    *  e' testo libero, e la superficie /api/ non sa trasportarne. */
-  createProject(name, seed) {
-    return wsManager.request('project.create', { name, seed });
+  createProject(name, seed, conversation) {
+    return wsManager.request('project.create', { name, seed, conversation });
+  },
+
+  /** Cancella un progetto: l'albero della wiki **e** la sua conversazione.
+   *
+   *  Non e' `api.deleteWorkspace` su `wikis/<nome>`, ed e' il punto di tutto:
+   *  quella toglie una cartella e non sa cosa sia un progetto, quindi lasciava
+   *  la chat sotto un nome ormai libero e il progetto successivo con lo stesso
+   *  nome se la riprendeva (difetto del 24/08/2026). Il server rifiuta ormai
+   *  quella strada; questa e' l'altra. */
+  deleteProject(name) {
+    return wsManager.request('project.delete', { name });
   },
 
   /** Chiude un item di audit con una nota di risoluzione. */
