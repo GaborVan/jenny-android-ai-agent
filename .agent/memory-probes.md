@@ -1,12 +1,12 @@
 # The four memory probes — run these by hand
 
-Four of the guarantees in Jenny's long-term memory are not mechanisms. They are requests written in
+Five of the guarantees in Jenny's long-term memory are not mechanisms. They are requests written in
 a prompt, and they hold because the model honours them. When one stops holding, **nothing goes
 red**: lint passes, types pass, the whole suite passes, and Jenny quietly starts re-recording things
 she already knows or saying "I don't remember" over a full archive.
 
 So they get checked by hand. **Run these after editing anything under `jenny/templates/agent/`, and
-after changing model.** Each takes a few minutes. There is a plan for automating them
+after changing model.** Each takes a few minutes. There is a plan for automating the first four
 ([`behaviour-harness-plan.md`](./behaviour-harness-plan.md)) which is deliberately unbuilt — at
 current stakes, none of these failures loses data, and doing this four times a year by hand is
 cheaper than the scaffolding.
@@ -134,6 +134,58 @@ languages and skips large files in silence, the two failure modes this replaces.
 **Watch out.** Most of the archive is *superseded wordings* of facts still present in the live
 files, because rewriting an entry archives the old version. Finding a genuinely absent detail takes
 looking; two attempts on 2026-08-20 picked facts that were still in `USER.md` in other words.
+
+---
+
+## Probe 5 — the wiki directory follows what is actually there
+
+**Guards** the rules in `atlas.md`: *"remove what disappeared from the wiki"* and
+*"Keep the `## Wikis` section complete"*. That section is **derived
+membership**: every wiki in the inventory gets a line, always, and nothing else
+gets one. The model writes the wording of each line; it does not get to choose
+the membership, and this probe looks only at membership.
+
+**Why it matters.** `memory/WIKI.md` is loaded into **every** prompt. A line
+naming a deleted project is not an untidy file — it is a false thing Jenny reads
+on every turn, with a `→ wikis/<slug>/wiki/index.md` pointer that leads nowhere.
+And `wikis/_index.md`, which says the same thing, updates immediately because
+code regenerates it — so when the two disagree, the wrong one is always this one.
+
+**Setup.** A **throwaway** project, never a real one: make one for the purpose,
+send it a message so it genuinely exists, and check it has reached the `## Wikis`
+section of `memory/WIKI.md` (that needs an Atlas pass, so either wait or force
+one). Note the starting list.
+
+**Do.** Delete that project from the file browser — hold it, pick Delete — then
+`/atlas`. Without `force`: deleting changes the fingerprint, so the pass starts
+on its own, and that is the real path. Wait for it to finish (tens of seconds)
+and read `memory/WIKI.md` again.
+
+**Pass.** The deleted project's line is gone, and the other lines are untouched.
+
+**Fail.** The line stays. From then until whenever, Jenny reads on every turn
+that the project exists.
+
+**The other half, for free.** If meanwhile there is a wiki that is **present and
+not listed** — one born after the last pass, say — the same read also checks the
+other direction of the rule: it should have appeared. Worth setting up on
+purpose; it is one extra project and no extra work.
+
+**Watch out.** Atlas runs every ~12h and **skips when the wiki fingerprint has
+not changed**. Confirm from the logs that a pass actually ran rather than
+inferring it from the file: a `WIKI.md` with an old mtime means Atlas never got
+in, and a probe that did not run is not a fail, it is nothing. Quickest check:
+`ls -la sessions/ | grep atlas` and look at the last one.
+
+**Where to write the result.** Not `memory-plan.md` like the other four — this
+one guards Atlas, so its home is
+[`stale-name-bindings-plan.md`](./stale-name-bindings-plan.md), step 1.
+
+**If it fails**, the fix is planned and should not be improvised:
+[`stale-name-bindings-plan.md`](./stale-name-bindings-plan.md), step 1b — the
+drift is **computed in Python** and handed to the prompt, and no line is ever
+deleted from that file by code. `WIKI.md` is prose the model wrote: reading it
+can fail silently and cost nothing, rewriting it cannot.
 
 ---
 
