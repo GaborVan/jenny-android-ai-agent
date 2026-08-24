@@ -153,6 +153,51 @@ class TestInventory:
         assert "`index.md`" not in inventory
         assert "(2 pages)" in inventory
 
+    def test_counting_a_wiki_does_not_open_its_pages(self, store, monkeypatch):
+        """T3.16. Il conteggio per wiki e' un ``len()``, e coi titoli costava una
+        lettura per pagina di **ogni** wiki: sulle 8 wiki vere (188 pagine)
+        l'inventario passava per 248 ``read_text`` e 6,45 ms, contro 60 e 3,98 ms.
+
+        L'asserzione e' su *quali* file si aprono, non su quanti: la wiki che
+        l'inventario non elenca non deve essere letta affatto, e quella che
+        elenca — dove i titoli si stampano davvero — va letta **una volta sola**.
+        Il numero pubblicato resta quello di prima, che e' la meta' che rende
+        questa una prova e non un cronometro.
+        """
+        _make_wiki(
+            store.workspace,
+            "main",
+            entities={"ada.md": "# Ada", "grace.md": "# Grace"},
+        )
+        _make_wiki(
+            store.workspace,
+            "loops",
+            concepts={f"c{i}.md": f"# Concept {i}" for i in range(4)},
+        )
+        opened: list[Path] = []
+        real_read_text = Path.read_text
+
+        def spy(self: Path, *args, **kwargs):
+            opened.append(self)
+            return real_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", spy)
+
+        inventory = store.build_inventory()
+
+        # I conteggi sono ancora quelli: questa e' pura prestazione.
+        assert "**main** — " in inventory and "(2 pages)" in inventory
+        assert "**loops** — " in inventory and "(4 pages)" in inventory
+
+        pages = [
+            p for p in opened
+            if "/wiki/concepts/" in p.as_posix() or "/wiki/entities/" in p.as_posix()
+        ]
+        # Nessuna pagina della wiki non elencata.
+        assert not [p for p in pages if "/loops/" in p.as_posix()]
+        # E quelle elencate, una volta sola a testa.
+        assert sorted(p.name for p in pages) == ["ada.md", "grace.md"]
+
 
 class TestPrompt:
     def test_carries_mechanism_inventory_and_current_file(self, store):

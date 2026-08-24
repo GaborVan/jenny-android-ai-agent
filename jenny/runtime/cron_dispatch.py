@@ -56,6 +56,7 @@ from jenny.session.turn_visibility import TurnVisibility
 
 if TYPE_CHECKING:
     from jenny.agent.context import ContextBuilder
+    from jenny.agent.gardener import GardenerOutcome, GardenerStore
     from jenny.agent.tools.registry import ToolRegistry
     from jenny.agent.turn_types import TurnOutcome
     from jenny.config.schema import Config
@@ -217,6 +218,80 @@ async def _silent(*_args: Any, **_kwargs: Any) -> None:
     pass
 
 
+def _alert_gardener_stuck(name: str, failures: int, status: str) -> None:
+    """Porta la serie di passate fallite su una superficie che qualcuno vede.
+
+    Il ``logger.warning`` di ``_record_gardener_attempt`` è, su Android, un
+    allarme che non suona: nessuno legge logcat, ed è precisamente lo stato in cui
+    il diario di un progetto smette di diventare pagine senza che niente lo dica.
+    Stessa forma di ``agent/dream_cycle.py::_alert_stuck`` e della watchdog del
+    cron: ``notify_delivery``, cioè zero token, nessun turno LLM, nessuna
+    dipendenza dal modello — che è la parte che in questo scenario potrebbe essere
+    proprio quella rotta — e no-op fuori da Android, quindi anche nei test.
+
+    L'etichetta porta il nome del progetto e un suffisso: il tag (``cron:<label>``)
+    è ciò che fa coalizzare gli alert, quindi col nome nudo due progetti guasti si
+    coprirebbero a vicenda e un progetto guasto coprirebbe un messaggio vero.
+    Riparte a ogni passata oltre soglia e non solo all'attraversamento — per un
+    allarme che significa «questo progetto è fermo» è il comportamento voluto.
+    """
+    from jenny.runtime.notifier import notify_delivery
+    from jenny.webui.metadata import WEBUI_MESSAGE_SOURCE_METADATA_KEY
+
+    notify_delivery(
+        f"The gardener has failed {failures} passes in a row on '{name}' ({status}): "
+        f"its journal is not becoming pages. Run /gardener {name} to see the error.",
+        {
+            WEBUI_MESSAGE_SOURCE_METADATA_KEY: {
+                "kind": "cron",
+                "label": f"Gardener · {name}",
+            }
+        },
+    )
+
+
+GARDENER_JOB_ID = "gardener"
+
+
+def refresh_gardener_job(cron: "CronService", *, config: "Config | None" = None) -> str | None:
+    """Ri-arma il job periodico del giardiniere sulla config di adesso, senza riavvio.
+
+    Serve la controparte di ``_run_gardener``: la rilettura a ogni tick fa vedere
+    ``enabled``/``idle_min``/``min_hours_between_passes``, ma **non**
+    ``interval_min``. Quel numero non vive nel ``Config``: è diventato lo
+    ``schedule`` del ``CronJob`` scritto nello store del cron alla registrazione,
+    e da lì in poi nessuna lettura di ``config.json`` lo tocca.
+
+    E c'è il caso peggiore, quello che rende questa funzione necessaria e non
+    comoda: ``GatewayContainer.build`` registra il job **solo se acceso**. Su un
+    gateway partito con il giardiniere spento, ``/gardener on`` scriverebbe un
+    ``enabled=True`` che nessun job va a leggere — l'interruttore che riaccende
+    resterebbe l'unico a chiedere un riavvio.
+
+    ``register_system_job`` è idempotente e riparte da zero solo se la
+    pianificazione è cambiata (v. il suo commento), quindi ri-registrare a
+    intervallo identico non sposta la prossima scadenza.
+
+    Ritorna la descrizione della pianificazione armata, o ``None`` se il
+    giardiniere è spento: a spegnere non si deregistra niente — non esiste una
+    controparte di ``register_system_job`` — e il cancello è quello di dispatch in
+    ``CronDispatcher._run_gardener``.
+    """
+    from jenny.config.loader import load_config
+    from jenny.cron.types import CronJob, CronPayload
+
+    cfg = (config or load_config()).agents.defaults.gardener
+    if not cfg.enabled:
+        return None
+    cron.register_system_job(CronJob(
+        id=GARDENER_JOB_ID,
+        name="gardener",
+        schedule=cfg.build_schedule(),
+        payload=CronPayload(kind="system_event"),
+    ))
+    return cfg.describe_schedule()
+
+
 class CronDispatcher:
     """Instrada un ``CronJob`` al gestore giusto (dream / heartbeat / bound)."""
 
@@ -335,11 +410,39 @@ class CronDispatcher:
         job registrato da un avvio precedente resta nello store del cron anche
         dopo che la sezione è stata spenta. È la stessa ragione per cui
         ``_run_update_check`` esce prima della rete.
+
+        Quel che **non** è solo instradamento è la coda: una passata che non
+        registra niente va segnata come tentata, e la serie di insuccessi va
+        detta fuori dal log. V. ``_record_gardener_attempt``.
+
+        La mutua esclusione fra due passate sullo stesso progetto **non** è qui:
+        sta in ``run_gardener``, perché i chiamanti sono due e la guardia deve
+        essere una. Conseguenza da conoscere: ``pick_project`` non sa niente delle
+        passate in volo, quindi un tick che incontra un ``/gardener`` a mano paga
+        la selezione e poi si ritira con ``already_running``. Una lettura di file
+        piccoli, e in cambio nessuna copia della guardia in due posti.
         """
         from jenny.agent.gardener import run_gardener
         from jenny.agent.gardener_schedule import pick_project
+        from jenny.config.loader import load_config
 
-        cfg = self._config.agents.defaults.gardener
+        # I tre orologi si rileggono **da disco a ogni tick**, esattamente come i
+        # knob di Dream in ``_run_dream`` e per la stessa ragione: il ``Config``
+        # che questo dispatcher tiene in mano è quello catturato quando il
+        # container si è costruito, e nessuno lo aggiorna —
+        # ``container._on_settings_changed`` ricarica modello e provider, non
+        # questo.
+        #
+        # Senza la rilettura ``enabled=False`` non è raggiungibile: è il valore
+        # che l'utente cambia per **fermare** una cosa, quindi è precisamente
+        # quello che non può chiedere un riavvio del gateway. Vale lo stesso per
+        # ``idle_min`` e ``min_hours_between_passes``, che decidono se entrare in
+        # un progetto e sono l'altra metà del freno.
+        #
+        # Solo i knob: ``workspace_path`` e ``wiki.wikis_dir`` restano da
+        # ``self._config``, perché cambiarli è un trasloco del workspace e non una
+        # taratura (v. la nota gemella in ``_run_dream``).
+        cfg = load_config().agents.defaults.gardener
         if not cfg.enabled:
             logger.debug("Gardener: disabled")
             return None
@@ -356,11 +459,108 @@ class CronDispatcher:
             logger.debug("Gardener: no project ready")
             return None
 
-        outcome = await run_gardener(agent, pick.store)
-        logger.debug("Gardener cron job: {} on {}", outcome.status, pick.store.name)
-        return None
+        # Il delta lo porta il ``pick``: la selezione ha già aperto i diari per
+        # decidere, e prima di T2.5 ``run_gardener`` li riapriva da zero un istante
+        # dopo. Così il prompt e il commit parlano della **stessa** lettura, e le
+        # righe arrivate nel frattempo restano non lette invece di finire sotto un
+        # cursore che le dichiara digerite.
+        outcome = await run_gardener(agent, pick.store, delta=pick.delta)
+        return self._record_gardener_attempt(pick.store, outcome)
+
+    def _record_gardener_attempt(
+        self, store: "GardenerStore", outcome: "GardenerOutcome"
+    ) -> str | None:
+        """Timbra il tentativo, allarma se la serie si allunga, e **dice l'esito**.
+
+        Tre cose che prima non succedevano, e tutte e tre per lo stesso motivo:
+        una passata che non registra niente era invisibile.
+
+        1. **Il timbro.** Il cursore lo tengono fermo di proposito
+           ``partial_write`` e ``commit_failed`` — ci sono righe non promosse che
+           devono tornare — ma senza timbro «tenere il cursore» diventava «rifare
+           la passata ogni mezz'ora», perché la distanza si misurava sul cursore.
+           Il timbro lo mette ``run_gardener`` (v. il suo ``_stamped``), così la
+           strada a mano e questa contano la stessa cosa; qui si legge
+           ``outcome.failures`` e si decide se la serie vale una notifica.
+        2. **L'esito nel record del cron.** Ritornando sempre ``None`` il servizio
+           cron segnava ``last_status="ok"`` su una passata fallita, e lo stato del
+           job — che è dove si va a guardare — diceva che tutto funzionava.
+        3. **L'allarme.** Il log su Android non lo legge nessuno: è la stessa
+           ragione per cui Dream ha ``_alert_stuck``, ed è la stessa primitiva
+           (zero token, e no-op fuori da Android, quindi anche nei test).
+        """
+        from jenny.agent.gardener_state import (
+            COMMITTED_STATUSES,
+            GARDENER_FAILURES_ARE_ALARMING,
+        )
+
+        if outcome.status == "already_running":
+            # Una passata su quel progetto è già in volo — quasi sempre un
+            # ``/gardener`` lanciato a mano un attimo prima, perché il cancello del
+            # fermo tiene fuori due tick di fila. Non è un insuccesso e non si
+            # timbra (l'ha già fatto, o lo farà, la passata che sta lavorando), ma a
+            # INFO e non a DEBUG: è l'unico posto da cui si vede che il tick non ha
+            # lavorato *per un motivo*, e su Android i DEBUG non arrivano.
+            logger.info(
+                "Gardener cron job: a pass on {} is already in flight; this tick stands down",
+                store.name,
+            )
+            return None
+        if not outcome.ran:
+            # Nessuna chiamata al provider: niente da timbrare e niente da
+            # contare. ``skipped_no_delta`` è il caso *normale* di un tick, non un
+            # insuccesso, e timbrarlo sposterebbe la distanza in avanti per una
+            # passata che non è mai partita.
+            logger.debug("Gardener cron job: {} on {}", outcome.status, store.name)
+            return None
+        if outcome.status in COMMITTED_STATUSES:
+            # Il timbro del tentativo l'ha già messo ``GardenerState.advanced``,
+            # insieme al cursore e all'azzeramento della serie.
+            logger.info(
+                "Gardener cron job: {} on {} ({} lines, {} writes)",
+                outcome.status, store.name, outcome.lines, outcome.writes,
+            )
+            return None
+
+        # Il timbro e il conto li ha già messi ``run_gardener``, perché la strada
+        # a mano deve contare la stessa cosa di questa. Qui resta la sola parte
+        # che è davvero del cron: decidere che la serie è abbastanza lunga da
+        # valere una notifica.
+        failures = outcome.failures
+        logger.warning(
+            "Gardener cron job: {} on {} ({} consecutive passes with nothing recorded); "
+            "the next pass on it is not due for another min_hours_between_passes",
+            outcome.status, store.name, failures,
+        )
+        if failures >= GARDENER_FAILURES_ARE_ALARMING:
+            _alert_gardener_stuck(store.name, failures, outcome.status)
+        return f"gardener: {store.name} {outcome.status}"
 
     async def _run_dream(self, agent: "CronCapableAgent") -> str | None:
+        """Il job Dream, sotto la presa che tiene un solo ciclo per volta.
+
+        La presa è **la stessa** di ``/dream`` (``agent/dream_cycle.py``), e il caso
+        raggiungibile è proprio l'incrocio fra i due: i job cron sono serializzati
+        fra loro, un ``/dream`` battuto a mano non lo è con niente. Il rifiuto è un
+        log e un ritorno, non un'eccezione: un tick che non parte perché il lavoro è
+        già in corso non è un job fallito.
+        """
+        from jenny.agent.dream_cycle import claim_dream_cycle, release_dream_cycle
+
+        if not claim_dream_cycle():
+            logger.warning(
+                "Dream cron job skipped: a Dream cycle is already running"
+            )
+            return "dream: already running"
+        try:
+            return await self._dream_cycle(agent)
+        finally:
+            # Un livello fuori dal lavoro, come nel percorso del comando: nessun
+            # cammino dentro ``_dream_cycle`` può saltarlo, eccezioni e
+            # cancellazione comprese. La presa la si rende sempre.
+            release_dream_cycle()
+
+    async def _dream_cycle(self, agent: "CronCapableAgent") -> str | None:
         # Dream is an internal job — run directly, not through the agent loop.
         #
         # Il prologo e l'epilogo del ciclo stanno in ``jenny/agent/dream_cycle.py``,

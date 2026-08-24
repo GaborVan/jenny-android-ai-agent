@@ -10,6 +10,42 @@ Additional filesystem roots must be capability-specific. `extra_allowed_dirs` is
 
 **Rule**: Any new path-handling logic must go through the workspace path resolver or perform an equivalent containment check with explicit read/write capability semantics.
 
+## The project/diary boundary runs one way only
+
+A project's words cannot reach the personal diary. The gate is a **single funnel**:
+`MemoryStore.append_history` returns `0` for a `project:` session key, so both writers on that path
+(`Consolidator.archive`'s summary and the `raw_archive` dump when the LLM call fails) stop there
+rather than each carrying their own filter. A second key turn covers the read side —
+`read_recent_history_for_prompt` returns nothing at all for a project key, which also closes entries
+written by an older version or by hand.
+
+**The reverse direction has no structural boundary, and that is deliberate.** `SOUL.md` and
+`USER.md` are always composed from the installation root (`ContextBuilder._IDENTITY_FILES`) and
+`MEMORY.md` is injected for every session kind, so a project's turn — and every internal pass that
+runs on the installation root, the gardener's included — carries the user's personal profile.
+`MemoryRecallTool` likewise captures the install-root archive at construction and ignores workspace
+scope, so a project session can `recall` the personal archive. The declared line is **who you are
+travels; where else you work does not**: what is gated on the session is the *cross-project
+inventory* (`memory/WIKI.md`, Atlas's directory of every wiki, person and plant), not the identity.
+
+So "the diary is kept personal" must not be read as symmetric. Personal is not secret-from-a-project.
+
+Two narrowings on that gated half, both keyed on the session and both about actors whose write
+surface is a single project — the second one is why the first is not the whole rule:
+
+- a `project:` conversation gets no wiki directory and no `Recent History` block;
+- a **gardener** pass (`gardener:` key) gets neither either (T7.8). Its toolbox reads inside one
+  project and writes only in `wikis/<name>/wiki/`, and `agent/gardener.md` tells it to work only
+  from the journal, the map and the page inventory. Before this, the pass with no user to talk to
+  was shown the personal conversation's queue while the project conversation it maintains was shown
+  none of it.
+
+**Rule**: when adding an internal actor whose writable surface is one project, gate
+`get_wiki_memory_context` and `read_recent_history_for_prompt` on it — do not "fix" the identity
+path to match, and do not widen the gardener's read root (its `build_tools` comment, *"Lettura:
+dentro il progetto. Non l'intera installazione come Atlas"*, is a boundary somebody chose: T4.5
+records a proposed fix that would have silently undone it).
+
 ## SSRF Protection
 
 All outbound HTTP requests from agent tools must pass through `validate_url_target` (`security/network.py`). By default it blocks loopback, RFC1918 private addresses, CGNAT ranges, link-local ranges, and cloud metadata endpoints (including `169.254.169.254`).
@@ -66,4 +102,10 @@ The module allow/block lists are a **usability guardrail** (they stop the model 
 
 Deployments that do not trust the model must disable the tool via `tools.python_exec.enable = false` — that is the real answer to "no sandbox", not in-process hardening.
 
-**Rule**: Do not describe `python_exec` as a sandbox, and do not introduce shell execution or command wrappers. Any new path-handling or network path added to the execution surface must go through the workspace path policy and the SSRF policy, since those layers (not the interpreter) are the containment boundary.
+### The read-only turn is on the same side of that boundary
+
+The read-only switch (`WorkspaceScope.writable = False`) is enforced inside `python_exec` by `_refuse_write_if_readonly`, and its gate is thread-local: it fires only on a thread the guard entered. Thread hops made through `asyncio` — `asyncio.to_thread`, `loop.run_in_executor` — carry the whole turn across (`_carry_turn_across_thread`, T4.13: both the path boundary *and* the read-only ContextVar). A **raw thread** reached through an allowed module's internals (`asyncio.base_events.threading.Thread`, `asyncio.futures.concurrent.futures.ThreadPoolExecutor`) carries neither, so it bypasses the path boundary **and** the read-only turn alike — measured 23/08/2026, `restrict_to_workspace` on and off: a raw thread's `open(p, 'w')` writes during a read-only turn. This is an accepted limit (closing it means patching `threading.Thread` process-wide); see `TestKnownRemainingDoors` and the trust-boundary comment in `python_exec.py`.
+
+So read-only is an **instruction backed by tool refusals**, not a containment control, and the two halves fail together rather than one at a time. The prompt block the model reads (`templates/agent/readonly.md`) is written to state intent for exactly this reason: a prompt sentence that promised more than the code keeps would be worse than one that states the intent, because the reader is the model.
+
+**Rule**: Do not describe `python_exec` as a sandbox, and do not describe the read-only turn as one either. Do not introduce shell execution or command wrappers. Any new path-handling or network path added to the execution surface must go through the workspace path policy and the SSRF policy, since those layers (not the interpreter) are the containment boundary.

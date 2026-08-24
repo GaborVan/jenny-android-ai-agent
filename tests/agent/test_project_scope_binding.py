@@ -124,6 +124,34 @@ class TestQuandoQualcosaNonTorna:
 
         assert scope.project_path == workspace.resolve()
 
+    def test_un_progetto_e_restricted_anche_a_restrizione_spenta(self, workspace):
+        """La docstring di ``for_project`` dice «sempre ``restricted``, non c'è modo
+        di chiedere il contrario» — e fino a T4.12 **nessun test lo provava**.
+
+        Trovato per mutazione il 23/08: sostituire il letterale ``"restricted"``
+        con ``default_access_mode(self.default_restrict_to_workspace)`` passava la
+        suite intera, perché ogni test di questo albero costruisce il resolver con
+        ``restrict_to_workspace=True`` e i due valori coincidono. Il mutante è
+        vivo solo con la restrizione spenta, che è una configurazione che esiste
+        (``config.security.restrict_to_workspace = false``): là un progetto
+        avrebbe ereditato ``full``, cioè la scrittura di un progetto avrebbe
+        smesso di stare nella sua cartella.
+        """
+        resolver = WorkspaceScopeResolver(
+            default_workspace=workspace,
+            default_restrict_to_workspace=False,
+        )
+        # Controprova che la restrizione è davvero spenta: la conversazione
+        # personale, sullo stesso resolver, non è ristretta.
+        assert resolver.default().access_mode == "full"
+        assert resolver.default().restrict_to_workspace is False
+
+        scope = resolver.for_project(project_session_key("patreon"))
+
+        assert scope.project_path == (workspace / "wikis" / "patreon").resolve()
+        assert scope.access_mode == "restricted"
+        assert scope.restrict_to_workspace is True
+
 
 # ── dal `chat_id` alla chiave ────────────────────────────────────────────────
 
@@ -291,13 +319,24 @@ class TestIlCanaleLeggeIlChatIdDelFrame:
         [
             ("default", "default"),
             ("project:patreon", "project:patreon"),
-            # Un `chat_id` è anche il nome del file di thread su disco: una
-            # stringa arbitraria lascerebbe creare file a un client.
-            ("project:../fuori", "default"),
-            ("project:a/b", "default"),
+            # Forme che non nominano nessun progetto: la chat personale è la sola
+            # risposta sensata, perché *è* la conversazione e non c'è niente da
+            # rifiutare.
             ("qualsiasi-cosa", "default"),
             (None, "default"),
             (12, "default"),
+            # Nella forma `project:` ma con un nome impossibile: `None`, cioè
+            # «rifiuta il frame». Un `chat_id` è anche il nome del file di thread
+            # su disco, quindi non può passare; ma il client ha detto *quale*
+            # conversazione vuole, e dargliene un'altra in silenzio era il difetto.
+            ("project:../fuori", None),
+            ("project:a/b", None),
+            ("project:Ricerca ETF", None),
+            ("project:università", None),
+            ("project:progetto (2026)", None),
+            ("project:.nascosto", None),
+            ("project:", None),
+            (f"project:{'x' * 65}", None),
         ],
     )
     def test_solo_un_progetto_valido_cambia_conversazione(self, frame_chat_id, expected):

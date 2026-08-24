@@ -236,3 +236,230 @@ def test_la_voce_di_log_nomina_il_file_che_ha_creato_davvero(
 
     log = (wiki_col_nome_vecchio / "log" / _today_log_name()).read_text(encoding="utf-8")
     assert "AGENTS.md" not in log
+
+
+# ── T6.2: il top-up non impone il formato dell'altro scaffolder ──────────────
+#
+# `SKILL.md` consiglia di rilanciare questo script su una wiki che esiste, e su
+# un progetto-taccuino il rilancio aggiungeva `wiki/concepts|entities|summaries`:
+# la tassonomia di un formato che quel progetto non usa. Finché il lint decideva
+# il modo dalle cartelle, quelle tre directory vuote gli spegnevano il controllo
+# su `state:` — un invariante 🔴 che sparisce senza una riga di output.
+
+
+@pytest.fixture
+def taccuino(tmp_path: Path) -> Path:
+    """Un progetto come lo crea il picker della UI: pagine piatte, un diario."""
+    root = tmp_path / "wikis" / "orto"
+    (root / "wiki").mkdir(parents=True)
+    (root / "raw" / "journal").mkdir(parents=True)
+    (root / "log").mkdir(parents=True)
+    (root / "wiki" / "index.md").write_text(
+        "# Orto\n\n## Pages\n\n- [[semine]]\n", encoding="utf-8"
+    )
+    (root / "wiki" / "semine.md").write_text(
+        "---\nstate: open\n---\n\n# Semine\n\nVedi [[index]].\n", encoding="utf-8"
+    )
+    return root
+
+
+def test_il_topup_su_un_taccuino_non_aggiunge_la_tassonomia(scaffold, taccuino, capsys):
+    created = scaffold.scaffold(str(taccuino), "Orto")
+    out = capsys.readouterr().out
+
+    for rel in ("wiki/concepts", "wiki/entities", "wiki/summaries", "raw/articles",
+                "raw/papers", "raw/refs", "outputs/queries"):
+        assert not (taccuino / rel).exists(), rel
+    # E il resto del top-up ha comunque lavorato, nella forma del progetto.
+    assert (taccuino / "raw" / "research").is_dir()
+    assert (taccuino / "audit" / "resolved").is_dir()
+    assert "raw/research/" in created and "audit/" in created
+    assert "already a notebook project" in out
+
+
+def test_il_topup_su_un_taccuino_non_cambia_il_modo_del_lint(scaffold, taccuino, capsys):
+    """(d) del passo: il modo prima e dopo è lo stesso. La regola è quella del
+    lint e arriva da lui — lo scaffolder e il controllore non devono poter
+    dissentire sul formato, perché è il dissenso che ha prodotto il difetto.
+
+    Ora è protetto due volte, e le due difese sono indipendenti: lo scaffolder non
+    crea più la tassonomia, e anche se la creasse il lint decide dalle pagine.
+    Serve riportare **entrambi** i difetti perché questo test cada — verificato
+    per mutazione."""
+    lint_wiki = scaffold.lint_wiki
+    assert lint_wiki.is_research_layout(taccuino / "wiki") is False
+
+    scaffold.scaffold(str(taccuino), "Orto")
+    capsys.readouterr()
+
+    assert lint_wiki.is_research_layout(taccuino / "wiki") is False
+
+
+def test_un_taccuino_senza_mappa_prende_la_mappa_piatta(scaffold, taccuino, capsys):
+    """Un albero rimasto a metà è proprio quel che si viene a riparare, e la
+    mappa è il primo file che l'agente legge: tre sezioni di tassonomia lì sono
+    tre inviti a un formato che questo progetto non usa."""
+    (taccuino / "wiki" / "index.md").unlink()
+
+    scaffold.scaffold(str(taccuino), "Orto")
+    capsys.readouterr()
+
+    mappa = (taccuino / "wiki" / "index.md").read_text(encoding="utf-8")
+    assert "## Pages" in mappa and "raw/journal/" in mappa
+    assert "Concepts" not in mappa and "Entities" not in mappa
+
+
+def test_una_biblioteca_con_la_tassonomia_vuota_prende_l_albero_intero(
+    scaffold, drifted_wiki, capsys
+):
+    """Il verso in cui sbagliare costa di più. `patreon-creator` misurata ha le
+    cartelle della ricerca ancora vuote e le pagine dove capita: leggerla come un
+    taccuino le negherebbe `outputs/queries` e la lascerebbe rotta. Il diario
+    assente è il segno che quella cartella non è un progetto — sul telefono il
+    diario ce l'hanno tutte, quindi qui conta la sua **assenza**."""
+    assert not (drifted_wiki / "raw" / "journal").exists()
+
+    created = scaffold.scaffold(str(drifted_wiki), "Patreon Creator")
+    out = capsys.readouterr().out
+
+    assert (drifted_wiki / "wiki" / "summaries").is_dir()
+    assert (drifted_wiki / "outputs" / "queries").is_dir()
+    assert "wiki/summaries/" in created
+    assert "already a notebook project" not in out
+
+
+def test_una_wiki_nuova_non_e_un_taccuino(scaffold, tmp_path: Path, capsys):
+    """La cartella che nasce adesso non ha pagine, e senza pagine non c'è niente
+    da leggere: prende l'albero di ricerca intero, che è il motivo per cui questo
+    script viene chiamato."""
+    root = tmp_path / "wikis" / "nuova"
+
+    scaffold.scaffold(str(root), "Nuova")
+    capsys.readouterr()
+
+    assert (root / "wiki" / "concepts").is_dir()
+    assert (root / "outputs" / "queries").is_dir()
+
+
+# ── T6.8: lo scaffolder dice la verità, e c'e' una sola forma ─────────────────
+#
+# **H15.** `_write` chiedeva `os.path.exists`, che dice sì anche a una *cartella*
+# chiamata `AGENTS.md` o `wiki/index.md`: il report diceva "already there — left
+# as it is" e il run si dichiarava riuscito su una wiki dove il lint poi muore
+# con `IsADirectoryError`.
+#
+# **H16.** `scaffold.py` non creava `raw/journal/`, mentre lo scaffolder del
+# package sì e SKILL.md dà il diario per universale: due scaffolder, due forme.
+# Ora il comune è definito una volta (`project_scaffold.PROJECT_DIRS`, ricopiato
+# in `_COMMON_DIRS`) e il confronto sta qui, così la prossima divergenza è un
+# test che cade.
+
+
+def test_una_cartella_dove_va_un_file_non_e_un_successo(scaffold, tmp_path: Path, capsys):
+    root = tmp_path / "wikis" / "storta"
+    (root / "wiki").mkdir(parents=True)
+    (root / "AGENTS.md").mkdir()
+
+    scaffold.scaffold(str(root), "Storta")
+    out = capsys.readouterr().out
+
+    assert "Wrong kind of thing in the way" in out
+    assert "AGENTS.md — a directory where a file belongs" in out
+    assert "still incomplete" in out
+    # E soprattutto non la frase che diceva che va tutto bene.
+    assert "AGENTS.md already there — left as it is" not in out
+    assert "Nothing to add" not in out
+    # La cartella non si tocca: spostare roba dell'utente non e' compito suo.
+    assert (root / "AGENTS.md").is_dir()
+
+
+def test_una_cartella_al_posto_della_mappa_e_una_collisione(scaffold, tmp_path: Path, capsys):
+    root = tmp_path / "wikis" / "storta"
+    (root / "wiki" / "index.md").mkdir(parents=True)
+
+    scaffold.scaffold(str(root), "Storta")
+    out = capsys.readouterr().out
+
+    assert "wiki/index.md — a directory where a file belongs" in out
+    assert "wiki/index.md already there — left as it is" not in out
+
+
+def test_un_file_dove_va_una_cartella_non_fa_esplodere_il_run(
+    scaffold, tmp_path: Path, capsys
+):
+    """`makedirs` moriva con un `FileExistsError` a metà scaffold, lasciando la
+    wiki peggio di come l'ha trovata e senza dire perché."""
+    root = tmp_path / "wikis" / "storta"
+    root.mkdir(parents=True)
+    (root / "log").write_text("non sono una cartella\n", encoding="utf-8")
+
+    scaffold.scaffold(str(root), "Storta")
+    out = capsys.readouterr().out
+
+    assert "log/ — a file where a directory belongs" in out
+    assert "still incomplete" in out
+    assert (root / "wiki").is_dir(), "il resto dell'albero deve essere stato creato"
+
+
+def test_write_distingue_un_file_da_una_cartella(scaffold, tmp_path: Path):
+    """Pin diretto sul confine, che sta in un punto solo."""
+    (tmp_path / "cartella.md").mkdir()
+    collisions: list[str] = []
+
+    assert scaffold._write(str(tmp_path), "cartella.md", "x", collisions) is False
+    assert collisions == ["cartella.md"]
+    assert (tmp_path / "cartella.md").is_dir()
+
+
+def test_anche_l_albero_di_ricerca_ha_il_diario(scaffold, tmp_path: Path, capsys):
+    """Il diario è universale: lo controlla il lint in ogni layout, ci scrive la
+    cattura in ogni layout, e SKILL.md lo dice. Una wiki di ricerca nata da qui
+    non aveva il posto dove quella scrittura va."""
+    root = tmp_path / "wikis" / "nuova"
+
+    created = scaffold.scaffold(str(root), "Nuova")
+    capsys.readouterr()
+
+    assert (root / "raw" / "journal").is_dir()
+    assert "raw/journal/" in created
+
+
+def test_i_due_scaffolder_non_possono_divergere(scaffold):
+    """La definizione unica di com'e' fatto un progetto vive nel package —
+    ``jenny/webui/project_scaffold.py::PROJECT_DIRS`` — e questa e' la copia che
+    il checkout della skill non puo' importare. Il confronto sta qui perche' due
+    liste che devono restare uguali vivono in due file."""
+    from jenny.webui.project_scaffold import PROJECT_DIRS
+
+    assert set(scaffold._NOTEBOOK_DIRS) == set(PROJECT_DIRS)
+    # E il comune e' comune: l'albero di ricerca lo contiene tutto.
+    assert set(scaffold._COMMON_DIRS) <= set(scaffold._RESEARCH_DIRS)
+    assert set(scaffold._COMMON_DIRS) <= set(PROJECT_DIRS)
+
+
+def test_un_secondo_topup_su_una_biblioteca_non_la_legge_come_taccuino(
+    scaffold, drifted_wiki, capsys
+):
+    """Il corollario di H16, e il difetto che avrebbe reintrodotto: da quando
+    anche l'albero di ricerca crea `raw/journal/`, l'assenza del diario non
+    distingue più niente al secondo giro. La cartella si dichiara con le sue
+    cartelle di ricerca, che vincono."""
+    scaffold.scaffold(str(drifted_wiki), "Patreon Creator")
+    capsys.readouterr()
+
+    scaffold.scaffold(str(drifted_wiki), "Patreon Creator")
+    out = capsys.readouterr().out
+
+    assert "already a notebook project" not in out
+    assert scaffold._is_existing_notebook(str(drifted_wiki)) is False
+
+
+def test_un_taccuino_resta_un_taccuino_anche_col_diario(scaffold, taccuino, capsys):
+    """Il verso opposto del test sopra: la nuova condizione non deve trasformare
+    un progetto in una biblioteca."""
+    scaffold.scaffold(str(taccuino), "Orto")
+    capsys.readouterr()
+
+    assert scaffold._is_existing_notebook(str(taccuino)) is True
+    scaffold.scaffold(str(taccuino), "Orto")
+    assert "already a notebook project" in capsys.readouterr().out

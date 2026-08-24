@@ -8,7 +8,7 @@ import functools
 import time
 from contextlib import nullcontext
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, NamedTuple
 
 from loguru import logger
 
@@ -80,10 +80,15 @@ from jenny.session.goal_state import (
 from jenny.session.keys import (
     PROJECT_SESSION_PREFIX,
     is_project_session_key,
+    is_valid_project_name,
     session_key_for_channel,
 )
 from jenny.session.manager import Session, SessionManager
-from jenny.session.project_rename import PROJECT_WIKI_ID_KEY, follow_renamed_project
+from jenny.session.project_rename import (
+    PROJECT_WIKI_ID_KEY,
+    follow_renamed_project,
+    pending_project_renames,
+)
 from jenny.session.turn_visibility import (
     TurnVisibility,
     is_silent_turn,
@@ -112,6 +117,39 @@ def _load_current_tools_config() -> "ToolsConfig":
     from jenny.config.loader import load_config
 
     return load_config().tools
+
+
+class ProjectFollowOutcome(NamedTuple):
+    """L'esito dell'inseguimento di una cartella di progetto rinominata.
+
+    ``moved_to`` valorizzato = spostato, e allora gli altri due sono ``None``.
+    Altrimenti ``why_not`` dice il perche' in una forma da mostrare, e
+    ``unopenable`` e' valorizzato **solo** nel caso in cui la cartella e' stata
+    ritrovata ma il suo nome nuovo non puo' essere una conversazione.
+
+    Quel caso ha un campo suo e non solo una frase perche' e' il solo rifiuto in
+    cui si sa **esattamente** dove e' finita la cartella e cosa fare: infilarlo
+    nel «I could not find where it went» degli altri quattro direbbe il falso
+    proprio nella riga da cui l'utente capisce se il suo storico c'e' ancora.
+    """
+
+    moved_to: str | None = None
+    why_not: str | None = None
+    unopenable: str | None = None
+
+
+def _shown_folder_name(name: str) -> str:
+    """Un nome di cartella letto dal disco, reso mostrabile in una frase.
+
+    Per definizione **non** passa ``is_valid_project_name`` — e' il nome che
+    questo rifiuto esiste per raccontare — quindi puo' contenere qualunque cosa
+    che un filesystem accetti: una riga nuova che spezza il paragrafo, un
+    backtick che chiude il codice inline a meta', duecentocinquanta caratteri.
+    Su una riga e con un tetto, come il ``chat_id`` che
+    ``WebSocketChannel._refuse_invalid_project`` tronca per la stessa ragione.
+    """
+    flat = " ".join(name.split()).replace("`", "'")
+    return flat if len(flat) <= 80 else flat[:79] + "…"
 
 
 def _new_turn_id(session_key: str) -> str:
@@ -375,12 +413,14 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             max_completion_tokens=provider.generation.max_tokens,
             consolidation_ratio=consolidation_ratio,
             session_locks=self._session_locks,
+            projects_subdir=projects_subdir,
         )
         self.auto_compact = AutoCompact(
             sessions=self.sessions,
             consolidator=self.consolidator,
             session_ttl_minutes=session_ttl_minutes,
             compact_projects=compact_projects_when_idle,
+            projects_subdir=projects_subdir,
         )
         self.model_presets: dict[str, Any] = dict(model_presets_config) if model_presets_config else {}
         self._active_preset: str | None = None
@@ -706,30 +746,101 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
         if root is not None and root.is_dir():
             return False
         name = key[len(PROJECT_SESSION_PREFIX):]
+        if key in self._pending_queues:
+            # Un turno di questa chat e' **in volo**, e la riparazione gli
+            # sposterebbe i file sotto le mani: quando quel turno finisce, il suo
+            # ``sessions.save()`` ricrea il file col nome vecchio — la storia di
+            # prima del rinomino piu' lo scambio appena concluso — e quello
+            # scambio finisce **fuori** dal progetto rinominato. Cioe' la
+            # riparazione, girando adesso, perderebbe esattamente quel che
+            # esiste per non perdere.
+            #
+            # **Rinviata, non messa in coda.** Non c'e' un lavoro da ricordarsi:
+            # il rinomino l'ha fatto l'utente fuori da Jenny, quindi non e' un
+            # evento che passa da qui una volta sola, e' uno *stato* che si
+            # riscontra guardando — il prossimo messaggio di questa chat lo
+            # riscontra di nuovo, e il prossimo avvio lo riscontra dal giornale.
+            # Una coda aggiungerebbe un compito differito da annullare se la
+            # cartella torna al suo nome, e da rieseguire se il processo muore
+            # prima di svuotarla: due strade in piu' per lo stesso esito.
+            #
+            # Il turno non parte comunque (``True``): la cartella manca, quindi
+            # iniettare questo messaggio nel turno in volo vorrebbe dire darlo a
+            # un turno che non puo' scrivere da nessuna parte.
+            logger.info(
+                "Riparazione del rinomino rinviata: {} ha un turno in volo", key
+            )
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=(
+                    f"The folder for project `{name}` is not there any more, and I am "
+                    "still finishing the previous message in this chat, so I have not "
+                    "read this one.\n\nI will look for where the folder went as soon as "
+                    "that is done — send this again then. If you renamed the folder, "
+                    f"renaming it back to `{name}` also fixes it. Or pick another "
+                    "project, or the personal chat, from the chip above the message box."
+                ),
+                metadata={**dict(msg.metadata or {}), "render_as": "text"},
+            ))
+            return True
         # **Prima di dire di no, si prova a ritrovarla** (passo 7): se la
         # sessione si e' annotata l'id della sua wiki e quella wiki esiste sotto
         # un altro nome, le tracce della chat prendono il nome nuovo. Il rifiuto
         # del passo 6 era il solo punto che scopre che una cartella legata e'
         # sparita, ed e' quindi anche il posto giusto per la riparazione.
-        moved_to, why_not = self._follow_renamed_project(key)
-        if moved_to is not None:
+        outcome = self._follow_renamed_project(key)
+        if outcome.moved_to is not None:
             await self.bus.publish_outbound(OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
                 content=(
-                    f"The folder `{name}` was renamed to `{moved_to}`, so I moved this "
-                    "conversation's history there — nothing was lost, and I have not read "
-                    f"your message.\n\nOpen `{moved_to}` from the chip above the message "
-                    "box and it is all where you left it."
+                    f"The folder `{name}` was renamed to `{outcome.moved_to}`, so I moved "
+                    "this conversation's history there — nothing was lost, and I have not "
+                    f"read your message.\n\nOpen `{outcome.moved_to}` from the chip above "
+                    "the message box and it is all where you left it."
                 ),
                 metadata={**dict(msg.metadata or {}), "render_as": "text"},
             ))
             return True
-        detail = f" ({why_not})" if why_not else ""
-        await self.bus.publish_outbound(OutboundMessage(
-            channel=msg.channel,
-            chat_id=msg.chat_id,
-            content=(
+        detail = f" ({outcome.why_not})" if outcome.why_not else ""
+        # «Nothing is lost» va detto solo quando e' vero. Dei motivi che
+        # ``follow_renamed_project`` puo' dare, quattro descrivono un rifiuto a
+        # cose ferme — non c'era niente sotto il nome vecchio, la destinazione ha
+        # gia' una conversazione sua, il giornale non si scrive, lo spostamento
+        # e' tornato indietro del tutto — e per quelli la frase e' esatta, come
+        # per il nome impossibile che il ramo qui sotto racconta a parte. Il
+        # quinto, «stopped halfway», dice il contrario: una parte delle tracce e'
+        # sotto il nome nuovo. Prometterci sopra «nothing is lost» sarebbe la
+        # bugia piu' costosa del passo 7, perche' arriva proprio nel momento in
+        # cui l'utente decide se fidarsi o copiarsi la chat a mano.
+        if outcome.unopenable is not None:
+            # Il solo rifiuto che sa dove e' finita la cartella. Non passa da
+            # ``detail``: la si nomina, e si dice la regola invece di rimandare
+            # l'utente al chip, che quella cartella non la elenca (T4.1).
+            content = (
+                f"The folder for project `{name}` is not there any more, so this "
+                "conversation has nothing to work on and I have not read your message.\n\n"
+                f"I found where it went — it is now called `{outcome.unopenable}` — but "
+                "that cannot be the name of a conversation, so I left this chat's history "
+                f"under `{name}` rather than moving it somewhere nothing could open it. "
+                "Nothing is lost.\n\nRename the folder using letters, numbers, dot, dash "
+                "and underscore only, no spaces and no accents, and this chat follows it "
+                f"— renaming it back to `{name}` works too. Then pick the project from the "
+                "chip above the message box."
+            )
+        elif self._project_history_is_split(key):
+            content = (
+                f"The folder for project `{name}` is not there any more, so this "
+                "conversation has nothing to work on and I have not read your message.\n\n"
+                f"I could not move this conversation to where the folder went{detail}. So "
+                "part of its history is under a new name and part is still under the old "
+                "one — nothing has been deleted, but the chat is not all in one place "
+                "until those two halves are joined. Restart me and that happens on the "
+                "way up; then open the project from the chip above the message box."
+            )
+        else:
+            content = (
                 f"The folder for project `{name}` is not there any more, so this "
                 "conversation has nothing to work on and I have not read your message.\n\n"
                 f"I could not find where it went{detail}. Nothing is lost: the chat is still "
@@ -737,10 +848,29 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
                 f"renaming it back to `{name}` is the fix — a project's address is its folder "
                 "name. Otherwise pick another project, or the personal chat, from the chip "
                 "above the message box."
-            ),
+            )
+        await self.bus.publish_outbound(OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=content,
             metadata={**dict(msg.metadata or {}), "render_as": "text"},
         ))
         return True
+
+    def _project_history_is_split(self, key: str) -> bool:
+        """La storia di *key* e' per meta' sotto un altro nome?
+
+        Si guarda il **giornale**, non il testo del motivo: il motivo e' una
+        frase da mostrare, e legarci una decisione vorrebbe dire che riscriverla
+        cambia in silenzio quel che l'utente si sente promettere. Il giornale
+        invece *e'* il fatto — una voce ancora aperta con questo nome a sinistra
+        vuol dire tracce in due posti, e vale anche per una voce lasciata da un
+        tentativo precedente, che descrive lo stesso stato.
+        """
+        try:
+            return any(old == key for old, _ in pending_project_renames(self.workspace))
+        except Exception:  # pragma: no cover - il giornale illeggibile lo logga da se'
+            return False
 
     def _remember_project_id(self, key: str) -> None:
         """Annota nella sessione l'id della wiki a cui appartiene.
@@ -779,31 +909,54 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
                 key,
             )
 
-    def _follow_renamed_project(self, key: str) -> tuple[str | None, str | None]:
+    def _follow_renamed_project(self, key: str) -> ProjectFollowOutcome:
         """Cerca la wiki della sessione *key* col suo id e le porta dietro la chat.
 
-        Ritorna ``(nome nuovo, motivo del no)``: uno dei due e' sempre ``None``.
+        Vedi :class:`ProjectFollowOutcome` per la forma dell'esito.
+
+        **Un nome che non puo' essere una conversazione ferma l'inseguimento**, e
+        lo ferma *prima* di ``invalidate`` e prima del giornale. Il rinomino lo fa
+        l'utente fuori da Jenny, quindi il nome nuovo non e' passato da nessun
+        controllo: portare la chat su ``project:Ricerca ETF`` la consegnerebbe a
+        una chiave che il canale rifiuta (``session_key_for_channel``) e che il
+        chip non elenca — cioe' uno spostamento riuscito verso il nulla, mentre
+        sotto il nome vecchio la chat funziona ancora. Il rifiuto e' anche il modo
+        di recuperare: si dice quale nome e' e quali caratteri servono.
         """
         try:
             session = self.sessions.get_or_create(key)
             recorded = session.metadata.get(PROJECT_WIKI_ID_KEY)
             if not recorded:
-                return None, "this conversation never recorded which wiki it belongs to"
+                return ProjectFollowOutcome(
+                    why_not="this conversation never recorded which wiki it belongs to"
+                )
             wikis_dir = self.workspace_scopes.for_project(key).project_path.parent
             target = find_wiki_by_id(wikis_dir, str(recorded))
             if target is None:
-                return None, "no folder here claims that wiki's id"
+                return ProjectFollowOutcome(why_not="no folder here claims that wiki's id")
+            if not is_valid_project_name(target.name):
+                shown = _shown_folder_name(target.name)
+                logger.warning(
+                    "Rinomino non inseguito: {} e' ora {!r}, che non puo' essere il nome "
+                    "di un progetto; le tracce restano sotto il nome vecchio",
+                    key, shown,
+                )
+                return ProjectFollowOutcome(
+                    why_not=f"the folder is now called `{shown}`, which cannot be the "
+                            "name of a conversation",
+                    unopenable=shown,
+                )
             new_key = f"{PROJECT_SESSION_PREFIX}{target.name}"
             # La sessione e' in cache e i suoi file stanno per cambiare nome:
             # tenerla vorrebbe dire riscriverla al vecchio nome al primo salvataggio.
             self.sessions.invalidate(key)
             moved, why_not = follow_renamed_project(self.workspace, key, new_key)
             if not moved:
-                return None, why_not
-            return target.name, None
+                return ProjectFollowOutcome(why_not=why_not)
+            return ProjectFollowOutcome(moved_to=target.name)
         except Exception:
             logger.opt(exception=True).error("Inseguimento del rinomino fallito per {}", key)
-            return None, "looking for it failed"
+            return ProjectFollowOutcome(why_not="looking for it failed")
 
     async def _expand_project_init(
         self, msg: InboundMessage, key: str

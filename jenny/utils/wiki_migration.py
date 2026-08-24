@@ -45,9 +45,9 @@ from jenny.utils.wiki_paths import (
     WIKI_ID_KEY,
     WIKI_SCHEMA_FILENAME,
     discover_wikis,
-    is_valid_wiki_id,
     new_wiki_id,
     strip_frontmatter,
+    wiki_id,
     wiki_journal_dir,
     wiki_schema_file,
 )
@@ -105,11 +105,31 @@ def _ensure_id(root: Path) -> str | None:
         logger.info("wiki {}: creato {} minimo con id", root.name, _AGENTS)
         return wiki_id_value
 
-    text = schema.read_text(encoding="utf-8")
-    frontmatter, _, _ = strip_frontmatter(text)
-    if is_valid_wiki_id((frontmatter or {}).get(WIKI_ID_KEY)):
+    # «Ce l'ha già, un id?» si chiede **al lettore che lo legge**. ``wiki_id`` usa
+    # una regex di proposito: una riga di scope con un due punti dentro rende il
+    # blocco non parsabile e ``yaml.safe_load`` non perde quella riga, perde
+    # **tutte** le altre (difetto visto sul telefono il 22/08 — v. il docstring
+    # di ``wiki_paths.wiki_id``). Chiederlo a YAML qui voleva dire non vedere
+    # l'id che c'era e scriverne uno nuovo a *ogni* avvio: l'identità della wiki
+    # cambiava sotto i piedi e la sua chat non era più ritrovabile, mentre il log
+    # diceva ogni volta «1 identificate». Ora scrittore e lettore concordano per
+    # costruzione.
+    if wiki_id(root) is not None:
         return None
 
+    text = schema.read_text(encoding="utf-8")
+    # Di ``strip_frontmatter`` qui serve **solo** la domanda strutturale «c'è un
+    # blocco?», che e' una regex e sopravvive allo YAML rotto: quando il parse
+    # fallisce ritorna ``{}``, non ``None``.
+    frontmatter, _, _ = strip_frontmatter(text)
+
+    # Un id scritto a mano e non conforme (``id: tesi-2024``) **non si tocca**:
+    # la riga resta dov'e' e quella nuova le va sopra. Riscriverla in loco
+    # cancellerebbe testo dell'utente, che e' l'unica cosa che questa migrazione
+    # promette di non fare mai; lasciar perdere la wiki cancellerebbe invece la
+    # sola cosa per cui l'id esiste — ritrovare la chat dopo un rinomino — e in
+    # silenzio, per sempre. Il lettore prende il **primo** match, cioe' il
+    # nostro, quindi l'esito e' stabile dal secondo avvio in poi.
     wiki_id_value = new_wiki_id()
     line = f"{WIKI_ID_KEY}: {wiki_id_value}\n"
     if frontmatter is None:
@@ -172,7 +192,11 @@ def migrate_wikis(wikis_dir: Path) -> dict[str, list[str]]:
             logger.opt(exception=True).error("Migrazione della wiki {} fallita", root.name)
     if renamed or identified or journals:
         logger.info(
-            "Migrazione wiki: {} rinominate ({}), {} identificate ({}), {} col diario nuovo ({})",
+            # «identificate» diceva di piu' di quel che era vero: fino al 22/08 il
+            # conto includeva le wiki che l'id ce l'avevano gia' e a cui la
+            # migrazione ne stava scrivendo un altro. Il conto e' delle wiki a cui
+            # e' stato **scritto** un id, e la riga adesso lo dice.
+            "Migrazione wiki: {} rinominate ({}), {} con id scritto ({}), {} col diario nuovo ({})",
             len(renamed), ", ".join(renamed) or "-",
             len(identified), ", ".join(identified) or "-",
             len(journals), ", ".join(journals) or "-",

@@ -169,11 +169,16 @@ class DownloadFileTool(Tool):
     def _downloads_root(self) -> Path:
         """La radice sotto cui sta ``downloads/``: quella del turno.
 
+        Chiede a ``WorkspaceScope.write_root()`` invece di leggere
+        ``project_path``: dal passo T4.4 «dove posso scrivere» ha una sola
+        risposta, e un tool con destinazione fissa non e' un'eccezione — e' solo
+        uno che non ha un percorso da validare contro quella radice.
+
         Senza uno scope legato — sessioni interne, test — resta il workspace del
         costruttore, che è anche la radice del turno in quel caso.
         """
         scope = current_workspace_scope()
-        return scope.project_path if scope is not None else self._workspace
+        return scope.write_root() if scope is not None else self._workspace
 
     async def execute(self, url: str, filename: str | None = None, **kwargs: Any) -> str:
         # Prima della rete, non dopo: scaricare 20 MB per poi rifiutare la

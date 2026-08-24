@@ -179,6 +179,13 @@ export class ChatController {
     this.isLoadingHistory = false;
     this.hasMoreHistory = true;
     this._initialHistoryLoaded = false;
+    /* Un caricamento iniziale è *in volo*, che non è la stessa cosa di
+       `_initialHistoryLoaded` (quello è un latch: resta alzato dopo la fine, e
+       torna giù su un fallimento). Serve al resync della riconnessione, che
+       altrimenti butta la vista mentre una fetch sta per riempirla e ne fa
+       partire una seconda: due risposte, un solo schermo, il thread scritto due
+       volte. */
+    this._loadingInitialHistory = false;
 
     this.imageHandler = new ImageHandler();
     this.imageHandler.onChange = (images) => this._renderAttachPreview(images);
@@ -596,7 +603,15 @@ export class ChatController {
 
   /* Cambio di conversazione: personale <-> progetto, o fra due progetti.
      `key` null vuol dire la personale — la chiave la conosce il session manager,
-     non il chip. */
+     non il chip.
+
+     Due cambi ravvicinati si sovrappongono e devono: il secondo non aspetta che
+     il primo abbia finito di caricare, altrimenti un tap resterebbe senza
+     risposta per tutta la durata di una fetch. Chi perde è **il primo**, sempre,
+     e non chi risponde per ultimo: se lo dimenticasse, il chip resterebbe sul
+     progetto sbagliato mentre i messaggi vanno nell'altro. Lo garantisce la
+     generazione che `switchTo` fa salire qui sotto, letta da
+     `loadInitialHistory` prima delle sue attese. */
   async _switchConversation(key) {
     if (!sessionManager.switchTo(key || sessionManager.personalKey)) return;
     this.invalidateHistory();
@@ -626,6 +641,17 @@ export class ChatController {
      activate() — usato quando la sessione cambia fuori da questa vista
      (es. uno scambio nella minichat di Jenny). */
   invalidateHistory() {
+    /* Le bolle in composizione muoiono con il DOM che le conteneva: i
+       riferimenti vanno azzerati **qui**, o restano a puntare nodi staccati e
+       il turno seguente ci scrive dentro senza che si veda niente.
+
+       Prima lo rimediava il caso: il `turn_end` del turno in volo arrivava
+       comunque e azzerava tutto. Da quando i frame di un'altra conversazione
+       vengono scartati non arriva più — cambiare chat a metà risposta è
+       esattamente il caso in cui questo accade — quindi la chiusura del turno
+       la fa chi butta la vista. */
+    this._resetStreamState();
+    this._clearGoalBanner();
     this.chatArea.innerHTML = '';
     this.identityEl = null;
     this._ensureIdentity();
@@ -657,9 +683,27 @@ export class ChatController {
      messaggio in coda che non sta nemmeno guardando. Incollati in fondo, invece,
      l'operazione è invisibile — ed è il caso normale: telefono in tasca, schermo
      che si riaccende. Il gate è `_autoScroll`, lo stesso che decide il
-     riallineamento al ritorno in foreground. */
+     riallineamento al ritorno in foreground.
+
+     **Non si esce più quando il thread non è mai stato caricato.** Era la
+     guardia `!_initialHistoryLoaded`, scritta pensando al primo collegamento
+     («ci pensa loadInitialHistory»), ma quel latch torna giù anche su un
+     *fallimento*: e il caricamento che fallisce è precisamente quello che parte
+     mentre il gateway non ha ancora finito di alzarsi, cioè il caso normale su
+     un telefono. Il risultato era una chat vuota che non si riprendeva più —
+     nemmeno alla riconnessione, l'unico momento in cui riprovarla ha senso —
+     finché non si usciva dalla vista e si rientrava. La riconnessione è il
+     segnale che il gateway c'è: è il momento giusto per il primo tentativo
+     tanto quanto per il secondo.
+
+     Al posto del latch c'è la domanda che quella guardia voleva fare davvero:
+     *c'è una fetch in volo?* (`_loadingInitialHistory`). Con il latch, un
+     `chat:open` arrivato mentre il caricamento iniziale era in attesa passava —
+     il latch è alzato dal primo istante — e faceva partire una seconda fetch
+     sulla stessa chiave: nessuna delle due è scaduta (la generazione non è
+     cambiata), quindi entrambe disegnavano e il thread compariva due volte. */
   async _resyncThreadAfterReconnect() {
-    if (!this._initialHistoryLoaded) return;
+    if (this._loadingInitialHistory) return;
     if (this._resyncingThread || this.isLoadingHistory) return;
     if (!this._autoScroll) return;
     if (!sessionManager.currentKey) return;
@@ -672,37 +716,92 @@ export class ChatController {
     }
   }
 
+  /* Il caricamento appartiene a una conversazione, e in mezzo ci sono due
+     attese: `api.bootstrap()` e la fetch del thread. Se durante una delle due
+     la conversazione aperta cambia, tutto quel che segue è di un'altra chat —
+     le sue bolle, il nome sul chip, il suo interruttore di sola lettura, il suo
+     cursore di paginazione — e va abbandonato in silenzio: a disegnare ci pensa
+     il caricamento nuovo, che è già partito. La chiave si prende una volta,
+     all'inizio: rileggerla dopo un'attesa vorrebbe dire chiedere il thread di
+     una conversazione e mostrarlo come se fosse di un'altra. */
   async loadInitialHistory() {
     if (this._initialHistoryLoaded) return;
     this._initialHistoryLoaded = true;
+    this._loadingInitialHistory = true;
+    const generation = sessionManager.switchGeneration;
+    const key = sessionManager.currentKey;
+    const superseded = () => generation !== sessionManager.switchGeneration;
     try {
-      if (!sessionManager.currentKey) {
+      if (!key) {
         this.hasMoreHistory = false;
         return;
       }
       await api.bootstrap();
+      if (superseded()) return;
       this._initRuntimeModelFromBootstrap();
-      const thread = await sessionManager.loadThread(sessionManager.currentKey, 160);
+      const { thread, scope } = await sessionManager.loadThread(key, 160);
+      if (superseded()) return;
       // Lo scope mostrato sopra il composer deve venire dal backend, non da un
       // default del client: e' l'unica cosa che sta tra un messaggio mandato
-      // allo scope sbagliato e l'utente.
-      scopeChip.syncFromSession(sessionManager.currentScope);
+      // allo scope sbagliato e l'utente. E viene dalla *risposta a questa*
+      // richiesta, non dal campo condiviso che vince chi risponde per ultimo.
+      scopeChip.syncFromSession(scope);
       // L'interruttore è per conversazione: la chiave la conosce il session
       // manager, non lui. Stesso punto del chip perché è lo stesso evento.
-      writeSwitch.syncFromSession(sessionManager.currentKey);
+      writeSwitch.syncFromSession(key);
+      // Il tentativo è andato: via la riga d'errore di quello prima, o resta
+      // in cima a un thread che c'è (`_renderThreadMessages` accoda, non
+      // sostituisce).
+      this._clearHistoryError();
       this._renderThreadMessages(thread.messages || []);
       this.historyCursor = thread.page?.before_cursor || null;
       this.hasMoreHistory = thread.page?.has_more_before !== false;
       this.scrollToBottom(true);
     } catch (err) {
+      // Anche il fallimento è di una conversazione sola: riaprire il latch
+      // scavalcato porterebbe via al caricamento nuovo il diritto di caricare.
+      // E per la stessa ragione non si dice niente a schermo: la riga d'errore
+      // di una conversazione già lasciata comparirebbe sopra il thread di
+      // un'altra, e cambiare progetto in fretta dipingerebbe errori per
+      // conversazioni che l'utente non sta guardando.
+      if (superseded()) return;
       this._initialHistoryLoaded = false;
       console.error('Failed to load history:', err);
+      // Un fallimento muto è la cosa peggiore che possa fare questo
+      // caricamento: lo schermo resta vuoto **mentre il chip nomina un
+      // progetto**, cioè indistinguibile da un progetto senza storia. Da lì si
+      // scrive credendo di ripartire da zero in un posto che invece ha un suo
+      // passato che l'agente rileggerà.
+      this._showHistoryError();
+    } finally {
+      this._loadingInitialHistory = false;
     }
+  }
+
+  /* La riga «storia non caricata», al posto della chat vuota che mentiva.
+     Una sola alla volta: due riconnessioni fallite di fila non impilano due
+     righe identiche. */
+  _showHistoryError() {
+    this._clearHistoryError();
+    const el = document.createElement('div');
+    el.className = 'chat-error chat-history-error';
+    el.textContent = i18n.t('chat.historyLoadFailed');
+    this.chatArea.appendChild(el);
+    this.scrollToBottom(true);
+  }
+
+  _clearHistoryError() {
+    this.chatArea.querySelectorAll('.chat-history-error').forEach((el) => el.remove());
   }
 
   async loadMoreHistory() {
     if (this.isLoadingHistory || !this.hasMoreHistory) return;
     if (!sessionManager.currentKey) return;
+    // Stessa regola del caricamento iniziale: una pagina vecchia arrivata dopo
+    // un cambio di conversazione va buttata, non incollata in cima al thread di
+    // un'altra chat.
+    const generation = sessionManager.switchGeneration;
+    const key = sessionManager.currentKey;
     // Senza cursore la thread API restituisce la pagina *più recente*, non
     // quella precedente: paginare indietro con before=null riporterebbe in cima
     // i messaggi già a schermo invece di quelli vecchi. Se il server dichiara
@@ -714,7 +813,8 @@ export class ChatController {
     this.isLoadingHistory = true;
     const scrollHeightBefore = this.chatArea.scrollHeight;
     try {
-      const thread = await sessionManager.loadThread(sessionManager.currentKey, 120, this.historyCursor);
+      const { thread } = await sessionManager.loadThread(key, 120, this.historyCursor);
+      if (generation !== sessionManager.switchGeneration) return;
       const messages = thread.messages || [];
       this._renderThreadMessagesToTop(messages);
       this.historyCursor = thread.page?.before_cursor || null;
@@ -1065,6 +1165,57 @@ export class ChatController {
     'message', 'file_edit', 'turn_end',
   ]);
 
+  /* Eventi che appartengono a *una* conversazione, e che quindi si rendono solo
+     se arrivano da quella aperta. Sono i frame di un turno più i due che
+     descrivono lo stato della conversazione: `user` (un messaggio entrato da un
+     altro canale) e `goal_status` (il banner, spinto per `chat_id`).
+
+     Fuori restano i frame che parlano del runtime, non di una conversazione, e
+     che vanno resi qualunque chat sia a schermo:
+
+     - `subagent_status` porta lo snapshot *globale* dei subagent (identico a
+       `GET /api/subagents`) e viaggia sul `chat_id` di chi li ha avviati:
+       filtrarlo vorrebbe dire un pannello che non si aggiorna più;
+     - `subagent_activity` porta un `chat_id` che **non è affidabile**: è
+       mirato a una connessione e il campo lo riempie `ws_sender._chat_id_for`
+       con `min(chats)`, cioè `default` per chiunque sia iscritto anche alla
+       chat personale. Filtrarlo spegnerebbe la modale dell'attività a chi
+       guarda un progetto;
+     - `runtime_model_updated`, `app_data_changed`, `apps_list_changed` sono
+       broadcast a ogni connessione e non portano `chat_id` affatto;
+     - `error` è un errore di protocollo della connessione (`_send_event`), e
+       nemmeno lui porta un `chat_id`. */
+  static CHAT_SCOPED_EVENTS = new Set([
+    ...ChatController.TURN_SCOPED_EVENTS, 'user', 'goal_status',
+  ]);
+
+  /* Un frame appartiene alla conversazione aperta?
+
+     Il `turn_id` distingue due turni; il `chat_id` distingue due
+     *conversazioni*, e prima delle sessioni-progetto non c'era niente da
+     distinguere — una chat sola, quindi un filtro assente era un filtro
+     inutile. Con i progetti diventa il punto in cui la risposta data in
+     `project:patreon` si dipinge nel thread personale: delta, righe di
+     `file_edit` e `turn_end` compresi, sotto un composer che può perfino
+     dichiarare un'altra modalità di scrittura.
+
+     Va valutato **prima** del confine di turno, e non è un dettaglio d'ordine:
+     `_applyTurnBoundary` ha un effetto collaterale — adotta il turno del frame
+     che vede — quindi un frame estraneo che passasse da lì si prenderebbe
+     `_currentTurnId`, e il `turn_end` della risposta vera non combacerebbe più
+     con niente. Filtrando prima, un turno di un'altra chat non tocca la
+     contabilità di questa: non apre niente, e quindi non lascia niente di
+     aperto.
+
+     Permissivo su ciò che non sa: senza `chat_id` sul frame (il retry di una
+     consegna parziale ne arriva privo) o senza conversazione nota, si rende. */
+  _belongsToOpenChat(msg) {
+    if (!ChatController.CHAT_SCOPED_EVENTS.has(msg.event)) return true;
+    const open = sessionManager.currentChatId;
+    if (!msg.chat_id || !open) return true;
+    return msg.chat_id === open;
+  }
+
   /* Confine di turno sui frame live: dice se questo frame va processato, e
      apre una bolla nuova quando il turno cambia.
 
@@ -1103,6 +1254,7 @@ export class ChatController {
   }
 
   handleMessage(msg) {
+    if (!this._belongsToOpenChat(msg)) return;
     if (!this._applyTurnBoundary(msg)) return;
     switch (msg.event) {
       case 'delta':
@@ -1738,14 +1890,23 @@ export class ChatController {
       }, 1000);
       this.scrollToBottom();
     } else {
-      if (this._goalTimer) {
-        clearInterval(this._goalTimer);
-        this._goalTimer = null;
-      }
-      if (this._goalBanner) {
-        this._goalBanner.remove();
-        this._goalBanner = null;
-      }
+      this._clearGoalBanner();
+    }
+  }
+
+  /* Toglie il banner "agent running" e ferma il suo cronometro.
+     Chiamato dal `goal_status: idle` — e da chi butta la vista, perché il nodo
+     muore col DOM ma `_goalBanner` no: restando non-null il banner non verrebbe
+     mai più ricreato (v. la guardia in `_handleGoalStatus`) e l'intervallo
+     continuerebbe a battere su un nodo staccato. */
+  _clearGoalBanner() {
+    if (this._goalTimer) {
+      clearInterval(this._goalTimer);
+      this._goalTimer = null;
+    }
+    if (this._goalBanner) {
+      this._goalBanner.remove();
+      this._goalBanner = null;
     }
   }
 

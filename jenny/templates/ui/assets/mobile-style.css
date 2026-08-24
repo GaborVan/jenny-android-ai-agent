@@ -764,10 +764,16 @@ body {
   /* Il pannello cresceva con l'elenco: a sette wiki usciva dallo schermo
      dall'alto, e quel che spariva era la testa — la sezione "personale", cioe'
      la voce con cui si torna indietro. Un tetto, e la lista sotto scorre.
-     Il numero e' lo spazio che chip, composer e dock lasciano libero sopra di
-     se'. Nessun secondo limite sulla lista: il tetto e' uno solo ed e' lei che
-     cede, per flex, cosi' non ci sono due misure da tenere d'accordo. */
-  max-height: min(320px, calc(100vh - 172px));
+     Lo spazio sottratto e' quel che chip, composer e dock occupano sotto il
+     pannello, **scritto con i loro token** e non col 172 a cui sommavano: quel
+     numero era la stessa somma che `.jenny-duo` & c. fanno con
+     `var(--dock-height) + 58px + var(--scope-row)`, ricalcolata a mano, quindi
+     ritoccare il padding del chip (cioe' `--scope-row`) muoveva la mascotte e
+     lasciava il menu dov'era. I 25px in fondo sono il margine di rispetto
+     dall'alto dello schermo. Nessun secondo limite sulla lista: il tetto e' uno
+     solo ed e' lei che cede, per flex, cosi' non ci sono due misure da tenere
+     d'accordo. */
+  max-height: min(320px, calc(100vh - (var(--dock-height) + 58px + var(--scope-row) + 25px)));
   padding: 4px;
   /* Superficie ALZATA, non incassata: `--surface-2` è più scuro di `--bg` in
      tutti e sette i temi (è il token dell'incassato), e un pannello che
@@ -813,6 +819,9 @@ body {
 }
 .scope-menu-sep { height: 0.5px; margin: 4px 6px; background: var(--border); }
 .scope-menu-note { padding: 6px 10px 8px; font-size: 11px; color: var(--text-faint); }
+/* Elenco non letto: e' un guasto, non uno stato vuoto — e va distinto a occhio
+   da "Nessun progetto ancora", che sta nello stesso posto. */
+.scope-menu-note.is-error { color: var(--error); }
 .scope-menu-item {
   display: flex;
   align-items: center;
@@ -865,9 +874,25 @@ body {
 .scope-menu-check { flex-shrink: 0; font-size: 14px; color: var(--accent); }
 .scope-menu-item[data-active="0"] .scope-menu-check { visibility: hidden; }
 .scope-menu-new .scope-menu-name { color: var(--text-muted); }
+/* Le cartelle che ci sono ma non si aprono: si leggono e non si toccano.
+   Più spente di "Nuovo progetto..." (`--text-muted`), che è un'azione: questa
+   riga non è un'azione, ed è la sola riga della tendina che non fa niente.
+   Il fondo che si accende resta l'unica cosa da spegnere a mano — la riga non è
+   un `<button>` (v. `_unopenableItem`), ma `:hover` vale su qualunque
+   `.scope-menu-item`, e sotto il dito un fondo che si illumina è la promessa
+   che questa riga non può mantenere. */
+.scope-menu-item.is-unopenable { color: var(--text-faint); cursor: default; }
+.scope-menu-item.is-unopenable:hover { background: transparent; }
+/* L'interruttore sta nella stessa riga del chip e ha la stessa transizione e lo
+   stesso `scale(0.98)` al tocco: e' nato dopo questo blocco e ne era rimasto
+   fuori. Il rimpicciolimento e' la parte che conta — le transizioni le azzera
+   comunque la regola `*` in fondo al file, il `transform` di uno stato `:active`
+   no, perche' non e' ne' un'animazione ne' una durata. */
 @media (prefers-reduced-motion: reduce) {
   .scope-chip { transition: none; }
   .scope-chip:active { transform: none; }
+  .write-switch { transition: none; }
+  .write-switch:active { transform: none; }
   .scope-menu-item { transition: none; }
 }
 

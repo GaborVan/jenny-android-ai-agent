@@ -20,6 +20,9 @@ const STRIP_SELECTOR = 'script, style, link, svg, template, noscript';
 
 export class UiQueryResponder {
   constructor() {
+    // Stream non filtrato per `chat_id` di proposito: una `ui_query` è una
+    // richiesta mirata a *questa* connessione, correlata da `correlation_id`, e
+    // la risposta descrive lo schermo — non il thread di una conversazione.
     wsManager.addEventListener('chat:message', (e) => {
       if (e.detail?.event === 'ui_query') this._respond(e.detail);
     });

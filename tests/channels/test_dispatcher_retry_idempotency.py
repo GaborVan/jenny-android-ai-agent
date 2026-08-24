@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from port_alloc import free_port
 
 from jenny.bus.events import OutboundMessage
 from jenny.bus.queue import MessageBus
@@ -35,15 +36,13 @@ from jenny.config.schema import Config
 from jenny.webui.gateway_services import build_gateway_services
 from jenny.webui.transcript import read_transcript_lines
 
-_PORT = 29765
-
 
 def _make_channel(bus: Any) -> WebSocketChannel:
     cfg = WebSocketConfig.model_validate({
         "enabled": True,
         "allowFrom": ["*"],
         "host": "127.0.0.1",
-        "port": _PORT,
+        "port": free_port(),
         "path": "/ws",
         "websocketRequiresToken": False,
     })

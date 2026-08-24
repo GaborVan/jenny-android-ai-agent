@@ -126,10 +126,19 @@ def loop(workspace: Path, memory: MemoryStore) -> _FakeLoop:
 class _ReviewSpy:
     """Sostituto di ``run_dream_review`` che registra cosa gli è arrivato."""
 
-    def __init__(self, *, shrink_to: str | None = None, status: str = "completed") -> None:
+    def __init__(
+        self,
+        *,
+        shrink_to: str | None = None,
+        status: str = "completed",
+        demoted_ids: tuple[str, ...] = (),
+        unresolved_refusals: int = 0,
+    ) -> None:
         self.calls: list[dict[str, Any]] = []
         self._shrink_to = shrink_to
         self._status = status
+        self._demoted_ids = demoted_ids
+        self._unresolved_refusals = unresolved_refusals
 
     async def __call__(self, agent, *, store, report, snapshotted, write_size_guard=None):
         self.calls.append({
@@ -147,6 +156,8 @@ class _ReviewSpy:
             before=before,
             after=after,
             freed=sum(before[label] - after[label] for label in before),
+            demoted_ids=self._demoted_ids,
+            unresolved_refusals=self._unresolved_refusals,
         )
 
     @property
@@ -392,6 +403,156 @@ class TestReviewPass:
         await _drain(loop)
 
         assert "nothing was freed" in loop.published[0].content
+
+    @pytest.mark.asyncio
+    async def test_the_reply_names_the_facts_the_review_moved_away(
+        self, router, loop, memory, monkeypatch
+    ):
+        """"Quanto ha liberato" non è "cosa ha tolto di mezzo", e l'utente riconosce
+        la seconda.
+
+        ``ReviewOutcome.demoted`` esisteva e non lo leggeva nessuno: una passata
+        che spostava sei fatti personali in archivio riferiva "nothing was freed".
+        Il numero da solo non basta — gli id sono ciò che ``recall`` accetta,
+        quindi la frase è già l'istruzione per riaverli.
+        """
+        spy = _ReviewSpy(demoted_ids=("a1b2c3d4", "e5f60718"))
+        _install_review(monkeypatch, spy)
+        memory.set_review_state(runs_since_review=12, stuck_runs=0)
+
+        await router.dispatch(_ctx(loop, "/dream"))
+        await _drain(loop)
+
+        content = loop.published[0].content
+        assert "moved 2 fact(s) into `memory/archive/`" in content
+        assert "recall a1b2c3d4, e5f60718" in content
+        # E la riga sui caratteri resta: sono due notizie, non una che sostituisce
+        # l'altra.
+        assert "A memory review pass ran first" in content
+
+    @pytest.mark.asyncio
+    async def test_a_review_that_moved_nothing_does_not_invent_a_demotion(
+        self, router, loop, memory, monkeypatch
+    ):
+        spy = _ReviewSpy()
+        _install_review(monkeypatch, spy)
+        memory.set_review_state(runs_since_review=12, stuck_runs=0)
+
+        await router.dispatch(_ctx(loop, "/dream"))
+        await _drain(loop)
+
+        assert "memory/archive/" not in loop.published[0].content
+
+    @pytest.mark.asyncio
+    async def test_the_reply_says_a_write_was_refused_by_its_budget(
+        self, router, loop, memory, monkeypatch
+    ):
+        """Un rifiuto aperto è la sola metà dell'esito su cui l'utente possa agire.
+
+        ``unresolved_refusals`` esisteva, era valorizzato su ogni percorso e non lo
+        leggeva nessuno in ``jenny/``: la review che lasciava un fatto fuori da
+        tutti i file riferiva "nothing was freed" — vero come numero, muto sul
+        fatto che una scrittura era stata *bloccata*. A differenza di una
+        degradazione, questa non si ripara con ``recall``: si ripara alzando il
+        tetto o potando, e la frase deve dirlo.
+        """
+        spy = _ReviewSpy(status="no-change", unresolved_refusals=1)
+        _install_review(monkeypatch, spy)
+        memory.set_review_state(runs_since_review=12, stuck_runs=0)
+
+        await router.dispatch(_ctx(loop, "/dream"))
+        await _drain(loop)
+
+        content = loop.published[0].content
+        assert "1 write(s) were refused by their size budget" in content
+        assert "`/dream budget`" in content
+        # E la riga sui caratteri resta: il rifiuto la *spiega*, non la sostituisce.
+        assert "nothing was freed" in content
+
+    @pytest.mark.asyncio
+    async def test_a_review_with_no_refusal_says_nothing_about_budgets(
+        self, router, loop, memory, monkeypatch
+    ):
+        spy = _ReviewSpy(shrink_to="# Memory\n")
+        _install_review(monkeypatch, spy)
+        memory.set_review_state(runs_since_review=12, stuck_runs=0)
+
+        await router.dispatch(_ctx(loop, "/dream"))
+        await _drain(loop)
+
+        assert "refused by their size budget" not in loop.published[0].content
+
+    @pytest.mark.asyncio
+    async def test_a_really_refused_write_reaches_the_reply(
+        self, router, loop, memory, workspace
+    ):
+        """Il giro completo, senza doppio del review: rifiuto vero, frase vera.
+
+        Le altre asserzioni di questa sezione sostituiscono ``run_dream_review``,
+        quindi provano la nota contro un esito costruito a mano. Qui il review
+        gira davvero, il guard rifiuta davvero la scrittura del "modello", e
+        ``unresolved_refusals`` arriva dall'unico posto che conta —
+        ``FileStates`` — fino alla riga che l'utente legge.
+        """
+        _set_dream_config(workspace, memory_budget_chars=50)
+        memory.set_review_state(runs_since_review=12, stuck_runs=0)
+        loop.on_turn = _replace_seed(memory, "x" * 300)
+
+        await router.dispatch(_ctx(loop, "/dream"))
+        await _drain(loop)
+
+        content = loop.published[0].content
+        assert "A memory review pass ran first" in content
+        assert "write(s) were refused by their size budget" in content
+
+    @pytest.mark.asyncio
+    async def test_the_refusal_comes_before_the_demotions(
+        self, router, loop, memory, monkeypatch
+    ):
+        """Le due notizie convivono, e l'ordine non è estetico.
+
+        Il rifiuto sta attaccato alla riga dei caratteri perché la spiega — "non
+        ha liberato niente" con un rifiuto aperto non è "non c'era niente da
+        fare" — mentre le degradazioni sono un esito riuscito e vanno in coda.
+        """
+        spy = _ReviewSpy(
+            status="no-change", unresolved_refusals=2, demoted_ids=("a1b2c3d4",)
+        )
+        _install_review(monkeypatch, spy)
+        memory.set_review_state(runs_since_review=12, stuck_runs=0)
+
+        await router.dispatch(_ctx(loop, "/dream"))
+        await _drain(loop)
+
+        content = loop.published[0].content
+        assert "2 write(s) were refused" in content
+        assert "moved 1 fact(s) into `memory/archive/`" in content
+        assert content.index("refused by their size budget") < content.index(
+            "into `memory/archive/`"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_pathological_pass_does_not_become_a_wall_of_hashes(
+        self, router, loop, memory, monkeypatch
+    ):
+        """Il tetto sugli id nominati, e la coda che dice quanti sono gli altri.
+
+        Tacere il resto sarebbe la stessa bugia in piccolo; ``recall`` senza
+        argomenti li elenca tutti, e quelli di questa passata sono in testa.
+        """
+        ids = tuple(f"{i:08x}" for i in range(14))
+        spy = _ReviewSpy(demoted_ids=ids)
+        _install_review(monkeypatch, spy)
+        memory.set_review_state(runs_since_review=12, stuck_runs=0)
+
+        await router.dispatch(_ctx(loop, "/dream"))
+        await _drain(loop)
+
+        content = loop.published[0].content
+        assert "moved 14 fact(s)" in content
+        assert ids[9] in content
+        assert ids[10] not in content
+        assert "and 4 more" in content
 
     @pytest.mark.asyncio
     async def test_the_review_is_reported_even_with_no_history_to_process(

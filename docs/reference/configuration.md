@@ -90,11 +90,18 @@ Everything about how the agent talks to the model and manages its own context.
 | `agents.defaults.atlas.enabled` | bool | `true` | Registers the periodic Atlas job, which compiles `memory/WIKI.md` from `workspace/wikis/`. With no wikis present the job exits before reaching the provider. |
 | `agents.defaults.atlas.intervalH` | int ≥ 1 | `6` | Hours between Atlas checks. A tick that finds the wiki unchanged since the last run costs nothing. |
 | `agents.defaults.atlas.maxContextTokens` | int ≥ 100 | `1200` | Cap on the wiki-directory block injected into every system prompt; a longer `memory/WIKI.md` is truncated at injection time. |
+| `agents.defaults.gardener.enabled` | bool | `true` | Registers the periodic [gardener](../using/gardener.md) job, which turns a project's journal lines into wiki pages. With no projects, or with no unread journal lines, a tick exits before reaching the provider. `/gardener off` writes this. |
+| `agents.defaults.gardener.intervalMin` | int 1–1440 | `30` | Minutes between ticks — how often it *looks* for a project to garden. Past a day the pass has stopped being periodic; `enabled: false` is the way to say never. |
+| `agents.defaults.gardener.idleMin` | int 0–1440 | `30` | How long that project's conversation must have been silent before a pass starts. `0` lets a pass begin while you are talking in it (it can promote half a conversation, and rewrite the map while you read it). A project with a turn actually in flight is skipped regardless. |
+| `agents.defaults.gardener.minHoursBetweenPasses` | int 0–8760 | `6` | Minimum gap before returning to the *same* project, counted from the last **attempt** rather than the last success. `0` lets it come straight back, which is the measured Dream degradation written as a number. |
+| `agents.defaults.compactProjectsWhenIdle` | bool | `false` | Whether a project's conversation is archived once it goes idle, like the personal one. Off by default: a project can sit for three weeks and pick up where it was. Read when the agent starts, so a change needs a gateway restart. Even when on, a project is not compacted while journal lines are still unpromoted, or while it has no pages at all. |
 | `agents.defaults.maxToolIterations` | int | `200` | Hard ceiling on tool calls in a single turn. |
 | `agents.defaults.maxToolResultChars` | int | `16000` | Tool output above this is truncated before it reaches the model. |
 | `agents.defaults.contextBlockLimit` | int \| null | `null` | Optional cap on context blocks; unset means no extra limit. |
 
 `dream` has exactly **two** fields — `enabled` and `intervalH`. Older docs mentioned `cron`, `modelOverride` and `maxBatchSize`; none of them exist. `atlas` adds `maxContextTokens` to the same pair; which wiki supplies its entity list follows `wiki.defaultWiki`. See [Memory, Dream and Atlas](../using/memory.md).
+
+The four `gardener` fields and `compactProjectsWhenIdle` are the only keys on this page with a **chat surface**: `/gardener settings` reads them and `/gardener off|on|interval|idle|distance|compact` writes them, with the ranges above enforced and named in the refusal. Changing `enabled`, `idleMin` or `minHoursBetweenPasses` applies live; `intervalMin` re-arms the periodic job when set through the command; `compactProjectsWhenIdle` takes effect at the next gateway start. A number outside its range in a file written by an older version is **clamped to the bound** rather than rejected — a stricter schema would fail to parse the file, and the recovery path for an unparseable `config.json` starts from defaults, taking your provider and API key with it. See [The gardener](../using/gardener.md).
 
 ### Behavior and identity
 
@@ -371,6 +378,8 @@ See [Mini-apps](../using/mini-apps.md).
 
 See [Wiki](../using/wiki.md).
 
+`wiki.wikisDir` is also where [projects](../using/projects.md) live — a project is a wiki — so `wiki.enabled: false` disables project creation too, and the create dialog says so. Renaming this directory moves every project with it; the gardener and the project-scope resolver both read the configured name rather than a hardcoded `wikis`.
+
 ## modelPresets
 
 Named bundles of model settings you can switch between at runtime with `/model <name>`. `modelPresets` is a top-level object; its keys are your own preset names.
@@ -423,5 +432,6 @@ How switching behaves:
 - [Tool reference](./tools.md) — what each tool actually does with these toggles
 - [Security model](../internals/security-model.md) — workspace policy, SSRF, and where the real boundaries are
 - [Android permissions](./android-permissions.md) — `WAKE_LOCK`, `SCHEDULE_EXACT_ALARM` and the battery exemption behind the `power.*` keys
+- [Projects](../using/projects.md) and [The gardener](../using/gardener.md) — the `gardener.*` keys and `compactProjectsWhenIdle` from the user's side
 - [Memory, Dream and Atlas](../using/memory.md), [Scheduling and proactivity](../using/scheduling.md), [SSH access](../using/ssh.md), [Telegram bridge](../using/telegram.md), [Backup and restore](../using/backup.md)
 - [Troubleshooting](../using/troubleshooting.md) — what to do when a config change breaks the boot

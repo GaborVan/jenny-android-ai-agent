@@ -233,6 +233,101 @@ async def test_page_material_is_refused_instead_of_truncated(tool, tmp_path) -> 
     assert not _page(project).exists()
 
 
+async def test_the_ceiling_is_measured_on_the_text_not_on_the_marker(tmp_path) -> None:
+    """Il marcatore d'origine non si paga sul tetto del chiamante.
+
+    ``[recovered] `` sono dodici caratteri che il modello non scrive e non vede:
+    prefissati **prima** del controllo restringevano l'allowance a 488, quindi una
+    riga da 495 tornava rifiutata citando un limite di 500 che il chiamante non
+    aveva sforato — un rifiuto su cui non si può agire. Il tetto è del fatto.
+    """
+    project = _wiki(tmp_path)
+    tool = JournalAppendTool(today=lambda: _DAY, origin_marker="[recovered]")
+    token = _bind(project)
+    try:
+        out = await tool.execute(text="x" * 495)
+    finally:
+        reset_workspace_scope(token)
+
+    assert "Too long" not in out
+    assert "[recovered] " + "x" * 495 in _page(project).read_text(encoding="utf-8")
+
+
+async def test_page_material_is_refused_even_with_a_marker(tmp_path) -> None:
+    """Il gemello del test qui sopra: spostando il controllo non si è aperto il
+    tetto. Il conto è su ``text``, e 501 caratteri restano materiale da pagina."""
+    project = _wiki(tmp_path)
+    tool = JournalAppendTool(today=lambda: _DAY, origin_marker="[recovered]")
+    token = _bind(project)
+    try:
+        out = await tool.execute(text="x" * 501)
+    finally:
+        reset_workspace_scope(token)
+
+    assert "Too long" in out and "501 characters" in out
+    assert not _page(project).exists()
+
+
+# ── L'orologio ───────────────────────────────────────────────────────────────
+
+
+async def test_the_page_and_the_time_come_from_one_reading_of_the_clock(tmp_path) -> None:
+    """Un turno a cavallo della mezzanotte non scrive ``- 00:00 —`` su ieri.
+
+    L'orologio finto avanza di un giorno **a ogni lettura**: con due letture — una
+    per la pagina, una per l'ora, com'era — la riga finiva nel file di un giorno e
+    portava l'ora di un altro. Un fatto datato a un giorno in cui non è stato
+    detto, in un file append-only che nessuno rilegge.
+    """
+    from datetime import datetime
+
+    project = _wiki(tmp_path)
+    readings = iter([
+        datetime(2026, 8, 22, 23, 59, 40),
+        datetime(2026, 8, 23, 0, 0, 30),
+        datetime(2026, 8, 24, 0, 0, 30),
+    ])
+    tool = JournalAppendTool(now=lambda: next(readings))
+    token = _bind(project)
+    try:
+        await tool.execute(text="si parte domani")
+    finally:
+        reset_workspace_scope(token)
+
+    assert not (project / "raw" / "journal" / "20260823.md").exists()
+    assert "- 23:59 — si parte domani" in _page(project).read_text(encoding="utf-8")
+
+
+async def test_the_hour_is_the_configured_timezone_not_the_system_one(tmp_path) -> None:
+    """L'ora della riga è quella che il modello ha in testa.
+
+    Il prompt gli dice l'ora nel fuso configurato (``context.py``,
+    ``current_time_str``); la riga di diario la scriveva col fuso di **sistema**,
+    e su un device fuori dal proprio fuso il fatto entrava nel diario a un'ora in
+    cui non era stato detto.
+
+    Il confronto è fra due fusi a venticinque ore di distanza invece che contro un
+    valore atteso: l'orologio è quello vero, quindi un'asserzione su una stringa
+    esatta cadrebbe al cambio di minuto — mentre due ore a venticinque ore di
+    distanza non possono coincidere mai.
+    """
+    project = _wiki(tmp_path)
+
+    hours = []
+    for tz in ("Pacific/Kiritimati", "Pacific/Midway"):
+        token = _bind(project)
+        try:
+            out = await JournalAppendTool(
+                today=lambda: _DAY, timezone=tz
+            ).execute(text="un fatto")
+        finally:
+            reset_workspace_scope(token)
+        assert "Appended" in out, out
+        hours.append(_page(project).read_text(encoding="utf-8").splitlines()[-1][2:7])
+
+    assert hours[0] != hours[1], hours
+
+
 # ── Il perché esiste ─────────────────────────────────────────────────────────
 
 

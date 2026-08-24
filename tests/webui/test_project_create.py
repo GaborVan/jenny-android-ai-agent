@@ -165,6 +165,100 @@ class TestUnProgettoNasceCompleto:
         assert (workspace / "wikis" / "primo" / "wiki" / "index.md").read_bytes() == before
 
 
+# ── un progetto rimasto a metà si può finire ─────────────────────────────────
+
+
+class TestUnProgettoAMetaSiPuoFinire:
+    """Il top-up dello scaffolder, raggiungibile dalla UI.
+
+    Lo scaffolder è scritto per essere rilanciato (`_write_if_absent` su ogni
+    file, `wiki/` creata **per prima** di proposito così un albero morto a metà
+    resta visibile al picker), ma il comando rifiutava appena la cartella
+    esisteva: quel comportamento non era raggiungibile da nessuna parte. Il
+    risultato era una cartella elencata, senza mappa, e irreparabile — su un
+    telefono l'utente non ci arriva a mano.
+    """
+
+    async def test_una_cartella_con_la_sola_wiki_viene_completata(self, ctx, workspace):
+        (workspace / "wikis" / "morta-a-meta" / "wiki").mkdir(parents=True)
+
+        result = await _create(ctx, name="morta-a-meta", seed="di cosa si tratta")
+
+        root = workspace / "wikis" / "morta-a-meta"
+        for rel in ("AGENTS.md", "wiki/index.md", "audit/.gitkeep"):
+            assert (root / rel).is_file(), rel
+        for rel in ("raw/journal", "raw/research", "log", "audit/resolved"):
+            assert (root / rel).is_dir(), rel
+        assert result["seeded"] is True
+        schema = (root / "AGENTS.md").read_text("utf-8")
+        assert _frontmatter(schema)["summary"] == "di cosa si tratta"
+
+    async def test_il_seme_entra_anche_se_lavvio_ha_gia_scritto_lagents_minimo(
+        self, ctx, workspace
+    ):
+        """Il caso vero, e quello che si perdeva in silenzio.
+
+        Fra il crash e il ritentativo c'è un riavvio, e la migrazione
+        (`utils/wiki_migration.py`) scrive un `AGENTS.md` **minimo** a ogni
+        cartella che contiene `wiki/`: id più segnaposto. Lo scaffolder, che non
+        riscrive quel che c'è, lascerebbe il segnaposto — progetto completo e
+        senza scopo, cioè la cosa per cui la riga viene chiesta.
+        """
+        from jenny.utils.wiki_migration import migrate_wikis
+
+        (workspace / "wikis" / "morta-a-meta" / "wiki").mkdir(parents=True)
+        migrate_wikis(workspace / "wikis")
+        schema = workspace / "wikis" / "morta-a-meta" / "AGENTS.md"
+        prima = _frontmatter(schema.read_text("utf-8"))
+        assert prima["summary"].startswith("<"), "il fixture non riproduce il segnaposto"
+
+        result = await _create(ctx, name="morta-a-meta", seed="Come si cresce su Patreon.")
+
+        dopo = _frontmatter(schema.read_text("utf-8"))
+        assert dopo["summary"] == "Come si cresce su Patreon."
+        assert result["seeded"] is True
+        # L'id scritto dalla migrazione resta quello: è l'identità della wiki, e
+        # riscriverlo staccherebbe la cartella dalla sua chat.
+        assert dopo["id"] == prima["id"]
+        # E il registro adesso la vede con la sua riga, non con «(no scope set)».
+        registry = (workspace / "wikis" / "_index.md").read_text("utf-8")
+        assert "Come si cresce su Patreon." in registry
+
+    async def test_uno_scope_vero_non_viene_riscritto(self, ctx, workspace):
+        """Completare un progetto non è riscriverne lo scope: se la creazione era
+        morta *fra* l'`AGENTS.md` e la mappa, la riga della prima volta è un dato
+        dell'utente e vince su quella di stavolta."""
+        await _create(ctx, name="quasi", seed="la riga di prima")
+        root = workspace / "wikis" / "quasi"
+        (root / "wiki" / "index.md").unlink()
+
+        result = await _create(ctx, name="quasi", seed="la riga di stavolta")
+
+        assert _frontmatter((root / "AGENTS.md").read_text("utf-8"))["summary"] == "la riga di prima"
+        assert result["seeded"] is False
+        # La mappa invece nasce adesso, quindi porta la riga di stavolta.
+        assert "la riga di stavolta" in (root / "wiki" / "index.md").read_text("utf-8")
+
+    async def test_una_cartella_che_non_e_un_progetto_e_un_rifiuto_diverso(self, ctx, workspace):
+        """Due rifiuti distinguibili: "ce l'hai già" non è "c'è qualcosa di mezzo".
+
+        Il client interpola il messaggio del server nel toast (`scope.createFailed`),
+        quindi la differenza arriva all'utente — e le due cose si risolvono in
+        due modi diversi: aprire il progetto, o rinominare la cartella.
+        """
+        (workspace / "wikis" / "intrusa").mkdir(parents=True)
+        (workspace / "wikis" / "intrusa" / "roba.txt").write_text("x", encoding="utf-8")
+
+        with pytest.raises(CommandError) as exc:
+            await _create(ctx, name="intrusa", seed="x")
+
+        assert exc.value.code == "bad_request"
+        assert "already exists" not in exc.value.message
+        assert "not a project" in exc.value.message
+        # E non ci ha scaffoldato dentro niente.
+        assert not (workspace / "wikis" / "intrusa" / "wiki").exists()
+
+
 # ── quel che il comando deve rifiutare ───────────────────────────────────────
 
 
@@ -175,6 +269,9 @@ class TestIlGateStaSulServer:
         with pytest.raises(CommandError) as exc:
             await _create(ctx, name="patreon", seed="due")
         assert exc.value.code == "bad_request"
+        # Il messaggio del progetto completo non cambia: è l'altro ramo che ne ha
+        # uno nuovo, e i due devono restare distinguibili dal client.
+        assert exc.value.message == "project already exists: patreon"
 
     @pytest.mark.parametrize(
         "name",
@@ -306,6 +403,143 @@ class TestElencoProgetti:
         assert response is not None and response.status_code == 401
 
 
+class TestUnNomeElencatoEUnNomeApribile:
+    """Il chip non può offrire una cartella che il canale poi rifiuta.
+
+    `project.create` la regex la applica, quindi da lì una cartella così non
+    nasce; ma una cartella sotto `wikis/` può arrivare da qualunque altra parte —
+    l'agente con `write_file`, lo scaffolder della skill, un rinomino fuori da
+    Jenny, un ripristino da backup. E allora `_collect_projects` la elencava e
+    `_envelope_chat_id` la dirottava sulla chat personale: scope
+    `default()`, `session_kind` `personal` (cioè dentro `MEMORY.md`) e la
+    trascrizione personale servita nella schermata del progetto.
+    """
+
+    @staticmethod
+    def _wiki(workspace: Path, name: str) -> None:
+        """Una wiki minima col nome dato: quel che `discover_wikis` cerca."""
+        pages = workspace / "wikis" / name / "wiki"
+        pages.mkdir(parents=True)
+        (pages / "index.md").write_text(f"# {name}\n", encoding="utf-8")
+
+    @pytest.mark.parametrize(
+        "name",
+        ["Ricerca ETF", "università", "perché", "progetto (2026)", ".nascosto", "x" * 65],
+    )
+    async def test_un_nome_che_non_puo_essere_una_sessione_non_e_apribile(
+        self, handler, workspace, name
+    ):
+        self._wiki(workspace, name)
+        self._wiki(workspace, "buona")
+
+        payload = await _get_projects(handler)
+
+        assert [p["name"] for p in payload["projects"]] == ["buona"]
+        # **Non sparisce.** Su un telefono non c'è un file manager per
+        # rinominarla: la sola strada è chiederlo all'agente, e per chiederlo
+        # l'utente deve sapere che quella cartella c'è.
+        assert [p["name"] for p in payload["unopenable"]] == [name]
+        assert payload["unopenable"][0]["reason"] == "invalid_name"
+        assert isinstance(payload["unopenable"][0]["modified"], int)
+
+    async def test_un_nome_valido_resta_apribile(self, handler, ctx, workspace):
+        await _create(ctx, name="alpha", seed="a")
+        self._wiki(workspace, "b.eta_1-2")
+
+        payload = await _get_projects(handler)
+
+        assert [p["name"] for p in payload["projects"]] == ["alpha", "b.eta_1-2"]
+        assert payload["unopenable"] == []
+
+    async def test_ogni_nome_elencato_e_accettato_dal_canale(self, handler, workspace):
+        """Il contratto, dai due lati: quel che la route offre, il canale apre.
+
+        Il difetto non era in nessuno dei due punti da solo — era che facevano
+        domande diverse. Questo test le fa fare la stessa.
+        """
+        from jenny.channels.websocket import WebSocketChannel
+
+        for name in ("buona", "Ricerca ETF", "università", "altra_1"):
+            self._wiki(workspace, name)
+
+        payload = await _get_projects(handler)
+
+        for project in payload["projects"]:
+            envelope = {"type": "message", "chat_id": f"project:{project['name']}"}
+            assert WebSocketChannel._envelope_chat_id(envelope) == envelope["chat_id"]
+        for project in payload["unopenable"]:
+            envelope = {"type": "message", "chat_id": f"project:{project['name']}"}
+            assert WebSocketChannel._envelope_chat_id(envelope) is None
+
+
+# ── l'altro creatore di cartelle: lo scaffolder della skill ─────────────────
+
+
+def _scaffold_module():
+    """``scaffold.py`` della skill, importato dal checkout in ``jenny/skills/``.
+
+    Non fa parte del package importabile e si importa ``reindex_wikis`` da se',
+    quindi la dir ``scripts/`` va su ``sys.path`` — come in
+    ``tests/skills/llm_wiki/test_scripts.py``, che fa lo stesso inserimento.
+    """
+    import sys
+
+    if str(_SKILL_SCRIPTS) not in sys.path:
+        sys.path.insert(0, str(_SKILL_SCRIPTS))
+    import scaffold
+
+    return scaffold
+
+
+class TestLoScaffolderAvvisa:
+    """`project.create` applica la regex; lo scaffolder della skill no.
+
+    È la seconda porta per cui una cartella non apribile entra in `wikis/`, e
+    l'agente la usa quando la wiki nasce da una conversazione invece che dal
+    chip. Non può rifiutare — gira anche in top-up su wiki che esistono, e una
+    wiki col nome sbagliato è proprio quella che ha più bisogno di essere
+    riparata — quindi avvisa e continua.
+    """
+
+    @pytest.mark.parametrize("name", ["Ricerca ETF", "università", "progetto (2026)", ".x"])
+    def test_avvisa_su_un_nome_che_non_potra_essere_una_chat(self, tmp_path, name, capsys):
+        scaffold = _scaffold_module()
+
+        assert scaffold._warn_if_unopenable(str(tmp_path / "wikis" / name)) is True
+        err = capsys.readouterr().err
+        assert name in err and "cannot be a project chat name" in err
+
+    @pytest.mark.parametrize("name", ["ricerca-etf", "b.eta_1", "X2"])
+    def test_tace_su_un_nome_buono(self, tmp_path, name, capsys):
+        scaffold = _scaffold_module()
+
+        assert scaffold._warn_if_unopenable(str(tmp_path / "wikis" / name)) is False
+        assert "cannot be a project chat name" not in capsys.readouterr().err
+
+    def test_lo_scaffold_completo_avvisa_e_crea_comunque(self, tmp_path, capsys):
+        scaffold = _scaffold_module()
+        root = tmp_path / "wikis" / "Ricerca ETF"
+
+        scaffold.scaffold(str(root), "Ricerca ETF")
+
+        captured = capsys.readouterr()
+        assert "cannot be a project chat name" in captured.err
+        assert (root / "wiki" / "index.md").is_file()
+
+    def test_la_regex_copiata_non_e_divergere_da_quella_canonica(self):
+        """La copia è deliberata (lo script non può importare `jenny`), quindi il
+        test è il solo posto che tiene le due in pari."""
+        from jenny.session.keys import is_valid_project_name
+
+        scaffold = _scaffold_module()
+        for name in [
+            "a", "X2", "b.eta_1-2", "x" * 64,
+            "Ricerca ETF", "università", ".nascosto", "-x", "", "x" * 65, "a..b",
+        ]:
+            copied = bool(scaffold._VALID_WIKI_NAME.match(name)) and ".." not in name
+            assert copied == is_valid_project_name(name), name
+
+
 # ── il chip non deve tornare a leggere la cartella sbagliata ─────────────────
 
 
@@ -371,3 +605,68 @@ class TestIlThreadDiUnProgetto:
         for key in ("cron:job-1", "subagent:L1", "heartbeat", "dream:20260821"):
             response = await _get_thread(handler, key)
             assert response.status_code == 404, key
+
+
+class TestIlRegistroNonRubaLoStdoutDiNessuno:
+    """T9.4/G4. La rigenerazione del registro girava dentro un
+    ``contextlib.redirect_stdout``, e ``create_project`` gira dentro un
+    ``asyncio.to_thread``: ``redirect_stdout`` muta ``sys.stdout`` **di
+    processo**, quindi per tutta quella finestra l'output di *ogni altro* thread
+    finiva nel buffer che veniva buttato.
+
+    Non è teorico. ``python_exec`` cattura quel che il codice del modello stampa
+    proprio via ``sys.stdout``, e ha sostituito il proprio ``redirect_stdout``
+    con un proxy per-thread esattamente per questa ragione (v. il commento
+    «cattura di stdout PER THREAD» in ``agent/tools/python_exec.py``): il proxy
+    però si consulta al momento della scrittura, e chi scrive legge
+    ``sys.stdout``. Con una ``StringIO`` al suo posto, un ``print()`` del
+    modello nel turno accanto spariva in silenzio.
+
+    E non c'era niente da nascondere: ``regenerate_index`` stampa una riga sola,
+    su **stderr**, che un ``redirect_stdout`` non tocca nemmeno.
+    """
+
+    @staticmethod
+    def _fake_reindex(workspace: Path) -> None:
+        """Un ``reindex_wikis.py`` che stampa **da un altro thread** mentre gira.
+
+        È il turno accanto, reso deterministico: il thread parte e finisce
+        dentro la finestra in cui il redirect esisteva, quindi non c'è nessuna
+        corsa da vincere.
+        """
+        scripts = workspace / "skills" / "llm-wiki" / "scripts"
+        scripts.mkdir(parents=True, exist_ok=True)
+        (scripts / "reindex_wikis.py").write_text(
+            "import threading\n"
+            "\n"
+            "def regenerate_index(wikis_dir):\n"
+            "    def un_altro_turno():\n"
+            "        print('OUTPUT-DI-UN-ALTRO-THREAD')\n"
+            "    t = threading.Thread(target=un_altro_turno)\n"
+            "    t.start()\n"
+            "    t.join()\n"
+            "    return wikis_dir / '_index.md'\n",
+            encoding="utf-8",
+        )
+
+    async def test_un_print_di_un_altro_thread_non_finisce_nel_buffer(
+        self, ctx, workspace, capsys
+    ):
+        self._fake_reindex(workspace)
+
+        result = await _create(ctx, name="orto", seed="cosa semino")
+
+        assert result["registry"].endswith("_index.md")
+        assert "OUTPUT-DI-UN-ALTRO-THREAD" in capsys.readouterr().out
+
+    async def test_e_il_progetto_nasce_comunque_completo(self, ctx, workspace):
+        """La guardia d'assenza: il fix è una riga *togliata*, e un test che
+        guarda solo lo stdout resterebbe verde anche se la rigenerazione del
+        registro fosse saltata del tutto.
+        """
+        self._fake_reindex(workspace)
+
+        result = await _create(ctx, name="orto", seed="cosa semino")
+
+        assert (workspace / "wikis" / "orto" / "wiki" / "index.md").is_file()
+        assert result["seeded"] is True

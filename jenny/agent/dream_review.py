@@ -79,18 +79,47 @@ class ReviewOutcome:
     # liberato" e "cosa ha tolto di mezzo" sono due domande diverse, e dopo la
     # fase 2 la seconda ha finalmente una risposta esatta invece di un delta in
     # caratteri.
+    #
+    # Valorizzato su **ogni** uscita di :func:`run_dream_review`, compresa quella
+    # per eccezione. Per tre commit lo era solo sui due rami ``failed``: i due
+    # esiti normali — "ha liberato spazio" e "non c'era niente da potare" — non lo
+    # portavano, cioè proprio quelli in cui una degradazione è più probabile.
+    # ``/dream`` rispondeva quindi "nothing was freed" a una passata che aveva
+    # spostato sei fatti personali dell'utente, e l'unica traccia era una riga di
+    # log.
     demoted: tuple[str, ...] = ()
     # Scritture rifiutate dal budget il cui contenuto non è mai atterrato. Se è
     # > 0 lo status non è ``completed``: ``failed`` quando qualcosa è anche calato
     # (possibile migrazione troncata), altrimenti ``no-change`` — che è l'esito
     # corretto quando il run ha lasciato stare la fonte, come il prompt gli chiede.
     # V. :func:`run_dream_review`.
+    #
+    # Lo legge la nota di ``/dream`` (``command/builtin.py::_format_dream_refusals``)
+    # perché è la sola metà azionabile dell'esito: una degradazione l'utente la
+    # ritrova con ``recall``, un rifiuto no — il fatto non è in nessun file, e
+    # l'unica mossa che lo sblocca è alzare il tetto o potare a mano. Per tre
+    # commit il campo era valorizzato su ogni percorso e letto da nessuno in
+    # ``jenny/``: una review che lasciava aperto un rifiuto riferiva "nothing was
+    # freed", che è vero come numero e muto sull'unica cosa da fare.
     unresolved_refusals: int = 0
 
     @property
     def freed(self) -> int:
         """Caratteri liberati in totale; negativo se i file sono cresciuti."""
         return sum(chars - self.after.get(label, 0) for label, chars in self.before.items())
+
+    @property
+    def demoted_ids(self) -> tuple[str, ...]:
+        """Gli id con cui il tool ``recall`` ritrova le voci di :attr:`demoted`.
+
+        Il nome del file d'archivio è ``<data>-<id>.md`` e l'id è un hash esadecimale
+        (``tools/memory_entries.py::entry_id``), quindi l'ultimo segmento dello stem
+        *è* l'id — la stessa derivazione che fa ``memory_archive.read_archived``
+        quando rilegge una voce. Sta qui perché un numero non è azionabile: chi
+        legge "sei fatti spostati" deve poter chiedere *quali*, e ``recall`` prende
+        id, non nomi di file.
+        """
+        return tuple(name.rsplit(".", 1)[0].rsplit("-", 1)[-1] for name in self.demoted)
 
 
 def review_session_key() -> str:
@@ -223,6 +252,11 @@ async def run_dream_review(
             before=before,
             after=_measure(report),
             unresolved_refusals=refused if isinstance(refused, int) else 0,
+            # Anche qui, e per la stessa ragione per cui si rimisurano i file: un
+            # run morto a metà può aver già spostato delle voci, e sono esattamente
+            # quelle di cui nessuno saprebbe niente — il turno è finito male,
+            # quindi non c'è nemmeno un riepilogo a valle che le nomini.
+            demoted=_report_demotions(store, archived_before),
         )
     finally:
         # La contabilità dei token sta qui e non nel chiamante, come in
@@ -326,11 +360,19 @@ async def run_dream_review(
         )
         return ReviewOutcome(
             status=STATUS_NO_CHANGE, before=before, after=after,
-            unresolved_refusals=outstanding,
+            unresolved_refusals=outstanding, demoted=demoted,
         )
 
     if shrank:
-        outcome = ReviewOutcome(status=STATUS_COMPLETED, before=before, after=after)
+        # ``outstanding`` è 0 qui e nell'uscita finale: i due rami che lo vedono
+        # positivo sono già ritornati sopra. Passarlo comunque, invece di lasciare
+        # il default, è la differenza fra "il campo è giusto" e "il campo è giusto
+        # finché nessuno riordina i rami": è la stessa mutezza che ``demoted``
+        # aveva su quattro uscite su sei, e costava una parola evitarla.
+        outcome = ReviewOutcome(
+            status=STATUS_COMPLETED, before=before, after=after, demoted=demoted,
+            unresolved_refusals=outstanding,
+        )
         logger.info(
             "Dream review: freed {:,} chars ({})",
             outcome.freed,
@@ -349,4 +391,7 @@ async def run_dream_review(
     # collocazione meno fuorviante: nulla è stato liberato. Il delta vero resta
     # leggibile in ``before``/``after``.
     logger.info("Dream review: nothing to shrink")
-    return ReviewOutcome(status=STATUS_NO_CHANGE, before=before, after=after)
+    return ReviewOutcome(
+        status=STATUS_NO_CHANGE, before=before, after=after, demoted=demoted,
+        unresolved_refusals=outstanding,
+    )

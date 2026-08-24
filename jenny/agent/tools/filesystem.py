@@ -24,8 +24,10 @@ from jenny.agent.tools.schema import (
 )
 from jenny.config.tool_schemas import FileToolsConfig  # re-export (def in config.tool_schemas)
 from jenny.security.workspace_access import current_tool_workspace, current_turn_is_readonly
-from jenny.security.workspace_policy import ReadOnlyTurnError, _safe_expanduser
+from jenny.security.workspace_policy import ReadOnlyTurnError, _path_key, _safe_expanduser
 from jenny.utils.helpers import build_image_content_blocks, detect_image_mime
+from jenny.utils.path import atomic_write
+from jenny.utils.wiki_paths import page_chars, wiki_page_rel
 
 # Gancio pre-scrittura: riceve il path risolto e il testo esatto che finirebbe su
 # disco, ritorna ``None`` per lasciar passare o un messaggio di rifiuto da
@@ -33,6 +35,29 @@ from jenny.utils.helpers import build_image_content_blocks, detect_image_mime
 # importato da chi impone il budget: i tool sui file sono usati da tutto l'agente
 # e non devono dipendere dal modulo che ne limita uno solo.
 WriteSizeGuard = Callable[[Path, str], str | None]
+
+
+def _page_over_ceiling_note(rel: str, chars: int, ceiling: int) -> str:
+    """La frase che dice che *rel* ha appena smesso di essere iniettabile. T9.12.
+
+    **Dice quel che dice la regola SPLIT**, e con le sue parole
+    (``templates/agent/gardener.md``, la clausola «A page that outgrows the budget
+    is SPLIT»): la stessa conseguenza — saltata intera, in ogni conversazione del
+    progetto — e lo stesso rimedio, tagliare lungo le cose di cui la pagina parla
+    spostando le frasi **parola per parola**. Se le due divergono, il modello
+    riceve un avviso a cui il prompt risponde con un'altra istruzione.
+
+    Funzione con un nome, come :func:`context._pages_left_out_notice`: il testo si
+    prova per quel che dice, e il test che lo prova non deve ricopiarlo.
+    """
+    return (
+        f"Note: `{rel}` is now {chars:,} characters, past the {ceiling:,} a turn in this "
+        "project can inject — this write is what took it over. From here it is skipped whole "
+        "in every conversation in this project: it is on disk and nobody can read it. Split it "
+        "along the things it talks about — each part becomes a page named after its own thing, "
+        "carrying the sentences that were already about it, moved word for word — then add the "
+        "new pages to the map."
+    )
 
 
 class _FsTool(Tool):
@@ -77,9 +102,28 @@ class _FsTool(Tool):
         write_files_only: bool = False,
         write_size_guard: WriteSizeGuard | None = None,
         entry_archiver: Callable[[Path, str], None] | None = None,
+        read_media_dir: bool = True,
     ):
         self._workspace = workspace
         self._allowed_dir = allowed_dir
+        # La cartella dei media (``.jenny/media``) fra le radici di **lettura**.
+        # Acceso di default, ed e' il comportamento storico: per ogni tool
+        # costruito da ``create()`` e' comunque ridondante — quella cartella sta
+        # dentro la radice dell'installazione, che il lettore ha gia' — quindi
+        # l'unico effetto vivo che ha e' allargare una cassetta costruita a mano
+        # con una radice **piu' stretta**. Misurato (T9.10): quella cassetta e'
+        # **una sola**, i tool di sola lettura del gardener, la cui radice e' un
+        # progetto (``wikis/<nome>``) e non contiene i media — e li' l'allargamento
+        # e' contro lo scopo dichiarato, quindi lo si spegne dal costruttore: v.
+        # ``GardenerStore.build_tools``. Dream e Atlas hanno
+        # ``allowed_dir=workspace`` e ``.jenny/media`` sta **dentro** quella
+        # radice, quindi per loro il flag e' inerte e spegnerlo sarebbe un
+        # placebo: farebbe *sembrare* imposto un confine che non cambia. L'unico
+        # consumatore vivo del ramo acceso e'
+        # ``test_filesystem_tools.py::…test_read_allowed_in_media_dir``, cioe' il
+        # caso di merito di T4.13 (un subagent a cui si chiede di guardare
+        # un'immagine).
+        self._read_media_dir = read_media_dir
         # "Nessuna directory scrivibile, solo questi file esatti". Serve a un
         # runner isolato che produce un unico artefatto (Atlas → memory/WIKI.md):
         # senza questo, ``allowed_dir=None`` significa "eredita la radice dello
@@ -120,11 +164,52 @@ class _FsTool(Tool):
         # (``memory_entries.make_entry_archiver``).
         self._entry_archiver = entry_archiver
 
+    @staticmethod
+    def _installation_read_root(workspace: Path) -> Path | None:
+        """La radice dell'installazione, quando ``workspace`` e' una sua sottocartella.
+
+        Passo T4.5. L'allargamento delle letture di ``_read_allowed_root`` legge
+        ``self._workspace``, e per l'agente principale quello *e'* la radice
+        dell'installazione — ma non per un subagent: ``SubagentManager`` gli
+        costruisce il ``ToolContext`` con ``workspace`` = la cartella del
+        progetto, quindi l'allargamento era un no-op proprio dove serve. Sotto
+        ``orchestratorMode`` i subagent sono gli **unici** attori con i tool di
+        scrittura dentro un progetto, quindi la ragione dichiarata
+        dell'allargamento — ``SkillsLoader`` che passa il percorso di
+        ``SKILL.md`` perche' l'agente se lo legga — muore tutta li'.
+
+        Torna ``None`` quando non c'e' niente da aggiungere: workspace non
+        distinguibile dalla radice, radice non ancora configurata (i test che
+        non montano un ``RuntimeContext``), oppure un workspace che sta **fuori**
+        dall'installazione — quello e' un tool costruito per un altro posto, e
+        regalargli la radice sarebbe un allargamento non chiesto.
+
+        Solo lettura: il valore finisce in ``extra_read_allowed_dirs``, che
+        ``_resolve_write`` non guarda mai (v.
+        ``tests/agent/tools/test_subagent_project_reads.py``).
+        """
+        from jenny.runtime.context import get_runtime_context
+
+        root = get_runtime_context().workspace_dir
+        if root is None:
+            return None
+        try:
+            root = _safe_expanduser(root).resolve(strict=False)
+            current = _safe_expanduser(workspace).resolve(strict=False)
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return None
+        if current == root or root not in current.parents:
+            return None
+        return root
+
     @classmethod
     def create(cls, ctx: Any) -> Tool:
         restrict = ctx.config.restrict_to_workspace
         allowed_dir = Path(ctx.workspace) if restrict else None
         extra_read = [Path(ctx.workspace) / "skills"]
+        installation = cls._installation_read_root(Path(ctx.workspace))
+        if installation is not None:
+            extra_read.append(installation)
         if getattr(ctx.config.file, "expose_package_source", False):
             from jenny.utils.android_assets import get_package_source_root
 
@@ -173,6 +258,19 @@ class _FsTool(Tool):
         Resta invece una restrizione **esplicita del costruttore** (Dream, un
         subagent con la sua directory): quella e' una scelta di chi ha costruito
         il tool, non dello scope, e non va allargata.
+
+        Attenzione a ``self._workspace``: e' la radice dell'installazione solo
+        per chi e' stato costruito con quella. Un subagent riceve la cartella del
+        progetto, e per lui questo metodo torna il progetto — l'installazione gli
+        arriva da ``_installation_read_root``, come radice di **sola** lettura in
+        ``extra_read_allowed_dirs`` (passo T4.5). Il posto giusto e' quello e non
+        qui: allargare la ``return`` qui sotto cambierebbe il confine anche per
+        chi passa ``allowed_dir`` **uguale** al proprio ``workspace`` — Dream,
+        Atlas, e i tool di sola lettura del gardener, che sono costruiti con
+        ``workspace=allowed_dir=<progetto>`` proprio per non vedere il resto
+        dell'installazione. Quei tre cadono su questo stesso ramo: la loro
+        directory e' una scelta del costruttore che qui non si distingue da uno
+        scope, e allargarla e' l'unica cosa che il passo T4.5 non doveva fare.
         """
         if not access.restrict_to_workspace:
             return None
@@ -197,8 +295,11 @@ class _FsTool(Tool):
         # La base dei percorsi relativi resta ``project_path`` per entrambi: "il
         # file X" dentro un progetto vuol dire dentro quel progetto, che si stia
         # leggendo o scrivendo. A cambiare e' solo il *confine*.
+        # ``write_root()`` e' l'unico posto in cui si decide dove si puo'
+        # scrivere (v. ``WorkspaceScope.write_root``); qui sopra ci resta solo la
+        # **restrizione del costruttore**, che stringe e non allarga.
         allowed_root = (
-            self._effective_allowed_root(access.allowed_root)
+            self._effective_allowed_root(access.write_root())
             if for_write
             else self._read_allowed_root(access)
         )
@@ -216,7 +317,7 @@ class _FsTool(Tool):
             path,
             self._extra_read_allowed_dirs,
             None,
-            include_media_dir=True,
+            include_media_dir=self._read_media_dir,
             for_write=False,
         )
 
@@ -299,6 +400,116 @@ class _FsTool(Tool):
             return None
         self._file_states.record_write_refused(path, text)
         return refusal
+
+    def _wiki_page_ceiling_note(self, path: Path, text: str) -> str | None:
+        """L'avviso se *questa* scrittura porta una pagina oltre il tetto. **T9.12.**
+
+        Va chiamato **prima** della scrittura e col testo finale (conversione CRLF
+        inclusa): il "prima" lo legge da disco, e dopo non c'e' piu'.
+
+        Tre soglie di silenzio, e la seconda e' tutto il task.
+
+        1. **Solo una pagina di un progetto** (:func:`wiki_page_rel`). Chi scrive
+           non sa se sta scrivendo dentro un progetto o in ``memory/``, che ha un
+           budget diverso e un guard suo (:data:`WriteSizeGuard`); la mappa ha un
+           tetto diverso ancora. Il percorso e' l'unica cosa che lo dice.
+        2. **Scatta sulla transizione, mai sullo stato.** Una pagina che era
+           *gia'* oltre non produce niente. Misurato sulla copia in sola lettura
+           delle otto wiki del dispositivo (274 pagine, 24/08): **25 sono oltre il
+           tetto e 78 oltre i 4.000**, cioe' a un append modesto da esso. Un
+           avviso sullo stato darebbe alla prima passata su quel corpo
+           venticinque richiami e trasformerebbe una passata di cattura in una di
+           potatura — che e' esattamente il rischio da evitare; sulla transizione
+           ne da' **uno**, alla scrittura che l'ha causata, e mai piu'.
+        3. **Il predicato e' esatto**, non una stima: il tetto e' quello della
+           *sezione* pagine, quindi «questa pagina entrera'» dipende anche
+           dall'ordine della mappa e dalle altre pagine — ma una pagina che da
+           sola costa piu' del tetto non entra **in nessun ordine**. E' quel che
+           il lint chiama ``PAGE_MAX_CHARS`` e quel che l'inventario della
+           passata annota (``GardenerStore.build_inventory``, T3.14).
+
+        Il tetto si legge da :func:`gardener.page_ceiling` e non da una terza
+        copia del numero (T3.12): l'import e' dentro la funzione perche'
+        ``agent/gardener.py`` — e ``agent/context.py`` che sta sotto — tirano
+        dentro mezzo repo, e i tool sui file li importa tutto l'agente. La lettura
+        dell'attributo a ogni chiamata e' anche quel che rende la condivisione
+        **provabile** invece che dichiarata.
+
+        **Costo**: nel caso normale un ``suffix``, il giro sui segmenti del
+        percorso e una misura della stringa che si aveva gia' in mano. Il file si
+        rilegge solo quando il testo nuovo e' oltre il tetto **ed** e' una pagina,
+        cioe' quasi mai — e la' una lettura in piu' e' il prezzo di sapere se la
+        pagina ci stava prima.
+        """
+        rel = wiki_page_rel(path)
+        if rel is None:
+            return None
+        # **Sotto la porta del percorso**, non sopra: cosi' una scrittura che non
+        # riguarda una pagina non carica niente, e chi non tocca wiki mai —
+        # l'autoscrittura su un ``.py``, il diario, ``memory/`` — non paga
+        # l'import nemmeno una volta.
+        from jenny.agent.gardener import page_ceiling
+
+        ceiling = page_ceiling()
+        chars = page_chars(text)
+        if chars <= ceiling:
+            return None
+        try:
+            before = page_chars(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            # Assente o illeggibile: prima non c'era nessuna pagina che entrava,
+            # quindi la transizione e' reale. Un file illeggibile l'iniettore lo
+            # conta fra le rimaste fuori, non fra quelle oltre il tetto.
+            before = 0
+        if before > ceiling:
+            return None
+        return _page_over_ceiling_note(rel, chars, ceiling)
+
+    def _is_exact_allowed_file(self, path: Path) -> bool:
+        """``path`` è uno dei file esatti per cui questo tool è stato costruito.
+
+        Cioè una voce di ``extra_write_allowed_files``, l'allowlist che un runner
+        isolato passa quando il tool esiste *per* riscrivere quei file e nient'altro:
+        memory/MEMORY.md, SOUL.md, USER.md per Dream; memory/WIKI.md per Atlas.
+        Confronto sulla forma risolta e con la stessa chiave di
+        ``workspace_policy`` — la allowlist è già ciò che ha autorizzato questa
+        scrittura, quindi le due forme coincidono per costruzione.
+        """
+        if not self._extra_write_allowed_files:
+            return False
+        key = _path_key(path)
+        for allowed in self._extra_write_allowed_files:
+            try:
+                resolved = Path(allowed).resolve()
+            except (OSError, RuntimeError, TypeError, ValueError):
+                continue
+            if _path_key(resolved) == key:
+                return True
+        return False
+
+    def _commit_write(self, path: Path, text: str) -> None:
+        """Imbuto unico di scrittura dei tool sui file, e sede della scelta atomica.
+
+        La regola di ``.agent/gotchas.md`` vale per verso: i file **dell'utente**
+        si scrivono in posto (rimpiazzare l'inode cambierebbe la semantica —
+        permessi, hardlink), mentre lo stato che Jenny **rilegge da sé** passa da
+        ``atomic_write``. Qui il discriminante è ``_is_exact_allowed_file``: un
+        tool costruito con una allowlist di file esatti esiste solo per riscrivere
+        stato di Jenny, e su Android un processo ucciso a metà di quella
+        scrittura lascerebbe un file troncato che si legge come integro.
+
+        Passa da qui **ogni** scrittura di ``write_file``/``edit_file``/
+        ``apply_patch``: un nuovo punto di scrittura eredita la decisione invece
+        di doversela ricordare. Byte e non testo perché ``apply_patch`` scrive con
+        ``newline=""`` e la conversione CRLF è già stata fatta da chi chiama: il
+        testo qui è già esattamente ciò che deve finire su disco.
+        """
+        data = text.encode("utf-8")
+        if self._is_exact_allowed_file(path):
+            atomic_write(path, data)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
 
     def _resolve(self, path: str) -> Path:
         return self._resolve_read(path)
@@ -609,16 +820,22 @@ class WriteFileTool(_FsTool):
             if content is None:
                 raise ValueError("Unknown content")
             fp = self._resolve_write(path)
-            # Prima della mkdir: una scrittura rifiutata non deve nemmeno
-            # lasciare in giro la directory che avrebbe dovuto contenerla.
+            # Prima di ``_commit_write`` (che fa la mkdir): una scrittura
+            # rifiutata non deve nemmeno lasciare in giro la directory che
+            # avrebbe dovuto contenerla.
             refusal = self._check_write_size(fp, content)
             if refusal is not None:
                 return refusal
+            # Prima della scrittura: l'avviso confronta col "prima", che dopo non
+            # esiste piu'. Vale anche qui e non solo per i due tool che lavorano
+            # per aggiunta — il conteggio che questo tool ritorna dice *quanto*
+            # ha scritto, non che quel quanto ha appena spento la pagina.
+            note = self._wiki_page_ceiling_note(fp, content)
             self._archive_departing(fp, content)
-            fp.parent.mkdir(parents=True, exist_ok=True)
-            fp.write_text(content, encoding="utf-8")
+            self._commit_write(fp, content)
             self._file_states.record_write(fp)
-            return f"Successfully wrote {len(content)} characters to {fp}"
+            msg = f"Successfully wrote {len(content)} characters to {fp}"
+            return msg if note is None else f"{msg}\n{note}"
         except PermissionError as e:
             return f"Error: {e}"
         except Exception as e:
@@ -716,11 +933,12 @@ class EditFileTool(_FsTool):
                     refusal = self._check_write_size(fp, new_text)
                     if refusal is not None:
                         return refusal
-                    fp.parent.mkdir(parents=True, exist_ok=True)
+                    note = self._wiki_page_ceiling_note(fp, new_text)
                     self._archive_departing(fp, new_text)
-                    fp.write_text(new_text, encoding="utf-8")
+                    self._commit_write(fp, new_text)
                     self._file_states.record_write(fp)
-                    return f"Successfully created {fp}"
+                    msg = f"Successfully created {fp}"
+                    return msg if note is None else f"{msg}\n{note}"
                 return self._file_not_found_msg(path, fp)
 
             # File size protection
@@ -740,10 +958,12 @@ class EditFileTool(_FsTool):
                 refusal = self._check_write_size(fp, new_text)
                 if refusal is not None:
                     return refusal
+                note = self._wiki_page_ceiling_note(fp, new_text)
                 self._archive_departing(fp, new_text)
-                fp.write_text(new_text, encoding="utf-8")
+                self._commit_write(fp, new_text)
                 self._file_states.record_write(fp)
-                return f"Successfully edited {fp}"
+                msg = f"Successfully edited {fp}"
+                return msg if note is None else f"{msg}\n{note}"
 
             # Read-before-edit check
             warning = self._file_states.check_read(fp)
@@ -832,12 +1052,19 @@ class EditFileTool(_FsTool):
             refusal = self._check_write_size(fp, new_content)
             if refusal is not None:
                 return refusal
+            note = self._wiki_page_ceiling_note(fp, new_content)
             self._archive_departing(fp, new_content)
-            fp.write_bytes(new_content.encode("utf-8"))
+            self._commit_write(fp, new_content)
             self._file_states.record_write(fp)
             msg = f"Successfully edited {fp}"
             if warning:
                 msg = f"{warning}\n{msg}"
+            if note is not None:
+                # Dopo l'esito e non prima: l'avviso parla di quel che il file *e'
+                # diventato*, quindi si legge dopo aver saputo che la scrittura c'e'
+                # stata. Il ``warning`` della lettura-prima-della-modifica sta
+                # invece sopra, perche' parla di quel che la scrittura non sapeva.
+                msg = f"{msg}\n{note}"
             return msg
         except PermissionError as e:
             return f"Error: {e}"

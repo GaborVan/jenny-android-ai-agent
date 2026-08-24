@@ -110,24 +110,23 @@ class TestBuildDreamPrompt:
         assert cursor == 2
         assert "usable memory" in prompt
 
-    def test_dream_prompt_consumes_consolidator_attribute_tags(self, tmp_path, monkeypatch):
-        from jenny.utils.helpers import sync_workspace_templates
-        from jenny.utils.prompt_templates import _environment
+    def test_a_correction_to_the_dream_prompt_reaches_an_installation(self):
+        """Cosa il template *dice* sta in ``_DREAM_MD_RULES``; qui sta il fatto che
+        una correzione arrivi.
 
-        workspace = tmp_path / "workspace"
-        workspace.mkdir(parents=True)
-        sync_workspace_templates(workspace, silent=True)
-        _environment.cache_clear()
-        prompt = render_template(
-            "agent/dream.md",
-            strip=True,
-            skill_creator_path="skills/skill-creator/SKILL.md",
-        )
+        ``agent/**`` si riscrive a ogni avvio, un file dell'utente una volta sola:
+        fuori da questo elenco, ogni riga scritta in ``agent/dream.md`` per riparare
+        un comportamento misurato sul telefono resterebbe nel repo e non sul
+        telefono. È la sola metà di questo contratto che una riscrittura del prompt
+        non può rompere — e la sola che nessun'altra asserzione di questo file
+        copriva: il test che stava qui prima sincronizzava un workspace di prova
+        senza reindirizzarci ``get_workspace_path``, quindi renderizzava il template
+        dell'installazione come tutti gli altri e la sincronizzazione non
+        partecipava a niente.
+        """
+        from jenny.utils.android_assets import _SYSTEM_PROMPT_TEMPLATES
 
-        assert "History attribute tags" in prompt
-        assert "[skip]: audit-only" in prompt
-        assert "[correction]: replace the older conflicting fact" in prompt
-        assert "Always strip these bracketed tags from saved memory content" in prompt
+        assert "agent/dream.md" in _SYSTEM_PROMPT_TEMPLATES
 
 
 class TestDreamPromptBudgetGauge:
@@ -188,6 +187,91 @@ class TestDreamPromptBudgetGauge:
         assert explicit[0] == default[0]
 
 
+# **Le regole che ``agent/dream.md`` deve dire, e la frase con cui oggi le dice.**
+#
+# Ogni riga è (nome della regola, perché esiste, come è scritta oggi). La colonna
+# di destra è l'unica che cambia quando si riscrive il template: prima stava
+# sparsa in sei test e una riscrittura costava sei modifiche, con fallimenti che
+# dicevano «la stringa non c'è» invece di «la regola non c'è» (T8.7, I13).
+#
+# Il perché non è decorazione. Quasi tutte queste frasi sono la **riparazione di
+# un comportamento misurato sul Titan 2**, e senza la ragione accanto la riga
+# successiva che «semplifica il prompt» le toglie una per una.
+_DREAM_MD_RULES: tuple[tuple[str, str, str], ...] = (
+    (
+        "proponi voci, non riscrivere file",
+        "il difetto d'origine: finché il prompt dice «modifica il file», il modello "
+        "modifica il file, e sotto pressione pota una riga e si ferma",
+        "Propose entries, do not rewrite files",
+    ),
+    (
+        "tutto il lotto in una chiamata",
+        "rimedio a D10: il modello sceglie la chiamata che costa meno, quindi la "
+        "chiamata che costa meno deve essere quella che produce l'evidenza. Con "
+        "``add`` un fatto per volta faceva ``list`` e filtrava da sé, e un lotto di "
+        "soli duplicati restava senza evidenza per voce — trattenuto pur essendo "
+        "consolidato",
+        "Propose the whole batch in one call",
+    ),
+    (
+        "e il parametro che lo permette",
+        "l'altra metà: «tutto in una chiamata» senza dire *come* lascia il modello "
+        "a inventarsi la forma",
+        "`add` takes `texts`",
+    ),
+    (
+        "non leggere il file per decidere",
+        "filtrare da sé è il comportamento da chiudere: il tool sa già cosa è nuovo",
+        "Do not read the file first to work out what is new",
+    ),
+    (
+        "a cosa serve davvero list",
+        "togliergli ``list`` di mano senza dire a cosa serve lo lascerebbe senza "
+        "modo di trovare un id da sostituire",
+        "the id of an entry you intend to `replace` or `remove`",
+    ),
+    (
+        "proporre un duplicato è gratis",
+        "se proporre un duplicato sembrasse costoso, il modello tornerebbe a "
+        "filtrare da sé",
+        "costs nothing to propose",
+    ),
+    (
+        "SOUL.md resta a scrittura-file",
+        "prosa con una struttura, non un elenco: le voci non c'entrano, e un "
+        "``add`` su SOUL.md non ha dove atterrare",
+        "SOUL.md and `skills/<name>/SKILL.md` have no entry tool",
+    ),
+    (
+        "le etichette del Consolidator si dichiarano",
+        "il diario porta ``[skip]`` e ``[correction]``: se il prompt non le spiega, "
+        "il modello le tratta come testo del fatto",
+        "History attribute tags",
+    ),
+    (
+        "e si dice cosa vuol dire skip",
+        "«audit-only» è la ragione per cui una riga marcata così non deve entrare in "
+        "memoria: senza, il modello la salva comunque",
+        "[skip]: audit-only",
+    ),
+    (
+        "e cosa vuol dire correction",
+        "una correzione non è un fatto in più: è un fatto che ne **sostituisce** uno",
+        "[correction]: replace the older conflicting fact",
+    ),
+    (
+        "le etichette non finiscono nei file",
+        "un'etichetta salvata dentro il fatto lo rende illeggibile per sempre, e "
+        "nessuno la va a togliere a mano",
+        "Always strip these bracketed tags from saved memory content",
+    ),
+)
+
+# La frase **ritirata**, tenuta separata perché è l'unica che deve *non* esserci:
+# metterla nella tabella sopra la trasformerebbe in una regola da rispettare.
+_RETIRED_BLESSING = "a run that only prunes is a run well spent"
+
+
 class TestThePromptTeachesTheEntryTool:
     """Il tool da solo non basta: finché il prompt dice "modifica il file", il
     modello modifica il file.
@@ -226,51 +310,29 @@ class TestThePromptTeachesTheEntryTool:
         assert named
         assert named <= actions
 
-    def test_it_says_not_to_rewrite_those_two_files(self):
-        assert "Propose entries, do not rewrite files" in self._prompt()
-
-    def test_it_asks_for_the_whole_batch_in_one_add(self):
-        """Il rimedio a D10: il modello sceglie la chiamata che costa meno, quindi
-        la chiamata che costa meno deve essere quella che produce l'evidenza.
-
-        Misurato sul Titan 2: con ``add`` a un fatto per volta faceva ``list`` e
-        filtrava da sé, e un batch di soli duplicati restava senza nessuna
-        evidenza per voce — trattenuto pur essendo consolidato.
-        """
-        prompt = self._prompt()
-
-        assert "Propose the whole batch in one call" in prompt
-        assert "`add` takes `texts`" in prompt
-
-    def test_it_tells_it_not_to_read_the_file_to_decide(self):
-        prompt = self._prompt()
-
-        assert "Do not read the file first to work out what is new" in prompt
-        # E dice a cosa serve davvero ``list``, o toglierglielo di mano lo
-        # lascerebbe senza il modo di trovare un id da sostituire.
-        assert "the id of an entry you intend to `replace` or `remove`" in prompt
-
-    def test_proposing_a_known_fact_is_declared_free(self):
-        """Se proporre un duplicato sembrasse costoso, il modello tornerebbe a
-        filtrare da sé — che è esattamente il comportamento da chiudere."""
-        assert "costs nothing to propose" in self._prompt()
-
-    def test_soul_keeps_the_file_tools(self):
-        """Prosa con una struttura, non un elenco: le voci non c'entrano."""
-        prompt = self._prompt()
-
-        assert "SOUL.md and `skills/<name>/SKILL.md` have no entry tool" in prompt
+    @pytest.mark.parametrize(
+        ("rule", "why", "phrase"), _DREAM_MD_RULES, ids=[r[0] for r in _DREAM_MD_RULES]
+    )
+    def test_it_states_every_rule_it_has_to_state(self, rule, why, phrase):
+        assert phrase in self._prompt(), f"{rule}: {why}"
 
     def test_the_budget_rule_no_longer_blesses_stopping(self, store):
         """La riga vecchia — "a run that only prunes is a run well spent" — diceva
         esattamente quello che il modello poi faceva. Potare resta utile, ma è
-        metà del lavoro, e la frase ora finisce sull'``add``."""
+        metà del lavoro, e la frase ora finisce sull'``add``.
+
+        Resta un test suo e non una riga di ``_DREAM_MD_RULES`` perché **non è
+        un'asserzione sul testo del template**: il prompt qui è quello costruito
+        da ``build_dream_prompt`` *con il gauge acceso*, cioè il ramo in cui la
+        regola di budget compare. La tabella sopra guarda il template renderizzato
+        da solo, e lì questa regola non c'è.
+        """
         store.append_history("hello")
         result = store.build_dream_prompt(gauge="USER.md [96%]")
         assert result is not None
         prompt, _ = result
 
-        assert "a run that only prunes is a run well spent" not in prompt
+        assert _RETIRED_BLESSING not in prompt
         assert "prunes and then stops has saved nothing" in prompt
         assert "Finish with the `add`." in prompt
 
@@ -601,6 +663,140 @@ class TestDreamTools:
         assert "Precise" in store.soul_file.read_text(encoding="utf-8")
         assert "Project Y active" in store.memory_file.read_text(encoding="utf-8")
         assert "Ludovico" in store.user_file.read_text(encoding="utf-8")
+
+
+class TestWriteFileSaysWhatThePromptSays:
+    """``write_file`` e ``dream.md`` devono raccontare lo stesso registry.
+
+    ``dream.md`` dichiara al modello che il suo registry consente esattamente
+    quattro percorsi. ``write_file`` ne accettava uno — la cartella delle skill —
+    e sui tre file di memoria rispondeva ``WorkspaceBoundaryError`` con in coda
+    "do not retry with alternative tools": un vicolo chiuso proprio per
+    ``SOUL.md``, che non ha un tool per voci e che il review pass deve accorciare
+    come prosa. Il tentativo rifiutato resta contato (``record_write_attempt``
+    sta prima della risoluzione), quindi il cursore non avanza e ``stuck``
+    sale — il "rifiuto di *path*" che il commento di ``format_stuck_alarm``
+    dice di aver visto sul Titan 2.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "path",
+        ["SOUL.md", "USER.md", "memory/MEMORY.md"],
+    )
+    async def test_write_file_lands_on_each_of_the_three(self, store, path):
+        tools = store.build_dream_tools()
+
+        result = await tools.execute(
+            "write_file", {"path": path, "content": "# Rewritten\n- Un fatto\n"},
+        )
+
+        assert "Successfully wrote" in result, result
+        # La trappola vera del messaggio di rifiuto: diceva al modello di non
+        # riprovare con un altro tool, cioè di fermarsi.
+        assert "do not retry with alternative tools" not in result
+        assert (store.workspace / path).read_text(encoding="utf-8") == (
+            "# Rewritten\n- Un fatto\n"
+        )
+
+    @pytest.mark.asyncio
+    async def test_every_path_the_prompt_claims_is_writable_really_is(self, store):
+        """Il test che legge tutti e due i lati.
+
+        La frase del prompt non è decorativa: è ciò su cui il modello decide di
+        chiamare o non chiamare. Se qui divergono, chi paga è un run notturno.
+        """
+        import re
+
+        prompt = render_template(
+            "agent/dream.md", strip=True, skill_creator_path="skills/skill-creator/SKILL.md",
+        )
+        claim = re.search(
+            r"your registry allows exactly (.+?), so a write there is refused", prompt,
+        )
+        assert claim is not None, "la frase del registry è cambiata: riallinea il test"
+        claimed = re.findall(r"`([^`]+)`", claim.group(1))
+        assert claimed == ["SOUL.md", "USER.md", "memory/MEMORY.md", "skills/<name>/SKILL.md"]
+
+        tools = store.build_dream_tools()
+        for claimed_path in claimed:
+            path = claimed_path.replace("<name>", "pinned")
+            result = await tools.execute(
+                "write_file", {"path": path, "content": f"# {path}\n"},
+            )
+            assert "Successfully wrote" in result, f"{path}: {result}"
+
+    @pytest.mark.asyncio
+    async def test_those_writes_are_atomic_like_the_other_two_tools(self, store, monkeypatch):
+        """Conseguenza voluta dell'allowlist, non effetto collaterale.
+
+        ``_commit_write`` decide su ``_is_exact_allowed_file``: dare l'allowlist a
+        ``write_file`` manda anche le sue scritture su quei tre file da
+        ``atomic_write``, come già ``edit_file`` e ``apply_patch``. È lo stato che
+        Jenny rilegge da sé, e su Android un processo ucciso a metà lascerebbe un
+        file troncato che si legge come integro.
+        """
+        from jenny.agent.tools import filesystem as fs_module
+
+        seen: list[str] = []
+        real = fs_module.atomic_write
+
+        def spy(path, data, *args, **kwargs):
+            seen.append(str(path))
+            return real(path, data, *args, **kwargs)
+
+        monkeypatch.setattr(fs_module, "atomic_write", spy)
+        tools = store.build_dream_tools()
+
+        await tools.execute("write_file", {"path": "USER.md", "content": "- Un fatto\n"})
+        await tools.execute(
+            "write_file", {"path": "skills/plain/SKILL.md", "content": "---\nname: plain\n---\n"},
+        )
+
+        assert seen == [str(store.user_file.resolve())]
+
+    @pytest.mark.asyncio
+    async def test_a_whole_file_rewrite_still_pays_the_entry_archiver(self, store):
+        """L'argomento contrario all'allowlist, verificato e caduto.
+
+        ``entry_archiver`` è per-tool ma ``build_dream_tools`` lo passa a tutti e
+        quattro, e ``WriteFileTool.execute`` chiama ``_archive_departing`` prima di
+        scrivere esattamente come ``edit_file``. Una riscrittura intera di
+        ``MEMORY.md`` non scavalca la degradazione.
+        """
+        from jenny.agent.memory_archive import archive_dir
+
+        store.memory_file.write_text(
+            "# Memory\n- Fatto che sta per sparire\n", encoding="utf-8",
+        )
+        tools = store.build_dream_tools()
+
+        await tools.execute(
+            "write_file", {"path": "memory/MEMORY.md", "content": "# Memory\n- Altro\n"},
+        )
+
+        archived = [
+            p.read_text(encoding="utf-8")
+            for p in archive_dir(store.memory_dir).glob("*.md")
+        ]
+        assert any("Fatto che sta per sparire" in text for text in archived), archived
+
+    @pytest.mark.asyncio
+    async def test_the_allowlist_does_not_open_children_or_siblings(self, store):
+        """L'allowlist è di file esatti: non diventa una directory scrivibile."""
+        tools = store.build_dream_tools()
+
+        child = await tools.execute(
+            "write_file", {"path": "USER.md/evil.txt", "content": "owned"},
+        )
+        sibling = await tools.execute(
+            "write_file", {"path": "memory/history.jsonl", "content": "owned"},
+        )
+
+        assert "outside allowed directory" in child
+        assert "outside allowed directory" in sibling
+        assert not (store.user_file / "evil.txt").exists()
+        assert not store.history_file.exists()
 
 
 def _completed_resp() -> SimpleNamespace:

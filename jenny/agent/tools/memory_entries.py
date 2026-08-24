@@ -71,6 +71,26 @@ _HEADING = re.compile(r"^(#{1,6})[ \t]+(.*)$")
 # corta abbastanza da stare in una riga di elenco senza mangiarsela.
 _ID_CHARS = 8
 
+# Un marcatore di elenco qualsiasi, non solo quello che fa una voce: ``-``,
+# ``*``, ``+`` e i numerati. Serve per **confrontare** le righe, non per
+# riconoscerle: promuovere una riga di prosa a bullet, o togliere il numero a un
+# elenco, non fa sparire il testo, e archiviarlo come perduto riempirebbe
+# l'archivio di roba che è ancora nel file — cioè renderebbe l'archivio rumore.
+_LIST_PREFIX = re.compile(r"^([-*+]|\d+[.)])[ \t]+")
+
+# Una riga senza nemmeno un carattere di parola non è contenuto: sono i ``---``,
+# le recinzioni di codice, i separatori di tabella. Sparire per loro non è una
+# perdita, ed è la struttura del file che si sta riscrivendo.
+_HAS_WORD = re.compile(r"\w")
+
+# Come si presenta in archivio un frammento che non era una voce. Finisce nel
+# campo ``heading``, che è l'unico dei metadati che ``recall`` mostra al modello:
+# la riga aperta dice "da USER.md › Preferences (body text, not an entry)", e
+# quel "not an entry" è tutto il punto. Un paragrafo di prosa recuperato senza
+# quella qualifica si leggerebbe come un fatto che qualcuno ha affermato, mentre
+# è il testo che stava *intorno* ai fatti.
+_FRAGMENT_NOTE = "(body text, not an entry)"
+
 
 @dataclass(frozen=True, slots=True)
 class Entry:
@@ -149,6 +169,107 @@ def parse_entries(text: str) -> list[Entry]:
     return entries
 
 
+@dataclass(frozen=True, slots=True)
+class Fragment:
+    """Testo che lascia un file di memoria senza essere una voce.
+
+    Un paragrafo, una riga di prosa sotto un elenco, una voce numerata: tutto
+    ciò che ``parse_entries`` ignora di proposito perché non è un bullet. Non ha
+    id qui dentro — lo prende da ``entry_id`` come tutto il resto, al momento di
+    archiviarlo — perché la sua identità è il testo, esattamente come per una
+    voce.
+    """
+
+    text: str
+    heading: str
+
+
+def _line_key(line: str) -> str:
+    """La riga ridotta a ciò di cui si chiede "c'è ancora?".
+
+    Cioè: senza spazi di bordo e senza marcatore di elenco. Le tre forme
+    ``Odia le riunioni``, ``- Odia le riunioni`` e ``1. Odia le riunioni``
+    portano lo stesso testo, e un confronto che le distinguesse dichiarerebbe
+    perduta una riga che il review pass ha solo promossa a voce.
+    """
+    return _LIST_PREFIX.sub("", line.strip()).strip()
+
+
+def lost_fragments(before: str, new_text: str) -> list[Fragment]:
+    """I blocchi di testo che c'erano e non ci sono più, voci escluse.
+
+    Esiste perché la rete al confine del file, finché guardava solo le voci,
+    aveva una maglia della dimensione del prompt del review pass: quel prompt
+    chiede esplicitamente di cancellare prosa ("l'introduzione che spiega a cosa
+    serve il file"), e una riscrittura che toglieva un paragrafo, una voce
+    numerata e una riga sciolta ne archiviava zero. Un testo che sparisce senza
+    passare da nessuna parte è la perdita definitiva che tutta la fase 2 esiste
+    per impedire, e non diventa meno definitiva perché il testo non cominciava
+    con un trattino.
+
+    Cosa **non** è un frammento, e perché:
+
+    - Le **intestazioni**. Sono la struttura del file, non il suo contenuto;
+      riorganizzare le sezioni è il mestiere del review pass, e archiviare un
+      ``## Preferences`` produrrebbe un "fatto" che non dice niente.
+    - Le righe **di una voce**. Quelle hanno già il loro percorso, con id e
+      deduplica, e passarle due volte darebbe due file per la stessa perdita.
+    - Le righe **senza caratteri di parola** (``---``, code fence, separatori).
+    - Le righe **ancora presenti**, confrontate per ``_line_key``: spostate di
+      sezione, indentate, promosse a bullet — non se ne è andato niente.
+
+    Le righe contigue si raggruppano in un frammento solo. Un paragrafo spezzato
+    in cinque file d'archivio non è un paragrafo recuperabile: è cinque frasi
+    orfane, e chi le rilegge non sa più in che ordine stavano.
+    """
+    surviving = {_line_key(line) for line in new_text.splitlines() if line.strip()}
+    surviving.discard("")
+
+    in_entry: set[int] = set()
+    for entry in parse_entries(before):
+        in_entry.update(range(entry.start, entry.end))
+
+    out: list[Fragment] = []
+    block: list[str] = []
+    block_heading = ""
+    heading = ""
+
+    def flush() -> None:
+        nonlocal block
+        if block:
+            out.append(Fragment(text="\n".join(block), heading=block_heading))
+            block = []
+
+    for i, line in enumerate(before.splitlines()):
+        match = _HEADING.match(line)
+        if match:
+            flush()
+            # Stessa regola di ``parse_entries``: la ``#`` è il titolo del file,
+            # non una sezione, e usarla come indirizzo manderebbe ogni frammento
+            # sotto un nome che nel file non indicizza niente.
+            heading = match.group(2).strip() if len(match.group(1)) >= 2 else ""
+            continue
+        key = _line_key(line)
+        if (
+            not line.strip()
+            or i in in_entry
+            or not _HAS_WORD.search(key)
+            or key in surviving
+        ):
+            flush()
+            continue
+        if not block:
+            block_heading = heading
+        block.append(line.rstrip())
+    flush()
+    return out
+
+
+def fragment_heading(heading: str) -> str:
+    """L'indirizzo con cui un frammento si presenta a ``recall``."""
+    return f"{heading} {_FRAGMENT_NOTE}".strip() if heading else _FRAGMENT_NOTE
+
+
 def find_entry(entries: list[Entry], target: str) -> tuple[Entry | None, str]:
     """Risolve un id o un frammento di testo in **una** voce.
 
@@ -191,6 +312,28 @@ def _as_bullet(text: str) -> str:
     if _BULLET.match(body) or body.startswith(("- ", "* ")):
         return body
     return f"- {body}"
+
+
+def requested_heading(raw: Any) -> str | None:
+    """La sezione chiesta dal modello, coercita — o ``None`` se non l'ha chiesta.
+
+    ``action`` e ``file`` passavano da ``str(...)`` e ``heading`` no: arrivava
+    crudo fino a ``heading.strip()`` dentro :func:`add_entry`, quindi un provider
+    che serializza ``{"heading": 3}`` faceva ``AttributeError`` — raccolto come
+    errore soft del tool, cioè uno slot di ``ToolErrorBudget`` speso per una
+    conversione mancante. ``str(...)`` conserva l'intenzione: la sezione ``3``
+    esiste come qualunque altra.
+
+    Il vuoto diventa ``None`` e non ``""``: con ``""`` :func:`add_entry` cerca la
+    sezione *senza titolo* e, non trovandola, apre una sezione nuova scrivendo
+    ``## `` — un'intestazione senza nome, in un file che il modello poi rilegge.
+    ``None`` è invece il caso documentato "non si sa": la voce va in fondo al
+    file, visibile e facile da spostare.
+    """
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    return text or None
 
 
 def add_entry(text: str, new_text: str, *, heading: str | None = None) -> tuple[str, str]:
@@ -321,8 +464,13 @@ def make_entry_archiver(workspace: Path) -> Callable[[Path, str], None]:
     voci che spariscono finiscono in archivio. Non serve nessuna collaborazione
     dal modello, che è il principio portante del piano.
 
-    Due proprietà volute, non effetti collaterali:
+    Tre proprietà volute, non effetti collaterali:
 
+    - **Non protegge solo i bullet.** Qualunque riga di contenuto che c'era e non
+      c'è più finisce in archivio, voce o no (v. :func:`lost_fragments`). Il
+      prompt del review pass chiede *esplicitamente* di cancellare prosa, e una
+      rete che guardasse solo le voci lascerebbe scoperto proprio ciò che quel
+      prompt manda a cancellare.
     - **Una voce riscritta viene archiviata nella sua versione vecchia.** L'id è
       l'hash del contenuto, quindi cambiare il testo la fa sparire come voce e
       ricomparire come un'altra. È un po' di rumore in archivio in cambio del
@@ -346,24 +494,34 @@ def make_entry_archiver(workspace: Path) -> Callable[[Path, str], None]:
         except OSError:
             # File che non c'è ancora: non se ne sta andando niente.
             return
-        surviving = {entry.id for entry in parse_entries(new_text)}
-        for entry in parse_entries(before):
-            if entry.id in surviving:
-                continue
+        def save(text: str, heading: str) -> None:
+            archived_id = entry_id(text)
             try:
                 archive_entry(
                     memory_dir,
                     ArchivedEntry(
-                        id=entry.id,
-                        text=entry.text,
+                        id=archived_id,
+                        text=text,
                         source=source,
-                        heading=entry.heading,
+                        heading=heading,
                     ),
                 )
             except OSError:
                 logger.exception(
-                    "Could not archive entry {} leaving {}", entry.id, source,
+                    "Could not archive entry {} leaving {}", archived_id, source,
                 )
+
+        surviving = {entry.id for entry in parse_entries(new_text)}
+        for entry in parse_entries(before):
+            if entry.id in surviving:
+                continue
+            save(entry.text, entry.heading)
+        # E poi tutto il resto che se ne va. Le voci hanno il loro giro sopra, con
+        # id e deduplica intatti; qui passa ciò che ``parse_entries`` non vede —
+        # prosa, elenchi numerati, righe sciolte — che fino a oggi lasciava il
+        # file senza copia da nessuna parte.
+        for fragment in lost_fragments(before, new_text):
+            save(fragment.text, fragment_heading(fragment.heading))
 
     return archiver
 
@@ -528,7 +686,7 @@ class MemoryEntryTool(Tool):
         path: Path,
         text: str,
         facts: list[str],
-        heading: Any,
+        heading: str | None,
     ) -> str:
         """Aggiunge N fatti in **una** scrittura, e dice com'è andata voce per voce.
 
@@ -605,7 +763,9 @@ class MemoryEntryTool(Tool):
             facts = self._facts(kwargs)
             if not facts:
                 return f"Cannot add to {MEMORY_TARGETS[file]}: no text given"
-            return self._add_many(file, path, text, facts, kwargs.get("heading"))
+            return self._add_many(
+                file, path, text, facts, requested_heading(kwargs.get("heading")),
+            )
 
         if action == "replace":
             new_text, why = replace_entry(
@@ -743,7 +903,40 @@ class MemoryEntryTool(Tool):
 
     @classmethod
     def create(cls, ctx: ToolContext) -> Tool:
-        return cls(Path(ctx.workspace))
+        """**Rifiuta di costruirsi da un ``ToolContext``**, e non è pigrizia.
+
+        Tre dipendenze fanno di questo tool un tool sicuro, e ``ToolContext`` non
+        ne porta nessuna delle due che contano: ``write_size_guard`` (il tetto di
+        budget) e ``entry_archiver`` (la copia in ``memory/archive/`` di quel che
+        sta per sparire dal file). Senza il secondo, ``memory replace`` riscrive
+        una voce e la versione precedente non finisce in nessun posto — è la
+        maglia larga misurata sul Titan 2 il 2026-08-19, quella per cui esiste
+        ``self._entry_archiver``. ``remove`` degrada, ``apply_patch`` è coperto
+        dalla rete al confine del file, e un ``replace`` costruito da qui
+        tornerebbe a essere il buco fra i due.
+
+        Il percorso è irraggiungibile oggi (nessun ``TOOLS``,
+        ``_plugin_discoverable = False``), quindi la scelta è fra un commento e un
+        rifiuto per il giorno in cui qualcuno mette questo modulo in
+        ``_HARDCODED_TOOL_MODULES``. Vale il rifiuto: un ``create()`` che solleva
+        non aborta il boot — ``ToolLoader`` lo registra in ``failures`` e logga a
+        ERROR il messaggio qui sotto (v. ``ToolLoadFailure``) — mentre un commento
+        non impedisce niente. Dei due esiti, "il tool `memory` non c'è e il log
+        dice perché" si scopre subito; "il tool c'è e perde la formulazione
+        precedente" si scopre rileggendo ``USER.md`` fra un mese.
+
+        Chi lo vuole davvero montare lo costruisce esplicitamente con le sue
+        dipendenze, come fa ``MemoryStore.build_dream_tools``; darle a
+        ``ToolContext`` è la decisione aperta del punto 1.12 del piano, non un
+        default da prendere per omissione.
+        """
+        raise RuntimeError(
+            "MemoryEntryTool cannot be built from a ToolContext: it needs a "
+            "write_size_guard (the memory budget) and an entry_archiver (the "
+            "archive copy that keeps a replaced entry from vanishing), and the "
+            "context carries neither. Construct it explicitly, the way "
+            "MemoryStore.build_dream_tools does."
+        )
 
 
 # Nessun ``TOOLS = [...]``: questo modulo non è ancora in

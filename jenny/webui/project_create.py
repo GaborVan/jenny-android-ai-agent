@@ -27,18 +27,32 @@ e ci entra **alla nascita**, non per sostituzione di un segnaposto dopo.
 
 from __future__ import annotations
 
-import contextlib
 import importlib.util
-import io
 import re
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
 
+from jenny.utils.path import atomic_write
+from jenny.utils.wiki_paths import (
+    LEGACY_WIKI_SCHEMA_FILENAME,
+    WIKI_INDEX_FILENAME,
+    WIKI_SCHEMA_FILENAME,
+    is_wiki_root,
+)
 from jenny.webui.project_scaffold import scaffold_project
 
 _TITLE_SPLIT_RE = re.compile(r"[-_.]+")
+
+# La frontmatter iniziale e la riga di scope dentro di essa. Regex e non YAML per
+# la stessa ragione di ``wiki_paths.wiki_id``: un due punti nel testo libero rende
+# il blocco non parsabile, e ``yaml.safe_load`` non perde *quella* riga, perde
+# tutte le altre. Qui va toccata una riga sola e riscritto il resto byte per
+# byte, che un round-trip di ``yaml.dump`` non sa fare (riordina le chiavi,
+# normalizza le virgolette, perde i commenti).
+_FRONTMATTER_RE = re.compile(r"^---\n([\s\S]*?)\n---")
+_SUMMARY_LINE_RE = re.compile(r"^summary:[ \t]*(.*)$", re.M)
 
 
 class ProjectCreateError(Exception):
@@ -75,6 +89,74 @@ def _yaml_scalar(value: str) -> str:
     return f'"{escaped}"'
 
 
+def _is_complete_project(root: Path) -> bool:
+    """Vero se *root* e' un progetto **finito**, cioe' da non toccare piu'.
+
+    Il marcatore e' la **mappa** (``wiki/index.md``), e non il file di
+    istruzioni. La ragione e' la migrazione dell'avvio
+    (``utils/wiki_migration.py``): a ogni boot ogni cartella che contiene
+    ``wiki/`` si prende un ``AGENTS.md`` minimo se non ce l'ha. Con quello come
+    marcatore, un albero rimasto a meta' — la ``wiki/`` c'e', il resto no —
+    risulterebbe "completo" dal riavvio successivo, e ci resterebbe per sempre
+    con la riga di scope a segnaposto: cioe' esattamente il progetto che il
+    picker elenca e che non si puo' finire.
+
+    ``wiki/index.md`` invece non lo scrive nessun passaggio automatico: lo
+    scrive uno scaffolder, il nostro o quello della skill — i due formati
+    differiscono in tutto tranne che nella mappa — quindi la sua presenza vuol
+    dire che un progetto e' nato davvero. Ed e' anche il file a cui punta il
+    wikilink del registro: senza, la voce in ``wikis/_index.md`` e' un link
+    morto.
+    """
+    if (root / "wiki" / WIKI_INDEX_FILENAME).is_file():
+        return True
+    # Una wiki scritta a mano prima del passo 7 tiene le istruzioni in
+    # ``CLAUDE.md``. Lo scaffolder non lo vede e le scriverebbe accanto un
+    # ``AGENTS.md``: e' lo stato che la migrazione si rifiuta di risolvere
+    # («ha sia CLAUDE.md sia AGENTS.md, non tocco niente»). Una cartella cosi'
+    # e' roba dell'utente, non un albero a meta'.
+    return (root / LEGACY_WIKI_SCHEMA_FILENAME).is_file()
+
+
+def _seed_scope_if_placeholder(root: Path, quoted_seed: str) -> bool:
+    """Scrive la riga di scope in un ``AGENTS.md`` che ha solo il segnaposto.
+
+    Serve al ripasso su un albero rimasto a meta'. Se l'avvio ha gia' scritto il
+    suo ``AGENTS.md`` minimo (``wiki_migration._ensure_id``, ``summary:`` a
+    segnaposto), lo scaffolder lo lascia stare — e' la regola che rende sicuro
+    rilanciarlo — e la riga che l'utente ha appena scritto si perderebbe in
+    silenzio: il progetto sarebbe completo e senza scopo, che e' la cosa per cui
+    la riga viene chiesta.
+
+    Uno ``summary:`` **vero** non si tocca: completare un progetto non e'
+    riscriverne lo scope. Ritorna True se ha scritto.
+    """
+    schema = root / WIKI_SCHEMA_FILENAME
+    try:
+        text = schema.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    block = _FRONTMATTER_RE.match(text)
+    if block is None:
+        return False
+    raw = block.group(1)
+    line = _SUMMARY_LINE_RE.search(raw)
+    if line is None:
+        # Frontmatter senza ``summary:``: la riga si aggiunge in fondo al blocco,
+        # che e' l'unico posto in cui non spezza niente di quel che c'e'.
+        updated = f"{raw.rstrip(chr(10))}\nsummary: {quoted_seed}"
+    else:
+        # Stessa regola di ``wiki_paths._is_placeholder``, piu' il caso della
+        # chiave vuota: entrambi vogliono dire "scope da riempire".
+        value = line.group(1).strip().strip('"').strip("'")
+        if value and not ("<" in value and ">" in value):
+            return False
+        updated = f"{raw[: line.start()]}summary: {quoted_seed}{raw[line.end() :]}"
+    atomic_write(schema, f"{text[: block.start(1)]}{updated}{text[block.end(1) :]}")
+    logger.info("project {}: scope line written into {}", root.name, WIKI_SCHEMA_FILENAME)
+    return True
+
+
 def create_project(
     *,
     wikis_dir: Path,
@@ -86,15 +168,37 @@ def create_project(
 
     Sincrona e con I/O: il chiamante la mette in un thread. Il nome arriva gia'
     validato — questo modulo non e' il gate.
+
+    **Su una cartella che esiste gia' rifiuta in due modi diversi**, e la
+    differenza e' quel che il client mostra all'utente. Un progetto completo e'
+    un "ce l'hai gia'"; una cartella che non e' un progetto e' un "c'e' qualcosa
+    di mezzo", che si risolve rinominando. In mezzo ai due c'e' il caso per cui
+    lo scaffolder e' scritto a top-up: l'albero a meta' — la ``wiki/`` c'e' (la
+    crea per prima di proposito, cosi' resta visibile al picker) e il resto no,
+    perche' la creazione e' morta a meta'. Prima di questo, quella cartella era
+    irrecuperabile: elencata dal picker, senza mappa, e su un telefono l'utente
+    non ha modo di ripararla a mano.
     """
     root = wikis_dir / name
     if root.exists():
-        raise ProjectCreateError(f"project already exists: {name}")
+        if _is_complete_project(root):
+            raise ProjectCreateError(f"project already exists: {name}")
+        if not is_wiki_root(root):
+            raise ProjectCreateError(
+                f"a folder named {name} is in the way: it exists but is not a project"
+            )
+        logger.info("project {}: half-built tree, completing it instead of refusing", name)
 
     try:
         created = scaffold_project(root, project_title(name), seed, _yaml_scalar(seed))
     except Exception as exc:
         raise ProjectCreateError(f"scaffold failed: {exc}") from exc
+
+    # Il seme: scritto dallo scaffolder quando l'``AGENTS.md`` nasce adesso,
+    # applicato a mano quando il file c'era gia' col segnaposto dell'avvio.
+    seeded = WIKI_SCHEMA_FILENAME in created or _seed_scope_if_placeholder(
+        root, _yaml_scalar(seed)
+    )
 
     # Il registro lo scrive il chiamante e non lo scaffolder: quello conosce una
     # cartella, questo conosce `wikis_dir`. `reindex_wikis` resta della skill —
@@ -108,8 +212,24 @@ def create_project(
         if reindex is not None and reindex.loader is not None:
             module = importlib.util.module_from_spec(reindex)
             reindex.loader.exec_module(module)
-            with contextlib.redirect_stdout(io.StringIO()):
-                registry = str(module.regenerate_index(wikis_dir))
+            # **Niente ``redirect_stdout`` qui.** Questa funzione gira dentro un
+            # ``asyncio.to_thread`` (v. ``webui/commands.py::project_create``), e
+            # ``redirect_stdout`` muta ``sys.stdout`` **di processo**: per tutta
+            # la finestra, l'output di *ogni altro* thread finisce nel buffer che
+            # buttiamo via. Non è teorico: ``python_exec`` cattura quel che il
+            # codice del modello stampa proprio via ``sys.stdout``, e ha
+            # sostituito il proprio ``redirect_stdout`` con un proxy per-thread
+            # esattamente per questo (v. il commento lungo in
+            # ``agent/tools/python_exec.py``, «cattura di stdout PER THREAD»).
+            # Il proxy però si consulta al momento della scrittura, e chi scrive
+            # legge ``sys.stdout``: con la nostra ``StringIO`` al suo posto, un
+            # ``print()`` del modello nel turno accanto sparisce in silenzio.
+            #
+            # E non c'era niente da nascondere: ``regenerate_index`` stampa una
+            # riga sola, su **stderr** (il caso «_index.md senza marcatori»), che
+            # un ``redirect_stdout`` non tocca nemmeno. Costo del silenzio: zero.
+            # Rischio: l'output di un altro turno.
+            registry = str(module.regenerate_index(wikis_dir))
     except Exception as exc:
         # La wiki esiste ed e' completa: un registro non aggiornato e' un
         # inconveniente che `lint --workspace` sa riparare, non un fallimento
@@ -119,10 +239,12 @@ def create_project(
     return {
         "name": name,
         "created": list(created or []),
-        # La riga di scope entra alla nascita, quindi c'e' sempre: il campo resta
-        # nella risposta perche' il client lo legge, e resta `True` invece di
-        # sparire per non cambiare la forma di un payload per un dettaglio
-        # interno.
-        "seeded": True,
+        # La riga di scope entra alla nascita, quindi su un progetto nuovo e'
+        # sempre `True`. Su un albero completato puo' essere `False`: se
+        # l'``AGENTS.md`` c'era gia' con uno scope **vero** — la creazione era
+        # morta fra quel file e la mappa — quello resta, e la riga di stavolta
+        # finisce solo nella mappa. Il campo dice quel che e' successo invece di
+        # dichiarare sempre riuscita una cosa che non sempre lo e'.
+        "seeded": seeded,
         "registry": registry,
     }

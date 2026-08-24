@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Collection
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Coroutine
 
 from loguru import logger
 
+from jenny.security.workspace_access import WorkspaceScopeResolver
 from jenny.session.keys import (
     ATLAS_SESSION_PREFIX,
     DREAM_SESSION_PREFIX,
@@ -16,6 +18,11 @@ from jenny.session.keys import (
     is_project_session_key,
 )
 from jenny.session.manager import Session, SessionManager
+
+# La sottocartella dei progetti quando nessuno la passa. Dalla stessa costante
+# che usa il ``Consolidator``, non da un letterale: ``config.wiki.wikis_dir`` e'
+# configurabile, e due default scritti a mano divergono al primo che cambia.
+_PROJECTS_SUBDIR = WorkspaceScopeResolver.projects_subdir
 
 if TYPE_CHECKING:
     from jenny.agent.memory import Consolidator
@@ -50,7 +57,8 @@ class AutoCompact:
 
     def __init__(self, sessions: SessionManager, consolidator: Consolidator,
                  session_ttl_minutes: int = 0,
-                 compact_projects: bool = False):
+                 compact_projects: bool = False,
+                 projects_subdir: str = _PROJECTS_SUBDIR):
         self.sessions = sessions
         self.consolidator = consolidator
         self._ttl = session_ttl_minutes
@@ -59,8 +67,33 @@ class AutoCompact:
         # progetto si compatta come quella personale — perche' la verita' non sta
         # piu' li', sta nelle pagine.
         self._compact_projects = compact_projects
+        # Dove stanno i progetti. **Non un letterale ``"wikis"``**: la cartella
+        # e' ``config.wiki.wikis_dir``, e chi costruisce questo oggetto la ha
+        # (``AgentLoop.__init__`` la riceve come ``projects_subdir`` e la passa
+        # gia' al ``Consolidator``). Finche' quel punto non la passa anche qui, il
+        # default vale — corretto per la configurazione di serie, e per una
+        # ``wikis_dir`` diversa la cartella non si trova e il recinto **rinvia**
+        # dicendolo, invece di compattare sulla fede.
+        self._projects_subdir = projects_subdir
         self._archiving: set[str] = set()
         self._summaries: dict[str, tuple[str, datetime]] = {}
+        # Il motivo dell'ultimo rinvio, per progetto: serve solo a non ripetere
+        # la stessa riga di log ogni minuto (il giro TTL gira a 60s). La
+        # decisione non e' memorizzata — si rifa ogni volta.
+        self._deferred: dict[str, str] = {}
+
+    @property
+    def _workspace(self) -> Path | None:
+        """La radice del workspace, dedotta da chi tiene le sessioni.
+
+        ``SessionManager.workspace`` **e'** ``config.workspace_path``, in
+        ``GatewayContainer`` come in ``AgentLoop`` (che passa la stessa
+        ``workspace``): non c'e' un secondo dato da tenere allineato, quindi
+        nessun argomento nuovo per una cosa che il chiamante ha gia' dato una
+        volta.
+        """
+        directory = getattr(self.sessions, "workspace", None)
+        return directory if isinstance(directory, Path) else None
 
     def _is_expired(self, ts: datetime | str | None,
                     now: datetime | None = None) -> bool:
@@ -116,10 +149,114 @@ class AutoCompact:
         entrano in contesto d'ufficio (T3 e T6.4). Il recinto resta la posizione
         di partenza, e resta reversibile: e' quel che rende accendere P4 una prova
         invece di una scommessa.
+
+        **Aperto il recinto, la manopola non basta da sola** (T2.6): "la verita'
+        sta nelle pagine" e' una premessa, non un fatto, e chi la verifica e'
+        :meth:`_pages_carry_the_project`. Quella verifica non sta qui perche'
+        questo metodo gira su **tutti** i candidati a ogni giro TTL (60 secondi)
+        mentre quella legge il diario da disco: pagarla per un progetto che non e'
+        nemmeno scaduto sarebbe I/O al minuto per progetto, sul telefono, per
+        niente. Sta ai due punti in cui la decisione si prende davvero.
         """
         if self._compact_projects:
             return True
         return not is_project_session_key(key)
+
+    def _pages_carry_the_project(self, key: str) -> bool:
+        """Se quel che questa conversazione ha detto e' **gia' diventato pagine**.
+
+        Il secondo cancello di P4, e quello che regge la premessa del primo.
+        Compattare la conversazione di un progetto e' innocuo *solo* se il
+        giardiniere ha gia' promosso quel che vi si e' detto; senza questo
+        controllo i due orologi non sono nemmeno nell'ordine giusto —
+        ``idleCompactAfterMinutes`` sta a 15 minuti di default, mentre il
+        giardiniere vuole 30 minuti di quiete **piu'** fino a sei ore di distanza
+        **piu'** un tick da mezz'ora. Su un progetto nuovo l'ordine normale
+        sarebbe stato *compatta, poi promuovi*: cioe' l'esatto contrario della
+        premessa. Legare la compattazione al **delta di diario vuoto** trasforma
+        una corsa fra due orologi che non si parlano in un invariante.
+
+        Non basta che il diario sia letto: si chiede **anche che esista almeno
+        una pagina**. Il delta e' vuoto in due situazioni che si assomigliano da
+        fuori e non hanno niente in comune — «il giardiniere ha promosso tutto» e
+        «in ``raw/journal/`` non c'e' mai finito niente» (cattura mai avvenuta,
+        cartella appena creata: :func:`read_journal_delta` restituisce un delta
+        vuoto quando la cartella del diario non c'e'). Nel secondo caso la
+        conversazione e' l'unico depositario esistente, ed e' esattamente il caso
+        che questo passo deve fermare. Il conto del rinvio di troppo e' invece
+        basso e limitato: la compattazione per **lunghezza**
+        (``maybe_consolidate_by_tokens``) gira a ogni turno di ogni sessione, per
+        cui un progetto che rinvia per sempre non cresce per sempre — perde solo
+        la compressione *anticipata*. Asimmetria decisiva: qui si sbaglia dalla
+        parte che costa token, non dalla parte che costa memoria.
+
+        Vale **solo** per i progetti: qualunque altra chiave passa senza toccare
+        il disco. La conversazione personale ha Dream, non il giardiniere, e
+        legarla a un diario che non ha spegnerebbe la compattazione dove funziona.
+        """
+        if not is_project_session_key(key):
+            return True
+        # Import locale: ``gardener`` non serve quando la manopola e' spenta —
+        # cioe' quasi sempre — e questo modulo lo carica ``AgentLoop`` all'avvio.
+        from jenny.agent.gardener import GardenerStore
+        from jenny.utils.wiki_paths import iter_wiki_pages
+
+        workspace = self._workspace
+        if workspace is None:
+            return self._defer(key, "the workspace root is unknown")
+        name = key[len(PROJECT_SESSION_PREFIX):]
+        # Stessa risoluzione chiave -> cartella del giardiniere e di
+        # ``WorkspaceScopeResolver.for_project``, guardia sui ``..`` compresa. E
+        # la sottocartella e' quella configurata, non ``"wikis"`` cablata.
+        store = GardenerStore.for_project(
+            workspace, name, wikis_dir_name=self._projects_subdir,
+        )
+        if store is None:
+            return self._defer(
+                key, f"no project folder at {self._projects_subdir}/{name}",
+            )
+        try:
+            delta = store.read_delta()
+            # ``titles=False``: qui serve solo il numero, e col default i titoli
+            # costerebbero una lettura per pagina — per un cancello che gira a
+            # ogni giro TTL, cioe' ogni minuto, per ogni progetto scaduto (T3.16).
+            pages = len(iter_wiki_pages(store.root / "wiki", titles=False))
+        except Exception as exc:
+            # Largo di proposito, e per due ragioni. Un diario illeggibile non e'
+            # un permesso a compattare, quindi l'esito giusto e' il rinvio; e
+            # ``check_expired`` viene chiamata **dentro** un ``except
+            # asyncio.TimeoutError`` in ``AgentLoop.run``, dove un'eccezione non
+            # e' ripresa da quel ``try`` — la farebbe uscire dal ciclo
+            # dell'agente. Un cancello prudente non deve poter spegnere il loop.
+            logger.debug("Auto-compact: journal check failed for {}: {!r}", key, exc)
+            return self._defer(key, f"the journal could not be read ({exc})")
+        if not delta.is_empty:
+            return self._defer(
+                key, f"{delta.line_count} journal lines are not promoted yet",
+            )
+        if not pages:
+            return self._defer(key, "the project has no pages yet")
+        if self._deferred.pop(key, None) is not None:
+            logger.info(
+                "Auto-compact: {} is no longer deferred ({} pages, journal fully read)",
+                key, pages,
+            )
+        return True
+
+    def _defer(self, key: str, reason: str) -> bool:
+        """Registra il rinvio e lo dice. Sempre ``False``, per scriverlo in linea.
+
+        Il log e' la meta' che rende questo cancello utile invece di misterioso:
+        un progetto che non si compatta mai deve poter essere **spiegato**. A
+        ``INFO`` la prima volta e a ogni cambio di motivo, a ``DEBUG`` sulle
+        ripetizioni: il giro TTL passa ogni minuto, e la stessa riga sessanta
+        volte l'ora seppellirebbe il resto del log invece di dirlo.
+        """
+        first_time = self._deferred.get(key) != reason
+        self._deferred[key] = reason
+        log = logger.info if first_time else logger.debug
+        log("Auto-compact: deferring idle compaction of {} — {}", key, reason)
+        return False
 
     def _idle_candidates(self) -> tuple[str, ...]:
         """Le sessioni che questo giro puo' guardare.
@@ -173,16 +310,26 @@ class AutoCompact:
             info = self.sessions.read_session_metadata(key)
             if info is None:
                 continue
-            if self._is_expired(info.get("updated_at")):
-                self._archiving.add(key)
-                schedule_background(self._archive(key))
+            if not self._is_expired(info.get("updated_at")):
+                continue
+            # **Dopo** la scadenza, non prima: il secondo cancello legge il
+            # diario da disco, e cosi' lo paga solo un progetto che sta davvero
+            # per essere compattato.
+            if not self._pages_carry_the_project(key):
+                continue
+            self._archiving.add(key)
+            schedule_background(self._archive(key))
 
     async def _archive(self, key: str) -> None:
         # Secondo controllo, e non e' ridondante: ``_archive`` e' una coroutine
         # che qualcuno pianifica, quindi e' raggiungibile senza passare da
         # ``check_expired`` — ed e' l'ultimo punto prima di riscrivere la
         # sessione. Il primo guardia l'ingresso, questo la scrittura.
-        if not self._may_archive_for_idleness(key) or self._is_internal_session(key):
+        if (
+            not self._may_archive_for_idleness(key)
+            or self._is_internal_session(key)
+            or not self._pages_carry_the_project(key)
+        ):
             self._archiving.discard(key)
             return
         try:

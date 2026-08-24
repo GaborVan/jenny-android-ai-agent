@@ -19,13 +19,15 @@ e un interruttore che nessuno accende non protegge niente. Le sonde
 
 from __future__ import annotations
 
+import dataclasses
+import threading
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from jenny.agent.tools.filesystem import EditFileTool, ReadFileTool, WriteFileTool
-from jenny.agent.tools.python_exec import PythonNamespace
+from jenny.agent.tools.python_exec import PythonExecTool, PythonNamespace
 from jenny.agent.tools.python_exec_builtins import _register_builtin_functions
 from jenny.config.tool_schemas import PythonExecConfig
 from jenny.security.workspace_access import (
@@ -250,3 +252,207 @@ def test_with_writing_on_the_same_route_lands(writable: Path, code: str) -> None
     stdout, stderr = _run(writable, code)
     assert "ReadOnlyTurnError" not in stdout + stderr
     assert (writable / "nuova").is_dir() or (writable / "nuovo.txt").exists()
+
+
+# ── Dal tool VERO: il cancello sta sul turno, non sul confine ─────────────
+#
+# PERCHÉ QUESTA SEZIONE ESISTE, DUE VOLTE.
+#
+# 1. Le prove qui sopra chiamano `PythonNamespace.execute()` dal thread del
+#    test. `current_turn_is_readonly()` legge un ContextVar, e in produzione il
+#    codice del modello gira su un worker raggiunto con
+#    `loop.run_in_executor`, che **non copia il contesto**: il flag tornava al
+#    proprio default (`False`) e ogni scrittura passava. Un cancello provato in
+#    modo sincrono non dice nulla su quello.
+#
+# 2. Con `restrict_to_workspace` SPENTO il confine di path non c'è, e ogni
+#    wrapper prendeva il ramo di passthrough — prima di arrivare al rifiuto.
+#    Ma la sola lettura non è una questione di *dove* si scrive: è del TURNO, e
+#    deve valere identica nelle due modalità. Da qui la parametrizzazione.
+
+
+@pytest.fixture(params=[True, False], ids=["restricted", "unrestricted"])
+def restrict(request) -> bool:
+    return request.param
+
+
+def _tool(ws: Path, restrict_to_workspace: bool) -> PythonExecTool:
+    cfg = PythonExecConfig()
+    tool = PythonExecTool(
+        working_dir=str(ws),
+        timeout=30,
+        allowed_modules=cfg.allowed_modules,
+        blocked_modules=cfg.blocked_modules,
+        restrict_to_workspace=restrict_to_workspace,
+        workspace=str(ws),
+    )
+    _register_builtin_functions(
+        tool.namespace, workspace=str(ws), restrict_to_workspace=restrict_to_workspace
+    )
+    return tool
+
+
+@pytest.fixture
+def readonly_scope(ws: Path, restrict: bool):
+    """Turno in sola lettura, con `restrict_to_workspace` del turno allineato."""
+    scope = build_workspace_scope(ws, "restricted").without_write_access()
+    scope = dataclasses.replace(scope, restrict_to_workspace=restrict)
+    with enter_workspace_scope(scope):
+        yield ws
+
+
+_MUTAZIONI = [
+    ("os.remove", "import os; os.remove({p!r})"),
+    ("os.rename", "import os; os.rename({p!r}, {p!r} + '.x')"),
+    ("os.mkdir", "import os; os.mkdir({p!r} + '.dir')"),
+    ("os.chmod", "import os; os.chmod({p!r}, 0o600)"),
+    ("os.utime", "import os; os.utime({p!r}, None)"),
+    (
+        "os.open-trunc",
+        "import os; os.close(os.open({p!r}, os.O_WRONLY | os.O_TRUNC))",
+    ),
+    ("os.symlink", "import os; os.symlink({p!r}, {p!r} + '.link')"),
+    ("shutil.rmtree", "import shutil; shutil.rmtree({p!r} + '.d')"),
+    ("shutil.copy", "import shutil; shutil.copy({p!r}, {p!r} + '.copia')"),
+    ("shutil.move", "import shutil; shutil.move({p!r}, {p!r} + '.mosso')"),
+    ("open-w", "open({p!r}, 'w').write('x')"),
+    ("pathlib-write", "from pathlib import Path; Path({p!r}).write_text('x')"),
+    ("io.FileIO-w", "import io; io.FileIO({p!r}, 'w').close()"),
+    ("builtin-write_file", "write_file({p!r}, 'x')"),
+]
+
+
+@pytest.mark.parametrize(
+    ("_id", "code"), _MUTAZIONI, ids=[i for i, _c in _MUTAZIONI]
+)
+async def test_every_mutating_route_is_refused_on_the_real_path(
+    readonly_scope: Path, restrict: bool, _id: str, code: str
+) -> None:
+    """Quattordici strade, due modalità, nessuna deve arrivare al filesystem."""
+    target = readonly_scope / "modificabile.txt"
+    (readonly_scope / (target.name + ".d")).mkdir()
+
+    out = await _tool(readonly_scope, restrict).execute(code=code.format(p=str(target)))
+
+    assert "ReadOnlyTurnError" in out, f"passata (restrict={restrict}): {code!r} -> {out!r}"
+    # E il filesystem non si è mosso: un rifiuto detto a metà è il caso peggiore.
+    assert target.read_text(encoding="utf-8") == "prima\n"
+    assert (readonly_scope / (target.name + ".d")).is_dir()
+    for suffisso in (".x", ".dir", ".link", ".copia", ".mosso"):
+        assert not Path(str(target) + suffisso).exists(), suffisso
+
+
+_LETTURE = [
+    ("listdir", "import os; print(os.listdir({p!r}))"),
+    ("stat", "import os; print(os.stat({p!r} + '/leggibile.txt').st_size)"),
+    ("access", "import os; print(os.access({p!r}, os.R_OK))"),
+    ("walk", "import os; print(sum(1 for _ in os.walk({p!r})))"),
+    ("open-r", "print(open({p!r} + '/leggibile.txt').read())"),
+    (
+        "pathlib-read",
+        "from pathlib import Path; print(Path({p!r} + '/leggibile.txt').read_text())",
+    ),
+    (
+        "os.open-r",
+        "import os; fd = os.open({p!r} + '/leggibile.txt', os.O_RDONLY);"
+        " print(os.read(fd, 4)); os.close(fd)",
+    ),
+    ("builtin-read_file", "print(read_file({p!r} + '/leggibile.txt'))"),
+]
+
+
+@pytest.mark.parametrize(("_id", "code"), _LETTURE, ids=[i for i, _c in _LETTURE])
+async def test_reading_is_untouched_on_the_real_path(
+    readonly_scope: Path, restrict: bool, _id: str, code: str
+) -> None:
+    """La metà che conta: un interruttore che chiude anche le letture non si usa."""
+    out = await _tool(readonly_scope, restrict).execute(code=code.format(p=str(readonly_scope)))
+
+    assert "ReadOnlyTurnError" not in out, f"chiusa per sbaglio: {code!r} -> {out!r}"
+    assert "Traceback" not in out, f"caduta per altro: {code!r} -> {out!r}"
+    assert out.strip() and out.strip() != "(no output)", f"nessun output da {code!r}: {out!r}"
+
+
+async def test_a_writable_turn_still_writes_on_the_real_path(
+    ws: Path, restrict: bool
+) -> None:
+    """Controprova: i wrapper sono di processo, il divieto è del *turno*."""
+    scope = dataclasses.replace(
+        build_workspace_scope(ws, "restricted"), restrict_to_workspace=restrict
+    )
+    with enter_workspace_scope(scope):
+        out = await _tool(ws, restrict).execute(
+            code=f"open({str(ws / 'nuovo.txt')!r}, 'w').write('x')"
+        )
+
+    assert "ReadOnlyTurnError" not in out, out
+    assert (ws / "nuovo.txt").read_text(encoding="utf-8") == "x"
+
+
+async def test_the_yield_time_session_route_is_refused(readonly_scope: Path) -> None:
+    """Il ramo `yield_time_ms` non passa dall'executor ma da un thread grezzo.
+
+    Porta con sé ancora meno del salto in executor: nessun ContextVar. Era la
+    strada che ignorava l'interruttore anche con tutto il resto chiuso.
+    """
+    target = readonly_scope / "modificabile.txt"
+
+    out = await _tool(readonly_scope, True).execute(
+        code=f"open({str(target)!r}, 'w').write('x')", yield_time_ms=3000
+    )
+
+    assert "ReadOnlyTurnError" in out, out
+    assert target.read_text(encoding="utf-8") == "prima\n"
+
+
+async def test_host_code_keeps_writing_during_a_readonly_turn(readonly_scope: Path) -> None:
+    """Il gate che rende innocuo il rifiuto anticipato.
+
+    I wrapper stanno sul modulo globale e non vengono mai smontati: se il
+    rifiuto valesse anche fuori da un exec guardato, un turno in sola lettura
+    non riuscirebbe più a persistere la propria sessione né il proprio
+    transcript. Questo test scrive dal thread del TEST — cioè come il gateway —
+    mentre il turno in sola lettura è attivo.
+    """
+    # Prima si fa girare un exec guardato, così i wrapper sono montati.
+    await _tool(readonly_scope, True).execute(code="print(1)")
+
+    (readonly_scope / "dal-gateway.txt").write_text("ok", encoding="utf-8")
+    import os as _os
+
+    _os.remove(readonly_scope / "dal-gateway.txt")
+
+
+class TestIlFlagArrivaAlThreadCheEsegue:
+    """Il test che muore se il cancello torna a essere solo sincrono.
+
+    Non prova un rifiuto: prova il *meccanismo*. Toccando la copia del contesto
+    in `run_python_async` questi assert cadono dicendo cosa si è rotto, mentre
+    ogni prova che chiama il namespace dal proprio thread continuerebbe a
+    passare — che è esattamente come il difetto è arrivato in produzione.
+    """
+
+    async def test_current_turn_is_readonly_e_vero_sul_worker(
+        self, readonly_scope: Path
+    ) -> None:
+        visto: dict[str, Any] = {}
+
+        def _registra() -> None:
+            from jenny.security.workspace_access import current_turn_is_readonly
+
+            visto["thread"] = threading.get_ident()
+            visto["readonly"] = current_turn_is_readonly()
+
+        tool = _tool(readonly_scope, True)
+        tool.namespace.register_function("_registra", _registra)
+
+        await tool.execute(code="_registra()")
+
+        assert visto["thread"] != threading.get_ident(), (
+            "il codice ha girato sul thread del test: questa prova non dice più "
+            "niente sulla produzione"
+        )
+        assert visto["readonly"] is True, (
+            "il flag di sola lettura non attraversa il salto di thread: ogni "
+            "cancello che lo legge è inerte in produzione"
+        )

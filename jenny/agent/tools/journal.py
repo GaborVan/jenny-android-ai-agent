@@ -31,7 +31,7 @@ capita a ogni turno.
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +44,7 @@ from jenny.security.workspace_access import (
     current_turn_is_readonly,
     current_workspace_scope,
 )
+from jenny.utils.helpers import safe_zoneinfo
 from jenny.utils.wiki_paths import is_wiki_root, journal_page_name, wiki_journal_dir
 
 # Non c'e' un progetto: il rifiuto dice **dove** vive il diario invece di dire
@@ -71,6 +72,7 @@ _PARAMETERS = tool_parameters_schema(
 )
 
 
+@tool_parameters(_PARAMETERS)
 class JournalAppendTool(Tool):
     """Append one line to the current project's journal page for today."""
 
@@ -85,9 +87,22 @@ class JournalAppendTool(Tool):
         today: Any = None,
         root: Path | None = None,
         origin_marker: str = "",
+        timezone: str | None = None,
+        now: Any = None,
     ) -> None:
-        # Iniettabile per i test; in produzione nessuno lo passa.
-        self._today = today or date.today
+        # Iniettabile per i test; in produzione nessuno lo passa. Resta la
+        # sola **data**: l'istante lo dà ``_stamp`` (v. ``_append``), e chi
+        # inietta questo inietta il giorno di quell'istante.
+        self._today = today
+        # Il fuso in cui il modello legge l'ora (``context.py`` gli mette in
+        # testa ``current_time_str(config.agents.defaults.timezone)``). Senza,
+        # la riga di diario portava l'ora **di sistema**: su un telefono in
+        # viaggio le due differiscono di ore, e il diario è il documento in cui
+        # quell'ora diventa un fatto storico.
+        self._timezone = timezone
+        # Un solo colpo d'orologio, iniettabile per i test: il giorno della
+        # pagina e l'ora della riga devono venire dallo **stesso** istante.
+        self._now = now
         # **Il progetto iniettato invece di dedotto.** Su un turno dell'utente il
         # progetto si ricava dallo scope legato, ed e' giusto: la cartella non
         # deve poter divergere dalla conversazione. Ma una **passata interna**
@@ -107,7 +122,7 @@ class JournalAppendTool(Tool):
 
     @classmethod
     def create(cls, ctx: Any) -> Tool:
-        return cls()
+        return cls(timezone=getattr(ctx, "timezone", None))
 
     @property
     def name(self) -> str:
@@ -123,22 +138,23 @@ class JournalAppendTool(Tool):
             "file, so it is always safe to call. Only inside a project."
         )
 
-    @property
-    def parameters(self) -> dict[str, Any]:
-        return _PARAMETERS
-
-    @tool_parameters(_PARAMETERS)
     async def execute(self, text: str = "", **_: Any) -> str:
         line = " ".join((text or "").split())
-        if line and self._origin_marker:
-            line = f"{self._origin_marker} {line}"
         if not line:
             return "Nothing to append: `text` was empty."
+        # **Il tetto si misura su ``text``, e il marcatore si mette dopo.**
+        # Prefissato prima, ``[recovered] `` (dodici caratteri che il modello non
+        # scrive e non vede) restringeva l'allowance a 488: una riga da 495
+        # veniva rifiutata citando un limite di 500 che il chiamante non aveva
+        # sforato, cioè un rifiuto su cui non si può agire. Il limite è del
+        # **fatto**; l'origine è annotazione del codice e non se ne paga il conto.
         if len(line) > _MAX_TEXT_CHARS:
             return (
                 f"Too long for a journal line ({len(line)} characters, max {_MAX_TEXT_CHARS}). "
                 "A journal line is one fact; this is page material."
             )
+        if self._origin_marker:
+            line = f"{self._origin_marker} {line}"
 
         # L'ordine dei due gate non e' indifferente. Prima "non c'e' un
         # progetto", che e' vero indipendentemente dal modo del turno: dire
@@ -146,7 +162,10 @@ class JournalAppendTool(Tool):
         # mette a cercare l'interruttore per un problema che l'interruttore non
         # risolve.
         scope = current_workspace_scope()
-        root = self._root or (scope.project_path if scope is not None else None)
+        # ``write_root()`` e non ``project_path``: dal passo T4.4 la radice
+        # scrivibile del turno la dice un solo metodo, anche a chi — come questo
+        # tool — ha una destinazione fissa e non un percorso da validare.
+        root = self._root or (scope.write_root() if scope is not None else None)
         if root is None or not is_wiki_root(root):
             return _NO_PROJECT_REFUSAL
         if current_turn_is_readonly():
@@ -154,10 +173,33 @@ class JournalAppendTool(Tool):
 
         return await self._append(root, line)
 
+    def _stamp(self) -> datetime:
+        """L'istante della riga, nel fuso in cui il modello legge l'ora.
+
+        ``datetime.now()`` nudo era sbagliato due volte. La prima: **due letture
+        dell'orologio**, una per il giorno della pagina e una per l'ora della
+        riga, quindi un turno a cavallo della mezzanotte scriveva ``- 00:00 —``
+        in fondo alla pagina di *ieri* — una riga datata a un giorno in cui non è
+        stata detta, in un file append-only che nessuno rilegge. La seconda: il
+        fuso di **sistema**, mentre l'ora che il modello ha in testa è quella
+        configurata (``context.py``, ``current_time_str``); su un device fuori
+        dal proprio fuso il fatto entrava nel diario con un'ora che non è quella
+        in cui è stato detto.
+
+        ``safe_zoneinfo`` e non ``ZoneInfo``: su Android il database tzdata può
+        mancare, e una cattura che solleva è un fatto perduto.
+        """
+        if self._now is not None:
+            return self._now()
+        tz = safe_zoneinfo(self._timezone) if self._timezone else None
+        return datetime.now(tz=tz) if tz else datetime.now().astimezone()
+
     async def _append(self, root: Path, line: str) -> str:
-        day = self._today()
+        # Un colpo d'orologio, due usi: la pagina e l'ora della riga.
+        stamp = self._stamp()
+        day = self._today() if self._today is not None else stamp.date()
         page = wiki_journal_dir(root) / journal_page_name(day)
-        entry = f"- {datetime.now().strftime('%H:%M')} — {line}\n"
+        entry = f"- {stamp.strftime('%H:%M')} — {line}\n"
         try:
             page.parent.mkdir(parents=True, exist_ok=True)
             fresh = not page.exists()

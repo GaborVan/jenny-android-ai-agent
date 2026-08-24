@@ -105,6 +105,13 @@ def _register_builtin_functions(
     def _write_root() -> str | None:
         """La radice entro cui una SCRITTURA deve restare, adesso.
 
+        Non la calcola: la chiede a ``ToolWorkspace.write_root()``, che e' l'unica
+        risposta a «dove posso scrivere» (passo T4.4). Qui resta solo la
+        conversione a stringa e il fallback sul workspace del costruttore, che
+        vale quando non c'e' confine da far rispettare — questa funzione e'
+        chiamata solo da ``_enforce_path`` sotto ``restrict_to_workspace``, quindi
+        un confine ci vuole comunque.
+
         Con una sessione-progetto legata e' la cartella del progetto; senza, il
         workspace di sempre. La *lettura* non passa di qui: resta sul workspace,
         perche' la prigione di un progetto e' sulla scrittura (v.
@@ -115,7 +122,7 @@ def _register_builtin_functions(
         access = current_tool_workspace(
             workspace, restrict_to_workspace=restrict_to_workspace
         )
-        root = access.allowed_root
+        root = access.write_root()
         return str(root) if root is not None else workspace
 
     def _enforce_path(path: str, *, for_write: bool = False) -> Path:
@@ -465,14 +472,63 @@ def _register_builtin_functions(
         return buf.getvalue()
 
     def wiki_lint(root: str) -> str:
-        """Run health check on an LLM Wiki. Returns issues found."""
+        """Run health check on an LLM Wiki. Returns issues found.
+
+        Cattura **solo stdout** — lo script scrive lì tutto, errori compresi — e
+        quando stdout è vuoto lo dice col codice di uscita invece del vecchio
+        "No output": quella stringa faceva passare per «nessun problema» un lint
+        che non ha girato affatto.
+
+        **Se il lint scoppia, il buffer parziale torna comunque**, con in coda una
+        riga che dice che è parziale e perché. La ragione è tutta nella differenza
+        fra i due esiti per chi chiama: lasciando salire l'eccezione, quel che il
+        modello riceve da ``python_exec`` è un traceback e **zero** risultati —
+        anche i quaranta già stampati prima del passo che è caduto. Non sono
+        risultati dubbi: sono passi conclusi, ognuno col suo conteggio.
+        Buttarli non rende nessuno più sicuro, rende solo il difetto più caro.
+
+        E il verso opposto — «torna il parziale e taci» — è il difetto che T6.6 ha
+        chiuso: un report senza la riga di riepilogo si legge come un report. Il
+        modello non conta i passi che si aspettava, quindi l'*assenza* del
+        riepilogo non è un segnale; un 🔴 che nomina l'eccezione lo è. Quindi
+        tornano entrambe le cose, in quest'ordine.
+        """
         import contextlib
+        import traceback
 
         mod = _load_wiki_script("lint_wiki.py")
+        # **Il confine si risolve fuori dal ``try``.** ``_wiki_root`` solleva
+        # ``WorkspaceBoundaryError`` su una root fuori dal workspace, e quella
+        # deve **salire**: è un rifiuto della policy, non un lint andato male, e
+        # ridurla a una stringa nel report la renderebbe indistinguibile da una
+        # wiki con dei problemi (v.
+        # ``tests/agent/tools/test_python_exec_builtins_paths.py``).
+        target = _wiki_root(root)
         buf = io.StringIO()
+        code: int | None = None
+        crash: str | None = None
+        trace: str | None = None
         with contextlib.redirect_stdout(buf):
-            mod.lint(_wiki_root(root))
-        return buf.getvalue() or "No output"
+            try:
+                code = mod.lint(target)
+            except Exception as exc:  # noqa: BLE001 — vedi il docstring
+                crash = f"{type(exc).__name__}: {exc}"
+                # Lo stack si formatta qui, dentro l'``except``, e si scrive
+                # **fuori** dal ``redirect_stdout``: un handler su stdout
+                # finirebbe dentro il buffer che poi torna al modello.
+                trace = traceback.format_exc()
+        if crash is not None:
+            # Il ritorno è per il modello; questo è per chi legge il telefono
+            # dopo, con lo stack che la stringa non porta.
+            logger.error("wiki_lint crashed on %s:\n%s", root, trace)
+            return (
+                f"{buf.getvalue()}\n"
+                f"🔴 the lint crashed before it finished: {crash}\n"
+                "   (everything above was already computed and stands. What comes\n"
+                "    after the last check printed never ran, so this is NOT a clean\n"
+                "    wiki and the count above is not the total.)"
+            )
+        return buf.getvalue() or f"(the lint printed nothing — it exited {code})"
 
     def wiki_audit(root: str, mode: str = "open") -> str:
         """List audit feedback grouped by target. Modes: open, resolved, all."""

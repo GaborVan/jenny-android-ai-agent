@@ -15,9 +15,21 @@
  * delle mini-app, memoria, promemoria, aggiornamento dell'app. Restano possibili
  * la risposta e l'invio di messaggi — una chat che non può nemmeno avvisarti non
  * è in sola lettura, è muta.
+ *
+ * **Per questo l'interruttore non aspetta la rete.** Il suo stato è di qui e
+ * basta: non c'è niente da leggere dal server, quindi non c'è niente per cui
+ * valga la pena restare inerti. `_key` parte già sulla conversazione personale —
+ * quella da cui `session-manager.js` riparte sempre — invece di restare `null`
+ * fino al primo `syncFromSession`: con `null` il primo tocco cadeva nel vuoto
+ * (la preferenza non veniva registrata, l'etichetta non cambiava) proprio nel
+ * caso in cui l'utente ha più bisogno di poter dire «non toccare niente», cioè
+ * quando il caricamento del thread è appena fallito. E la chiave è quella vera,
+ * non un segnaposto: un segnaposto farebbe perdere la preferenza al primo
+ * `syncFromSession` riuscito, che è un interruttore che torna indietro da solo.
  */
 
 import { i18n } from './i18n.js';
+import { sessionManager } from './session-manager.js';
 import { AppState } from './state.js';
 
 export class WriteSwitch {
@@ -31,10 +43,17 @@ export class WriteSwitch {
     // riparte sempre dalla personale), quindi una preferenza che sopravvive
     // sarebbe una promessa che al riavvio non ha più un soggetto.
     this._byKey = new Map();
-    this._key = null;
-    // Montata da chi possiede la chat: ridisegnare il composer non è mestiere
-    // di questo modulo.
-    this.onChange = null;
+    // Mai `null`: v. il docstring. La conversazione aperta al primo disegno è
+    // la personale, quindi questa è la chiave giusta anche prima che qualcuno
+    // ce lo confermi — e resta giusta se nessuno lo fa mai.
+    this._key = sessionManager.personalKey;
+    // **Nessun `onChange`.** Ce n'era uno, dichiarato qui e chiamato in
+    // `toggle`, che nessuno ha mai montato: il ridisegno che avrebbe servito lo
+    // fa già l'iscrizione a `AppState.on('readonlyTurn')` — il chip aggiorna il
+    // placeholder da lì, e passare per lo stato invece che per una callback è
+    // quel che rende irrilevante l'ordine dei due `syncFromSession`. Un gancio
+    // che non serve a nessuno è un secondo modo di far sapere la stessa cosa,
+    // cioè un secondo modo di sbagliarla.
   }
 
   init() {
@@ -47,9 +66,13 @@ export class WriteSwitch {
     this.render();
   }
 
-  /** La conversazione a cui si riferisce l'interruttore da adesso. */
+  /** La conversazione a cui si riferisce l'interruttore da adesso.
+   *
+   *  Una chiave assente vuol dire la personale, non «nessuna conversazione»:
+   *  ripiegare lì tiene l'interruttore operabile in ogni caso.
+   */
   syncFromSession(sessionKey) {
-    this._key = sessionKey || null;
+    this._key = sessionKey || sessionManager.personalKey;
     this._publish();
     this.render();
   }
@@ -62,10 +85,11 @@ export class WriteSwitch {
   toggle() {
     if (!this.enabled) return;
     const next = !this.readonly;
-    if (this._key) this._byKey.set(this._key, next);
+    // Senza guardia: `_key` c'è sempre, e la guardia che c'era qui rendeva il
+    // tasto morto proprio quando serviva (v. il docstring).
+    this._byKey.set(this._key, next);
     this._publish();
     this.render();
-    this.onChange?.(next);
   }
 
   /** Su `AppState` perché il placeholder del composer lo legge da lì. */

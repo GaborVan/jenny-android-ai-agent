@@ -20,6 +20,7 @@ import pytest
 from jenny.agent import dream_cycle
 from jenny.agent.memory import MemoryStore
 from jenny.bus.events import InboundMessage
+from jenny.command import builtin
 from jenny.command.builtin import register_builtin_commands
 from jenny.command.router import CommandContext, CommandRouter
 from jenny.config.loader import load_config, save_config
@@ -347,19 +348,21 @@ class TestWrite:
     async def test_each_name_writes_its_own_field(self, router, loop, workspace):
         await router.dispatch(_ctx(loop, "/dream budget user 1500"))
         await router.dispatch(_ctx(loop, "/dream budget soul 900"))
-        await router.dispatch(_ctx(loop, "/dream budget review 4"))
+        # 24 e non 4: sotto ``_REVIEW_CADENCE_FLOOR`` il comando rifiuta, e questo
+        # test misura il routing del nome sul campo, non il pavimento.
+        await router.dispatch(_ctx(loop, "/dream budget review 24"))
 
         dream = _dream_config(workspace)
         assert (dream.user_budget_chars, dream.soul_budget_chars) == (1500, 900)
-        assert dream.review_every_runs == 4
+        assert dream.review_every_runs == 24
         # Non nominato, quindi fermo al default di spedizione.
         assert dream.memory_budget_chars == 3000
 
     @pytest.mark.asyncio
     async def test_review_confirmation_speaks_in_runs(self, router, loop):
-        out = await router.dispatch(_ctx(loop, "/dream budget review 4"))
+        out = await router.dispatch(_ctx(loop, "/dream budget review 24"))
 
-        assert "every 12 → every 4 runs" in out.content
+        assert "every 12 → every 24 runs" in out.content
 
     @pytest.mark.asyncio
     async def test_setting_zero_says_enforcement_is_off(self, router, loop, workspace):
@@ -499,6 +502,186 @@ class TestValidation:
         assert _config_path(workspace).stat().st_mtime_ns == before
         assert _dream_config(workspace).review_every_runs == 12
         assert "at least 1 run" in out.content
+
+
+class TestReviewCadenceFloor:
+    """Il pavimento della cadenza di review è applicato, non stampato.
+
+    ``reviewEveryRuns`` sotto soglia fa incontrare due passate di review sullo
+    stesso file: la seconda arriva su un file già potato e continua a cercare cose
+    da togliere (misurato — ``USER.md`` 3.524 → 1.626, il 31% sulla sola seconda
+    passata, e una passata forzata che portò via cinque voci reali). Lo schema
+    resta ``ge=1`` perché un restore deve poter riscrivere qualunque valore
+    storico, quindi l'unico posto in cui il numero è difeso è questo comando.
+    """
+
+    @pytest.mark.asyncio
+    async def test_below_the_floor_is_refused_and_names_the_floor(
+        self, router, loop, workspace
+    ):
+        before = _config_path(workspace).stat().st_mtime_ns
+
+        out = await router.dispatch(_ctx(loop, "/dream budget review 4"))
+
+        # Il file non è stato toccato: né riscritto, né il `.bak` ruotato.
+        assert _config_path(workspace).stat().st_mtime_ns == before
+        assert _dream_config(workspace).review_every_runs == 12
+        assert f"below the floor of {builtin._REVIEW_CADENCE_FLOOR}" in out.content
+        assert "was not written" in out.content
+
+    @pytest.mark.asyncio
+    async def test_one_is_refused_too(self, router, loop, workspace):
+        """``review 1`` è la configurazione misurata come distruttiva, non un caso limite."""
+        out = await router.dispatch(_ctx(loop, "/dream budget review 1"))
+
+        assert _dream_config(workspace).review_every_runs == 12
+        assert "below the floor" in out.content
+
+    def test_the_floor_is_twelve_and_equals_the_shipped_default(self):
+        """Il numero, fissato: dodici, e non il sei che era solo stampato.
+
+        Sei era la soglia dell'avviso e nasceva dalla cancellazione terminale,
+        che la fase 2 del piano ha chiuso (``make_entry_archiver``). Il numero che
+        resta è quello che il piano tiene — *"keep ``reviewEveryRuns`` at 12 and
+        treat forced reviews as the rare path they are meant to be"* — e scendere
+        sotto è l'item 6.1, deliberatamente non fatto. Pavimento e default devono
+        restare lo stesso numero: un pavimento sotto il default sarebbe una zona
+        in cui il comando scrive un valore che il piano non vuole.
+        """
+        from jenny.config.schema import DreamConfig
+
+        assert builtin._REVIEW_CADENCE_FLOOR == 12
+        assert DreamConfig().review_every_runs == builtin._REVIEW_CADENCE_FLOOR
+
+    @pytest.mark.asyncio
+    async def test_six_the_old_advised_floor_is_now_refused(
+        self, router, loop, workspace
+    ):
+        """Il cambiamento di comportamento di questo task, in una riga."""
+        out = await router.dispatch(_ctx(loop, "/dream budget review 6"))
+
+        assert _dream_config(workspace).review_every_runs == 12
+        assert "below the floor" in out.content
+
+    @pytest.mark.asyncio
+    async def test_the_refusal_prints_the_measurement(self, router, loop):
+        """Il numero deve arrivare con la misura che lo giustifica, non da solo."""
+        out = await router.dispatch(_ctx(loop, "/dream budget review 4"))
+
+        assert "3,524 to 1,626" in out.content
+        assert "five real entries" in out.content
+
+    @pytest.mark.asyncio
+    async def test_the_refusal_offers_the_confirmation_phrase_for_this_value(
+        self, router, loop
+    ):
+        out = await router.dispatch(_ctx(loop, "/dream budget review 3"))
+
+        assert (
+            f"/dream budget review 3 {builtin._REVIEW_CADENCE_OVERRIDE}" in out.content
+        )
+
+    @pytest.mark.asyncio
+    async def test_exactly_the_floor_is_accepted(self, router, loop, workspace):
+        await router.dispatch(_ctx(loop, "/dream budget review 24"))
+
+        out = await router.dispatch(
+            _ctx(loop, f"/dream budget review {builtin._REVIEW_CADENCE_FLOOR}")
+        )
+
+        assert _dream_config(workspace).review_every_runs == 12
+        assert "every 24 → every 12 runs" in out.content
+        assert "below the floor" not in out.content
+
+    @pytest.mark.asyncio
+    async def test_the_confirmation_phrase_writes_the_value(
+        self, router, loop, workspace
+    ):
+        out = await router.dispatch(
+            _ctx(loop, f"/dream budget review 1 {builtin._REVIEW_CADENCE_OVERRIDE}")
+        )
+
+        assert _dream_config(workspace).review_every_runs == 1
+        raw = json.loads(_config_path(workspace).read_text(encoding="utf-8"))
+        assert raw["agents"]["defaults"]["dream"]["reviewEveryRuns"] == 1
+        assert "every 12 → every 1 runs" in out.content
+        # Scritto, ma non in silenzio: la conferma dice cosa resta acceso.
+        assert "back-to-back" in out.content
+        assert "`memory/archive/`" in out.content
+
+    @pytest.mark.asyncio
+    async def test_a_wrong_third_token_is_refused_not_swallowed(
+        self, router, loop, workspace
+    ):
+        """Chi ha scritto un terzo token voleva confermare: mangiarselo scriverebbe a sua insaputa."""
+        before = _config_path(workspace).stat().st_mtime_ns
+
+        out = await router.dispatch(_ctx(loop, "/dream budget review 1 --force"))
+
+        assert _config_path(workspace).stat().st_mtime_ns == before
+        assert _dream_config(workspace).review_every_runs == 12
+        assert "`--force` is not the confirmation phrase" in out.content
+        assert builtin._REVIEW_CADENCE_OVERRIDE in out.content
+
+    @pytest.mark.asyncio
+    async def test_the_phrase_is_not_a_flag_a_model_would_guess(self):
+        """Non un ``--force``: una frase in prima persona, con dei trattini e non un flag."""
+        phrase = builtin._REVIEW_CADENCE_OVERRIDE
+        assert not phrase.startswith("-")
+        assert phrase.count("-") >= 3
+        assert phrase not in {"force", "yes", "confirm", "unsafe"}
+
+    @pytest.mark.asyncio
+    async def test_the_phrase_is_pointless_above_the_floor(
+        self, router, loop, workspace
+    ):
+        """Sopra soglia la frase non serve, ma non deve nemmeno rompere niente."""
+        out = await router.dispatch(
+            _ctx(loop, f"/dream budget review 24 {builtin._REVIEW_CADENCE_OVERRIDE}")
+        )
+
+        assert _dream_config(workspace).review_every_runs == 24
+        assert "every 12 → every 24 runs" in out.content
+
+    @pytest.mark.asyncio
+    async def test_a_third_token_is_refused_for_the_size_budgets(
+        self, router, loop, workspace
+    ):
+        """La conferma è solo di ``review``: sui tetti di dimensione non esiste."""
+        before = _config_path(workspace).stat().st_mtime_ns
+
+        out = await router.dispatch(
+            _ctx(loop, f"/dream budget memory 100 {builtin._REVIEW_CADENCE_OVERRIDE}")
+        )
+
+        assert _config_path(workspace).stat().st_mtime_ns == before
+        assert _dream_config(workspace).memory_budget_chars == 3000
+        assert "at most a name and a value" in out.content
+
+    @pytest.mark.asyncio
+    async def test_the_usage_block_names_the_floor_not_the_schema_minimum(self):
+        """Chi legge le forme valide deve leggere il numero che il comando applica."""
+        usage = builtin._dream_usage()
+
+        assert f"minimum {builtin._REVIEW_CADENCE_FLOOR})" in usage
+        # `minimum 1` nudo è sottostringa di `minimum 12`: la parentesi di chiusura
+        # è ciò che distingue il vecchio minimo dello schema dal nuovo pavimento.
+        assert "minimum 1)" not in usage
+
+    def test_the_schema_still_accepts_a_restored_value_below_the_floor(self):
+        """Il pavimento vive nel comando *perché* lo schema non deve alzarlo.
+
+        Un ``ge=12`` renderebbe illeggibile un `config.json` con
+        ``reviewEveryRuns: 1``; ``loader._load_with_recovery`` proverebbe il
+        `.bak` — stesso valore — e poi metterebbe il file in quarantena
+        ripartendo dai default, provider e chiave API inclusi.
+        """
+        from jenny.config.schema import DreamConfig
+
+        assert DreamConfig(review_every_runs=1).review_every_runs == 1
+        assert (
+            DreamConfig.model_validate({"reviewEveryRuns": 1}).review_every_runs == 1
+        )
 
 
 class TestUnknownForms:

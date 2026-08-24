@@ -1,0 +1,210 @@
+"""Cosa porta dentro il prompt una passata del giardiniere, e cosa no. **T7.8.**
+
+Il confine fra un progetto e il diario personale vale in **un verso solo**, ed è
+voluto: un progetto non entra nel diario (l'imbuto di ``append_history``), ma
+l'identità esce sempre — ``SOUL.md``, ``USER.md`` e ``MEMORY.md`` li compone
+``ContextBuilder`` dalla radice dell'installazione per ogni tipo di sessione. La
+riga è «chi sei viaggia, dove altro lavori no» (T7.1), e questo file la misura
+sul solo attore in cui non c'è nessun utente a scegliere: la passata del
+giardiniere, la cui unica cartella scrivibile è ``wikis/<nome>/wiki/``.
+
+Misurato il 23/08 prima del fix, sul prompt di sistema vero di una chiave
+``gardener:``: arrivavano **tutti e cinque** — i tre file di identità, la rubrica
+di Atlas (``memory/WIKI.md``, che elenca ogni wiki, persona e pianta) e il blocco
+``Recent History`` con la coda **della conversazione personale**. E l'ultimo era
+il verso rovesciato: la *conversazione* di quel progetto non prende niente da
+quella coda (``read_recent_history_for_prompt``, primo ramo), mentre la passata di
+manutenzione — che non ha nemmeno un utente con cui parlare — si prendeva la metà
+personale. Da lì un fatto personale può entrare in un progetto per una strada che
+il template stesso apre: la regola del controllo incrociato dice «cerca un fatto
+stabile che l'utente ha detto e che il diario non ha registrato» e la risposta è
+un ``journal_append``, cioè l'ingresso della passata dopo.
+
+**La decisione, e la sua metà negativa.** I tre file di identità **restano**: il
+turno di quel progetto li ha per progetto dichiarato (T7.1), la passata promuove
+le righe che quel turno ha scritto, e toglierli vorrebbe dire filare la specie di
+sessione dentro ``_get_identity``/``_load_bootstrap_files``, cioè il percorso di
+prompt più condiviso del repo, per lasciare l'unico attore senza identità a
+scrivere pagine che l'utente legge. Si chiudono i due blocchi che non sono
+identità: la rubrica fra progetti e la coda di qualcun altro. Sono due
+restringimenti — nessuna lettura si allarga.
+
+**Cosa provano questi test.** I primi tre eseguono il codice vero: costruiscono
+il prompt di sistema che il loop costruirebbe per quella chiave (canale interno,
+nessuno scope legato, quindi radice dell'installazione) e ci cercano dentro dei
+marcatori piantati nei file. Il quarto e il quinto girano sulla regola della coda
+direttamente, che è dove sta la decisione. Nessuno di questi è un grep su prosa
+di template.
+"""
+
+from __future__ import annotations
+
+import pathlib
+
+from jenny.agent.context import ContextBuilder
+from jenny.agent.gardener import GardenerStore
+from jenny.agent.memory import MemoryStore, is_gardener_session_key
+
+WIKI_DIRECTORY = "## Wiki Directory"
+RECENT_HISTORY = "# Recent History"
+
+PERSONAL = "unified:default"
+
+
+def _install(root: pathlib.Path) -> None:
+    """Un'installazione con i cinque posti da cui il personale può viaggiare."""
+    (root / "memory").mkdir(parents=True, exist_ok=True)
+    (root / "SOUL.md").write_text("# Jenny\n\nTono asciutto. SOULMARK\n", encoding="utf-8")
+    (root / "USER.md").write_text(
+        "# Chi sei\n\n- Terapeuta: giovedì alle 18. USERMARK\n", encoding="utf-8"
+    )
+    (root / "memory" / "MEMORY.md").write_text(
+        "# Long-term\n\n- MEMMARK: i piani di stipendio\n", encoding="utf-8"
+    )
+    (root / "memory" / "WIKI.md").write_text(
+        "# Wiki Directory\n\n## Wikis\n- **terapia** — 4 pagine\n\n## Plants\n- **Monstera**\n",
+        encoding="utf-8",
+    )
+
+
+def _project(root: pathlib.Path, name: str = "casa") -> pathlib.Path:
+    project = root / "wikis" / name
+    (project / "wiki").mkdir(parents=True, exist_ok=True)
+    (project / "wiki" / "index.md").write_text("# Casa\n\n- [[furgone]]\n", encoding="utf-8")
+    return project
+
+
+def _gardener_key(root: pathlib.Path, name: str = "casa") -> str:
+    """La chiave vera della passata, dallo store — non una stringa scritta a mano.
+
+    Scritta a mano il test resterebbe verde il giorno in cui il prefisso cambia,
+    provando una cosa su una chiave che non esiste più.
+    """
+    store = GardenerStore.for_project(root, name)
+    assert store is not None
+    return store.session_key()
+
+
+def _gardener_system_prompt(root: pathlib.Path) -> str:
+    """Il prompt di sistema che il loop costruisce per una passata.
+
+    ``channel`` interno e nessun ``workspace``: è quel che fa
+    ``AgentLoop._build_initial_messages``, dove
+    ``WorkspaceScopeResolver.for_turn`` ripiega su ``default()`` per ogni canale
+    che non è quello scopato — quindi la radice è l'installazione, e il blocco di
+    progetto non si rende affatto.
+    """
+    return ContextBuilder(root).build_system_prompt(
+        channel="internal", session_key=_gardener_key(root)
+    )
+
+
+# ── quel che resta, e la ragione per cui resta ───────────────────────────────
+
+
+def test_the_identity_still_travels_into_a_gardener_pass(tmp_path) -> None:
+    """**Decisione: i tre file di identità restano.** Non è un difetto non chiuso.
+
+    Il turno del progetto li ha per progetto dichiarato (T7.1: «il profilo
+    personale non è segreto per un progetto»), e la passata promuove le righe che
+    quel turno ha scritto — vedrebbe *meno* di chi le ha scritte. Il caso in cui
+    la decisione conta: ``gardener.md`` chiede di recuperare una riga «in their
+    terms», e i referenti di quelle parole stanno qui.
+    """
+    root = tmp_path
+    _install(root)
+    _project(root)
+
+    prompt = _gardener_system_prompt(root)
+
+    assert "SOULMARK" in prompt
+    assert "USERMARK" in prompt
+    assert "MEMMARK" in prompt
+
+
+# ── quel che si chiude ───────────────────────────────────────────────────────
+
+
+def test_a_gardener_pass_does_not_see_the_other_projects(tmp_path) -> None:
+    """La rubrica fra progetti non entra: è «dove altro lavori».
+
+    Formulato sull'effetto e non sul mezzo, come il gemello di
+    ``test_a_project_prompt_does_not_name_another_project``: «non contiene
+    ``## Wiki Directory``» resterebbe verde il giorno in cui la rubrica arriva da
+    un'altra parte.
+
+    Tre ragioni, e la terza è solo sua: la scelta del progetto è già stata fatta
+    (dal cron), la vita privata ci viaggia dentro, ed è un elenco di pagine che i
+    suoi tool **non possono aprire** — davanti a una passata la cui regola 3 è
+    «una pagina che nomina una cosa che ha una pagina sua la linka».
+    """
+    root = tmp_path
+    _install(root)
+    _project(root)
+
+    prompt = _gardener_system_prompt(root)
+
+    assert WIKI_DIRECTORY not in prompt
+    for other in ("terapia", "Monstera"):
+        assert other not in prompt, f"il prompt della passata su casa nomina {other}"
+
+
+def test_a_gardener_pass_does_not_see_the_personal_conversation(tmp_path) -> None:
+    """Il verso rovesciato, chiuso: la coda personale non entra nella passata.
+
+    La *conversazione* del progetto non prende niente da questa coda; la passata
+    di manutenzione si prendeva la metà personale. Qui si misura sul prompt
+    intero, cioè comprese le due strade per cui una voce può entrare (la propria
+    chiave e il ramo personale).
+    """
+    root = tmp_path
+    _install(root)
+    _project(root)
+    MemoryStore(root).append_history("HISTMARK: detto nella chat personale", session_key=PERSONAL)
+
+    prompt = _gardener_system_prompt(root)
+
+    assert "HISTMARK" not in prompt
+    assert RECENT_HISTORY not in prompt
+
+
+def test_the_pass_still_reads_its_own_entries(tmp_path) -> None:
+    """**Non è un ``return []``**, ed è la differenza che il ramo interno protegge.
+
+    Un job rilegge i propri run: quel che si toglie è la coda di qualcun altro.
+    Oggi la chiave della passata porta l'orologio, quindi in produzione il blocco
+    esce comunque vuoto — ma il giorno in cui diventasse stabile un ``return []``
+    negherebbe i propri run in silenzio, e questo test cade al posto dell'utente.
+    """
+    root = tmp_path
+    store = MemoryStore(root)
+    key = _gardener_key(_with_project(root))
+    store.append_history("OWNMARK: la passata di prima", session_key=key)
+    store.append_history("HISTMARK: la chat personale", session_key=PERSONAL)
+
+    entries = store.read_recent_history_for_prompt(0, session_key=key)
+
+    assert [e["content"] for e in entries] == ["OWNMARK: la passata di prima"]
+
+
+def test_the_other_internal_sessions_are_untouched(tmp_path) -> None:
+    """Il controllo negativo: cambia **un** ramo, non la regola.
+
+    ``cron`` è il ramo che esiste per la cura dell'amnesia dell'heartbeat, e la
+    metà personale gli serve — gira nella chat personale. Se questo cade insieme
+    al test sopra, la modifica ha preso tutti gli interni invece di uno.
+    """
+    root = tmp_path
+    store = MemoryStore(root)
+    store.append_history("HISTMARK: la chat personale", session_key=PERSONAL)
+
+    entries = store.read_recent_history_for_prompt(0, session_key="cron:daily")
+
+    assert [e["content"] for e in entries] == ["HISTMARK: la chat personale"]
+    assert not is_gardener_session_key("cron:daily")
+
+
+def _with_project(root: pathlib.Path) -> pathlib.Path:
+    """La cartella del progetto, per le prove che non costruiscono il prompt."""
+    _project(root)
+    return root

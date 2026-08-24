@@ -9,13 +9,23 @@ diario è append-only, quindi nessuno la rileggerà mai; e non c'è nessun segna
 visibile, perché il file è intatto e il cursore è plausibile. Sono
 ``test_the_cap_does_not_swallow_the_first_unread_line`` (era un difetto vero,
 trovato scrivendo il modulo) e ``test_a_pruned_state_keeps_the_days_that_exist``.
+
+Il terzo, arrivato dopo, è dello stesso ceppo:
+``test_a_line_deleted_above_the_cursor_makes_the_day_be_reread``. Il conteggio di
+righe da solo non vede un diario riscritto *sopra* il cursore, e l'append-only
+è vero solo dal lato del giardiniere — un turno può scrivere ``raw/journal/*.md``
+con ``write_file``. Da cui il testimone.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+
+from loguru import logger
 
 from jenny.agent.gardener_state import (
     GardenerState,
@@ -24,6 +34,22 @@ from jenny.agent.gardener_state import (
     read_state,
     write_state,
 )
+
+
+@contextmanager
+def _warnings() -> Iterator[list[str]]:
+    """I WARNING di loguru emessi dentro il blocco.
+
+    Qui l'avviso è materia del test, non decorazione: un diario riscritto sopra
+    il cursore si nota *solo* dal log — il file è intatto e il cursore ha
+    l'aria giusta — quindi un avviso che non esce è il difetto che torna muto.
+    """
+    seen: list[str] = []
+    handler = logger.add(lambda message: seen.append(str(message)), level="WARNING")
+    try:
+        yield seen
+    finally:
+        logger.remove(handler)
 
 
 def _project(root: Path, name: str = "viaggio") -> Path:
@@ -187,6 +213,269 @@ def test_a_shrunken_journal_is_not_reread(tmp_path) -> None:
     assert read_journal_delta(project, state).is_empty
 
 
+def test_a_shrunken_journal_is_still_reported(tmp_path) -> None:
+    """Non si rilegge, ma non si tace: è l'unico segnale che quel giorno esiste."""
+    project = _project(tmp_path)
+    _journal(project, "20260822", "primo", "secondo", "terzo")
+    state = GardenerState().advanced(read_journal_delta(project, GardenerState()))
+    _journal(project, "20260822", "riscritto")
+
+    with _warnings() as said:
+        assert read_journal_delta(project, state).is_empty
+
+    assert any("20260822" in line and "append-only" in line for line in said), said
+
+
+# ── Il testimone ─────────────────────────────────────────────────────────────
+
+
+def test_a_line_deleted_above_the_cursor_makes_the_day_be_reread(tmp_path) -> None:
+    """**Il terzo test che conta.** Un diario riscritto *sopra* il cursore.
+
+    Il conteggio di righe da solo non lo vede: cancellata una riga già letta e
+    aggiunta una nuova, il file resta più lungo del cursore, quindi nessun
+    accorciamento, e le righe scorrono in su di una. La prima voce non letta
+    finisce **sotto** il cursore — persa per sempre, perché il diario nessuno lo
+    rilegge. È raggiungibile senza malizia: solo ``journal_append`` è append-only
+    per costruzione, un turno può riscrivere ``raw/journal/*.md`` con
+    ``write_file``.
+
+    Da cui il testimone del prefisso consumato: se non torna si rilegge da riga
+    zero. Costa una ripromozione, che la passata assorbe, invece di una riga
+    perduta, che non torna.
+    """
+    project = _project(tmp_path)
+    _journal(project, "20260822", "primo", "secondo", "terzo")
+    state = GardenerState().advanced(
+        read_journal_delta(project, GardenerState(), max_lines=2)
+    )
+    assert state.cursor == {"raw/journal/20260822.md": 4}
+    # "primo" via, "quarto" in coda: il file resta più lungo del cursore.
+    _journal(project, "20260822", "secondo", "terzo", "quarto")
+
+    with _warnings() as said:
+        delta = read_journal_delta(project, state, max_lines=10)
+
+    assert [line for f in delta.files for line in f.lines] == [
+        "- 09:00 — secondo",
+        "- 09:00 — terzo",
+        "- 09:00 — quarto",
+    ], "una voce non letta è finita sotto il cursore"
+    assert delta.line_count == 3
+    assert any("20260822" in line for line in said), said
+
+    # E il tetto conta sulla rilettura intera, non sulla coda: quel che resta
+    # va detto anche qui.
+    capped = read_journal_delta(project, state, max_lines=2)
+    assert capped.line_count == 2 and capped.left_behind == 1
+
+
+def test_a_plain_append_is_not_mistaken_for_a_rewrite(tmp_path) -> None:
+    """Il controllo del test sopra: il caso normale — una voce in coda — non deve
+    far scattare niente. Un testimone che grida a ogni append farebbe rileggere
+    il diario a ogni passata, cioè ripromuovere tutto per sempre."""
+    project = _project(tmp_path)
+    page = _journal(project, "20260822", "primo")
+    state = GardenerState().advanced(read_journal_delta(project, GardenerState()))
+
+    with page.open("a", encoding="utf-8") as fh:
+        fh.write("- 10:00 — secondo\n")
+    with _warnings() as said:
+        delta = read_journal_delta(project, state)
+
+    assert delta.files[0].lines == ("- 10:00 — secondo",)
+    assert said == []
+
+
+def test_a_cursor_without_a_witness_rereads_from_scratch(tmp_path) -> None:
+    """Uno stato di prima del testimone — o con il testimone illeggibile — vale
+    «non posso verificare», che è una rilettura: mai un cursore creduto sulla
+    parola. Si paga una passata sola, poi il testimone c'è."""
+    project = _project(tmp_path)
+    _journal(project, "20260822", "primo", "secondo", "terzo")
+
+    with _warnings() as said:
+        delta = read_journal_delta(project, GardenerState(cursor={
+            "raw/journal/20260822.md": 4,
+        }))
+
+    assert delta.line_count == 3
+    assert any("20260822" in line for line in said), said
+
+
+def test_a_state_file_from_before_the_witness_degrades_to_empty(tmp_path) -> None:
+    """La forma dello stato è cambiata, quindi la versione è cambiata: il file di
+    un telefono aggiornato si legge come stato vuoto — rilettura da capo, nessuna
+    eccezione — che è lo stesso costo che il testimone assente avrebbe comunque
+    imposto."""
+    project = _project(tmp_path)
+    path = gardener_state_file(project)
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps({
+            "version": 1,
+            "cursor": {"raw/journal/20260822.md": 4},
+            "last_run_at": "2026-08-22T21:30:00",
+        }),
+        encoding="utf-8",
+    )
+
+    assert read_state(project) == GardenerState()
+
+
+def test_only_the_rewritten_day_is_reread(tmp_path) -> None:
+    """Il testimone è per giorno, non per progetto: un giorno riscritto non deve
+    trascinare nella rilettura tutto il diario che gli sta accanto."""
+    project = _project(tmp_path)
+    _journal(project, "20260822", "intatto uno", "intatto due")
+    _journal(project, "20260823", "primo", "secondo", "terzo")
+    state = GardenerState().advanced(read_journal_delta(project, GardenerState()))
+    # Il 23 riscritto sopra il cursore (via "primo", in coda due voci nuove, così
+    # il file resta più lungo del cursore); il 22 solo allungato.
+    _journal(project, "20260823", "secondo", "terzo", "quarto", "quinto")
+    with (project / "raw" / "journal" / "20260822.md").open("a", encoding="utf-8") as fh:
+        fh.write("- 10:00 — intatto tre\n")
+
+    delta = read_journal_delta(project, state)
+
+    assert {f.path: f.lines for f in delta.files} == {
+        "raw/journal/20260822.md": ("- 10:00 — intatto tre",),
+        "raw/journal/20260823.md": (
+            "- 09:00 — secondo",
+            "- 09:00 — terzo",
+            "- 09:00 — quarto",
+            "- 09:00 — quinto",
+        ),
+    }
+
+
+def test_the_witness_survives_the_state_file(tmp_path) -> None:
+    """Il testimone deve stare su disco accanto al conteggio: se non ci stesse,
+    ogni passata ripartirebbe da zero su ogni giorno — la rilettura per sempre,
+    invece della rilettura una volta."""
+    project = _project(tmp_path)
+    page = _journal(project, "20260822", "primo", "secondo")
+    write_state(project, GardenerState().advanced(
+        read_journal_delta(project, GardenerState())
+    ))
+    with page.open("a", encoding="utf-8") as fh:
+        fh.write("- 10:00 — terzo\n")
+
+    with _warnings() as said:
+        delta = read_journal_delta(project, read_state(project))
+
+    assert delta.files[0].lines == ("- 10:00 — terzo",)
+    assert said == []
+
+
+def test_a_last_line_completed_later_is_not_lost(tmp_path) -> None:
+    """La perdita silenziosa che il conteggio da solo non vede.
+
+    Un diario salvato **senza newline finale** — cosa che ``journal_append`` non
+    fa mai, ma un ``write_file`` di un turno sì — ha l'ultima riga incompleta, e
+    quella riga viene letta e consumata. Il primo ``journal_append`` successivo la
+    *completa* incollandosi in coda, sulla stessa riga fisica: il numero di righe
+    non si muove, quindi il vecchio ``seen >= len(physical)`` saltava il giorno e
+    **il fatto appena catturato non veniva promosso mai**. Il file è intatto e il
+    cursore ha l'aria giusta: nessun segnale, per sempre.
+
+    Il rimedio è il testimone, che esisteva già ed era solo escluso dall'ultima
+    riga. Il prezzo è la ripromozione di quel giorno, che la passata assorbe per
+    costruzione.
+    """
+    project = _project(tmp_path)
+    page = project / "raw" / "journal" / "20260822.md"
+    page.write_text("# 2026-08-22\n\n- 09:00 — il furgone", encoding="utf-8")
+    state = GardenerState().advanced(read_journal_delta(project, GardenerState()))
+    assert state.cursor == {"raw/journal/20260822.md": 3}
+
+    with page.open("a", encoding="utf-8") as fh:
+        fh.write(" ha le gomme da cambiare\n")
+    with _warnings() as said:
+        delta = read_journal_delta(project, state)
+
+    assert delta.files[0].lines == ("- 09:00 — il furgone ha le gomme da cambiare",)
+    assert any("20260822" in line for line in said), said
+
+
+def test_a_finished_day_that_did_not_change_is_not_reread(tmp_path) -> None:
+    """Il controllo del test sopra, e la ragione per cui il testimone si guarda
+    anche a file finito senza che questo costi una ripromozione a ogni giro: se il
+    prefisso torna, non c'è niente da fare e non si dice niente."""
+    project = _project(tmp_path)
+    _journal(project, "20260822", "primo", "secondo")
+    state = GardenerState().advanced(read_journal_delta(project, GardenerState()))
+
+    with _warnings() as said:
+        delta = read_journal_delta(project, state)
+
+    assert delta.is_empty
+    assert said == []
+
+
+def test_a_finished_day_with_no_witness_is_left_alone(tmp_path) -> None:
+    """L'unico punto in cui «non verificabile» **non** vuol dire «rileggi».
+
+    Sotto un cursore che sta alla fine del file non c'è niente da perdere — la
+    stessa asimmetria del file accorciato — mentre trattare il testimone assente
+    come un dubbio avrebbe fatto ripromuovere un diario intero a ogni cursore
+    scritto da una versione che i testimoni non li teneva. Controllo dichiarato
+    senza mutazione: fissa che il cancello non è stato allargato.
+    """
+    project = _project(tmp_path)
+    _journal(project, "20260822", "primo", "secondo")
+
+    with _warnings() as said:
+        delta = read_journal_delta(
+            project, GardenerState(cursor={"raw/journal/20260822.md": 4})
+        )
+
+    assert delta.is_empty
+    assert said == []
+
+
+# ── Le righe fisiche ─────────────────────────────────────────────────────────
+
+
+def test_a_journal_line_is_what_wc_l_counts(tmp_path) -> None:
+    """Il cursore è un numero che una persona verifica con ``wc -l``, e per farlo
+    le righe vanno divise come le divide ``wc``.
+
+    ``str.splitlines()`` divide anche su ``\\v``, ``\\f``, ``\\x85``, U+2028 e
+    U+2029: una voce che ne contenga uno diventava **due**. E la correzione ovvia
+    — ``text.split("\\n")`` — sarebbe stata peggio del difetto: su un file normale
+    conta una riga in più (l'elemento vuoto dopo l'ultimo ``\\n``), cioè rompe la
+    stessa proprietà in tutti i casi invece che in uno raro.
+    """
+    from jenny.agent.gardener_state import journal_lines
+
+    assert journal_lines("uno\ndue\ntre\n") == ["uno", "due", "tre"]
+    assert journal_lines("uno\ndue\ntre") == ["uno", "due", "tre"]
+    assert journal_lines("") == []
+    assert journal_lines("\n") == [""]
+    # CRLF identico a ``splitlines()``: un diario già letto non deve rileggersi
+    # per il solo aggiornamento del codice.
+    assert journal_lines("uno\r\ndue\r\n") == ["uno", "due"]
+    # I separatori esotici restano **dentro** la riga in cui il file li ha messi.
+    for exotic in ("\v", "\f", "\x1c", "\x85", "\u2028", "\u2029"):
+        assert journal_lines(f"uno{exotic}due\n") == [f"uno{exotic}due"]
+
+
+def test_an_exotic_separator_does_not_invent_an_entry(tmp_path) -> None:
+    """Lo stesso, visto dal cursore: una voce sola, e un cursore che concorda col
+    numero di ``\\n`` del file. Raggiungibile solo da uno scrittore estraneo —
+    ``journal_append`` normalizza con ``str.split()``, che quei caratteri li
+    mangia — ma il diario è testo copiato da mezzo mondo."""
+    project = _project(tmp_path)
+    page = project / "raw" / "journal" / "20260822.md"
+    page.write_text("# 2026-08-22\n\n- 09:00 — Nakasendo\u2028il vecchio\n", encoding="utf-8")
+
+    delta = read_journal_delta(project, GardenerState())
+
+    assert delta.line_count == 1
+    assert delta.files[0].cursor_after == page.read_text(encoding="utf-8").count("\n")
+
+
 # ── Il tetto ─────────────────────────────────────────────────────────────────
 
 
@@ -317,7 +606,7 @@ def test_a_nonsense_cursor_entry_is_dropped_not_trusted(tmp_path) -> None:
     path.parent.mkdir(parents=True)
     path.write_text(
         json.dumps({
-            "version": 1,
+            "version": 2,
             "cursor": {
                 "raw/journal/20260822.md": "quattro",
                 "raw/journal/20260823.md": -1,
@@ -349,3 +638,180 @@ def test_a_pruned_state_keeps_the_days_that_exist(tmp_path) -> None:
     write_state(project, state)
 
     assert read_state(project).cursor == {"raw/journal/20260822.md": 3}
+
+
+# ── I due orologi: registrato e tentato ──────────────────────────────────────
+
+
+def test_an_attempt_stamps_the_clock_without_moving_the_cursor(tmp_path) -> None:
+    """Il gemello di ``advanced``, ed è tutto il punto della correzione.
+
+    ``partial_write`` e ``commit_failed`` tengono il cursore fermo di proposito —
+    ci sono righe non promosse che devono tornare — e la passata va segnata
+    comunque, altrimenti «tenere il cursore» diventa «rifare la passata ogni
+    mezz'ora per sempre».
+    """
+    state = GardenerState(
+        cursor={"raw/journal/20260822.md": 4},
+        last_run_at="2026-08-20T09:00:00",
+        witness={"raw/journal/20260822.md": "0123456789abcdef"},
+    )
+
+    after = state.attempted(at=datetime(2026, 8, 23, 21, 0, 0))
+
+    assert after.cursor == state.cursor and after.witness == state.witness
+    assert after.last_run_at == "2026-08-20T09:00:00"
+    assert after.last_attempt_at == "2026-08-23T21:00:00"
+    assert after.failures == 1
+
+
+def test_a_registered_pass_stamps_both_clocks_and_clears_the_streak(tmp_path) -> None:
+    """Una passata riuscita è anche una passata tentata, e chiude la serie.
+
+    Senza l'azzeramento il contatore salirebbe per sempre e l'allarme partirebbe
+    su un progetto sano; senza il secondo timbro la registrazione di un successo
+    resterebbe un tentativo vecchio."""
+    project = _project(tmp_path)
+    _journal(project, "20260822", "una voce")
+    state = GardenerState(failures=5, last_attempt_at="2026-08-20T09:00:00")
+    delta = read_journal_delta(project, state)
+
+    after = state.advanced(delta, at=datetime(2026, 8, 23, 21, 0, 0))
+
+    assert after.failures == 0
+    assert after.last_run_at == after.last_attempt_at == "2026-08-23T21:00:00"
+
+
+def test_the_two_clocks_survive_a_write(tmp_path) -> None:
+    """``write_state`` ricostruisce lo stato per potarlo: i campi nuovi devono
+    attraversare quella ricostruzione, o il timbro non arriva su disco."""
+    project = _project(tmp_path)
+    _journal(project, "20260822", "una voce")
+
+    write_state(project, GardenerState(
+        cursor={"raw/journal/20260822.md": 1},
+        last_attempt_at="2026-08-23T21:00:00",
+        failures=2,
+    ))
+
+    reread = read_state(project)
+    assert reread.last_attempt_at == "2026-08-23T21:00:00" and reread.failures == 2
+
+
+def test_a_state_written_before_the_two_clocks_is_read_not_thrown_away(tmp_path) -> None:
+    """**Il test che paga il non aver bumpato ``_STATE_VERSION``.**
+
+    Uno stato che il gate di versione rifiuta vale «stato vuoto», cioè rilettura
+    del diario da capo: su un telefono con dei progetti sono duecento righe
+    ripromosse e una passata LLM per niente. I due campi nuovi hanno un default
+    sicuro — nessun tentativo, zero insuccessi — che è esattamente il
+    comportamento di prima, quindi il file di ieri deve continuare a valere.
+    """
+    project = _project(tmp_path)
+    _journal(project, "20260822", "una voce")
+    path = gardener_state_file(project)
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps({
+            "version": 2,
+            "cursor": {"raw/journal/20260822.md": 1},
+            "last_run_at": "2026-08-22T10:00:00",
+            "witness": {"raw/journal/20260822.md": "0123456789abcdef"},
+        }),
+        encoding="utf-8",
+    )
+
+    state = read_state(project)
+
+    assert state.cursor == {"raw/journal/20260822.md": 1}
+    assert state.last_attempt_at is None and state.failures == 0
+
+
+def test_a_nonsense_failure_count_is_dropped_not_trusted(tmp_path) -> None:
+    """Un contatore che non è un numero non è un contatore: azzerarlo ritarda un
+    allarme, fidarsene lo farebbe partire su un progetto sano."""
+    project = _project(tmp_path)
+    path = gardener_state_file(project)
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps({"version": 2, "cursor": {}, "failures": "tre"}), encoding="utf-8"
+    )
+
+    assert read_state(project).failures == 0
+
+
+def test_recording_an_attempt_counts_the_series_on_disk(tmp_path) -> None:
+    """Il contatore vive nel file, non in memoria: fra due tick non c'è nessun
+    processo che si ricordi niente."""
+    from jenny.agent.gardener_state import record_attempt
+
+    project = _project(tmp_path)
+    _journal(project, "20260822", "una voce")
+
+    assert record_attempt(project) == 1
+    assert record_attempt(project) == 2
+    assert read_state(project).failures == 2
+
+
+# ── La misura della mappa che l'ultima passata ha lasciato ───────────────────
+
+
+def test_the_map_measure_survives_the_state_file(tmp_path) -> None:
+    """Il freno del secondo innesco vive su disco, come i due orologi: fra due
+    tick non c'è nessun processo che si ricordi niente, e un freno che si perde
+    al riavvio è il livelock rimandato."""
+    project = _project(tmp_path)
+    write_state(project, GardenerState(map_left_at=4321))
+
+    assert read_state(project).map_left_at == 4321
+
+
+def test_a_state_written_before_the_map_measure_reads_as_armed(tmp_path) -> None:
+    """È lo stato di tutti i progetti già sul telefono, e il default deve essere
+    **innesco armato**: il costo di sbagliare da questo lato è una passata di
+    troppo, dall'altro è la mappa tagliata per sempre. E nessun bump di
+    ``_STATE_VERSION``, che costerebbe a ogni progetto una rilettura del diario da
+    capo."""
+    project = _project(tmp_path)
+    path = gardener_state_file(project)
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps({"version": 2, "cursor": {}, "last_run_at": "2026-08-20T10:00:00"}),
+        encoding="utf-8",
+    )
+
+    state = read_state(project)
+
+    assert state.map_left_at is None
+    assert state.last_run_at == "2026-08-20T10:00:00"
+
+
+def test_a_nonsense_map_measure_reads_as_armed(tmp_path) -> None:
+    """Stessa asimmetria: un valore che non è un numero vale «nessuno l'ha ancora
+    vista», non «lasciala stare»."""
+    project = _project(tmp_path)
+    path = gardener_state_file(project)
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps({"version": 2, "cursor": {}, "map_left_at": "grossa"}), encoding="utf-8"
+    )
+
+    assert read_state(project).map_left_at is None
+
+
+def test_a_pass_that_did_not_look_at_the_map_keeps_the_measure(tmp_path) -> None:
+    """Il default di ``map_chars`` conserva, non azzera: un innesco che si riarma
+    da sé a ogni passata di diario è esattamente il livelock che quel campo esiste
+    per chiudere."""
+    project = _project(tmp_path)
+    _journal(project, "20260822", "una voce")
+    write_state(project, GardenerState(map_left_at=9000))
+
+    from jenny.agent.gardener_state import record_attempt
+
+    record_attempt(project)
+    assert read_state(project).map_left_at == 9000
+
+    delta = read_journal_delta(project, read_state(project))
+    write_state(project, read_state(project).advanced(delta))
+    assert read_state(project).map_left_at == 9000

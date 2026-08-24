@@ -235,6 +235,40 @@ class GatewayContainer:
         wikis_dir = getattr(wiki_cfg, "wikis_dir", "wikis") or "wikis"
         migrate_wikis(self.config.workspace_path / wikis_dir)
 
+    def _repair_pending_renames(self) -> None:
+        """Finisce i rinomini di progetto interrotti a metà.
+
+        Sta **dopo** ``SessionManager`` e **prima** che agente e canali possano
+        aprire una sessione di progetto, perché è l'unica finestra in cui i file
+        di traccia non li sta guardando nessuno.
+
+        Perché all'avvio e non altrove: il caso che il giornale esiste per
+        rimediare è il processo ucciso fra due ``rename``, e un processo ucciso
+        **riparte**. Su Android quello non è un incidente raro, è il modo normale
+        in cui il processo finisce. A regime costa una ``read_text`` che solleva
+        ``FileNotFoundError``.
+
+        L'``except`` è largo per la stessa ragione dell'``except`` di
+        ``_migrate_wikis``: il ramo non è "rinomini finiti contro rinomini a
+        metà", è "un rinomino a metà contro **nessun gateway**". Un rinomino
+        lasciato aperto lo riprova l'avvio dopo; un gateway che non parte no.
+        """
+        from jenny.session.project_rename import repair_pending_project_renames
+
+        try:
+            for old_key, new_key in repair_pending_project_renames(
+                self.config.workspace_path
+            ):
+                logger.warning(
+                    "Rinomino di progetto ripreso e completato: {} -> {}",
+                    old_key, new_key,
+                )
+        except Exception:
+            logger.opt(exception=True).error(
+                "Ripresa dei rinomini di progetto in sospeso fallita; il gateway "
+                "parte comunque e il prossimo avvio riprova"
+            )
+
     def build(self) -> None:
         """Costruisce l'intero grafo di oggetti (composition point)."""
         from jenny.bus.queue import MessageBus
@@ -271,6 +305,7 @@ class GatewayContainer:
             logger.info("Gateway starting without provider - complete onboarding to configure.")
             self.provider = None
         self.session_manager = SessionManager(config.workspace_path)
+        self._repair_pending_renames()
 
         cron_store_path = config.workspace_path / "cron" / "jobs.json"
         self.cron = CronService(cron_store_path)

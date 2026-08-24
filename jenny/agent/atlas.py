@@ -35,6 +35,11 @@ from typing import Any
 
 from loguru import logger
 
+from jenny.agent.internal_run import (
+    internal_run_completed,
+    internal_run_should_commit,
+    prune_internal_sessions,
+)
 from jenny.session.keys import ATLAS_SESSION_PREFIX
 from jenny.utils.path import atomic_write
 from jenny.utils.prompt_templates import render_template
@@ -150,7 +155,15 @@ class AtlasStore:
     # -- inventario ----------------------------------------------------------
 
     def build_inventory(self) -> str:
-        """Elenco deterministico di wiki e pagine, pronto da mettere nel prompt."""
+        """Elenco deterministico di wiki e pagine, pronto da mettere nel prompt.
+
+        Le due chiamate a :func:`iter_wiki_pages` non chiedono la stessa cosa, di
+        proposito (T3.16). Il ciclo qui sopra vuole **solo il numero** di pagine
+        per wiki, e coi titoli quel numero costa una lettura per pagina di ogni
+        wiki: misurato il 23/08 sulle 8 wiki vere (188 pagine), l'inventario
+        passava per 248 ``read_text`` e 6,45 ms. L'elenco della wiki bersaglio,
+        sotto, i titoli **li stampa** — quello resta con ``titles=True``.
+        """
         roots = discover_wiki_roots(self.wikis_dir)
         if not roots:
             return "(no wikis found)"
@@ -158,7 +171,7 @@ class AtlasStore:
         lines: list[str] = []
         lines.append("### Wikis")
         for name, root in roots.items():
-            total = len(iter_wiki_pages(root / "wiki"))
+            total = len(iter_wiki_pages(root / "wiki", titles=False))
             lines.append(
                 f"- **{name}** — {read_wiki_scope(root)} "
                 f"({total} pages) → wikis/{name}/wiki/index.md"
@@ -267,6 +280,15 @@ class AtlasStore:
         workspace = self.workspace.resolve()
         writable = [self.wiki_file.resolve()]
 
+        # Lettura ovunque nel workspace, e ``<workspace>/.jenny/media`` è dentro il
+        # workspace: quella cartella è **dentro la superficie dichiarata** di
+        # questo run, non un allargamento (T9.10). Da cui nessun
+        # ``read_media_dir=False``, e non è una simmetria mancata con la cassetta
+        # del giardiniere: là la radice di lettura è *un progetto* — il flag
+        # riportava dentro una cartella che il commento accanto diceva fuori — e
+        # qui la radice è il workspace, quindi il flag non ha niente da
+        # aggiungere. Misurato: con e senza, i quattro tool arrivano a
+        # ``.jenny/media``. Spegnerlo qui sarebbe un placebo.
         for read_only_tool in (ReadFileTool, ListDirTool, FindFilesTool, GrepTool):
             tools.register(read_only_tool(
                 workspace=workspace,
@@ -314,7 +336,6 @@ async def run_atlas(
     sia lo slash command (``command/builtin.py``). *force* salta il controllo
     del fingerprint ma non quello sull'esistenza delle wiki.
     """
-    from jenny.agent.memory import MemoryStore
     from jenny.agent.token_usage import record_response_token_usage
 
     if store is None:
@@ -335,44 +356,51 @@ async def run_atlas(
     t0 = time.monotonic()
     resp = None
     tools = store.build_tools()
+    # La chiave in una locale, e non ricalcolata al punto di uso: la conia
+    # l'orologio al secondo, quindi una seconda chiamata e' **un'altra chiave** e
+    # il run non riuscirebbe piu' a dimenticare la propria (T2.5, stessa
+    # trappola).
+    session_key = AtlasStore.session_key()
     try:
-        resp = await agent.process_direct(
-            store.build_prompt(),
-            session_key=AtlasStore.session_key(),
-            ephemeral=True,
-            tools=tools,
-            on_progress=_silent,
-        )
-    except Exception as exc:  # noqa: BLE001 — l'esito viaggia nell'outcome
-        logger.exception("Atlas run failed")
-        return AtlasOutcome(
-            status="failed", elapsed=time.monotonic() - t0, detail=str(exc)
-        )
+        try:
+            resp = await agent.process_direct(
+                store.build_prompt(),
+                session_key=session_key,
+                ephemeral=True,
+                tools=tools,
+                on_progress=_silent,
+            )
+        except Exception as exc:  # noqa: BLE001 — l'esito viaggia nell'outcome
+            logger.exception("Atlas run failed")
+            return AtlasOutcome(
+                status="failed", elapsed=time.monotonic() - t0, detail=str(exc)
+            )
+        finally:
+            record_response_token_usage(
+                resp,
+                source="atlas",
+                timezone_name=_timezone_of(agent),
+            )
+
+        elapsed = time.monotonic() - t0
+        file_states = getattr(tools, "file_states", None)
+        if internal_run_should_commit(resp, file_states):
+            store.write_state(fingerprint)
+            logger.info("Atlas: directory updated in {:.1f}s", elapsed)
+            outcome = AtlasOutcome(status="written", elapsed=elapsed)
+        elif internal_run_completed(resp):
+            # Completato ma con tutte le scritture bloccate o fallite: non
+            # registrare il fingerprint, altrimenti la wiki risulterebbe digerita
+            # e il prossimo tick salterebbe un aggiornamento mai avvenuto.
+            logger.warning("Atlas: run completed without writing; fingerprint not advanced")
+            outcome = AtlasOutcome(status="no_write", elapsed=elapsed)
+        else:
+            logger.warning("Atlas: run did not complete; fingerprint not advanced")
+            outcome = AtlasOutcome(status="incomplete", elapsed=elapsed)
+
+        return outcome
     finally:
-        record_response_token_usage(
-            resp,
-            source="atlas",
-            timezone_name=_timezone_of(agent),
-        )
-
-    elapsed = time.monotonic() - t0
-    file_states = getattr(tools, "file_states", None)
-    if MemoryStore.internal_run_should_commit(resp, file_states):
-        store.write_state(fingerprint)
-        logger.info("Atlas: directory updated in {:.1f}s", elapsed)
-        outcome = AtlasOutcome(status="written", elapsed=elapsed)
-    elif MemoryStore.internal_run_completed(resp):
-        # Completato ma con tutte le scritture bloccate o fallite: non
-        # registrare il fingerprint, altrimenti la wiki risulterebbe digerita
-        # e il prossimo tick salterebbe un aggiornamento mai avvenuto.
-        logger.warning("Atlas: run completed without writing; fingerprint not advanced")
-        outcome = AtlasOutcome(status="no_write", elapsed=elapsed)
-    else:
-        logger.warning("Atlas: run did not complete; fingerprint not advanced")
-        outcome = AtlasOutcome(status="incomplete", elapsed=elapsed)
-
-    _prune_sessions(agent)
-    return outcome
+        _prune_sessions(agent, session_key)
 
 
 def _timezone_of(agent: Any) -> str | None:
@@ -380,13 +408,32 @@ def _timezone_of(agent: Any) -> str | None:
     return getattr(context, "timezone", None)
 
 
-def _prune_sessions(agent: Any) -> None:
-    from jenny.agent.memory import MemoryStore
+def _prune_sessions(agent: Any, session_key: str | None = None) -> None:
+    """Ripulisce quel che il run ha lasciato dietro: i file e la memoria.
 
+    Due difetti, la stessa forma di quelli che T1.4 e T2.5 hanno chiuso sul
+    giardiniere, e chiusi qui allo stesso modo.
+
+    **Gira su ogni uscita** e non solo su quella riuscita: il ramo ``failed``
+    tornava *prima* di questa chiamata, quindi un Atlas che fallisce a ogni tick
+    — provider giù per giorni — accumulava un ``atlas_*.jsonl`` e una voce di
+    registro ogni sei ore senza che nulla potasse mai. Un ``finally`` lo rende
+    vero per costruzione invece che per disciplina sui rami.
+
+    **E la chiave del run si dimentica subito** (T2.11), invece di aspettare la
+    potatura. ``evict_pruned_sessions`` ora sgombera anche il ``FileStateStore``,
+    ma sgombera le chiavi **potate**: con ``keep=10`` la voce di *questo* run
+    sopravviverebbe altri dieci run — e Atlas gira ogni sei ore, quindi dieci run
+    sono due giorni e mezzo. Sono byte (72 per un ``FileStates`` vuoto, e questa
+    voce non viene nemmeno usata: la cassetta del run porta il suo ``FileStates``),
+    ma sono byte che nessuno ha scelto di tenere.
+    """
     sessions = getattr(agent, "sessions", None)
     sessions_dir = getattr(sessions, "sessions_dir", None)
+    if session_key and hasattr(agent, "forget_file_reads"):
+        agent.forget_file_reads(session_key)
     if sessions_dir is None:
         return
-    pruned = MemoryStore.prune_internal_sessions(sessions_dir, "atlas")
+    pruned = prune_internal_sessions(sessions_dir, "atlas")
     if pruned and hasattr(agent, "evict_pruned_sessions"):
         agent.evict_pruned_sessions(pruned)

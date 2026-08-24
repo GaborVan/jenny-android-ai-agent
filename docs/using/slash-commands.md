@@ -10,7 +10,7 @@ Two commands — `/stop` and `/status` — are handled on a "priority" fast path
 
 All server-side command responses below are **hardcoded in English**, regardless of whether the WebUI is set to Italian or English. This is true for the confirmation text, the usage/error messages, and the `/status`/`/model` output.
 
-## The 10 server commands
+## The server commands
 
 | Command | Arguments | What it does |
 |---|---|---|
@@ -20,10 +20,13 @@ All server-side command responses below are **hardcoded in English**, regardless
 | `/model` | `[preset]` | Shows the current model/preset, or switches the active preset |
 | `/history` | `[n]` | Prints the last `n` persisted user/assistant messages (default 10, max 50) |
 | `/goal` | `<description>` | Tells the agent to treat the request as a long-running goal |
-| `/dream` | none | Manually triggers a memory consolidation (Dream) run in the background |
+| `/dream` | `[budget [name n]]` | Manually triggers a memory consolidation (Dream) run in the background, or reads/sets the memory-file budgets |
 | `/atlas` | `[force]` | Rebuilds the wiki directory (`memory/WIKI.md`) from your wikis, in the background |
+| `/gardener` | `[project\|settings\|…]` | Runs one [gardener](./gardener.md) pass on a project now, or reads and changes the periodic pass |
 | `/skill` | none | Lists the currently enabled skills with their descriptions |
-| `/help` | none | Lists all of the above (not `/clear` — see below) |
+| `/help` | none | Lists all of the above, plus `/init` (but not `/clear` — see below) |
+
+One more command, `/init`, appears in `/help` but is not in the list above because it is not a command in the same sense: inside a [project](./projects.md) it is expanded into an ordinary agent turn that reads the wiki and writes that project's `AGENTS.md`. Outside a project it refuses and tells you to pick one from the chip.
 
 Full details and exact output text for each command follow.
 
@@ -196,6 +199,22 @@ Atlas found no wikis to map.
 
 `/atlas force` skips the change check and rebuilds regardless. It does not skip the "do you have any wikis" check — with no wikis there is nothing to compile. See [Atlas](./memory.md#atlas-the-wiki-side-of-memory).
 
+### `/gardener` — run a gardener pass, or set the periodic one
+
+Inside a [project](./projects.md), bare `/gardener` runs one [gardener](./gardener.md) pass on that project right now: it acknowledges with `Gardening <name>...` and follows up when the pass finishes. Outside a project it refuses and asks you to name one (`/gardener <project>`).
+
+Seven words take the place of a project name and set the periodic pass instead of running anything: `settings`, `off`, `on`, `compact`, `interval`, `idle`, `distance`. So `/gardener settings` prints the current state and the valid forms, `/gardener off` stops the periodic pass (leaving the by-hand forms working), and `/gardener idle 45` changes how much silence a pass waits for. Every form and its accepted range is in [The gardener](./gardener.md#running-one-by-hand-gardener); a project actually named one of those seven words is shadowed by them, and `/gardener` from inside it still works.
+
+### `/init` — write this project's instructions
+
+Only inside a project. Unlike everything else on this page it is not answered by the command layer: it is expanded into a full agent turn that reads `wiki/index.md`, the pages, the recent `log/` entries and the existing instructions file, and then writes that project's `AGENTS.md` — scope, the conventions the pages already follow, and the open questions. If the file already has content it is updated rather than replaced. What you see in the chat stays `/init`.
+
+Outside a project:
+
+```text
+`/init` only works inside a project — it writes that project's AGENTS.md. Pick one from the chip above the message box first.
+```
+
 ### `/skill` — list enabled skills
 
 ```text
@@ -222,9 +241,11 @@ No skills available.
 /model [preset] — Show or switch the active model preset.
 /history [n] — Print the last N persisted conversation messages.
 /goal <goal> — Tell the agent to treat the request as a long-running goal.
-/dream — Manually trigger memory consolidation.
+/dream [budget [name n]] — Manually trigger memory consolidation. Add 'budget' to read the memory file sizes, or 'budget <name> <n>' to set one.
 /atlas [force] — Rebuild the wiki directory in memory/WIKI.md. Add 'force' to skip the change check.
+/gardener [project|settings] — Turn this project's new journal lines into pages and update its map — or, with nothing new to promote, bring an oversized map back under its ceiling. Inside a project it works on that one; elsewhere name it: '/gardener <project>'. Add 'settings' to read the periodic pass, or 'off' to stop it.
 /skill — List enabled skills and their descriptions.
+/init — Inside a project: read the wiki and write its AGENTS.md.
 /help — List available slash commands.
 ```
 

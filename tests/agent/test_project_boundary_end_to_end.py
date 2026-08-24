@@ -48,7 +48,7 @@ def install(tmp_path: pathlib.Path) -> pathlib.Path:
             f"---\nsummary: {nome}\n---\n\n# {nome}\n\n{segreto}\n", encoding="utf-8"
         )
     (tmp_path / "SOUL.md").write_text("Sono Jenny. PAROLA-ANIMA\n", encoding="utf-8")
-    (tmp_path / "USER.md").write_text("Si chiama Ludovico. PAROLA-UTENTE\n", encoding="utf-8")
+    (tmp_path / "USER.md").write_text("Si chiama Marta. PAROLA-UTENTE\n", encoding="utf-8")
     memory = tmp_path / "memory"
     memory.mkdir()
     (memory / "MEMORY.md").write_text("# Memoria\n\nPAROLA-MEMORIA\n", encoding="utf-8")

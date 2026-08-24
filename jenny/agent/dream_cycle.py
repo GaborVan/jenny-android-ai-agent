@@ -13,7 +13,10 @@ arrivata un'altra.
 
 Qui stanno il prologo — misura, riga di log, trigger del review, checkpoint,
 ricostruzione delle misure dopo il review — e l'epilogo, cioè l'aritmetica dei
-contatori: la parte che per costruzione deve essere la stessa. Ai chiamanti
+contatori: la parte che per costruzione deve essere la stessa. Più la presa che
+tiene i due percorsi a **un ciclo per volta** (:func:`claim_dream_cycle`), che sta
+qui per la stessa ragione: duplicarla nei due chiamanti sarebbe due copie da
+tenere d'accordo. Ai chiamanti
 resta ciò che è davvero loro: costruire il prompt, il turno incrementale, lo
 snapshot pre-turno, la contabilità token, ``compact_history`` più il pruning, e
 la traduzione dell'esito — una riga di log per il cron, una frase in chat per il
@@ -28,6 +31,7 @@ pacchetti importa l'altro.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -81,6 +85,97 @@ STUCK_IS_ALARMING = 4
 # nuovo: è la stessa distanza con cui ``STUCK_FORCES_REVIEW`` reagisce a un
 # problema che si ripete.
 REVIEW_RETRY_AFTER_RUNS = 2
+
+
+# ---------------------------------------------------------------------------
+# Un ciclo di Dream per volta
+# ---------------------------------------------------------------------------
+
+# Chi tiene la presa, o vuoto se nessuno: l'``AbstractEventLoop`` su cui il ciclo
+# in volo sta girando. Vuoto = libero.
+#
+# **Perché serve.** I due percorsi di Dream — il job cron e ``/dream`` — non si
+# escludono per costruzione. I job cron sono serializzati fra loro, quindi il caso
+# raggiungibile è ``/dream`` battuto mentre il job delle due ore gira, oppure
+# ``/dream`` due volte: ``cmd_dream`` faceva ``asyncio.create_task`` senza chiedere
+# niente a nessuno. E il lock per sessione non li separa, perché
+# ``MemoryStore.dream_session_key()`` è ``dream:%Y%m%d-%H%M%S``, cioè una chiave
+# diversa a ogni run — di proposito, v. la decisione lì.
+#
+# Cosa costano due cicli sovrapposti, nell'ordine in cui pesano: entrambi leggono
+# ``runs_since_review`` e, se è dovuto, entrambi chiamano ``run_dream_review``, cioè
+# due passate di review consecutive sugli stessi file; entrambi prendono lo stesso
+# batch dallo stesso ``.dream_cursor``; e il read-modify-write dei contatori in
+# ``finish_dream_cycle`` perde un tick.
+#
+# **Quanto costano, misurato.** Non fatti irrecuperabili: da T2.4b
+# ``make_entry_archiver`` è montato al confine del file su tutti e quattro i tool di
+# Dream e archivia in ``memory/archive/`` ogni voce che esce da ``USER.md`` /
+# ``MEMORY.md`` / ``SOUL.md`` prima che la scrittura atterri — verificato sul device
+# con ``reviewEveryRuns: 1``, dieci voci archiviate e nessuna persa (piano memoria,
+# fase 2, defect D4). Due review di fila costano quindi **token e rumore**, non
+# informazione. Che è un motivo sufficiente per una presa, e non per una paura.
+#
+# **Un registro di processo e non un ``asyncio.Lock``**, per la stessa ragione del
+# giardiniere (``agent/gardener.py::_PASSES_IN_FLIGHT``): il secondo ciclo non deve
+# mettersi in coda, deve essere **rifiutato**. Mettersi in coda vorrebbe dire che
+# ``/dream`` risponde fra un minuto con il lavoro di qualcun altro già fatto, e che
+# il tick del cron dopo trova la coda ancora piena. Non serve un lock intorno:
+# controllo e inserimento stanno nella stessa istruzione sincrona, senza ``await`` in
+# mezzo, e l'event loop è uno.
+#
+# **Perché memorizzare l'event loop e non solo un booleano.** Una presa che resta
+# presa è peggio di nessuna presa: Dream sarebbe spento fino al riavvio del processo,
+# in silenzio. I ``try``/``finally`` dei due chiamanti coprono ogni uscita del
+# lavoro — ritorno, eccezione, ``CancelledError`` — ma non l'unico caso in cui il
+# ``finally`` non gira affatto: un task cancellato *prima* del suo primo passo, cioè
+# lo smontaggio dell'event loop. Un loop che non c'è più non può avere un ciclo in
+# volo, quindi una presa che non appartiene al loop corrente è morta e si recupera.
+_CYCLE_IN_FLIGHT: list[Any] = []
+
+
+def claim_dream_cycle() -> bool:
+    """Prende la presa sul ciclo di Dream, o ritorna ``False`` se è già presa.
+
+    Chi ottiene ``True`` **deve** chiamare :func:`release_dream_cycle` in un
+    ``finally``. Non è un context manager perché in ``cmd_dream`` i due momenti
+    stanno in due frame diversi: la presa si prende nell'handler, prima di
+    ``create_task``, o due ``/dream`` di fila passerebbero entrambi il controllo
+    prima che il primo task inizi; il rilascio sta nel task.
+    """
+    try:
+        running: Any = asyncio.get_running_loop()
+    except RuntimeError:  # pragma: no cover — entrambi i chiamanti sono async
+        running = None
+    if _CYCLE_IN_FLIGHT:
+        if _CYCLE_IN_FLIGHT[0] is running:
+            logger.warning("Dream: un ciclo è già in volo; questo non parte")
+            return False
+        # La presa appartiene a un event loop che non è più quello corrente: il
+        # ciclo che l'aveva non può riprendere, e il suo ``finally`` non girerà
+        # mai. Recuperarla qui è la sola cosa che impedisce a Dream di restare
+        # spento per sempre dietro un guasto invisibile.
+        logger.warning(
+            "Dream: presa lasciata da un event loop che non c'è più; recuperata"
+        )
+    _CYCLE_IN_FLIGHT[:] = [running]
+    return True
+
+
+def release_dream_cycle() -> None:
+    """Rilascia la presa. Idempotente: chiamarla senza averla non è un errore."""
+    _CYCLE_IN_FLIGHT.clear()
+
+
+# La frase che legge chi ha battuto ``/dream`` mentre un ciclo era già in volo.
+# Dice il costo vero — token spesi due volte — e non quello di prima di T2.4b:
+# l'archivio al confine del file rende la seconda passata di review costosa, non
+# distruttiva, e un rifiuto che spaventa più del dovuto è un rifiuto che mente.
+DREAM_ALREADY_RUNNING = (
+    "A Dream cycle is already running, so this one did not start — Dream runs one cycle "
+    "at a time, or both take the same batch off the same cursor and each pays for its own "
+    "review pass. Nothing would be lost, only spent twice. Try again once it has finished."
+)
 
 
 # I tag con cui il Consolidator marca un fatto destinato a **restare**. Sono la

@@ -42,9 +42,10 @@ Work only from those.
 
 ## What the user said, and what the journal caught
 
-When you are also given the user's recent messages and the journal for those days, do one more
-thing before anything else: **look for a stable fact they said that the journal never recorded.**
-Capture happens live, in the middle of a conversation, and it misses things.
+When you are also given the user's recent messages and what the journal already holds over the same
+recent stretch, do one more thing before anything else:
+**look for a stable fact they said that the journal never recorded.** Capture happens live, in the
+middle of a conversation, and it misses things.
 
 If you find one, record it with `journal_append` — one line, in their terms. It lands marked as
 recovered, and the next pass promotes it like any other line. That is the whole of it: you recover
@@ -52,8 +53,11 @@ the *line*, you do not write the page from the message.
 
 Three limits, and they matter more than the task:
 
-- **When in doubt, leave it.** A fact already in the journal in other words is not missing. A
-  duplicate line is not free — it becomes a second page, or a page that argues with itself.
+- **When in doubt, leave it.** A fact already in the journal in other words is not missing. And
+  the journal you are shown is a **window** — the most recent days, and only as many of them as
+  fit — not the whole record: a fact you cannot find in it may simply have been
+  recorded on an older day, and the messages you are shown can reach further back than those days
+  do. A duplicate line is not free — it becomes a second page, or a page that argues with itself.
 - **Only what will still be true next week.** The same test as capture: a constraint, a decision, a
   preference, a name, a date. Not mood, not the thread of the discussion, not what they asked you.
 - **You cannot change the journal, only add to it.** It is the record of what was said and the
@@ -64,24 +68,66 @@ Three limits, and they matter more than the task:
 - **Add and promote. Do not rewrite.** On a page that already exists you append, or you change its
   `state:` — you do not re-word body text that was already right. Rewriting is how a wiki decays
   one careful pass at a time.
+- **A page that outgrows the budget is SPLIT, and splitting is a promotion.** "Add, do not rewrite"
+  is what makes pages grow, so it needs its own exit: past {{ page_max }} characters a page no
+  longer enters a turn *at all*. It is not shortened and it is not summarised — it is skipped whole,
+  in every conversation in this project. And which pages *are* offered is settled before anyone
+  speaks: they go in **the order the map names them** — first mention first, the ones the map never
+  names last — so no question the user asks can call a skipped page back, and where a page sits in
+  the map decides whether it is read at all. A page nobody can read is worse than no page. **The list
+  of pages below marks the ones that are already there** — you are not guessing which, and you do
+  not have to open them to find out. When one gets there, cut it along the things it talks about:
+  each part becomes a page named after its own thing, carrying the sentences that were already
+  about it — **moved word for word**, not re-worded — with its own `state:` and the `source:` those
+  lines came from. The original page keeps its name
+  and one of the parts, and links to the others; then add the new pages to the map. Nothing is
+  deleted and no sentence is rewritten, which is why this is a promotion and not a rewrite: the
+  same work as promoting a journal line, with a page as the source instead of the journal.
+{% if map_over_budget %}
+- **This map is over its ceiling, and pruning it is a promotion.** `{{ project_path }}/wiki/index.md`
+  is {{ map_chars }} characters and has to fit in {{ map_target }}: it is injected into every single
+  turn of every conversation in this project, and past that ceiling it arrives **cut off** — the
+  model reads the head of the map and never learns that the rest of it exists. It is over because it
+  carries prose, not because it names too many pages: one line per page fits even at fifty pages. So
+  move the prose out. Each paragraph that outgrew a few lines goes into the page it is about — moved
+  **word for word**, not re-worded, keeping that page's `state:` and `source:` — and leaves a
+  `[[link]]` behind in the map. That is the same manoeuvre as promoting a journal line, with the map
+  as the source, which is why it is allowed here while rewriting is not.
+- **The page list comes out of a prune whole.** Every page the map named before your edit is still
+  named after it: the list is how anyone learns which pages exist, so an entry dropped from it is a
+  page that has stopped existing for every future conversation. Prune prose, never entries — if the
+  map is still over the ceiling once the prose is gone, leave it over and say so.
+{% endif %}
 - **A promoted line starts at `state: open`.** The frontmatter of a page carries `state:` (`open` |
   `hypothesis` | `decided` | `done`) and `source:`. Something said in passing does not become
   `decided` because a maintenance pass walked past it — only the user's own words, or a page that
   already says so, can justify anything stronger.
-- **`source:` points at the journal day it came from**, e.g. `source: raw/journal/20260822.md`.
-  That is the trail from a page back to the sentence that caused it, and it is what makes a wrong
-  page correctable instead of merely wrong.
+- **`source:` points at the journal day it came from**, written from the project root and *not*
+  from the workspace: `source: raw/journal/20260822.md`. It is a value you write inside the page —
+  not a path you resolve — which is why it is the one place that does not start with
+  `{{ project_path }}/`; to actually open that file, prefix it like any other path. The value is
+  the trail from a page back to the sentence that caused it, and it is what makes a wrong page
+  correctable instead of merely wrong.
 - **The map is the exception to "do not rewrite", in one part only.** Its list of pages describes
   the folder, so bring it in line with what exists. Its other sections — what is decided, what is
   open — you *amend*: add a line, move a line from open to decided when a page says so. Do not
   rebuild them from your own reading. And keep the map to one screen: it is read on every single
   turn of every conversation in this project, so every line you add there is paid for again and
-  again. What outgrows a few lines belongs on a page.
-- **Never delete a page**, and never delete a section of one. If two pages contradict each other,
-  or a journal line denies a page that says `decided`, leave both alone and **write the question
-  into the map's open section** — one line, naming both pages. That section is read at the start of
-  every conversation in this project, so a question left there reaches the person who can settle
-  it. Deciding it yourself is the one thing you must not do.
+  again. What outgrows a few lines belongs on a page{% if map_over_budget %}, and on this map that
+  move is due now: it is the prune above{% endif %}.
+- **Never delete a page**, and never delete a section of one —
+{% if map_over_budget %}
+  a split is the single exception among pages, and the prune of this map above is the other one, and
+  neither is a deletion: text that moves verbatim into a page the original links to is still there
+  and still reachable.
+{% else %}
+  a split is the single exception, and it is not a deletion: a section that moves verbatim into a
+  new page the original links to is still there and still reachable.
+{% endif %}
+  If two pages contradict each other, or a journal line denies a page that says `decided`, leave
+  both alone and **write the question into the map's open section** — one line, naming both pages.
+  That section is read at the start of every conversation in this project, so a question left there
+  reaches the person who can settle it. Deciding it yourself is the one thing you must not do.
 - **Follow the structure you find.** If the pages under `wiki/` are flat, add flat pages, and open
   a subfolder only when a group of pages has clearly earned one. If they are already organised in
   folders, put yours where that organisation says. The folder is the authority, not your

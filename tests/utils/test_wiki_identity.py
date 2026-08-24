@@ -134,6 +134,93 @@ def test_a_seeded_scope_line_is_quoted_so_it_never_breaks_the_block(tmp_path: Pa
         assert yaml.safe_load(block)["summary"] == seed, f"seed non sopravvive: {seed!r}"
 
 
+# I semi che rompono la frontmatter se qualcuno se ne dimentica uno. Il primo è
+# **quello misurato** sul telefono il 22/08. L'emoji c'è perché la riga viaggia
+# su RPC dalla WebUI, cioè può contenerne una, e perché è il caso in cui una
+# codifica sbagliata si vede subito.
+_SEEDS_THAT_BREAK_YAML = [
+    "Prova del passo 7: la chat segue",
+    'con "virgolette" dentro',
+    "back\\slash",
+    "# hash",
+    "un progetto 🌍 che viaggia in RPC",
+]
+
+
+def _frontmatter(text: str) -> dict:
+    """La frontmatter di *text*, parsata. Solleva se il blocco non è YAML valido."""
+    import yaml
+
+    parsed = yaml.safe_load(text.split("---", 2)[1])
+    assert isinstance(parsed, dict), f"frontmatter non parsabile: {text!r}"
+    return parsed
+
+
+@pytest.mark.parametrize("seed", _SEEDS_THAT_BREAK_YAML)
+def test_the_scope_line_that_create_project_writes_round_trips(
+    tmp_path: Path, seed: str
+) -> None:
+    """La stessa proprietà, ma dal **chiamante** e non dall'helper.
+
+    Il test qui sopra costruisce la riga YAML a mano, quindi misura
+    ``_yaml_scalar`` e non lo scrittore: mutare il *call site* —
+    ``project_create.create_project``, ``_yaml_scalar(seed)`` -> ``seed`` —
+    passava tutta la suite (misurato il 23/08). Ed è quel call site il posto in
+    cui il difetto del 22/08 è stato visto: un due punti nel seme dell'utente
+    portava via l'intera frontmatter, quindi ``read_wiki_scope`` cadeva sul
+    ripiego e l'id risultava assente.
+    """
+    from jenny.webui.project_create import create_project
+
+    wikis = tmp_path / "wikis"
+    wikis.mkdir()
+
+    result = create_project(
+        wikis_dir=wikis,
+        # Nessuna skill nel workspace: ``reindex_wikis`` non c'è, e il registro
+        # non aggiornato è per contratto un avviso, non un fallimento.
+        scripts_dir=tmp_path / "senza-skill",
+        name="prova",
+        seed=seed,
+    )
+
+    assert result["seeded"] is True
+    project = wikis / "prova"
+    assert _frontmatter((project / "AGENTS.md").read_text(encoding="utf-8"))["summary"] == seed
+    assert is_valid_wiki_id(wiki_id(project)), "una frontmatter rotta si porta via anche l'id"
+
+
+@pytest.mark.parametrize("seed", _SEEDS_THAT_BREAK_YAML)
+def test_the_scope_line_written_into_a_half_built_tree_round_trips_too(
+    tmp_path: Path, seed: str
+) -> None:
+    """Il secondo call site, che è un ramo diverso e ha il proprio quoting.
+
+    Su un albero rimasto a metà l'``AGENTS.md`` esiste già — l'ha scritto la
+    migrazione dell'avvio, con ``summary:`` a segnaposto — quindi lo scaffolder
+    lo lascia stare e la riga la scrive ``_seed_scope_if_placeholder``. È una
+    seconda chiamata a ``_yaml_scalar``, e un test sul primo ramo la lascia
+    scoperta.
+    """
+    from jenny.webui.project_create import create_project
+
+    wikis = tmp_path / "wikis"
+    (wikis / "morta-a-meta" / "wiki").mkdir(parents=True)
+    migrate_wikis(wikis)  # come l'avvio: AGENTS.md minimo, summary a segnaposto
+    project = wikis / "morta-a-meta"
+    assert "<" in _frontmatter((project / "AGENTS.md").read_text(encoding="utf-8"))["summary"]
+
+    result = create_project(
+        wikis_dir=wikis,
+        scripts_dir=tmp_path / "senza-skill",
+        name="morta-a-meta",
+        seed=seed,
+    )
+
+    assert result["seeded"] is True
+    assert _frontmatter((project / "AGENTS.md").read_text(encoding="utf-8"))["summary"] == seed
+
+
 # ── La ricerca, e l'ambiguità ────────────────────────────────────────────
 
 
@@ -273,6 +360,105 @@ def test_the_journal_is_created_once(wikis: Path) -> None:
     migrate_wikis(wikis)
 
     assert migrate_wikis(wikis)["journals"] == []
+
+
+# ── Chi scrive l'id lo rilegge come lo legge chi lo usa ──────────────────
+
+_ROTTA = "---\nsummary: Prova del passo 7: la chat segue\n---\n\n# P\n"
+
+
+def _id_lines(text: str) -> list[str]:
+    return [line for line in text.splitlines() if line.startswith(f"{WIKI_ID_KEY}:")]
+
+
+def test_four_boots_over_an_unparsable_frontmatter_write_one_id(wikis: Path) -> None:
+    """Il difetto del 22/08, dal lato di **chi scrive**.
+
+    ``_ensure_id`` chiedeva a ``yaml.safe_load`` se la wiki avesse già un id, e
+    su una frontmatter con un due punti in una riga di scope quel parser non
+    perde *quella* riga: perde **tutte** le chiavi. Quindi non vedeva l'id che
+    c'era e ne scriveva un altro a ogni avvio, mentre ``wiki_id`` — che legge con
+    una regex e prende il primo match — restituiva ogni volta un valore diverso.
+    Esito: la chat della wiki diventava irrintracciabile a ogni riavvio, e il log
+    diceva «1 identificate» per sempre. Quattro avvii, un solo id.
+    """
+    import yaml
+
+    with pytest.raises(yaml.YAMLError):
+        yaml.safe_load(_ROTTA.split("---")[1])
+
+    project = _wiki(wikis, "storta", "AGENTS.md", _ROTTA)
+
+    seen = []
+    identified = []
+    for _ in range(4):
+        identified.append(migrate_wikis(wikis)["identified"])
+        seen.append(wiki_id(project))
+
+    text = (project / "AGENTS.md").read_text(encoding="utf-8")
+    assert len(_id_lines(text)) == 1, f"un id per avvio invece di uno solo:\n{text}"
+    assert len(set(seen)) == 1, f"l'identità della wiki cambia a ogni avvio: {seen}"
+    assert is_valid_wiki_id(seen[0])
+    assert identified == [["storta"], [], [], []], (
+        "il log di avvio non deve dire «identificate» di una wiki che l'id ce l'ha già"
+    )
+    assert "summary: Prova del passo 7: la chat segue" in text
+
+
+def test_a_hand_written_non_hex_id_gets_a_real_one_above_it(wikis: Path) -> None:
+    """Scelta deliberata: la riga dell'utente **resta**, la nostra le va sopra.
+
+    Le altre due strade erano peggiori. Riscrivere ``id: tesi-2024`` in loco
+    cancella testo che l'utente ha scritto a mano, che è l'unica cosa che questa
+    migrazione promette di non fare. Lasciar perdere la wiki (trattare *qualsiasi*
+    riga ``id:`` come "ce l'ha") le toglie in silenzio e per sempre la sola cosa
+    per cui l'id esiste: ritrovare la propria chat dopo un rinomino. Il lettore
+    prende il primo match, cioè il nostro, quindi dal secondo avvio non si muove
+    più niente.
+    """
+    project = _wiki(wikis, "tesi", "AGENTS.md", "---\nid: tesi-2024\nsummary: la mia tesi\n---\n")
+
+    migrate_wikis(wikis)
+    after_first = (project / "AGENTS.md").read_text(encoding="utf-8")
+    assert migrate_wikis(wikis)["identified"] == []
+    assert (project / "AGENTS.md").read_text(encoding="utf-8") == after_first
+
+    assert "id: tesi-2024" in after_first, "la riga scritta a mano non si tocca"
+    assert is_valid_wiki_id(wiki_id(project))
+    assert _id_lines(after_first)[0] != "id: tesi-2024", "il nostro id va letto per primo"
+
+
+def test_a_well_formed_frontmatter_with_an_id_is_not_touched(wikis: Path) -> None:
+    body = "---\nid: 3f9a2c1b7e04\nsummary: x\ntags: [a, b]\n---\n\n# P\n\nroba mia\n"
+    project = _wiki(wikis, "aposto", "AGENTS.md", body)
+
+    assert migrate_wikis(wikis)["identified"] == []
+    assert (project / "AGENTS.md").read_text(encoding="utf-8") == body
+
+
+def test_a_well_formed_frontmatter_without_an_id_gets_exactly_one(wikis: Path) -> None:
+    project = _wiki(wikis, "senza", "AGENTS.md", "---\nsummary: x\n---\n\n# P\n")
+
+    assert migrate_wikis(wikis)["identified"] == ["senza"]
+    after_first = (project / "AGENTS.md").read_text(encoding="utf-8")
+    assert migrate_wikis(wikis)["identified"] == []
+
+    assert (project / "AGENTS.md").read_text(encoding="utf-8") == after_first
+    assert len(_id_lines(after_first)) == 1
+    assert "summary: x" in after_first
+
+
+def test_a_file_with_no_frontmatter_at_all_gets_one_id_and_keeps_its_body(wikis: Path) -> None:
+    project = _wiki(wikis, "nuda", "AGENTS.md", "# Solo un titolo\n\ncontenuto\n")
+
+    assert migrate_wikis(wikis)["identified"] == ["nuda"]
+    after_first = (project / "AGENTS.md").read_text(encoding="utf-8")
+    assert migrate_wikis(wikis)["identified"] == []
+
+    assert (project / "AGENTS.md").read_text(encoding="utf-8") == after_first
+    assert len(_id_lines(after_first)) == 1
+    assert after_first.startswith("---\n" + WIKI_ID_KEY)
+    assert "# Solo un titolo" in after_first and "contenuto" in after_first
 
 
 def test_a_broken_wiki_does_not_stop_the_others(wikis: Path) -> None:

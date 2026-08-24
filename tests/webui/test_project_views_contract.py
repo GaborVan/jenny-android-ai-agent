@@ -20,6 +20,24 @@ una volta, ed è il motivo per cui i test qui sotto guardano quei due corpi.
 
 Asserzioni sul sorgente, come ``test_scope_menu_contract.py``: la WebUI non ha
 un runner JS con DOM.
+
+**L'isolamento sta nel client, e questa è una decisione — non una metà
+dimenticata** (T4.11, 23/08). ``/api/tree``, ``/api/graph`` e ``/api/page``
+servono qualunque wiki che ``discover_wikis`` conosca, quale che sia la
+conversazione aperta: l'aggancio non arriva fin là, e non c'è un modo di farglielo
+arrivare che non sia peggiore del problema (queste sono route HTTP dietro un
+token, senza sessione da cui dedurlo; farlo ricordare al server sarebbe il
+secondo scrittore di ``pinnedWiki``, che è quel che il primo test qui sotto vieta;
+passarlo come parametro accanto a ``wiki=`` lo farebbe scrivere allo stesso
+client che già decide ``wiki=``). E non c'è conseguenza di sicurezza: sono wiki
+dello stesso utente, dietro lo stesso token, e il confine di lettura dell'agente
+è già tutto il workspace di proposito.
+
+Quel che il server garantisce è il **contenimento** — il nome deve essere una
+wiki di ``wikis/``, la pagina deve stare nella ``wiki/`` di quella wiki — e a
+tenerlo fermo, con input ostili e non per grep, c'è
+``test_wiki_routes_server_scope.py``. Le due metà rispondono a domande diverse:
+questa è la vista, quella è il percorso.
 """
 
 from __future__ import annotations

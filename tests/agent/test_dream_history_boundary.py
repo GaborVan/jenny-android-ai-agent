@@ -31,6 +31,7 @@ from jenny.agent.memory import MemoryStore
 PERSONAL = "unified:default"
 CRON = "cron:job-1"
 DREAM = "dream:20260821-1200"
+PROJECT = "project:acme"
 
 
 @pytest.fixture
@@ -157,3 +158,39 @@ class TestKnownFactsFollowsTheSameVisibility:
         store.append_history("- [durable] fatto interno", session_key=CRON)
 
         assert "fatto interno" in store.get_known_facts_context()
+
+    def test_a_project_consolidation_gets_no_block_at_all(self, store):
+        """E non e' una questione di token: e' il profilo personale.
+
+        La coda era gia' chiusa a un progetto, i due file caldi no — quindi
+        ``USER.md`` e ``memory/MEMORY.md`` finivano nel prompt di consolidamento
+        di un progetto insieme all'istruzione che chiede di estrarre un
+        ``[correction]`` verso quei fatti. Quella correzione non ha dove andare:
+        il riassunto di un progetto si ferma in ``_last_summary`` e
+        ``append_history`` non lo scrive, quindi Dream non la vede mai. Un blocco
+        che invita a produrre qualcosa che il percorso poi butta e' peggio di un
+        blocco assente.
+        """
+        store.user_file.write_text(
+            "# User\n- Vede la terapeuta il martedi'\n", encoding="utf-8",
+        )
+        store.memory_file.write_text(
+            "# Memory\n- Piano stipendio: rinegoziare a settembre\n", encoding="utf-8",
+        )
+        store.append_history("- [durable] fatto personale", session_key=PERSONAL)
+
+        assert store.get_known_facts_context(session_key=PROJECT) == ""
+        # Controprova: gli stessi file, la stessa coda, la chiave personale.
+        personal = store.get_known_facts_context(session_key=PERSONAL)
+        assert "terapeuta" in personal
+        assert "rinegoziare a settembre" in personal
+
+    def test_a_project_gets_no_block_even_with_an_empty_queue(self, store):
+        """Il gate sta prima delle letture, non dentro il filtro della coda.
+
+        Senza coda il blocco sarebbe stato composto dai soli file — cioe' il caso
+        peggiore, tutto profilo e nessun contesto del progetto.
+        """
+        store.user_file.write_text("# User\n- Fatto personalissimo\n", encoding="utf-8")
+
+        assert store.get_known_facts_context(session_key=PROJECT) == ""

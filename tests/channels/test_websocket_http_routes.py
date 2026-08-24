@@ -3,33 +3,19 @@
 import asyncio
 import functools
 import json
-import random
-import socket
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
+from port_alloc import free_port
 
 from jenny.channels.websocket import WebSocketChannel, WebSocketConfig
 from jenny.session.manager import Session, SessionManager
 from jenny.webui.gateway_services import GatewayServices, build_gateway_services
 
-_PORT = 29900
 _AUTH_SECRET = "test-secret"
-
-
-def _free_port() -> int:
-    for _ in range(100):
-        port = random.randint(30_000, 60_000)
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            try:
-                sock.bind(("127.0.0.1", port))
-            except OSError:
-                continue
-            return port
-    raise RuntimeError("could not find a free localhost port")
 
 
 def _make_handler(
@@ -57,7 +43,7 @@ def _ch(
     *,
     session_manager: SessionManager | None = None,
     workspace_path: Path | None = None,
-    port: int = _PORT,
+    port: int | None = None,
     runtime_model_name: Any | None = None,
     **extra: Any,
 ) -> WebSocketChannel:
@@ -65,7 +51,8 @@ def _ch(
         "enabled": True,
         "allowFrom": ["*"],
         "host": "127.0.0.1",
-        "port": port,
+        # Nessun default fisso: senza porta esplicita se ne prende una libera.
+        "port": port if port is not None else free_port(),
         "path": "/",
         "websocketRequiresToken": False,
         "tokenIssueSecret": _AUTH_SECRET,
@@ -127,19 +114,20 @@ def _seed_many(workspace: Path, keys: list[str]) -> SessionManager:
 async def test_bootstrap_returns_metadata_for_localhost(
     bus: MagicMock, tmp_path: Path
 ) -> None:
+    port = free_port()
     sm = _seed_session(tmp_path)
-    channel = _ch(bus, session_manager=sm, port=29901)
+    channel = _ch(bus, session_manager=sm, port=port)
     server_task = asyncio.create_task(channel.start())
     await asyncio.sleep(0.3)
     try:
         resp = await _http_get(
-            "http://127.0.0.1:29901/webui/bootstrap",
+            f"http://127.0.0.1:{port}/webui/bootstrap",
             headers={"X-Jenny-Auth": _AUTH_SECRET},
         )
         assert resp.status_code == 200
         body = resp.json()
         assert body["ws_path"] == "/"
-        assert body["ws_url"] == "ws://127.0.0.1:29901/"
+        assert body["ws_url"] == f"ws://127.0.0.1:{port}/"
         assert isinstance(body.get("model_name"), str)
         assert isinstance(body.get("provider"), str)
     finally:
@@ -152,6 +140,7 @@ async def test_bootstrap_returns_metadata_for_localhost(
 async def test_webui_skills_route_requires_token_and_hides_paths(
     bus: MagicMock, tmp_path: Path
 ) -> None:
+    port = free_port()
     workspace_skill = tmp_path / "skills" / "workspace-skill"
     workspace_skill.mkdir(parents=True)
     (workspace_skill / "SKILL.md").write_text(
@@ -181,18 +170,18 @@ async def test_webui_skills_route_requires_token_and_hides_paths(
         bus,
         session_manager=_seed_session(tmp_path),
         workspace_path=tmp_path,
-        port=29920,
+        port=port,
     )
     server_task = asyncio.create_task(channel.start())
     await asyncio.sleep(0.3)
     try:
-        deny = await _http_get("http://127.0.0.1:29920/api/webui/skills")
+        deny = await _http_get(f"http://127.0.0.1:{port}/api/webui/skills")
         assert deny.status_code == 401
 
-        await _bootstrap(29920)
+        await _bootstrap(port)
         token = _AUTH_SECRET
         resp = await _http_get(
-            "http://127.0.0.1:29920/api/webui/skills",
+            f"http://127.0.0.1:{port}/api/webui/skills",
             headers={"Authorization": f"Bearer {token}"},
         )
 
@@ -232,6 +221,7 @@ async def test_webui_skills_route_requires_token_and_hides_paths(
 async def test_webui_thread_resigns_assistant_media_urls(
     bus: MagicMock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    port = free_port()
     from jenny.webui.transcript import append_transcript_object
 
     monkeypatch.setattr("jenny.config.paths.get_data_dir", lambda: tmp_path)
@@ -261,15 +251,15 @@ async def test_webui_thread_resigns_assistant_media_urls(
         },
     )
 
-    channel = _ch(bus, port=29914)
+    channel = _ch(bus, port=port)
     server_task = asyncio.create_task(channel.start())
     await asyncio.sleep(0.3)
     try:
-        await _bootstrap(29914)
+        await _bootstrap(port)
         token = _AUTH_SECRET
         auth = {"Authorization": f"Bearer {token}"}
         resp = await _http_get(
-            "http://127.0.0.1:29914/api/sessions/websocket:video-replay/webui-thread",
+            f"http://127.0.0.1:{port}/api/sessions/websocket:video-replay/webui-thread",
             headers=auth,
         )
         assert resp.status_code == 200
@@ -280,7 +270,7 @@ async def test_webui_thread_resigns_assistant_media_urls(
         assert media[0]["url"].startswith("/api/media/")
         assert media[0]["url"] != "/api/media/old-sig/old-payload"
 
-        fetched = await _http_get(f"http://127.0.0.1:29914{media[0]['url']}")
+        fetched = await _http_get(f"http://127.0.0.1:{port}{media[0]['url']}")
         assert fetched.status_code == 200
         assert fetched.content == b"video"
     finally:
@@ -292,6 +282,7 @@ async def test_webui_thread_resigns_assistant_media_urls(
 async def test_session_routes_reject_non_websocket_keys(
     bus: MagicMock, tmp_path: Path
 ) -> None:
+    port = free_port()
     sm = _seed_many(
         tmp_path,
         [
@@ -300,18 +291,18 @@ async def test_session_routes_reject_non_websocket_keys(
             "other-channel:C123",
         ],
     )
-    channel = _ch(bus, session_manager=sm, port=29909)
+    channel = _ch(bus, session_manager=sm, port=port)
     server_task = asyncio.create_task(channel.start())
     await asyncio.sleep(0.3)
     try:
-        await _bootstrap(29909)
+        await _bootstrap(port)
         token = _AUTH_SECRET
         auth = {"Authorization": f"Bearer {token}"}
 
         # The webui list already hides non-websocket sessions; handcrafted URLs
         # should hit the same boundary rather than exposing or deleting them.
         msgs = await _http_get(
-            "http://127.0.0.1:29909/api/sessions/cli:direct/webui-thread",
+            f"http://127.0.0.1:{port}/api/sessions/cli:direct/webui-thread",
             headers=auth,
         )
         assert msgs.status_code == 404
@@ -319,7 +310,7 @@ async def test_session_routes_reject_non_websocket_keys(
         doomed = sm._get_session_path("other-channel:C123")
         assert doomed.exists()
         deny_delete = await _http_get(
-            "http://127.0.0.1:29909/api/sessions/other-channel:C123/delete",
+            f"http://127.0.0.1:{port}/api/sessions/other-channel:C123/delete",
             headers=auth,
         )
         assert deny_delete.status_code == 404
@@ -333,19 +324,20 @@ async def test_session_routes_reject_non_websocket_keys(
 async def test_session_routes_reject_invalid_key(
     bus: MagicMock, tmp_path: Path
 ) -> None:
+    port = free_port()
     sm = _seed_session(tmp_path)
-    channel = _ch(bus, session_manager=sm, port=29904)
+    channel = _ch(bus, session_manager=sm, port=port)
     server_task = asyncio.create_task(channel.start())
     await asyncio.sleep(0.3)
     try:
-        await _bootstrap(29904)
+        await _bootstrap(port)
         token = _AUTH_SECRET
         auth = {"Authorization": f"Bearer {token}"}
 
         # Invalid characters in the key -> regex match fails -> 404
         # (route doesn't match, falls through to channel 404).
         resp = await _http_get(
-            "http://127.0.0.1:29904/api/sessions/bad%20key/webui-thread",
+            f"http://127.0.0.1:{port}/api/sessions/bad%20key/webui-thread",
             headers=auth,
         )
         assert resp.status_code in {400, 404}
@@ -358,25 +350,26 @@ async def test_session_routes_reject_invalid_key(
 async def test_static_serves_index_when_dist_present(
     bus: MagicMock, tmp_path: Path
 ) -> None:
+    port = free_port()
     dist = tmp_path / "dist"
     dist.mkdir()
     (dist / "index.html").write_text("<!doctype html><title>nbweb</title>")
     (dist / "favicon.svg").write_text("<svg/>")
     sm = _seed_session(tmp_path / "ws_state")
-    channel = _ch(bus, session_manager=sm, port=29905)
+    channel = _ch(bus, session_manager=sm, port=port)
     server_task = asyncio.create_task(channel.start())
     await asyncio.sleep(0.3)
     try:
         # Bare ``GET /`` is a browser opening the app: it must return the SPA
         # index.html, not the WS-upgrade handler's 401/426.
-        root = await _http_get("http://127.0.0.1:29905/")
+        root = await _http_get(f"http://127.0.0.1:{port}/")
         assert root.status_code == 200
         assert "Jenny" in root.text
-        asset = await _http_get("http://127.0.0.1:29905/favicon.svg")
+        asset = await _http_get(f"http://127.0.0.1:{port}/favicon.svg")
         assert asset.status_code == 200
         assert "<svg" in asset.text
         # Unknown SPA route falls back to index.html.
-        spa = await _http_get("http://127.0.0.1:29905/sessions/abc")
+        spa = await _http_get(f"http://127.0.0.1:{port}/sessions/abc")
         assert spa.status_code == 200
         assert "Jenny" in spa.text
     finally:
@@ -388,16 +381,17 @@ async def test_static_serves_index_when_dist_present(
 async def test_static_rejects_path_traversal(
     bus: MagicMock, tmp_path: Path
 ) -> None:
+    port = free_port()
     dist = tmp_path / "dist"
     dist.mkdir()
     (dist / "index.html").write_text("ok")
     secret = tmp_path / "secret.txt"
     secret.write_text("classified")
-    channel = _ch(bus, port=29906)
+    channel = _ch(bus, port=port)
     server_task = asyncio.create_task(channel.start())
     await asyncio.sleep(0.3)
     try:
-        resp = await _http_get("http://127.0.0.1:29906/../secret.txt")
+        resp = await _http_get(f"http://127.0.0.1:{port}/../secret.txt")
         # Normalized by httpx into /secret.txt → falls back to index.html, not 'classified'.
         assert "classified" not in resp.text
     finally:
@@ -407,11 +401,12 @@ async def test_static_rejects_path_traversal(
 
 @pytest.mark.asyncio
 async def test_unknown_route_returns_404(bus: MagicMock) -> None:
-    channel = _ch(bus, port=29907)
+    port = free_port()
+    channel = _ch(bus, port=port)
     server_task = asyncio.create_task(channel.start())
     await asyncio.sleep(0.3)
     try:
-        resp = await _http_get("http://127.0.0.1:29907/api/unknown")
+        resp = await _http_get(f"http://127.0.0.1:{port}/api/unknown")
         assert resp.status_code == 404
     finally:
         await channel.stop()
@@ -474,7 +469,8 @@ def test_wildcard_ipv6_with_secret_is_valid(bus: MagicMock) -> None:
 
 
 def test_bootstrap_ws_url_uses_forwarded_https_host(bus: MagicMock) -> None:
-    channel = _ch(bus, host="127.0.0.1", port=29931, tokenIssueSecret="")
+    port = free_port()
+    channel = _ch(bus, host="127.0.0.1", port=port, tokenIssueSecret="")
     resp = channel.gateway.http._handle_bootstrap(
         _LOCAL,
         _FakeReq({"Host": "jenny.example", "X-Forwarded-Proto": "https"}),

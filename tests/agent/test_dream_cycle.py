@@ -242,6 +242,10 @@ class _ReviewSpy:
             before=before,
             after=after,
             freed=sum(before[label] - after[label] for label in before),
+            # Come il vero ``ReviewOutcome``: `/dream` lo legge per dire *quali*
+            # fatti la passata ha spostato in archivio, non solo quanti caratteri
+            # ha liberato.
+            demoted_ids=(),
         )
 
     @property

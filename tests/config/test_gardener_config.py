@@ -11,7 +11,14 @@ from __future__ import annotations
 
 import pytest
 
-from jenny.config.schema import AgentDefaults, GardenerConfig
+from jenny.config.schema import (
+    GARDENER_DISTANCE_HOURS_MAX,
+    GARDENER_IDLE_MIN_MAX,
+    GARDENER_INTERVAL_MIN_MAX,
+    AgentDefaults,
+    Config,
+    GardenerConfig,
+)
 
 
 def test_defaults() -> None:
@@ -81,3 +88,119 @@ def test_the_two_clocks_can_be_switched_off(field: str) -> None:
 
 def test_it_hangs_off_the_agent_defaults() -> None:
     assert isinstance(AgentDefaults().gardener, GardenerConfig)
+
+
+# -- i tetti (T2.9) -----------------------------------------------------------
+#
+# I tre campi erano ``ge=`` senza tetto, e ``interval_min`` è quello che conta:
+# diventa un ``every_ms``, quindi ``10**9`` pianifica diciannove secoli in avanti e
+# arma una sveglia RTC per quella data. Innocuo finché il numero lo scrive solo un
+# programmatore; non più da quando ``/gardener interval`` lo fa scrivere a mano.
+
+
+@pytest.mark.parametrize(
+    ("field", "over"),
+    [
+        ("interval_min", GARDENER_INTERVAL_MIN_MAX + 1),
+        ("idle_min", GARDENER_IDLE_MIN_MAX + 1),
+        ("min_hours_between_passes", GARDENER_DISTANCE_HOURS_MAX + 1),
+    ],
+)
+def test_a_value_over_the_ceiling_is_refused(field: str, over: int) -> None:
+    """Un valore appena sopra il tetto, non ``10**9``: un tetto si prova sul bordo.
+
+    Con la clemenza montata su ``GardenerConfig`` invece che su ``AgentDefaults``
+    questi tre rifiuti scomparirebbero tutti insieme, e il ``le=`` diventerebbe
+    decorazione.
+    """
+    with pytest.raises(Exception):
+        GardenerConfig(**{field: over})
+
+
+@pytest.mark.parametrize(
+    ("field", "top"),
+    [
+        ("interval_min", GARDENER_INTERVAL_MIN_MAX),
+        ("idle_min", GARDENER_IDLE_MIN_MAX),
+        ("min_hours_between_passes", GARDENER_DISTANCE_HOURS_MAX),
+    ],
+)
+def test_the_top_of_each_range_is_accepted(field: str, top: int) -> None:
+    """Il tetto è incluso: ``le``, non ``lt``. Un giorno esatto è una scelta."""
+    assert getattr(GardenerConfig(**{field: top}), field) == top
+
+
+def test_the_ceilings_are_the_numbers_the_command_names() -> None:
+    """Il comando legge il range da ``model_fields``, non da una sua copia.
+
+    Se un domani il ``le=`` si sposta e la costante resta indietro, i rifiuti di
+    ``/gardener`` citerebbero un range che lo schema non applica più.
+    """
+    fields = GardenerConfig.model_fields
+
+    assert fields["interval_min"].le == GARDENER_INTERVAL_MIN_MAX
+    assert fields["idle_min"].le == GARDENER_IDLE_MIN_MAX
+    assert fields["min_hours_between_passes"].le == GARDENER_DISTANCE_HOURS_MAX
+
+
+def test_a_legacy_value_over_the_ceiling_is_clamped_and_not_quarantined() -> None:
+    """Il tetto non deve poter cancellare la config di chi aggiorna.
+
+    ``loader._load_with_recovery`` reagisce a un ``ValidationError`` provando il
+    ``.bak`` — che ha lo stesso numero fuori range — e poi mettendo il file in
+    quarantena e ripartendo dai **default**: provider e chiave compresi. Per un
+    ``intervalMin`` scritto da una versione senza tetti sarebbe uno scambio
+    pessimo, e renderebbe irraggiungibile proprio la via d'uscita
+    (``/gardener off`` passa da ``store.mutate``, che rilegge il file).
+    """
+    config = Config.model_validate({
+        "providers": {
+            "default": "ds",
+            "providers": [{"name": "ds", "format": "openai_compat", "api_key": "sk-x"}],
+        },
+        "agents": {"defaults": {"gardener": {
+            "intervalMin": 10 ** 9,
+            "idleMin": -5,
+            "minHoursBetweenPasses": 10 ** 9,
+        }}},
+    })
+
+    gardener = config.agents.defaults.gardener
+    # Limitato al tetto, non riportato al default: il numero fuori range dice in
+    # che direzione andava la scelta, e 30 minuti farebbero lavorare il
+    # giardiniere molto più di quanto chiunque avesse chiesto.
+    assert gardener.interval_min == GARDENER_INTERVAL_MIN_MAX
+    assert gardener.idle_min == 0
+    assert gardener.min_hours_between_passes == GARDENER_DISTANCE_HOURS_MAX
+    # E il resto del file è ancora lì: è la cosa che la quarantena avrebbe perso.
+    assert config.providers.providers[0].api_key == "sk-x"
+
+
+def test_the_clamp_reads_the_snake_case_alias_too() -> None:
+    """Un `config.json` scritto a mano usa spesso lo snake_case: entrambi gli alias
+    portano al campo, quindi entrambi devono passare dalla clemenza — altrimenti il
+    tetto boccia solo una delle due grafie."""
+    config = Config.model_validate(
+        {"agents": {"defaults": {"gardener": {"interval_min": 10 ** 9}}}}
+    )
+
+    assert config.agents.defaults.gardener.interval_min == GARDENER_INTERVAL_MIN_MAX
+
+
+def test_a_value_inside_the_range_is_left_exactly_alone() -> None:
+    """La clemenza non deve diventare una normalizzazione: un numero valido
+    attraversa il parse identico, e il file non viene "corretto" da nessuno."""
+    config = Config.model_validate(
+        {"agents": {"defaults": {"gardener": {"intervalMin": 45, "idleMin": 0}}}}
+    )
+
+    assert config.agents.defaults.gardener.interval_min == 45
+    assert config.agents.defaults.gardener.idle_min == 0
+
+
+def test_a_non_numeric_value_is_not_guessed_at() -> None:
+    """``clamp_raw`` limita numeri; non prova a interpretare una stringa. Un
+    ``intervalMin: "presto"`` è un refuso, e la validazione del campo è il posto
+    dove viene detto — non qui, indovinando."""
+    with pytest.raises(Exception):
+        GardenerConfig.model_validate({"intervalMin": "presto"})

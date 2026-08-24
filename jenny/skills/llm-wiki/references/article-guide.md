@@ -45,6 +45,11 @@ If a concept page **would** exceed ~1200 words, do not write it as a single file
 
    - [[summaries/...]]
    ```
+   The `[[<Topic>/<aspect-1>]]` bullets resolve because a link with a `/` matches any page
+   whose path *ends* with it — the `concepts/` prefix is optional, the `<Topic>/` segment is
+   not. `[[<aspect-1>]]` alone would find a same-named page under any other topic, and
+   `[[Elsewhere/<aspect-1>]]` is dead. See the resolution rules in `SKILL.md`.
+
 3. Write each `<aspect-N>.md` as a focused 400–1200 word page.
 4. Update `wiki/index.md` to show the hierarchy with indented bullets under the folder-split entry.
 

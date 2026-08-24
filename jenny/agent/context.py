@@ -3,13 +3,14 @@
 import base64
 import mimetypes
 import platform
+import re
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping, NamedTuple, Sequence
 
 from loguru import logger
 
-from jenny.agent.memory import MemoryStore
+from jenny.agent.memory import MemoryStore, is_gardener_session_key
 from jenny.agent.skills import SkillsLoader
 from jenny.config.paths import get_output_path
 from jenny.session.goal_state import goal_state_runtime_lines
@@ -29,20 +30,27 @@ from jenny.utils.helpers import (
 from jenny.utils.prompt_templates import render_template
 from jenny.utils.wiki_paths import (
     LEGACY_WIKI_SCHEMA_FILENAME,
+    WIKI_INDEX_FILENAME,
     WIKI_SCHEMA_FILENAME,
     is_wiki_root,
     iter_wiki_pages,
     wiki_schema_file,
 )
 
-# Fallback quando ContextBuilder è costruito senza config (test, tool isolati):
-# stesso valore del default di ``AtlasConfig.max_context_tokens``.
 # Tetto sulla mappa di progetto iniettata nel blocco (T3). Si paga a **ogni**
 # turno del progetto, quindi e' una soglia sui caratteri e non sui token: e'
-# quella che si legge a occhio nel file, ed e' il numero che il lint di T5
-# usera' per dire a una mappa che si sta gonfiando. Duemila caratteri sono
-# circa una schermata piena sul telefono, cioe' esattamente quel che la mappa
-# dichiara di essere.
+# quella che si legge a occhio nel file, ed e' il numero che il lint usa per dire
+# a una mappa che si sta gonfiando. Duemila caratteri sono circa una schermata
+# piena sul telefono, cioe' esattamente quel che la mappa dichiara di essere.
+#
+# **Questo numero e' scritto due volte** (T3.12): la copia e'
+# ``MAP_MAX_CHARS`` in ``jenny/skills/llm-wiki/scripts/lint_wiki.py``. La
+# duplicazione e' voluta e non si puo' togliere — quello script gira anche fuori
+# dall'app e non deve importare ``jenny`` (v. ``FORK_BOUNDARY.md``) — quindi
+# quello che tiene insieme i due valori e' un test, non un import:
+# ``tests/skills/llm_wiki/test_lint_wiki.py::test_the_ceiling_matches_the_one_the_prompt_uses``
+# legge *questo* file come testo e cade se i due numeri divergono. Cambiando qui,
+# cambiare la' — o e' il lint che avvisa alla soglia sbagliata.
 _PROJECT_MAP_MAX_CHARS = 2000
 
 # Tetto sul **contenuto delle pagine** iniettato nel blocco di progetto (T6.4, il
@@ -55,8 +63,14 @@ _PROJECT_MAP_MAX_CHARS = 2000
 # di un progetto giovane (venti pagine da trecento caratteri). Il giorno che il
 # tetto morde davvero, quello e' il segnale che serve la selezione — cioe' il
 # problema "con cinquecento pagine grep non basta", che si affronta quando arriva.
+#
+# Stessa coppia della mappa (T3.12): la copia e' ``PAGE_MAX_CHARS`` in
+# ``jenny/skills/llm-wiki/scripts/lint_wiki.py``, e il legame e'
+# ``test_the_page_ceiling_matches_the_budget_the_prompt_has``.
 _PROJECT_PAGES_MAX_CHARS = 6000
 
+# Fallback quando ContextBuilder è costruito senza config (test, tool isolati):
+# stesso valore del default di ``AtlasConfig.max_context_tokens``.
 _DEFAULT_WIKI_DIRECTORY_TOKENS = 1200
 
 # Il nome del tool che fa da interruttore ad ``agent/scheduling.md``. Costante e
@@ -65,6 +79,310 @@ _DEFAULT_WIKI_DIRECTORY_TOKENS = 1200
 # test (``test_cron_tool_name_constant_matches``), che ``CronTool`` lo importa
 # davvero perché lì costa solo tempo di test.
 _CRON_TOOL_NAME = "cron"
+
+
+class _ProjectPages(NamedTuple):
+    """Le pagine iniettate, **con quante sono su quante**. T3.6.
+
+    I due conteggi escono da qui e non li ricalcola nessuno: risalirli dal testo
+    vorrebbe dire contare i recinti con una regex, e ricamminare ``wiki/``
+    vorrebbe dire rileggere ogni file una seconda volta a ogni turno.
+
+    Servono al template perche' l'istruzione piu' forte del blocco parlava delle
+    pagine iniettate come se fossero *le* pagine del progetto. Misurato sulle
+    otto wiki vere il 23/08, dopo T3.2: adhd 1 su 13, allergie 2 su 23,
+    android-rom 4 su 31, etf-finance 1 su 20, main 2 su 52, memory 2 su 16,
+    patreon-creator 1 su 33. Il blocco che dice quanto e' non e' una scusa: e' il
+    solo modo perche' "aprine altre" sia un'istruzione e non un ripiego.
+
+    ``here + left_out == total`` per costruzione, quindi ``left_out`` non e' un
+    campo: due numeri che devono tornare sono un numero che puo' non tornare.
+    """
+
+    text: str
+    here: int
+    total: int
+
+
+def _pages_left_out_notice(count: int) -> str:
+    """L'avviso delle pagine rimaste fuori dal blocco.
+
+    Funzione e non stringa in linea perche' la sua **lunghezza** entra nel conto
+    del tetto (v. :meth:`ContextBuilder._read_project_pages`): il testo e la
+    misura del testo devono venire dallo stesso posto, o il giorno che si
+    riscrive la frase il tetto torna a sforare di ottanta caratteri.
+    """
+    return (
+        f"[{count} more page(s) are not here — the map lists them, and "
+        "`read_file` opens them]"
+    )
+
+
+# Il recinto minimo dei blocchi di dati del prompt di progetto: quattro backtick,
+# perche' una pagina o una mappa possono contenere un blocco di codice a tre e con
+# tre il recinto si chiuderebbe a meta'.
+_MIN_FENCE_BACKTICKS = 4
+
+_BACKTICK_RUN_RE = re.compile("`+")
+
+
+def _fence_for(text: str) -> str:
+    """Il recinto che *text* non puo' chiudere da dentro. **T3.10.**
+
+    Un recinto di lunghezza fissa e' una promessa che il contenuto puo' rompere:
+    per CommonMark un blocco aperto con N backtick lo chiude la prima riga con
+    N o piu' backtick, quindi una pagina che contiene una riga di **quattro**
+    backtick chiude il recinto a quattro e tutto quel che segue smette di essere
+    dato — si legge come prosa di sistema, allo stesso livello del blocco che la
+    circonda, e **sopra** la frase che l'avrebbe etichettata come contenuto (che
+    nel template sta dopo). Misurato il 23/08: una pagina con
+    ``\\n````\\nnested\\n````\\n`` seguita da una riga qualunque mette quella riga
+    fuori da ogni recinto.
+
+    Non e' solo il caso ostile. Una pagina che *documenta* come si scrive una
+    pagina — cioe' il mestiere della skill ``llm-wiki`` — mostra un blocco a tre
+    backtick dentro un blocco a quattro, e sono quattro backtick scritti in buona
+    fede. Il testo non fidato arriva comunque: ``web_fetch`` → ``raw/research/``
+    verbatim → promozione a pagina.
+
+    **Un backtick piu' della sequenza piu' lunga**, con un pavimento a quattro.
+    Si guarda la sequenza piu' lunga *in tutto il testo* e non solo a inizio riga:
+    costa lo stesso e non obbliga chi legge questa funzione a ricostruire quando
+    una riga conti come chiusura (indentazione fino a tre spazi, solo spazi
+    dopo). Sotto le quattro il risultato e' identico al carattere a quel che il
+    prompt spediva prima, che e' il caso di ogni pagina reale delle otto wiki.
+    """
+    longest = max((len(run.group()) for run in _BACKTICK_RUN_RE.finditer(text)), default=0)
+    return "`" * max(_MIN_FENCE_BACKTICKS, longest + 1)
+
+
+# I wikilink di una mappa. Regex locale e non ``jenny.webui.wiki._WIKILINK_RE``
+# per la stessa ragione di ``_CRON_TOOL_NAME``: quel modulo tira dentro il
+# renderer markdown e l'audit, e ``context.py`` lo importa mezzo repo. Il corpo
+# si prende intero e si spezza dopo (v. :func:`_map_page_targets`) invece di
+# infilare l'etichetta nella regex: con un quantificatore lazy davanti a un
+# gruppo opzionale, ``[[a/b|Etichetta]]`` restituisce ``a``.
+_MAP_WIKILINK_RE = re.compile(r"\[\[([^\[\]]+?)\]\]")
+
+
+def _map_page_targets(text: str) -> list[str]:
+    """Le pagine che una mappa nomina, in ordine di prima apparizione.
+
+    Il **bersaglio** e non l'etichetta: e' il bersaglio che ``read_file`` apre,
+    e nelle mappe vere e' un percorso dentro ``wiki/``
+    (``concepts/productivity/Shiny-Object-Syndrome``). Tenere l'etichetta
+    raddoppierebbe il costo di un elenco che si paga a ogni turno, e non
+    aggiungerebbe niente di apribile.
+
+    ``\\|`` come nella WebUI: dentro una tabella markdown la pipe va scappata, e
+    ``[[a\\|b]]`` e' lo stesso link di ``[[a|b]]``. ``[[#ancora]]`` invece non e'
+    una pagina — nella mappa di ``main`` ce ne sono quattro, ed elencarle come
+    pagine mandarebbe l'agente a cercare file che non esistono.
+
+    Ordine di apparizione e deduplica per lista: l'elenco finisce nel prefisso
+    cacheato del prompt, quindi due render della stessa mappa devono dare la
+    stessa stringa — un ``set`` non lo garantisce.
+    """
+    targets: list[str] = []
+    for match in _MAP_WIKILINK_RE.finditer(text):
+        target = match.group(1).replace("\\|", "|").split("|", 1)[0].strip()
+        if not target or target.startswith("#"):
+            continue
+        if target not in targets:
+            targets.append(target)
+    return targets
+
+
+def _read_map_source(root: Path) -> str:
+    """Il testo grezzo di ``wiki/index.md``, o stringa vuota se non c'e'. T3.7.
+
+    Un solo lettore per i due consumatori — il blocco della mappa
+    (:meth:`ContextBuilder._read_project_map`) e l'**ordine delle pagine**
+    (:func:`_pages_in_map_order`) — perche' se leggessero il file per conto loro
+    la seconda potrebbe ordinare su una mappa e la prima mostrarne un'altra: fra
+    le due letture c'e' un turno del giardiniere che riscrive l'indice.
+
+    Un file assente non e' un errore: una wiki fatta a mano puo' non avere
+    indice, e in quel caso non c'e' ne' mappa da mostrare ne' ordine da imporre.
+
+    **E un file che non e' UTF-8 non e' un errore nemmeno lui** (T6.12). Prima si
+    leggeva in ``utf-8`` stretto e si catturava il solo ``OSError``: un
+    ``index.md`` salvato in latin-1 alzava ``UnicodeDecodeError`` da qui fino a
+    ``build_system_prompt``, cioe' **ogni turno di quel progetto** falliva. Non
+    era simmetrico con le pagine, che il loro lettore cattura e conta fra le
+    «rimaste fuori» (v. :meth:`ContextBuilder._read_project_pages`): la mappa era
+    la sola lettura di questo blocco che potesse spegnere un progetto.
+
+    **Si sostituiscono i byte guasti, non si butta la mappa**, e la ragione e'
+    che qui degradare a «assente» costa **due** cose e non una. La prima e' la
+    sezione della mappa, che e' il difetto dichiarato. La seconda e' invisibile e
+    peggiore: questo e' anche il lettore che decide **l'ordine** delle pagine
+    (:func:`_pages_in_map_order`), e a mappa vuota l'ordine ripiega
+    sull'alfabeto — cioe' esattamente il criterio che T3.7 ha rimosso dopo averlo
+    misurato («la prima lettera dell'alfabeto come criterio di rilevanza», con
+    ``concepts/2DCD`` in testa a una wiki da 52 pagine). Siccome nel tetto
+    entrano da 1 a 4 pagine, **l'ordine e' la selezione**: un byte guasto
+    nell'indice cambierebbe *quali* pagine il modello vede, senza dirlo. Con la
+    sostituzione i bersagli dei wikilink — che sono percorsi di file — restano
+    leggibili, e a degradare e' il solo carattere guasto.
+    E il prompt che circonda il blocco parla comunque della mappa («``wiki/index.md``
+    — **the map** … Read on every turn») anche quando la sezione non c'e': una
+    mappa assente rende quel testo una promessa falsa, e ``read_file`` su quel
+    file rifiuta a sua volta un non-UTF-8.
+
+    **Dove l'utente lo vede**: nel lint della wiki, passo 0 — «Pages that are not
+    UTF-8», che nomina il file e il byte esatto (``scripts/lint_wiki.py``,
+    ``decode_problem``). Non si logga qui: ``build_system_prompt`` gira una volta
+    per turno, quindi una riga da qui sarebbe una riga per turno per sempre su un
+    fatto che non cambia — e il rimedio («ri-salva in UTF-8») e' del lint, non
+    del turno. Nel prompt il segno resta comunque visibile, perche' il carattere
+    di sostituzione finisce nel testo della mappa.
+    """
+    try:
+        return (
+            (root / "wiki" / WIKI_INDEX_FILENAME)
+            .read_text(encoding="utf-8", errors="replace")
+            .strip()
+        )
+    except OSError:
+        return ""
+
+
+def _pages_in_map_order(entries: Sequence[str], map_text: str) -> list[str]:
+    """Le pagine ordinate come la **mappa** le nomina, il resto in coda. T3.7.
+
+    Il criterio di selezione, e la ragione per cui e' questo. Nel tetto entrano
+    da 1 a 4 pagine su 13-52 (misurato sulle otto wiki vere il 23/08): quali
+    entrano conta piu' di quante. Alfabetico dava ``concepts/2DCD`` su una wiki
+    personale da 52 pagine, cioe' la prima lettera dell'alfabeto come criterio di
+    rilevanza.
+
+    **La mappa e' la dichiarazione che il progetto fa di se stesso**, e l'ordine
+    in cui nomina una pagina e' l'unica gerarchia che qualcuno ha scritto
+    davvero: la scrive l'utente, la mantiene il giardiniere (T3.4), e si corregge
+    modificando un file.
+
+    E funziona sulle mappe **come sono oggi**, che era il requisito: le otto
+    mappe vere nominano 186 pagine su 188 (fuori solo una di ``allergie`` e una
+    di ``patreon-creator``), quindi il criterio ordina praticamente tutto e il
+    ripiego alfabetico tocca due pagine in tutto il corpus. Non dipende da un
+    comportamento nuovo del giardiniere — quando la potatura della prosa (T3.4)
+    passera', la mappa diventera' quasi solo un elenco di pagine, e un elenco ha
+    un ordine per costruzione.
+
+    Gli altri tre segnali candidati sono stati misurati sullo stesso corpus e
+    scartati:
+
+    * ``state:`` nel frontmatter — **zero pagine su 188** ce l'hanno. Un criterio
+      che oggi non distingue niente non e' un criterio, e' un rinvio.
+    * ``mtime`` — le 188 pagine di ogni wiki hanno lo **stesso** mtime al
+      nanosecondo (verificato sul telefono il 23/08: sono state scritte in una
+      passata). E per costruzione sposterebbe tutte le pagine successive a ogni
+      tocco, invalidando piu' prefisso di quanto ne cambi il contenuto.
+    * conteggio dei wikilink entranti — discrimina bene (su ``adhd`` premia
+      ``ADHD-Overview``, la pagina giusta), ma e' **derivato e non dichiarato**:
+      quando sbaglia — su ``main`` la pagina piu' linkata e' una pianta da
+      appartamento — non c'e' nessuna leva per correggerlo, mentre una riga della
+      mappa si sposta. E costa la lettura integrale di tutte le pagine a ogni
+      turno, che e' esattamente quel che T3.11 ha tolto.
+
+    **Prende i soli percorsi, e non e' un dettaglio di firma** (T3.11): l'ordine
+    esce dalla mappa, quindi il titolo di una pagina non serve a ordinarla —
+    ed era l'unica ragione per cui l'elenco arrivava qui dopo aver aperto ogni
+    file della wiki.
+
+    **Sul prefisso cacheato non cambia niente**: l'ordine esce dall'indice su
+    disco, non dal messaggio del turno. Cambia quando cambia la mappa — cioe'
+    quando passa il giardiniere — non quando l'utente parla.
+
+    L'ordine e' quello di **prima apparizione** nel file, lo stesso di
+    :func:`_map_page_targets`: cosi' l'elenco che una mappa tagliata sintetizza e
+    le pagine iniettate concordano in testa, invece di essere due nozioni diverse
+    di "quel che la mappa nomina". Le pagine che la mappa non nomina vanno in
+    coda **in ordine alfabetico**, che e' il ripiego di prima applicato dove non
+    c'e' niente di meglio — e sono anche le prime candidate a restare fuori dal
+    tetto, che e' giusto: una pagina che l'indice non cita non e' mai stata messa
+    in vetrina da nessuno.
+
+    Il bersaglio si risolve in due modi perche' nelle mappe vere se ne trovano
+    due: il percorso dentro ``wiki/`` (``concepts/ADHD-Overview``) e il **nome
+    nudo** (``[[Active-Memory]]`` per ``concepts/Active-Memory.md``, che e' come
+    scrivono le mappe di ``memory`` e ``patreon-creator``). A parita' di nome nudo
+    vince la prima in ordine di percorso: due pagine con lo stesso nome sotto
+    cartelle diverse rendono ambiguo il link, ed e' una segnalazione del lint, non
+    una ragione per tornare all'alfabeto.
+    """
+    if not map_text:
+        return list(entries)
+    by_path: dict[str, str] = {}
+    by_stem: dict[str, str] = {}
+    for rel in entries:
+        key = rel[:-3] if rel.endswith(".md") else rel
+        by_path.setdefault(key, rel)
+        by_stem.setdefault(key.rsplit("/", 1)[-1], rel)
+    targets = _map_page_targets(map_text)
+    rank: dict[str, int] = {}
+    for position, target in enumerate(targets):
+        key = target.removeprefix("wiki/")
+        if key.endswith(".md"):
+            key = key[:-3]
+        rel = by_path.get(key) or by_stem.get(key.rsplit("/", 1)[-1])
+        if rel is not None:
+            rank.setdefault(rel, position)
+    # ``len(targets)`` come sentinella: ogni rango assegnato e' un indice, quindi
+    # sta sotto. E la chiave secondaria e' il percorso, che e' unico — l'ordine e'
+    # totale, quindi non dipende dall'ordine di iterazione di nessun dizionario.
+    return sorted(entries, key=lambda rel: (rank.get(rel, len(targets)), rel))
+
+
+def _map_cut_notice(total: int, listed: Sequence[str], unlisted: int) -> str:
+    """L'avviso di una mappa tagliata, con dentro l'elenco delle sue pagine. T3.5.
+
+    Funzione e non stringa in linea per la stessa ragione di
+    :func:`_pages_left_out_notice`: la sua lunghezza entra nel conto del tetto,
+    e la misura deve venire dallo stesso posto del testo. Da qui anche il fatto
+    che i ``[[ ]]`` li mette **lei**: il chiamante che li avesse messi prima di
+    passare la lista avrebbe prodotto ``[[[[Patreon]]]]``, e l'ha prodotto
+    davvero al primo giro.
+
+    **L'elenco sta dentro l'avviso**, non in un blocco a parte con la sua
+    intestazione. Cosi' e' chiaro che quelle righe non sono testo della mappa ma
+    roba generata qui, e non serve una seconda etichetta pagata a ogni turno.
+
+    Sta **in mezzo** e non in fondo per un motivo tipografico che e' anche
+    sintattico: un elenco che finisce contro la parentesi di chiusura dell'avviso
+    scrive ``[[summaries/Preprint-Paper]]]``, cioe' un wikilink con un ``]`` di
+    troppo attaccato.
+    """
+    parts = [f"[the map continues — {total} characters in all"]
+    if listed:
+        parts.append("; the pages it names: " + " · ".join(f"[[{t}]]" for t in listed))
+        if unlisted:
+            parts.append(f" (+{unlisted} more)")
+    elif unlisted:
+        parts.append(f"; the {unlisted} page(s) it names are not listed here")
+    parts.append("; read `wiki/index.md` for the rest]")
+    return "".join(parts)
+
+
+def _map_head(text: str, budget: int) -> str:
+    """La testa della mappa che entra nel budget avanzato, tagliata a fine riga.
+
+    Nessuna riga a meta', per la stessa ragione per cui nessuna pagina entra a
+    meta' (v. :meth:`ContextBuilder._read_project_pages`): mezza riga di tabella
+    o mezzo elemento di elenco si legge come intero. Se non c'e' nemmeno un
+    confine di riga dentro il budget la testa non entra affatto — e resta
+    l'elenco, che e' la parte che conta.
+    """
+    if budget <= 0:
+        return ""
+    if len(text) <= budget:
+        return text
+    cut = text[:budget]
+    newline = cut.rfind("\n")
+    if newline <= 0:
+        return ""
+    return cut[:newline].rstrip()
 
 
 def _turn_is_writable() -> bool:
@@ -227,8 +545,6 @@ class ContextBuilder:
         # e' una domanda su chi sta parlando, non su dove si lavora.
         in_project = is_wiki_root(root)
         if in_project:
-            project_map = self._read_project_map(root)
-            project_pages = self._read_project_pages(root)
             with suppress(Exception):  # workspace sincronizzato da una versione precedente
                 parts.append(render_template(
                     "agent/project.md",
@@ -252,16 +568,9 @@ class ContextBuilder:
                     # non e' bastato. Dare un ordine e poi vietarlo due paragrafi
                     # dopo e' un invito a cercare la scappatoia: meglio non darlo.
                     capture=_turn_is_writable(),
-                    # T3, il gradino 1 di P4: la mappa del progetto entra
-                    # **d'ufficio**, non su richiesta. Il giro di wiki parte
-                    # pagato, e la differenza si vede alla prima domanda di una
-                    # sessione nuova: senza, l'agente risponde da quel che ha in
-                    # cronologia — che dopo una settimana e' niente.
-                    project_map=project_map,
-                    # T6.4, il gradino 2: oltre alla mappa entra il **contenuto**
-                    # delle pagine. Il turno si costruisce dalle note, che e' la
-                    # definizione operativa di P4.
-                    project_pages=project_pages,
+                    # Mappa, pagine e i due conteggi: **un solo posto li nomina**,
+                    # e non e' questo (T3.9). V. :meth:`_project_block_vars`.
+                    **self._project_block_vars(root),
                 ))
 
         # Il blocco sta **prima** del bootstrap, al contrario di
@@ -376,7 +685,26 @@ class ContextBuilder:
         # parlando", non "dove si lavora". ``MEMORY.md`` qui sopra resta invece
         # in tutti e due i casi, ed e' la stessa riga di confine dell'1.2 — chi
         # sei viaggia, dove altro lavori no.
-        if not is_project_session_key(session_key or ""):
+        #
+        # **E vale anche per il giardiniere** (T7.8), che non e' una
+        # conversazione ma ha lo stesso mestiere ristretto: la sua cassetta legge
+        # dentro **un** progetto e scrive solo in ``wikis/<nome>/wiki/``
+        # (``GardenerStore.build_tools``, sotto il commento «Lettura: dentro il
+        # progetto. Non l'intera installazione come Atlas»), e ``agent/gardener.md``
+        # gli dice «you are the gardener of one project» e «work only from those».
+        # Misurato il 23/08: la rubrica gli arrivava intera. Le due ragioni di
+        # sopra valgono parola per parola — la scelta del progetto e' gia' stata
+        # fatta (dal cron, non dall'utente, e questo non la rende una domanda
+        # aperta), e la vita privata ci viaggia dentro — e ce n'e' una terza, sua:
+        # e' un elenco di pagine che i **suoi** tool non possono aprire, davanti a
+        # una passata la cui regola 3 e' «una pagina che nomina una cosa che ha una
+        # pagina sua la linka». Il template non nomina la rubrica in nessun punto,
+        # quindi togliergliela non lascia una promessa scoperta (la lezione di
+        # T6.12).
+        #
+        # Il verso e' quello giusto: si **stringe** una lettura, non si allarga
+        # niente. Atlas resta intatto — e' lui che la rubrica la scrive.
+        if not is_project_session_key(session_key or "") and not is_gardener_session_key(session_key):
             wiki_directory = self.memory.get_wiki_memory_context(self.wiki_directory_max_tokens)
             if wiki_directory:
                 memory_sections.append(wiki_directory)
@@ -540,6 +868,68 @@ class ContextBuilder:
             lines.extend(supplemental_lines)
         return ContextBuilder._RUNTIME_CONTEXT_TAG + "\n" + "\n".join(lines) + "\n" + ContextBuilder._RUNTIME_CONTEXT_END
 
+    def _project_block_vars(self, root: Path) -> dict[str, Any]:
+        """Le cinque variabili con cui ``agent/project.md`` parla del contenuto.
+
+        **Un posto solo che le nomina, perche' il template ha due chiamanti.**
+        Il blocco lo rende l'agente principale (``build_system_prompt``) *e* il
+        subagent (``SubagentManager._build_subagent_prompt``) — ed e' il subagent
+        l'attore che scrive davvero le pagine e cura la mappa. Fino a T3.9 lui
+        non passava nessuna delle quattro, e Jinja valuta **falso** un
+        ``{% if %}`` su una variabile assente: le due sezioni gli sparivano in
+        silenzio, quindi lavorava alla cieca sul materiale che deve curare. E'
+        la stessa trappola per cui ``_tool_predicate`` passa una callable e non
+        un insieme — la' documentata, qui inciampata.
+
+        **Le cinque vanno insieme o non vanno.** ``project_pages_here`` e
+        ``project_pages_total`` stanno *dentro* il ``{% if project_pages %}``:
+        alimentare solo il testo fa rendere «Those are  of the project's
+        pages», che e' peggio della sezione assente perche' sembra un conteggio.
+        ``project_map_fence`` sta *dentro* il ``{% if project_map %}`` per la
+        stessa ragione, ma il suo caso peggiore e' l'opposto e piu' brutto: una
+        variabile assente rende una stringa vuota, cioe' la mappa **senza
+        recinto**. Percio' nel template ha un ``default('````')`` — il gancio
+        contro le rinomine resta il gate sull'AST, e il ripiego vale che nel caso
+        peggiore si torna al recinto fisso di prima invece di non averne nessuno.
+
+        **L'ordine delle due letture e' quello di prima** — mappa, poi pagine —
+        perche' e' l'ordine in cui i file vengono aperti, e c'e' un test che lo
+        misura (T3.11).
+
+        Il cancello contro le rinomine sta in
+        ``tests/agent/test_project_block_is_fed.py``: confronta i nomi che i
+        template *dichiarano* (dall'AST) con quelli che i due chiamanti passano, e
+        cade se uno resta senza cibo — su entrambi i prompt.
+        """
+        project_map = self._read_project_map(root)
+        project_pages = self._read_project_pages(root)
+        return {
+            # T3, il gradino 1 di P4: la mappa del progetto entra **d'ufficio**,
+            # non su richiesta. Il giro di wiki parte pagato, e la differenza si
+            # vede alla prima domanda di una sessione nuova: senza, l'agente
+            # risponde da quel che ha in cronologia — che dopo una settimana e'
+            # niente.
+            "project_map": project_map,
+            # T3.10: e il recinto della mappa lo decide **la mappa**. Il blocco
+            # delle pagine il suo se lo costruisce da se' (:func:`_fence_for`),
+            # la mappa no — il suo recinto e' scritto in ``agent/project.md``, e
+            # a lunghezza fissa una mappa con una riga di quattro backtick lo
+            # chiude a metà. Si passa quindi la stringa di backtick invece di
+            # cablarla nel template. Va misurata sul testo che il template
+            # riceve, cioe' **dopo** il ritaglio del tetto.
+            "project_map_fence": _fence_for(project_map),
+            # T6.4, il gradino 2: oltre alla mappa entra il **contenuto** delle
+            # pagine. Il turno si costruisce dalle note, che e' la definizione
+            # operativa di P4.
+            "project_pages": project_pages.text,
+            # T3.6: e il blocco dice **quante su quante**. Senza i due numeri
+            # l'istruzione era "rispondi da queste", che su una wiki vera e'
+            # falsa una volta su dieci — sulle otto di oggi entrano da 1 a 4
+            # pagine su 13-52.
+            "project_pages_here": project_pages.here,
+            "project_pages_total": project_pages.total,
+        }
+
     def _read_project_map(self, root: Path) -> str:
         """``wiki/index.md`` del progetto, pronta da mettere nel blocco. T3.
 
@@ -550,25 +940,65 @@ class ContextBuilder:
         oltre soglia sta assorbendo contenuto che spetta alle pagine, e il lint
         (T5) lo dira'.
 
+        **Quel che si tiene e' l'elenco delle pagine, non il primo paragrafo**
+        (T3.5). La mappa serve nel prompt perche' dice *cosa esiste*: tagliata in
+        testa consegnava la prosa introduttiva e buttava l'indice, che e'
+        l'inversione esatta del suo motivo di esistere. Oltre soglia si sintetizza
+        l'elenco dei bersagli dei wikilink, in ordine di apparizione, e la prosa
+        si prende solo quel che avanza. Il produttore ci sta arrivando da solo —
+        il giardiniere (T3.4) e' istruito a spostare la prosa di una mappa gonfia
+        dentro le pagine, e la mappa minima del caso peggiore misura 1.495
+        caratteri con 51 pagine su 51 — ma questa e' la rete per l'intervallo
+        prima che una passata ci arrivi.
+
         Un file assente non e' un errore: le sette wiki di prima hanno un
         ``index.md`` scritto a mano, e una wiki appena creata a mano potrebbe non
         averlo affatto. In quel caso il blocco si rende senza la sezione, che e'
         la verita' — non c'e' una mappa da leggere.
         """
-        page = root / "wiki" / "index.md"
-        try:
-            text = page.read_text(encoding="utf-8").strip()
-        except OSError:
+        text = _read_map_source(root)
+        if not text:
             return ""
         if len(text) <= _PROJECT_MAP_MAX_CHARS:
             return text
-        return (
-            text[:_PROJECT_MAP_MAX_CHARS].rstrip()
-            + f"\n\n[the map continues — {len(text)} characters in all; read "
-            "`wiki/index.md` for the rest]"
-        )
 
-    def _read_project_pages(self, root: Path) -> str:
+        # Oltre soglia si sceglie **cosa** buttare, e si butta la prosa. Misurato
+        # sulle otto wiki vere il 23/08: sette mappe su otto sono oltre il tetto,
+        # e la peggiore (12.298 caratteri, 51 pagine) col taglio in testa ne
+        # consegnava 5 — cioe' la prosa introduttiva e nessun indice, che e' il
+        # contrario della ragione per cui la mappa entra nel prompt.
+        #
+        # Perche' un elenco sintetizzato e non "tieni le righe che contengono un
+        # wikilink": nelle mappe vere i riferimenti stanno **dentro la prosa** e
+        # dentro le celle di tabelle larghe, non raccolti in una lista. Tenere le
+        # righe intere di quella mappa costa 7.757 caratteri — sempre oltre il
+        # tetto, quindi si torna a tagliare e si perde comunque mezzo indice.
+        # Nemmeno "testa + coda con un buco marcato" regge: la' i link stanno nel
+        # mezzo, ed e' proprio il mezzo che il buco mangia.
+        targets = _map_page_targets(text)
+
+        # Prima passata su interi, solo per non costruire l'avviso una volta per
+        # link su una mappa con migliaia di link: da' il limite superiore.
+        kept = 0
+        running = 0
+        for target in targets:
+            running += len(target) + 4 + (3 if kept else 0)  # "[[]]" e " · "
+            if running > _PROJECT_MAP_MAX_CHARS:
+                break
+            kept += 1
+        # Poi si stringe sull'avviso vero, che porta anche il conteggio di quelle
+        # rimaste fuori: pochi passi, perche' la prima passata ha gia' quasi
+        # centrato il punto.
+        while kept and len(_map_cut_notice(len(text), targets[:kept], len(targets) - kept)) > _PROJECT_MAP_MAX_CHARS:
+            kept -= 1
+        notice = _map_cut_notice(len(text), targets[:kept], len(targets) - kept)
+
+        # L'avviso si paga **dentro** il tetto, come in T3.2: quel che avanza va
+        # alla testa della mappa, e non il contrario.
+        head = _map_head(text, _PROJECT_MAP_MAX_CHARS - len(notice) - 2)
+        return f"{head}\n\n{notice}" if head else notice
+
+    def _read_project_pages(self, root: Path) -> _ProjectPages:
         """Il contenuto delle pagine del progetto, pronto per il blocco. **T6.4.**
 
         Il gradino 2 di P4: la mappa dice *cosa esiste*, questo mette in mano
@@ -576,48 +1006,135 @@ class ContextBuilder:
         sul furgone e un agente che sa cosa c'e' scritto — la prima costa una
         lettura a ogni domanda, la seconda no.
 
-        **L'ordine e' alfabetico, e il vincolo e' la cache.** Il blocco di sistema
-        e' il prefisso cacheato: una selezione che dipendesse dal messaggio
-        corrente produrrebbe un prefisso diverso a ogni turno, cioe' cache buttata
-        a ogni messaggio. Alfabetico e' stabile e spiegabile; ordinare per data di
-        modifica sposterebbe tutte le pagine successive a ogni tocco, invalidando
-        piu' prefisso di quanto ne cambi il contenuto.
+        **L'ordine e' quello della mappa, e il vincolo e' la cache.** Il blocco di
+        sistema e' il prefisso cacheato: una selezione che dipendesse dal
+        messaggio corrente produrrebbe un prefisso diverso a ogni turno, cioe'
+        cache buttata a ogni messaggio. L'ordine viene quindi da ``wiki/index.md``
+        — che sta su disco e cambia quando passa il giardiniere, non quando
+        l'utente parla — e le pagine che l'indice non nomina restano in coda in
+        ordine alfabetico. Il criterio, i tre segnali scartati e le misure che li
+        hanno scartati stanno in :func:`_pages_in_map_order`.
 
-        **Nessuna pagina entra a meta'.** Oltre il tetto si smette di aggiungere
-        pagine *interne* e si dice quante restano fuori: mezza pagina si legge
-        come una pagina intera, ed e' peggio di una pagina assente — che la mappa
-        segnala comunque.
+        **L'ordine e' la selezione**, perche' il tetto si riempie dalla testa: da
+        1 a 4 pagine su 13-52 entrano, e alfabetico ne faceva entrare le prime
+        dell'alfabeto.
+
+        **Nessuna pagina entra a meta'.** Oltre il tetto la pagina si salta
+        intera e si dice che e' rimasta fuori: mezza pagina si legge come una
+        pagina intera, ed e' peggio di una pagina assente — che la mappa segnala
+        comunque. Vale anche per la **prima**: una pagina da sedicimila caratteri
+        (ce n'e' una vera) presa intera si mangerebbe il tetto da sola ed
+        escluderebbe tutte le altre, che e' il difetto misurato in T3.2.
+
+        **Il tetto si misura su quel che si spedisce**, non sul testo delle
+        pagine: dentro il conto ci vanno il recinto di ogni blocco (22 caratteri
+        piu' il percorso, uno in piu' per ogni backtick che T3.10 aggiunge al
+        recinto di una pagina che ne contiene quattro), il ``\\n\\n`` che separa
+        i blocchi e l'avviso finale.
+        Contare il solo testo lasciava passare quattrocento pagine da sei
+        caratteri per quindicimila caratteri iniettati — un tetto da seimila.
+
+        **Ogni pagina che non entra si conta**, qualunque sia la ragione: fuori
+        tetto, vuota o illeggibile. Un avviso che dice "1" quando ne mancano tre
+        e' peggio di nessun avviso, perche' sembra preciso.
+
+        **Torna anche quante sono su quante** (T3.6): sono i due numeri con cui il
+        template dice al modello che ha in mano una parte, e sono gratis qui —
+        ``len(entries)`` e ``len(blocks)`` — mentre fuori costerebbero una seconda
+        camminata su ``wiki/``. Sul prefisso cacheato non cambia niente: escono
+        dal disco, non dal messaggio.
+
+        **Ogni pagina si apre una volta sola** (T3.11). L'elenco arriva senza
+        titoli — ``titles=False`` — perche' il titolo qui non e' mai stato usato
+        ne' per ordinare (l'ordine e' quello della mappa, T3.7) ne' per il blocco
+        (che porta il percorso e il testo): estrarlo voleva dire una **seconda**
+        camminata di letture su tutta la wiki, sotto quella che questo ciclo fa
+        gia'. Misurato il 23/08 sulle 11 wiki vere (471 pagine): la piu' grande,
+        139 pagine, passa da 5,3 ms a 3,4 ms; su tutte e undici da 20,5 ms a
+        12,4 ms.
+
+        **Che sia tempo che si paga vale la pena dirlo**: ``build_system_prompt``
+        lo chiama ``build_messages``, che ``_state_build`` invoca senza executor
+        sul loop dell'evento, una volta per turno, e non c'e' nessuna cache. Sono
+        millisecondi in cui l'agente non risponde e nessun'altra corutine gira.
         """
-        entries = iter_wiki_pages(root / "wiki")
+        entries = iter_wiki_pages(root / "wiki", titles=False)
         if not entries:
-            return ""
+            return _ProjectPages("", 0, 0)
+        # T3.7: l'ordine e' quello della mappa, non l'alfabeto. Il tetto si
+        # riempie dalla testa, quindi **l'ordine e' la selezione**: cambiarlo e'
+        # tutto quel che serve per far entrare le pagine giuste.
+        entries = _pages_in_map_order(entries, _read_map_source(root))
         blocks: list[str] = []
-        total = 0
+        total = 0  # lunghezza esatta di "\n\n".join(blocks)
         left_out = 0
-        for rel, _title in entries:
-            if left_out:
+        for rel in entries:
+            # **Il tetto si consulta prima di aprire il file** (T3.11). Il recinto
+            # costa **almeno** 22 caratteri piu' il percorso — al minimo dei
+            # quattro backtick, che T3.10 puo' solo allargare, quindi questo resta
+            # un limite inferiore — e una pagina che entra ha almeno
+            # un carattere di testo: se nemmeno *quello* ci sta, questa pagina
+            # finisce fra le rimaste fuori qualunque cosa contenga — e le altre due
+            # ragioni per restare fuori (vuota, illeggibile) contano allo stesso
+            # modo. L'esito e' identico al carattere, la lettura no.
+            #
+            # **Scatta solo quando il tetto e' quasi pieno**, ed e' il motivo per
+            # cui non e' il rimedio generale: una pagina scartata perche' troppo
+            # grossa non consuma budget, quindi il residuo resta largo e le
+            # successive vanno lette per sapere quanto misurano. ``st_size`` non
+            # aiuta — in UTF-8 e' un limite *superiore* al numero di caratteri,
+            # quindi dimostra "ci sta", mai "non ci sta", che e' il verso
+            # sbagliato per saltare una lettura (il verso giusto lo usa
+            # ``GardenerStore._page_chars_if_over``). Misurato sulle 11 wiki
+            # vere: su ``main`` (79 pagine) il ciclo ne apre 36 invece di 79 e il
+            # blocco passa da 2,1 a 1,3 ms, su ``etf-finance`` 7 invece di 20; su
+            # ``blackberry`` (139 pagine, dove le due che entrano stanno in coda
+            # alla mappa) non scatta mai. Vale quel che vale, e costa un ``if``.
+            floor = len(rel) + 23 + (2 if blocks else 0)
+            if total + floor > _PROJECT_PAGES_MAX_CHARS:
                 left_out += 1
                 continue
             try:
                 text = (root / "wiki" / rel).read_text(encoding="utf-8").strip()
             except (OSError, UnicodeDecodeError):
+                left_out += 1
                 continue
             if not text:
+                left_out += 1
                 continue
-            if blocks and total + len(text) > _PROJECT_PAGES_MAX_CHARS:
-                left_out = 1
+            # Recinto come la mappa: una pagina puo' contenere un blocco di
+            # codice, e le sue intestazioni ``#`` sbucherebbero nella struttura
+            # del prompt. **Misurato sul testo** (T3.10, v. :func:`_fence_for`):
+            # a lunghezza fissa una pagina con una riga di quattro backtick
+            # chiude il proprio recinto, e il resto della pagina esce dal canale
+            # dei dati. Quattro e' il pavimento, quindi per ogni pagina reale il
+            # blocco e' identico al carattere a quel che si spediva prima.
+            fence = _fence_for(text)
+            block = f"`{rel}`\n\n{fence}markdown\n{text}\n{fence}"
+            cost = len(block) + (2 if blocks else 0)  # il "\n\n" del join
+            if total + cost > _PROJECT_PAGES_MAX_CHARS:
+                # Si salta questa e si prova la prossima: le pagine sono di
+                # taglie molto diverse, e fermarsi alla prima che sfonda vuol
+                # dire buttare via tutte le pagine corte che venivano dopo.
+                left_out += 1
                 continue
-            total += len(text)
-            # Recinto a quattro backtick come la mappa: una pagina puo' contenere
-            # un blocco di codice, e le sue intestazioni ``#`` sbucherebbero nella
-            # struttura del prompt.
-            blocks.append(f"`{rel}`\n\n````markdown\n{text}\n````")
+            total += cost
+            blocks.append(block)
+        # L'avviso sta nel tetto come una pagina, perche' e' roba che si spedisce.
+        # Se non ci sta, esce l'ultima pagina entrata — e l'avviso cresce di uno,
+        # che e' la verita'.
+        while left_out and blocks:
+            if total + 2 + len(_pages_left_out_notice(left_out)) <= _PROJECT_PAGES_MAX_CHARS:
+                break
+            dropped = blocks.pop()
+            total -= len(dropped) + (2 if blocks else 0)
+            left_out += 1
+        # Quante sono si legge **ora**, prima che l'avviso entri fra i blocchi:
+        # dopo, ``len(blocks)`` conterebbe anche lui come una pagina.
+        here = len(blocks)
         if left_out:
-            blocks.append(
-                f"[{left_out} more page(s) are not here — the map lists them, and "
-                "`read_file` opens them]"
-            )
-        return "\n\n".join(blocks)
+            blocks.append(_pages_left_out_notice(left_out))
+        return _ProjectPages("\n\n".join(blocks), here, len(entries))
 
     def _load_bootstrap_files(self, workspace: Path | None = None) -> str:
         """Load all bootstrap files from workspace.
@@ -636,6 +1153,20 @@ class ContextBuilder:
         dell'installazione: e' chi e' Jenny e chi e' l'utente, e non cambia
         perche' si sta lavorando dentro una cartella diversa. Senza scope legato
         le due radici coincidono e non cambia niente.
+
+        **Questa e' la meta' del confine che vale in un verso solo** (T7.8, e
+        prima T7.1). Un progetto non entra nel diario personale — un imbuto solo,
+        ``MemoryStore.append_history`` — mentre l'identita' esce *sempre* da qui,
+        anche verso una passata interna il cui unico posto scrivibile e'
+        ``wikis/<nome>/wiki/``. Non e' una dimenticanza: e' la riga «chi sei
+        viaggia, dove altro lavori no», e quel che si chiude sulla sessione e'
+        l'inventario fra progetti (la rubrica di Atlas, e la coda di
+        ``read_recent_history_for_prompt``), non i tre file di identita'. Chi
+        arriva qui pensando di simmetrizzare il confine legga prima
+        ``.agent/security.md``: togliere l'identita' a un attore vuol dire
+        filarci la specie di sessione dentro il percorso di prompt piu'
+        condiviso che c'e', e lasciare l'unico attore senza identita' a scrivere
+        pagine che l'utente legge.
         """
         parts = []
         project_root = workspace or self.workspace

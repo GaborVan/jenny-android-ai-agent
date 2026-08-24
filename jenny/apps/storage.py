@@ -21,6 +21,7 @@ from jenny.security.workspace_access import (
     current_turn_is_readonly,
     current_workspace_scope,
 )
+from jenny.session.keys import is_project_session_key
 from jenny.utils.path import atomic_write
 from jenny.utils.wiki_paths import is_wiki_root
 
@@ -107,15 +108,55 @@ _PROJECT_REFUSAL = (
 )
 
 
-def _in_a_project() -> bool:
+def _in_a_project(app_dir: Path) -> bool:
     """Se il turno in corso e' la conversazione di un progetto.
 
-    Si chiede allo **scope** e non alla chiave di sessione, che qui non arriva —
-    stessa ragione di ``ContextBuilder``: chi ha bisogno di questa risposta e'
-    anche il subagent, che la chiave non ce l'ha mai.
+    **Due sorgenti in OR, perche' nessuna delle due copre tutti i chiamanti.**
+    Prima era solo la seconda, e la seconda da sola risponde a una domanda di
+    filesystem al posto di una domanda sul turno (T4.9, 23/08):
+
+    1. **La chiave del turno.** E' quel che *definisce* una sessione-progetto —
+       ``WorkspaceScopeResolver.for_project`` deduce la cartella da lei — quindi
+       e' la risposta autorevole quando c'e'. Copre il caso che la sola forma
+       della cartella sbaglia: un progetto la cui **cartella manca**.
+       ``for_project`` tiene di proposito il percorso che non esiste (le
+       scritture falliscono, ma il lavoro non finisce nel workspace personale),
+       e una cartella che non esiste non contiene ``wiki/``: il gate si apriva, e
+       i dati personali delle mini-app tornavano scrivibili da dentro un
+       progetto.
+    2. **La forma della cartella dello scope.** Resta perche' la chiave non c'e'
+       sempre: il subagent non ne ha una di progetto (la sua e'
+       ``subagent:<lineage>``) ma **eredita lo scope**, e le route HTTP delle
+       mini-app non hanno nessun turno. E' l'unico segnale che hanno.
+
+    In OR e non in "una vince sull'altra": due segnali parziali su una chiusura
+    si compongono chiudendo. Il caso che *apre* e' il terzo ramo — l'app vive
+    **dentro** la radice del turno — che non e' un'eccezione ma la domanda del
+    confine di scrittura: se ``app_dir`` sta dentro quel che questo turno puo'
+    cambiare, non c'e' niente da rifiutare. E' anche quel che evita il rifiuto
+    assurdo del caso opposto: un workspace personale che un giorno si trovasse un
+    ``wiki/`` in radice diventerebbe "un progetto" per la sola forma, e
+    rifiuterebbe *ogni* scrittura personale sulle mini-app.
     """
+    # Import dentro la funzione: ``jenny.apps`` sotto ``jenny.agent`` e' una
+    # dipendenza che esiste gia' (``executor.py`` importa ``agent.tools.base``),
+    # ma questo modulo lo caricano anche le route HTTP delle mini-app, che di
+    # ``agent`` non hanno bisogno — e il gateway lo importa all'avvio.
+    from jenny.agent.tools.context import current_request_session_key
+
+    if is_project_session_key(current_request_session_key() or ""):
+        return True
     scope = current_workspace_scope()
-    return scope is not None and is_wiki_root(scope.project_path)
+    if scope is None:
+        return False
+    # ``write_root()`` e non ``project_path``: dal passo T4.4 la radice scrivibile
+    # del turno la dice un solo metodo. Risolto da entrambi i lati perche' su
+    # Android la dir dati e' raggiungibile con due nomi e ``parents`` confronta
+    # per componenti, non per inode (v. il difetto del 23/08 nel giardiniere).
+    root = scope.write_root()
+    if root in app_dir.resolve(strict=False).parents:
+        return False
+    return is_wiki_root(root)
 
 
 def _dump(record: dict) -> str:
@@ -158,7 +199,7 @@ async def execute_storage_action(
     if action.op in _MUTATING_OPS:
         if current_turn_is_readonly():
             raise StorageError(READONLY_TOOL_REFUSAL)
-        if _in_a_project():
+        if _in_a_project(app_dir):
             raise StorageError(_PROJECT_REFUSAL)
     path = _collection_path(app_dir, action.collection)
 

@@ -62,32 +62,84 @@ def _flat() -> str:
 
 # ── Cosa dice ────────────────────────────────────────────────────────────
 
+# **Le regole, e la frase con cui oggi sono scritte — in un posto solo.**
+#
+# Questo file esiste per un blocco di prompt il cui mestiere è *essere
+# riscritto*: la sola cosa che si può fare quando il modello sbaglia sul telefono
+# è cambiare le parole. Con le frasi sparse in sei asserzioni, una riscrittura
+# costava sei modifiche e ogni fallimento diceva «la stringa non c'è» invece di
+# «la regola non c'è» (T8.7, I13). Qui la frase sta accanto al nome della regola
+# e alla ragione per cui la regola esiste, quindi una riscrittura è **una**
+# modifica e il fallimento nomina quel che si è perso.
+#
+# Il nome e la ragione sono il contratto; la frase è come lo diciamo oggi. Chi
+# riscrive il template cambia la colonna di destra. Chi vuole *togliere* una
+# riga di questa tabella sta togliendo una regola, e allora è la colonna di
+# mezzo che deve smettere di essere vera.
+_READONLY_RULES: tuple[tuple[str, str, str], ...] = (
+    (
+        "descrivi invece di scrivere",
+        "la descrizione della modifica *è* il prodotto del turno, non il preambolo di un "
+        "tentativo: senza, il modello risponde «non posso» e l'utente resta a mani vuote",
+        "describe the change",
+    ),
+    (
+        "e dillo al posto del tentativo",
+        "l'altra metà della stessa frase: «descrivi» da solo si legge come «descrivi, poi prova»",
+        "instead of making it",
+    ),
+    (
+        "nessun altro percorso vale la pena",
+        "la prima strada che un modello prova quando un tool dice no. **Non è un universale "
+        "sul codice**: T4.16 ha misurato che la porta dei thread nudi resta aperta, e ha "
+        "tenuto la sottostringa cambiando quel che afferma — da «non esiste un giro» a "
+        "«prendi il rifiuto come definitivo». La sottostringa è il cardine di quel lavoro: "
+        "va riscritta sapendolo, non per far tornare un test",
+        "no other path or other tool",
+    ),
+    (
+        "delegare non solleva il vincolo",
+        "la seconda strada, e la sola misurata: il 22/08 sul telefono l'agente ha delegato "
+        "a un subagent, che ha pianificato e scritto sei file, tutti rifiutati. Il confine "
+        "ha tenuto, il lavoro è stato buttato",
+        "delegating does not lift it",
+    ),
+    (
+        "chi può riaccenderla",
+        "la terza strada è chiedere di nuovo: senza dire di chi è l'interruttore, il "
+        "modello lo chiede due volte",
+        "switch above the composer",
+    ),
+    (
+        "leggere resta intatto",
+        "senza questo «sola lettura» si legge come «muta», e il turno non fa nemmeno "
+        "quello che potrebbe fare",
+        "reading is untouched",
+    ),
+    (
+        "parlare resta intatto",
+        "l'altra metà: un blocco che vieta tutto vieta anche di rispondere",
+        "messaging the user",
+    ),
+)
 
-def test_it_says_what_to_do_instead_of_writing() -> None:
-    """Un blocco che dicesse solo "non puoi" lascerebbe il turno senza esito.
 
-    La descrizione della modifica *è* il prodotto del turno, non il preambolo di
-    un tentativo: se il blocco non lo dice, il modello risponde "non posso" e
-    l'utente resta a mani vuote.
+@pytest.mark.parametrize(
+    ("rule", "why", "phrase"), _READONLY_RULES, ids=[r[0] for r in _READONLY_RULES]
+)
+def test_the_block_states_every_rule_it_has_to_state(rule: str, why: str, phrase: str) -> None:
+    assert phrase in _flat(), f"{rule}: {why}"
+
+
+def test_no_rule_is_stated_twice_by_accident() -> None:
+    """La tabella è l'elenco delle regole, non un elenco di stringhe.
+
+    Due righe con la stessa frase sarebbero una regola contata due volte, e
+    toglierne una lascerebbe il test verde: la tabella smetterebbe di essere il
+    posto dove si legge cosa il blocco deve dire.
     """
-    text = _flat()
-    assert "describe the change" in text
-    assert "instead of making it" in text
-
-
-def test_it_closes_the_side_doors() -> None:
-    """Le tre strade che un modello prova quando un tool dice no."""
-    text = _flat()
-    assert "no other path or other tool" in text, "cercare un percorso consentito"
-    assert "delegating does not lift it" in text, "delegare a un subagent (visto il 22/08)"
-    assert "switch above the composer" in text, "e chi può riaccenderla"
-
-
-def test_it_says_what_still_works() -> None:
-    """Senza questo, "sola lettura" si legge come "muta": leggere deve restare."""
-    text = _flat()
-    assert "reading is untouched" in text
-    assert "messaging the user" in text
+    phrases = [phrase for _, _, phrase in _READONLY_RULES]
+    assert len(set(phrases)) == len(phrases)
 
 
 def test_the_block_stays_small() -> None:

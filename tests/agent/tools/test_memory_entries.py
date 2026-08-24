@@ -119,6 +119,61 @@ class TestEntryId:
         assert first.id == second.id
 
 
+class TestEntryIdDiscriminatesInTheOtherDirection:
+    """L'id è un *discriminante*, e i suoi due errori non costano lo stesso.
+
+    Tre consumatori leggono "stesso id" come "stesso fatto", e nessuno dei tre
+    chiede conferma: ``add_entry`` rifiuta la scrittura con "already present",
+    l'archiviatore di ``_make_archiver`` calcola ``surviving`` per id e quindi
+    **non** archivia la forma vecchia, e il blocco "Already recorded" di
+    ``MemoryStore`` la deduplica via.
+
+    Da qui l'asimmetria che questi test tengono ferma. Un id che *distingue di
+    troppo* costa un file d'archivio in più — recuperabile, visibile, gratis. Un
+    id che *confonde* costa una correzione rifiutata in silenzio e una voce che
+    se ne va senza copia, cioè esattamente il guasto che la fase 2 esiste per
+    impedire. Quindi si normalizza **solo** ciò che un salvataggio può cambiare
+    senza che nessuno l'abbia voluto (v. ``TestEntryId`` sopra), e tutto ciò che
+    una persona ha scritto diverso è una voce diversa.
+
+    La direzione positiva era già coperta; questa no — misurato il 23/08 con una
+    mutazione (``line.rstrip()`` → ``line.strip().lower()``) sopravvissuta alla
+    suite intera.
+    """
+
+    def test_case_counts(self):
+        """Maiuscole e minuscole distinguono, perché distinguono nei fatti.
+
+        Un percorso, un comando, un nome proprio: correggerne la cassa è una
+        correzione, e con un id insensibile alla cassa ``add_entry`` risponde
+        "already present" e la correzione non arriva su disco.
+        """
+        assert entry_id("- Enzo") != entry_id("- enzo")
+
+    def test_inner_spacing_counts(self):
+        """Gli spazi *interni* non sono spazi di bordo: nessun salvataggio li
+        introduce da sé, quindi una differenza qui è una differenza voluta."""
+        assert entry_id("- a  b") != entry_id("- a b")
+
+    def test_punctuation_counts(self):
+        assert entry_id("- non è vero") != entry_id("- non è vero.")
+
+    def test_the_indentation_of_a_continuation_line_counts(self):
+        """Il rientro è ciò che tiene un sotto-elenco attaccato alla sua voce
+        (v. ``_is_continuation``): perderlo nell'id renderebbe indistinguibili
+        due voci che il parser legge in modo diverso."""
+        assert entry_id("- padre\n  - figlio") != entry_id("- padre\n- figlio")
+
+    def test_but_a_trailing_space_on_an_inner_line_still_does_not(self):
+        """L'altra metà del contratto, sulle voci di più righe.
+
+        ``text.strip()`` da solo pulisce i due bordi del testo intero; gli spazi
+        in coda a una riga *interna* li toglie il ``rstrip()`` per riga, e sono
+        proprio quelli che un editor lascia dietro di sé.
+        """
+        assert entry_id("- padre  \n  - figlio") == entry_id("- padre\n  - figlio")
+
+
 class TestFindEntry:
     def test_by_id(self):
         entries = parse_entries(_REAL_SHAPE)
@@ -904,3 +959,95 @@ class TestReplacingAlsoKeepsTheOldVersion:
 
         assert len(list(archive_dir(tmp_path / "memory").glob("*.md"))) == 1
 
+
+
+# ---------------------------------------------------------------------------
+# T7.9 — igiene: l'argomento non coercito, e il ``create()`` senza difese
+# ---------------------------------------------------------------------------
+
+
+class TestHeadingIsCoerced:
+    """``heading`` era l'unico argomento che arrivava crudo a ``.strip()``.
+
+    ``action`` e ``file`` passano da ``str(...)``; ``heading`` no, quindi un
+    provider che serializza ``{"heading": 3}`` faceva ``AttributeError`` dentro
+    ``add_entry``. Non porta via il run — è raccolto come errore soft del tool —
+    ma spende uno slot di ``ToolErrorBudget`` per una conversione mancante.
+    """
+
+    @pytest.fixture
+    def tool(self, tmp_path: Path) -> MemoryEntryTool:
+        (tmp_path / "USER.md").write_text(_REAL_SHAPE, encoding="utf-8")
+        return MemoryEntryTool(tmp_path)
+
+    async def test_a_numeric_heading_does_not_raise(self, tool, tmp_path):
+        out = await tool.execute(
+            action="add", file="user", text="Plays chess", heading=3,
+        )
+
+        assert out.startswith("1 added.")
+        body = (tmp_path / "USER.md").read_text(encoding="utf-8")
+        # L'intenzione si conserva: la sezione "3" nasce come qualunque altra.
+        assert "## 3" in body
+        assert body.index("## 3") < body.index("Plays chess")
+
+    async def test_a_numeric_heading_that_exists_is_matched_as_text(self, tool, tmp_path):
+        (tmp_path / "USER.md").write_text(
+            "# User Profile\n\n## 2026\n\n- Primo\n\n## Altro\n\n- Fuori\n",
+            encoding="utf-8",
+        )
+
+        await tool.execute(action="add", file="user", text="Secondo", heading=2026)
+
+        body = (tmp_path / "USER.md").read_text(encoding="utf-8")
+        assert body.count("## 2026") == 1
+        assert body.index("Secondo") < body.index("## Altro")
+
+    async def test_a_blank_heading_does_not_open_a_nameless_section(self, tool, tmp_path):
+        """Con ``""`` grezzo ``add_entry`` cercava la sezione senza titolo e, non
+        trovandola, scriveva ``## `` — un'intestazione senza nome, in un file che
+        il modello poi rilegge."""
+        await tool.execute(
+            action="add", file="user", text="Plays chess", heading="   ",
+        )
+
+        body = (tmp_path / "USER.md").read_text(encoding="utf-8")
+        assert "## \n" not in body
+        assert not any(line.strip() == "##" for line in body.splitlines())
+        # Il caso documentato "non si sa": in fondo al file, facile da spostare.
+        assert body.rstrip().endswith("- Plays chess")
+
+
+class TestCreateRefusesToBuildUnprotected:
+    """Il tool ha tre dipendenze e ``ToolContext`` non porta le due che contano.
+
+    Percorso irraggiungibile oggi (nessun ``TOOLS``, ``_plugin_discoverable`` a
+    False): il test esiste per il giorno in cui il modulo entra in
+    ``_HARDCODED_TOOL_MODULES``. Un ``create()`` che solleva non aborta il boot
+    (``ToolLoader`` lo registra in ``failures`` e logga a ERROR), mentre un
+    ``memory replace`` costruito senza ``entry_archiver`` perde in silenzio la
+    formulazione precedente di una voce di ``USER.md``.
+    """
+
+    def test_it_raises_instead_of_returning_an_unprotected_tool(self, tmp_path):
+        from jenny.agent.tools.context import ToolContext
+
+        ctx = ToolContext(config=None, workspace=str(tmp_path))
+
+        with pytest.raises(RuntimeError) as excinfo:
+            MemoryEntryTool.create(ctx)
+
+        message = str(excinfo.value)
+        # Il messaggio è l'unica cosa che il log mostrerà: deve nominare cosa manca.
+        assert "write_size_guard" in message
+        assert "entry_archiver" in message
+
+    def test_the_explicit_construction_is_still_the_way(self, tmp_path):
+        """Il rifiuto vale per il percorso del contesto, non per il tool."""
+        tool = MemoryEntryTool(
+            tmp_path,
+            file_states=FileStates(),
+            entry_archiver=lambda _path, _text: None,
+        )
+
+        assert tool.name == "memory"

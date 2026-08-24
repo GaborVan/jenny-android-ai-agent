@@ -23,6 +23,10 @@ from typing import TYPE_CHECKING, Any
 from jenny.agent.tools.base import Tool, tool_parameters
 from jenny.agent.tools.context import ContextAware, RequestContext
 from jenny.agent.tools.schema import StringSchema, tool_parameters_schema
+from jenny.security.workspace_access import (
+    READONLY_TOOL_REFUSAL,
+    current_turn_is_readonly,
+)
 from jenny.session.goal_state import (
     GOAL_STATE_KEY,
     goal_state_raw,
@@ -125,6 +129,17 @@ class LongTaskTool(Tool, _GoalToolsMixin):
         )
 
     async def execute(self, goal: str, ui_summary: str | None = None, **kwargs: Any) -> str:
+        # Primo di tutti i controlli, e prima dei tetti di lunghezza: in sola
+        # lettura nessuna chiamata puo' andare a buon fine, quindi un "accorcia
+        # e richiama" manderebbe il modello a riprovare una strada chiusa.
+        # Un goal sostenuto e' della stessa famiglia di un job cron — sopravvive
+        # al turno, alla conversazione e al riavvio, e cambia il comportamento
+        # futuro (wall timeout LLM, chip del goal, iniezione "keep working") —
+        # quindi si chiude come ``CronTool``: con la frase condivisa, non con un
+        # errore di confine. Un errore di confine ("outside allowed directory")
+        # manderebbe il modello a cercare un'altra strada; qui non ce n'e'.
+        if current_turn_is_readonly():
+            return READONLY_TOOL_REFUSAL
         sess = self._session()
         if sess is None:
             return (
@@ -203,6 +218,16 @@ class CompleteGoalTool(Tool, _GoalToolsMixin):
         )
 
     async def execute(self, recap: str | None = None, **kwargs: Any) -> str:
+        # NESSUN cancello di sola lettura qui, ed e' una decisione, non una
+        # dimenticanza: la si rilegga se questo tool cambia mestiere.
+        # ``long_task`` si chiude perche' *crea* un'obbligazione durevole; questo
+        # non puo' crearne nessuna — riscrive lo stato di un blob che esiste
+        # gia', e la sola transizione possibile e' active -> completed. E se
+        # fosse chiuso, un turno in sola lettura che ha davvero soddisfatto un
+        # obiettivo di sola lettura ("scopri X e dimmelo") non avrebbe modo di
+        # fermare l'iniezione "keep working" (v. ``_goal_continue`` in
+        # ``loop.py``): ogni turno successivo verrebbe spronato verso un
+        # obiettivo gia' raggiunto.
         sess = self._session()
         if sess is None:
             return "Error: complete_goal requires an active chat session."

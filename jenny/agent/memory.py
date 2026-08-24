@@ -14,9 +14,15 @@ from typing import TYPE_CHECKING, Any, Iterator
 
 from loguru import logger
 
+from jenny.agent.internal_run import internal_run_completed as _internal_run_completed
+from jenny.agent.internal_run import (
+    internal_run_should_commit as _internal_run_should_commit,
+)
+from jenny.agent.internal_run import prune_internal_sessions as _prune_internal_sessions
 from jenny.agent.memory_archive import archive_dir
 from jenny.session.keys import (
     DREAM_SESSION_PREFIX,
+    internal_session_kind,
     is_internal_session_key,
     is_personal_session_key,
     is_project_session_key,
@@ -34,6 +40,24 @@ from jenny.utils.prompt_templates import render_template
 # ``MemoryStore.build_dream_prompt`` incolla. È una costante perché lo legge anche
 # ``dream_prompt_history``, che sul prompt fa il taglio inverso.
 DREAM_HISTORY_HEADER = "\n\n## Conversation History\n"
+
+
+def is_gardener_session_key(key: str | None) -> bool:
+    """True se *key* è la sessione di una passata del giardiniere. **T7.8.**
+
+    **Il posto giusto per questa funzione è** :mod:`jenny.session.keys`, accanto a
+    ``is_project_session_key`` / ``is_personal_session_key``: là sta il
+    vocabolario delle chiavi e là sta il letterale ``"gardener"``. Sta qui e non
+    là perché ci sono due chiamanti — la regola della coda qui sotto
+    (:meth:`MemoryStore.read_recent_history_for_prompt`) e il cancello della
+    rubrica in ``ContextBuilder.build_system_prompt`` — e due confronti con lo
+    stesso letterale scritti in due file sono la cosa che poi divergono; questo
+    modulo è l'unico dei due che l'altro importa già. Va spostata.
+
+    Funzione di modulo e non ``@staticmethod`` su ``MemoryStore``, che è
+    documentato come "pure file I/O for memory files": è la lezione di T7.3.
+    """
+    return internal_session_kind(key or "") == "gardener"
 
 # Il blocco "già registrato" che la fase 4 del piano aggiunge al prompt del
 # Consolidator. Tre numeri, e nessuno è arbitrario:
@@ -60,6 +84,28 @@ DREAM_HISTORY_HEADER = "\n\n## Conversation History\n"
 _KNOWN_FACTS_MAX_TOKENS = 1600
 _KNOWN_FACTS_PENDING_ENTRIES = 20
 _KNOWN_FACTS_PENDING_SHARE = 0.4
+
+# Oltre quante voci in ``memory/archive/`` la crescita della cartella va detta.
+#
+# L'archivio **non ha ritenzione**, di proposito e documentato: il testo costa
+# poco e il punto della fase 2 è che niente sia più irrecuperabile
+# (``agent/memory_archive.py``). Ma ``entry_id`` è un hash del contenuto, quindi
+# ogni riformulazione dello stesso fatto deposita un file nuovo: la crescita
+# segue il churn del review pass, non le rimozioni vere, e nessuno se ne
+# accorgerebbe.
+#
+# 300 non è il punto in cui la cartella diventa pesante — contare 300 dirent costa
+# frazioni di millisecondo. È il primo conteggio a cui **l'archivio non sta più in
+# una chiamata di ``recall``**: quel tool rende l'indice entro 24.000 caratteri a
+# ~90 per voce (v. ``tools/memory_recall.py``), cioè intorno alle 265, e da lì in
+# poi il modello non vede più l'archivio intero in una volta — che è la soglia
+# oltre la quale il piano prevede un passaggio di selezione sull'indice (fase 7.2).
+# Con 41 voci sul device il margine resta di oltre 7 volte.
+#
+# Il segnale sta **anche qui** e non solo là: ``MemoryRecallTool._list`` logga
+# quando *il modello cerca*, cosa che può non succedere per settimane, mentre
+# questo passa a ogni system prompt — è l'unico dei due che si accorge da sé.
+_ARCHIVE_NOTABLE_ENTRIES = 300
 
 # I mark che il Consolidator scrive davanti a ogni fatto. Elencati qui e non
 # dedotti da una regex generica perché questa lista è anche il filtro che tiene
@@ -143,6 +189,7 @@ class MemoryStore:
         self._corruption_logged = False  # rate-limit non-int cursor warning
         self._malformed_entry_logged = False  # rate-limit bad history shape warning
         self._oversize_logged = False  # rate-limit oversized-entry warning
+        self._archive_size_logged = False  # rate-limit archive-growth notice
         self._append_lock = threading.Lock()  # serialize cursor allocation + append
 
     # -- generic helpers -----------------------------------------------------
@@ -205,6 +252,19 @@ class MemoryStore:
           tentativo a vuoto ma un run intero che non commette niente. La
           degradazione la fa il runtime (v. ``tools/memory_entries.py``), e questa
           riga lo dichiara invece di lasciarlo indovinare.
+
+        **Il conteggio si rifà a ogni build di system prompt, e non è in cache.**
+        Non per distrazione: la cartella è fatta di file piccoli e contare le
+        dirent costa ~44 µs a 41 voci e ~2,7 ms a 5.000, contro un turno che ne
+        spende secondi dal provider. Una cache validata sull'mtime della
+        directory risparmierebbe una ``scandir`` pagando uno ``stat``, cioè
+        niente, e comprerebbe in cambio una finestra di staleness il cui modo di
+        sbagliare è esattamente quello che questa riga esiste per impedire: un
+        conteggio stantio a 0 fa **sparire il blocco**, e un modello che non vede
+        l'archivio torna a trattare una degradazione come una cancellazione.
+        Quando questa cartella diventerà davvero costosa la risposta è la
+        ritenzione o un indice (fase 7.2 del piano), non una cache — e
+        :data:`_ARCHIVE_NOTABLE_ENTRIES` è il campanello che dice quando.
         """
         directory = archive_dir(self.memory_dir)
         try:
@@ -213,6 +273,21 @@ class MemoryStore:
             return ""
         if not count:
             return ""
+        if count >= _ARCHIVE_NOTABLE_ENTRIES and not self._archive_size_logged:
+            # Una volta per processo, come gli altri avvisi rate-limitati di
+            # questa classe: qui si passa a ogni turno, e un avviso per turno è
+            # rumore che si impara a ignorare. Su un telefono il gateway
+            # riparte spesso, quindi "una volta per processo" resta una riga che
+            # si rivede.
+            self._archive_size_logged = True
+            logger.info(
+                "Memory archive holds {} entries (>= {}): past the point where the "
+                "recall index can list them all in one call, so retention or an "
+                "index pass over the archive starts to earn its place "
+                "(plan phase 7.2). Nothing is lost meanwhile — the directory has "
+                "no retention by design",
+                count, _ARCHIVE_NOTABLE_ENTRIES,
+            )
         return (
             "## Archive\n"
             f"Facts removed from long-term memory are moved to `memory/archive/` "
@@ -246,6 +321,22 @@ class MemoryStore:
         coda più quella della conversazione personale, non quella di terzi.
         Omesso, non filtra niente.
 
+        **Per una sessione di progetto il blocco non esiste**, e la ragione non è
+        il costo in token. La coda era già filtrata (quella funzione risponde
+        lista vuota a un progetto), ma i due file caldi si leggevano comunque:
+        il profilo personale finiva nel prompt di consolidamento di un progetto
+        insieme all'istruzione che chiede di estrarre un ``[correction]`` verso
+        quei fatti. Quel ``[correction]`` non ha dove andare — il riassunto di un
+        progetto arriva a ``_last_summary`` nei metadati della sessione e
+        ``append_history`` non lo scrive (v. la sua docstring), quindi Dream non
+        lo vede mai — cioè una correzione alla memoria di lungo periodo estratta
+        qui è una correzione **persa**. Un blocco che invita a produrre qualcosa
+        che il percorso poi butta è peggio di un blocco assente.
+
+        L'assenza è anche già prevista dal template: ``consolidator_archive.md``
+        dice "if this prompt shows you that memory, use what it shows; if it does
+        not, extract the fact and let Dream deduplicate". Niente da riscrivere là.
+
         **Due sorgenti, e la seconda è quella che conta.** I file caldi dicono
         cosa Dream ha già archiviato; la coda di history oltre il cursore di
         Dream dice cosa è già stato estratto e sta aspettando. Con i soli file,
@@ -278,6 +369,12 @@ class MemoryStore:
         per dichiarare che la memoria è vuota.
         """
         from jenny.agent.tools.memory_entries import entry_id, parse_entries
+
+        # Il gate sta **prima** delle due letture, non dentro il filtro della
+        # coda: la coda era già chiusa, i file caldi no, ed è da lì che passava
+        # il profilo personale. La chiave ce l'abbiamo in mano.
+        if session_key and is_project_session_key(session_key):
+            return ""
 
         seen: set[str] = set()
 
@@ -393,6 +490,20 @@ class MemoryStore:
         Nota l'asimmetria, e non "correggerla": per una sessione **interna** la
         scrittura qui e' voluta, perche' un job cron rilegge le proprie voci per
         ricordarsi dei run passati.
+
+        **E c'e' una seconda asimmetria, piu' grande, che questo cancello non
+        dice** (T7.8): il confine vale in **un verso solo**. Un progetto non entra
+        nel diario personale — questo imbuto, piu' il giro di chiave in
+        :meth:`read_recent_history_for_prompt` — ma il diario esce ovunque, e di
+        proposito: ``SOUL.md``, ``USER.md`` e ``MEMORY.md`` li compone
+        ``ContextBuilder`` dalla radice dell'installazione per **ogni** tipo di
+        sessione, e ``MemoryRecallTool`` prende l'archivio di quella radice alla
+        costruzione ignorando lo scope del workspace. La riga di confine e' «chi
+        sei viaggia, dove altro lavori no»: quel che si chiude sulla sessione e'
+        l'inventario fra progetti, non l'identita'. Quindi «il diario resta
+        personale» non si legge come simmetrico — personale non vuol dire segreto
+        a un progetto. Il ragionamento intero, e i due soli blocchi che si
+        chiudono, stanno in ``.agent/security.md``.
         """
         if session_key and is_project_session_key(session_key):
             logger.debug(
@@ -562,13 +673,15 @@ class MemoryStore:
     ) -> list[dict[str, Any]]:
         """Return unprocessed history entries safe to inject into a turn prompt.
 
-        La regola e' ternaria, una risposta per categoria:
+        La regola e' quaternaria, una risposta per categoria:
 
         - **progetto**: niente, e non "niente di altrui" ma proprio niente. Questa
           coda e' la contabilita della conversazione personale e la finestra e' il
           suo cursore di Dream; un progetto non condivide ne' l'una ne' l'altro,
           quindi il blocco "Recent History" del suo prompt non esiste invece di
           essere filtrato. Un'assenza non si puo' sbagliare, un filtro si.
+        - **giardiniere**: le proprie voci, e **non** la conversazione personale
+          (T7.8). Vedi sotto: e' l'unico ramo interno con questa restrizione.
         - **interna**: le proprie voci *piu'* la conversazione personale. Il primo
           ramo e' la cura dell'amnesia dell'heartbeat — un job rilegge i propri run
           — e ha un test che lo nomina
@@ -582,17 +695,42 @@ class MemoryStore:
         chiusa in ``append_history`` — e questo e' il secondo giro di chiave, non
         una ridondanza inutile: chiude anche le voci scritte da una versione
         precedente o a mano.
+
+        **Perche' il giardiniere e' l'eccezione fra gli interni** (T7.8, misurato
+        il 23/08). Il ramo interno esiste perche' un job rilegga *i propri* run;
+        la conversazione personale ci e' dentro perche' un job che gira nella chat
+        personale ne fa parte. Una passata del giardiniere no: gira su **un**
+        progetto, la sua cassetta legge dentro quella cartella e scrive solo in
+        ``wiki/`` (``GardenerStore.build_tools``), e ``agent/gardener.md`` le dice
+        «work only from those» — il diario del progetto, la mappa, l'inventario. Il
+        verso che ne veniva era rovesciato: la **conversazione** di quel progetto
+        non prende niente da questa coda (primo ramo), mentre la passata di
+        manutenzione, che non ha nemmeno un utente con cui parlare, si prendeva la
+        meta' personale. Nessun altro ramo cambia, e il giardiniere continua a
+        rileggere le proprie voci: quel che sparisce e' solo la coda di qualcun
+        altro. Il filtro e non un ``return []`` perche' la semantica vera e'
+        «le sue si', quelle personali no»; oggi la chiave della passata porta
+        l'orologio, quindi il blocco esce comunque vuoto — ma il giorno in cui
+        diventasse stabile un ``return []`` gli negherebbe i propri run in
+        silenzio.
+
+        **E la restrizione e' un cancello davanti a un tool, non una tenda**: la
+        passata puo' comunque *chiedere* la memoria personale — ``recall`` e i tre
+        file di identita' restano dove sono, per la ragione scritta in
+        ``.agent/security.md``. Questo ramo toglie quel che arrivava **non
+        richiesto** dentro il prompt.
         """
         if session_key is not None and is_project_session_key(session_key):
             return []
         entries = self.read_unprocessed_history(since_cursor=since_cursor)
         if session_key is None:
             return entries
+        own_only = is_gardener_session_key(session_key)
         return [
             entry
             for entry in entries
             if (entry_session := entry.get("session_key")) == session_key
-            or self._is_personal_history_session(entry_session)
+            or (not own_only and self._is_personal_history_session(entry_session))
         ]
 
     def compact_history(self) -> None:
@@ -979,6 +1117,27 @@ class MemoryStore:
         # di tool "scrivibili" tenuto a mano. Un tool che domani diventasse
         # write-capable — o un ``read_file`` con un ``--write-back`` — sfuggirebbe
         # al budget solo perché nessuno si è ricordato di aggiungerlo qui.
+        # **Nessun ``read_media_dir=False`` qui, e non per dimenticanza** (T9.10).
+        # T9.2 l'ha spento nella cassetta del giardiniere, la cui radice di lettura
+        # è *un progetto*: là ``<workspace>/.jenny/media`` cadeva fuori dal confine
+        # dichiarato e il flag lo riportava dentro. Qui la radice di lettura è il
+        # **workspace intero**, e la media dir sta dentro il workspace — misurato:
+        # con e senza il flag, questo ``read_file`` apre ``.jenny/media/...``
+        # identicamente. Metterlo sarebbe un placebo: una riga che fa *sembrare*
+        # un confine quel che non ne mette nessuno. L'argomento con cui T9.2 ha
+        # chiuso il giardiniere — «una passata a cui nessuno chiede niente non ha
+        # bisogno di guardare un'immagine» — vale anche qui: semplicemente non ha
+        # niente da spegnere.
+        #
+        # E chiudere davvero quella cartella a Dream vuol dire stringere
+        # ``allowed_dir``, che è un'altra decisione e più grossa di così: sotto
+        # questa radice ci sono anche ``wikis/<progetto>/**`` — le pagine, i
+        # diari, gli ``AGENTS.md`` di ogni progetto — quindi la media dir non
+        # aggiunge un verso che la radice non conceda già. Il confine
+        # progetto → personale che T7.8 ha misurato solido è quello della
+        # **cronologia** (il cancello di ``append_history`` più il filtro in
+        # ``build_dream_prompt``), non quello della cassetta: chi volesse
+        # chiuderlo anche qui deve partire da ``wikis/``, non da ``.jenny/media``.
         tools.register(ReadFileTool(
             workspace=workspace,
             allowed_dir=workspace,
@@ -1003,9 +1162,37 @@ class MemoryStore:
             write_size_guard=write_size_guard,
             entry_archiver=entry_archiver,
         ))
+        # ``extra_write_allowed_files`` anche qui, e non è simmetria per il gusto
+        # della simmetria: senza, il registry smentiva il prompt. ``dream.md``
+        # dice "your registry allows exactly ``SOUL.md``, ``USER.md``,
+        # ``memory/MEMORY.md`` and ``skills/<name>/SKILL.md``", e ``SOUL.md`` —
+        # prosa senza tool per voci, che il review pass deve accorciare — non
+        # aveva altro modo naturale che ``write_file``. La risposta era un
+        # ``WorkspaceBoundaryError`` con in coda "do not retry with alternative
+        # tools": un vicolo chiuso, con il tentativo già contato, quindi cursore
+        # fermo e ``stuck`` in salita — il "rifiuto di *path*" che il commento di
+        # ``format_stuck_alarm`` dice di aver visto sul Titan 2 con tutti i file
+        # all'81% o meno.
+        #
+        # Non allarga il perimetro: sono gli stessi tre file che ``edit_file`` e
+        # ``apply_patch`` qui sopra riscrivono già interi. Cambia due cose, entrambe
+        # volute. La scrittura passa da ``atomic_write`` (``_commit_write`` decide
+        # su ``_is_exact_allowed_file``), come per gli altri due e per la stessa
+        # ragione: è stato che Jenny rilegge da sé, e un processo ucciso a metà
+        # lascerebbe un file troncato che si legge come integro. E l'archivio delle
+        # voci in uscita continua a valere, perché ``entry_archiver`` è per-tool e
+        # ``WriteFileTool.execute`` chiama ``_archive_departing`` prima di scrivere
+        # esattamente come gli altri: una riscrittura intera di ``MEMORY.md`` non
+        # scavalca la degradazione.
+        #
+        # Che riscrivere quei file per intero sia comunque la strada peggiore per
+        # i due file a voci resta detto dove va detto, cioè nel prompt ("Propose
+        # entries, do not rewrite files"): è una preferenza, e una preferenza si
+        # insegna, non si trasforma in un vicolo cieco.
         tools.register(WriteFileTool(
             workspace=workspace,
             allowed_dir=skills_dir,
+            extra_write_allowed_files=editable_files,
             file_states=file_states,
             write_size_guard=write_size_guard,
             entry_archiver=entry_archiver,
@@ -1040,86 +1227,20 @@ class MemoryStore:
         tools.memory_entries = memory_entries
         return tools
 
-    @staticmethod
-    def internal_run_completed(resp: object | None) -> bool:
-        """Return True only when an ephemeral internal agent turn completed cleanly."""
-        metadata = getattr(resp, "metadata", None)
-        return isinstance(metadata, dict) and metadata.get("_stop_reason") == "completed"
+    # Le tre regole dei run interni vivono in ``jenny/agent/internal_run.py``:
+    # non sono I/O sui file di memoria (Atlas e il giardiniere non ne aprono
+    # nessuno), e stavano qui solo perché Dream è stato il primo a servirsene.
+    # Restano raggiungibili da ``MemoryStore`` come alias: i test e
+    # ``docs/internals/architecture.md`` le nominano così, e questo spostamento
+    # non compra un rename di massa.
+    internal_run_completed = staticmethod(_internal_run_completed)
+    internal_run_should_commit = staticmethod(_internal_run_should_commit)
+    prune_internal_sessions = staticmethod(_prune_internal_sessions)
 
     @staticmethod
     def dream_run_completed(resp: object | None) -> bool:
         """Return True only when an ephemeral Dream agent turn completed cleanly."""
         return MemoryStore.internal_run_completed(resp)
-
-    @staticmethod
-    def internal_run_should_commit(
-        resp: object | None,
-        file_states: object | None,
-    ) -> bool:
-        """Return True quando un run interno può registrare il proprio progresso.
-
-        Regola condivisa da Dream (avanzamento del cursore su ``history.jsonl``)
-        e da Atlas (avanzamento del fingerprint della wiki). In entrambi i casi
-        il progresso è un'affermazione — "questo input è stato digerito" — e
-        farla dopo un run che non ha prodotto nulla per un blocco di policy
-        significa perdere quell'input per sempre. Si registra quindi solo se il
-        run:
-
-        - è completato pulito (``internal_run_completed``), **e**
-        - nessun rifiuto di budget è rimasto aperto
-          (``unrecovered_refusals == 0``: un file rifiutato e poi riscritto
-          accorciato non conta più), **e**
-        - ha scritto almeno un file (``writes_ok > 0``), **oppure** non ha mai
-          tentato una scrittura (``writes_attempted == 0``) — il caso legittimo
-          "non c'era niente da cambiare".
-
-        Se ha tentato scritture e nessuna è riuscita NON si registra: l'input va
-        riprocessato al run seguente.
-
-        Il rifiuto di budget va guardato a parte dai due contatori aggregati: un
-        run che scrive con successo una skill e si vede rifiutare ``MEMORY.md`` ha
-        comunque ``writes_ok > 0``, e su ``ok``/``attempted`` passerebbe per
-        riuscito. Il fatto rifiutato non è su disco e, registrato il progresso, non
-        tornerebbe in nessun batch successivo: perso.
-
-        Ma il rifiuto che conta è quello **rimasto aperto**, non quello avvenuto —
-        ed è una misura di *contenuto*, non un conteggio per run. Il messaggio di
-        rifiuto chiede al modello di liberare spazio e riscrivere nello stesso
-        turno; se obbedisce e il contenuto atterra, il run ha fatto il suo lavoro.
-        Guardare il contatore cumulativo trattava quel successo come un
-        fallimento: cursore fermo, stesso batch due ore dopo, ``stuck`` in salita e
-        un allarme che annunciava scritture rifiutate che erano riuscite — con i
-        tetti armati, lo stato normale e non un caso limite. Si legge quindi
-        ``unrecovered_refusals``, che si chiude solo quando una scrittura riuscita
-        su *quel* percorso fa atterrare almeno una delle righe rifiutate
-        (v. ``FileStates.record_write_refused`` per il perché di "almeno una").
-
-        Il livelock che resta — rifiuto che nessuno recupera — esce dal review
-        forzato (v. ``agent/dream_cycle.py``), non da un commit più permissivo.
-
-        ``file_states`` è tollerante a ``None`` / oggetti senza i contatori di
-        scrittura (fallback conservativo: nessun avanzamento) per non far
-        esplodere il chiamante se il registry non è quello costruito qui. Un
-        registry senza ``unrecovered_refusals`` ripiega sul contatore cumulativo
-        — comportamento di prima, che per chi non ha il gancio è identico — e in
-        assenza di entrambi vale zero: chi non ha i contatori non ha nemmeno il
-        gancio che li incrementa (``_FsTool._check_write_size``), quindi non può
-        aver rifiutato nulla.
-        """
-        if not MemoryStore.internal_run_completed(resp):
-            return False
-        writes_ok = getattr(file_states, "writes_ok", None)
-        writes_attempted = getattr(file_states, "writes_attempted", None)
-        if not isinstance(writes_ok, int) or not isinstance(writes_attempted, int):
-            return False
-        outstanding = getattr(file_states, "unrecovered_refusals", None)
-        if not isinstance(outstanding, int):
-            outstanding = getattr(file_states, "writes_refused_budget", 0)
-        if isinstance(outstanding, int) and outstanding > 0:
-            return False
-        if writes_ok > 0:
-            return True
-        return writes_attempted == 0
 
     @staticmethod
     def dream_should_advance_cursor(
@@ -1128,26 +1249,11 @@ class MemoryStore:
     ) -> bool:
         """Return True only when the Dream cursor may safely advance.
 
-        Un turno che completa pulito non basta: se Dream non produce alcuna
-        scrittura perché è stato bloccato (policy) o ha rifiutato, avanzare il
-        cursore perderebbe per sempre quelle voci di history (consolidamento
-        silenziosamente saltato). Perciò si avanza solo quando il run:
-
-        - è completato pulito (``dream_run_completed``), **e**
-        - non ha rifiuti di budget rimasti aperti — un file rifiutato e poi
-          riscritto accorciato nello stesso turno è recuperato, non perso, **e**
-        - ha scritto almeno un file (``writes_ok > 0``), **oppure** non ha mai
-          tentato una scrittura (``writes_attempted == 0``) — il caso legittimo
-          "nulla da consolidare".
-
-        Se invece ha tentato scritture ma nessuna è riuscita (tutte bloccate o
-        fallite) NON si avanza: quelle voci vanno riprocessate al run seguente.
-        Lo stesso vale se *una parte* delle scritture è passata e una è stata
-        rifiutata dal budget — v. :meth:`internal_run_should_commit`.
-
-        ``file_states`` è tollerante a ``None`` / oggetti senza i contatori
-        (fallback conservativo: nessun avanzamento) per non far esplodere il
-        chiamante se il registry non è quello di :meth:`build_dream_tools`.
+        Alias di :meth:`internal_run_should_commit` con il nome che Dream usa: il
+        cursore su ``history.jsonl`` è il "progresso" di cui quella regola parla.
+        Il perché sta lì, in un posto solo — questa funzione ne ha portato per
+        mesi una seconda copia da 28 righe, ed è la forma di documentazione che
+        drifta prima di qualunque altra.
         """
         return MemoryStore.internal_run_should_commit(resp, file_states)
 
@@ -1192,38 +1298,6 @@ class MemoryStore:
     def dream_session_key() -> str:
         """Return a unique session key for a Dream run, e.g. ``dream:20260528-100000``."""
         return f"{DREAM_SESSION_PREFIX}{datetime.now():%Y%m%d-%H%M%S}"
-
-    @staticmethod
-    def prune_internal_sessions(
-        sessions_dir: Path, prefix: str, *, keep: int = 10
-    ) -> list[str]:
-        """Remove the oldest ``<prefix>_*.jsonl`` session files, keeping N.
-
-        Only files matching the prefix are considered; sessions belonging to
-        anything else are never touched.
-
-        Returns the original ``<prefix>:...`` session keys of the files that
-        were actually removed, so callers can also evict any in-memory
-        bookkeeping (``SessionManager`` cache, active tasks, session locks)
-        keyed by the same value — deleting the on-disk file alone leaves those
-        caches growing forever.
-        """
-        files = sorted(
-            sessions_dir.glob(f"{prefix}_*.jsonl"), key=lambda p: p.stat().st_mtime,
-        )
-        if len(files) <= keep:
-            return []
-
-        to_remove = files[: len(files) - keep]
-        removed_keys: list[str] = []
-        for path in to_remove:
-            try:
-                path.unlink()
-                logger.debug("Pruned old {} session: {}", prefix, path.stem)
-                removed_keys.append(path.stem.replace("_", ":", 1))
-            except OSError:
-                logger.warning("Failed to prune {} session {}", prefix, path)
-        return removed_keys
 
     @classmethod
     def prune_dream_sessions(cls, sessions_dir: Path, *, keep: int = 10) -> list[str]:

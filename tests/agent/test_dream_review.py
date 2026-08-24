@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from jenny.agent import dream_review as dream_review_module
 from jenny.agent.dream_review import (
     STATUS_COMPLETED,
     STATUS_FAILED,
@@ -175,6 +176,14 @@ class TestTheThreeThingsItMustNotDo:
         marchierebbe come fallito ogni run che non aveva niente da potare —
         cioè il caso che il prompt dichiara esplicitamente valido.
         ``internal_run_completed`` resta l'unico helper consentito.
+
+        Le ``setattr`` da sole non bastano più. Da quando la regola vive in
+        ``jenny/agent/internal_run.py`` la si raggiunge anche con
+        ``from jenny.agent.internal_run import internal_run_should_commit``, che
+        lega il nome all'import e ignora qualunque patch — ed è proprio la forma
+        scritta in ``atlas.py`` e ``gardener.py``, cioè quella che un lettore
+        copierebbe per prima. Da qui la seconda metà del test, che guarda il
+        sorgente invece della chiamata.
         """
 
         def _boom(*_args: Any, **_kwargs: Any):
@@ -186,6 +195,18 @@ class TestTheThreeThingsItMustNotDo:
         outcome = await _run(store, _FakeAgent(effect=_shrink(store)))
 
         assert outcome.status == STATUS_COMPLETED
+
+        source = Path(dream_review_module.__file__ or "").read_text(encoding="utf-8")
+        # Il docstring di modulo *nomina* i due helper per spiegare perché non li
+        # usa, quindi si guardano le sole righe di codice.
+        code = [
+            line for line in source.splitlines()
+            if not line.lstrip().startswith("#")
+        ]
+        code_text = "\n".join(code).split('"""')
+        body = "".join(code_text[::2])  # fuori dai docstring/blocchi tripli
+        for banned in ("internal_run_should_commit", "dream_should_advance_cursor"):
+            assert banned not in body, f"{banned} è entrato in dream_review.py"
 
     async def test_it_does_not_snapshot_the_workspace(
         self, store: MemoryStore, monkeypatch: pytest.MonkeyPatch
@@ -1044,3 +1065,203 @@ class TestADestructivePassSaysSo:
 
         assert len(moved) == 1 and "new" in moved[0]
 
+
+
+class TestTheOutcomeSaysWhatItTookAway:
+    """"Quanto ha liberato" e "quali fatti ha spostato" sono due domande diverse.
+
+    ``demoted`` esisteva già ed era **morto**: valorizzato sui soli due rami
+    ``failed``, letto da nessuno. I due esiti normali — "ha liberato spazio" e
+    "non c'era niente da potare" — non lo portavano, cioè proprio quelli in cui
+    una degradazione è più probabile; e ``/dream`` rispondeva "nothing was freed"
+    a una passata che aveva spostato dei fatti personali dell'utente.
+
+    Il caso peggiore ha un nome e sta qui sotto: una **riformulazione**. La voce
+    vecchia parte per l'archivio, la nuova è più lunga, nessun file cala — e i
+    soli ``before``/``after`` raccontano un run che non ha fatto niente.
+    """
+
+    _FACT = "- Timezone: Europe/Rome\n"
+
+    @staticmethod
+    def _rewords_a_fact_into_a_longer_one(store: MemoryStore) -> Any:
+        """Effetto che riformula un fatto di ``USER.md`` allungandolo.
+
+        La voce vecchia se ne va (l'archiviatore al confine del file la degrada,
+        v. ``make_entry_archiver``) e il file **cresce**: nessun ``shrank``, quindi
+        l'esito è ``no-change`` — e senza ``demoted`` la risposta all'utente
+        sarebbe "nothing was freed" su un fatto che è uscito dal prompt.
+        """
+
+        async def effect(tools: Any) -> None:
+            await tools.execute("edit_file", {
+                "path": "USER.md",
+                "old_text": TestTheOutcomeSaysWhatItTookAway._FACT,
+                "new_text": "- Timezone: Europe/Rome (CEST in summer, verified 2026-08)\n",
+            })
+
+        return effect
+
+    @staticmethod
+    def _drops_a_fact(store: MemoryStore) -> Any:
+        """Effetto che toglie un fatto da ``USER.md``: degrada **e** rimpicciolisce."""
+
+        async def effect(tools: Any) -> None:
+            await tools.execute("edit_file", {
+                "path": "USER.md",
+                "old_text": TestTheOutcomeSaysWhatItTookAway._FACT,
+                "new_text": "",
+            })
+
+        return effect
+
+    async def test_a_reword_is_reported_even_though_nothing_shrank(
+        self, store: MemoryStore
+    ) -> None:
+        outcome = await _run(
+            store, _FakeAgent(effect=self._rewords_a_fact_into_a_longer_one(store))
+        )
+
+        assert outcome.status == STATUS_NO_CHANGE
+        # La prova che il solo delta non basta: non c'è niente da liberare, e un
+        # fatto è comunque uscito dai file caldi.
+        assert outcome.freed <= 0
+        assert len(outcome.demoted) == 1
+
+    async def test_a_pass_that_freed_space_also_says_what_it_moved(
+        self, store: MemoryStore
+    ) -> None:
+        """Il ramo ``completed``: quello che gira più spesso, e non lo portava."""
+        outcome = await _run(store, _FakeAgent(effect=self._drops_a_fact(store)))
+
+        assert outcome.status == STATUS_COMPLETED
+        assert len(outcome.demoted) == 1
+
+    async def test_a_quiet_pass_reports_no_demotions(self, store: MemoryStore) -> None:
+        """Il rovescio: senza degradazioni la nota non deve inventarne."""
+        outcome = await _run(store, _FakeAgent(effect=_shrink(store)))
+
+        assert outcome.status == STATUS_COMPLETED
+        assert outcome.demoted == ()
+        assert outcome.demoted_ids == ()
+
+    async def test_a_run_that_died_still_reports_what_it_had_already_moved(
+        self, store: MemoryStore
+    ) -> None:
+        """Il ramo per eccezione, l'unico dove nessun riepilogo a valle le nominerebbe.
+
+        Il turno è finito male, quindi il modello non racconta niente e i soli
+        ``before``/``after`` non distinguono "cancellato" da "spostato". Le voci
+        già degradate prima dell'errore sono precisamente quelle di cui nessuno
+        saprebbe.
+        """
+
+        async def effect(tools: Any) -> None:
+            await tools.execute("edit_file", {
+                "path": "USER.md", "old_text": self._FACT, "new_text": "",
+            })
+            raise RuntimeError("il provider è caduto a metà turno")
+
+        agent = _FakeAgent(effect=effect)
+        outcome = await _run(store, agent)
+
+        assert outcome.status == STATUS_FAILED
+        assert len(outcome.demoted) == 1
+
+    async def test_a_run_that_did_not_complete_reports_them_too(
+        self, store: MemoryStore
+    ) -> None:
+        outcome = await _run(
+            store,
+            _FakeAgent(stop_reason="max_iterations", effect=self._drops_a_fact(store)),
+        )
+
+        assert outcome.status == STATUS_FAILED
+        assert len(outcome.demoted) == 1
+
+    async def test_an_open_refusal_with_nothing_shrunk_reports_them_too(
+        self, store: MemoryStore
+    ) -> None:
+        """Il ramo che il piano aveva individuato: rifiuto aperto, nulla è calato.
+
+        Il modello riformula un fatto (degradazione, e il file cresce) e poi si
+        vede rifiutare la scrittura sulla destinazione. È l'esito che il prompt
+        del review chiede — lascia stare la fonte — e portava via con sé la
+        notizia della riformulazione.
+        """
+
+        def guard(path: Path, _text: str) -> str | None:
+            return "Write refused: over budget." if path.name == "MEMORY.md" else None
+
+        async def effect(tools: Any) -> None:
+            await self._rewords_a_fact_into_a_longer_one(store)(tools)
+            await tools.execute("edit_file", {
+                "path": "memory/MEMORY.md",
+                "old_text": "# Memory\n",
+                "new_text": "# Memory\n- contesto spostato\n",
+            })
+
+        outcome = await _run(store, _FakeAgent(effect=effect), write_size_guard=guard)
+
+        assert outcome.status == STATUS_NO_CHANGE
+        assert outcome.unresolved_refusals == 1
+        assert len(outcome.demoted) == 1
+
+    async def test_a_destructive_migration_reports_them_too(
+        self, store: MemoryStore
+    ) -> None:
+        """Il quinto ramo: rifiuto aperto **e** qualcosa è calato.
+
+        È il caso in cui il fatto potrebbe non essere in nessuno dei due file, e
+        la sola risposta utile all'utente è dove ritrovarlo.
+        """
+
+        def guard(path: Path, _text: str) -> str | None:
+            return "Write refused: over budget." if path.name == "MEMORY.md" else None
+
+        async def effect(tools: Any) -> None:
+            await self._drops_a_fact(store)(tools)
+            await tools.execute("edit_file", {
+                "path": "memory/MEMORY.md",
+                "old_text": "# Memory\n",
+                "new_text": f"# Memory\n{self._FACT}",
+            })
+
+        outcome = await _run(store, _FakeAgent(effect=effect), write_size_guard=guard)
+
+        assert outcome.status == STATUS_FAILED
+        assert outcome.unresolved_refusals == 1
+        assert len(outcome.demoted) == 1
+
+    async def test_no_return_path_forgets_them(self) -> None:
+        """L'invariante, letta dal sorgente e non da un ramo alla volta.
+
+        I sei rami qui sopra sono i sei di oggi; il difetto originale era che un
+        settimo aggiunto senza pensarci nascesse muto, e la revisione non se ne
+        accorgesse — ``demoted`` ha un default, quindi ometterlo non è un errore
+        per nessuno. Questo test rende il default un'omissione visibile.
+        """
+        import inspect
+        import re
+
+        from jenny.agent import dream_review
+
+        source = inspect.getsource(dream_review.run_dream_review)
+        constructions = re.findall(r"ReviewOutcome\((?:[^()]|\([^()]*\))*\)", source)
+
+        assert len(constructions) == 6, f"rami cambiati: {len(constructions)}"
+        mute = [c for c in constructions if "demoted" not in c]
+        assert not mute, f"uscite senza le degradazioni: {mute}"
+
+    async def test_the_ids_are_what_recall_accepts(self, store: MemoryStore) -> None:
+        """Un numero non è azionabile: ``recall`` prende id, non nomi di file."""
+        from jenny.agent.tools.memory_recall import MemoryRecallTool
+
+        outcome = await _run(store, _FakeAgent(effect=self._drops_a_fact(store)))
+
+        assert outcome.demoted_ids and outcome.demoted_ids != outcome.demoted
+        rendered = await MemoryRecallTool(store.workspace).execute(
+            ids=list(outcome.demoted_ids)
+        )
+        assert "Europe/Rome" in rendered
+        assert "No archived entry has id" not in rendered

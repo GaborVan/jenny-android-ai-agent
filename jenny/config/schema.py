@@ -127,6 +127,18 @@ class DreamConfig(Base):
     # default (2) dodici run vogliono dire al massimo un review pass al giorno.
     # ``ge=1`` e non ``ge=0``: un review pass ogni zero run non è una
     # configurazione, è una divisione per zero scritta a parole.
+    #
+    # E resta ``ge=1``, non ``ge=12``, pur essendo dodici il pavimento operativo
+    # (v. ``command/builtin.py::_REVIEW_CADENCE_FLOOR``). Due ragioni. Un restore
+    # deve poter riscrivere qualunque valore storico, e un ``le=``/``ge=`` nuovo su
+    # un campo già spedito non è una restrizione innocua: un `config.json` con un
+    # valore fuori range diventa illeggibile, ``loader._load_with_recovery`` prova
+    # il `.bak` — stesso valore — e poi mette in quarantena il file ripartendo dai
+    # default, provider e chiave API inclusi (v. ``GardenerConfig.clamp_raw``).
+    # Alzare qui il minimo costerebbe la config di chi ha già `reviewEveryRuns: 1`
+    # sul telefono, per una cadenza che al massimo spende token. Il pavimento vive
+    # nel comando, dove c'è una persona a cui spiegarlo e una frase con cui
+    # scavalcarlo.
     review_every_runs: int = Field(
         default=12,
         ge=1,
@@ -184,6 +196,29 @@ class AtlasConfig(Base):
         return f"every {hours}h"
 
 
+# Tetti dei tre numeri del giardiniere. Stanno in costanti, e non solo nel ``le=``
+# dei campi, perché il comando ``/gardener`` li nomina nei suoi rifiuti: un range
+# scritto due volte diventa due range appena uno dei due cambia.
+#
+# Un giorno per i due in minuti. Il tetto non serve a proteggere da un numero
+# "grande" ma da un numero *senza significato*: ``interval_min`` diventa un
+# ``every_ms`` che arma una sveglia RTC, quindi 10**9 pianifica diciannove secoli
+# in avanti — un job che non scatterà mai, e nessun errore da nessuna parte. Oltre
+# le 24 ore la battuta non è più periodica, e "non guardare più" ha già il suo
+# interruttore (``enabled``), che è anche l'unica forma reversibile di dirlo.
+GARDENER_INTERVAL_MIN_MAX = 1440
+# Stesso tetto e ragione diversa: ``idle_min`` è il silenzio richiesto *prima* di
+# entrare. Oltre un giorno nessun progetto vivo lo raggiunge mai, quindi il valore
+# non è una cadenza lenta — è uno spegnimento travestito, di quelli che si
+# diagnosticano leggendo il codice.
+GARDENER_IDLE_MIN_MAX = 1440
+# Un anno per la distanza fra due passate sulla stessa materia. Più larga delle
+# altre due perché qui un valore grande è una scelta legittima (un progetto lo si
+# vuole rivedere a stagioni, non a ore); oltre l'anno però "distanza" ha smesso di
+# voler dire distanza e vuol dire "mai", che di nuovo è ``enabled=False``.
+GARDENER_DISTANCE_HOURS_MAX = 8760
+
+
 class GardenerConfig(Base):
     """Il giardiniere: promuove il diario dei progetti in pagine, a mente fredda.
 
@@ -205,6 +240,7 @@ class GardenerConfig(Base):
     interval_min: int = Field(
         default=30,
         ge=1,
+        le=GARDENER_INTERVAL_MIN_MAX,
         validation_alias=AliasChoices("intervalMin", "interval_min"),
         serialization_alias="intervalMin",
     )
@@ -216,6 +252,7 @@ class GardenerConfig(Base):
     idle_min: int = Field(
         default=30,
         ge=0,
+        le=GARDENER_IDLE_MIN_MAX,
         validation_alias=AliasChoices("idleMin", "idle_min"),
         serialization_alias="idleMin",
     )
@@ -227,9 +264,65 @@ class GardenerConfig(Base):
     min_hours_between_passes: int = Field(
         default=6,
         ge=0,
+        le=GARDENER_DISTANCE_HOURS_MAX,
         validation_alias=AliasChoices("minHoursBetweenPasses", "min_hours_between_passes"),
         serialization_alias="minHoursBetweenPasses",
     )
+
+    # I tre campi che ``clamp_raw`` riporta dentro i tetti. Elencati per nome e non
+    # dedotti da ``model_fields``: ``enabled`` non è un numero, e un domani un
+    # quarto campo numerico potrebbe volere il rifiuto e non la clemenza.
+    _CLAMPED_FIELDS = ("interval_min", "idle_min", "min_hours_between_passes")
+
+    @classmethod
+    def clamp_raw(cls, data: Any) -> Any:
+        """Riporta dentro i tetti i numeri di un ``config.json`` scritto prima di loro.
+
+        Serve perché aggiungere un ``le=`` a un campo già spedito non è una
+        restrizione innocua: ``loader._load_with_recovery`` reagisce a un
+        ``ValidationError`` provando il ``.bak`` — che ha lo stesso valore fuori
+        range — e poi **mettendo in quarantena il file e ripartendo dai default**.
+        Un tetto nuovo su ``intervalMin`` diventerebbe così la cancellazione del
+        provider e della sua chiave, per un numero che al massimo pianificava una
+        sveglia troppo in là. E soprattutto renderebbe irraggiungibile la via
+        d'uscita: ``/gardener off`` passa da ``store.mutate``, che rilegge il file
+        — quindi scriverebbe *sopra* una config appena azzerata.
+
+        Si limita, non si ripiega sul default: il valore fuori range dice in che
+        *direzione* andava la scelta di chi l'ha scritto (o l'accidente che l'ha
+        prodotto), e riportarlo a 30 minuti farebbe lavorare il giardiniere più di
+        quanto chiunque avesse chiesto. Il tetto è il minimo cambiamento che rende
+        il file valido, e il log dice entrambi i numeri.
+
+        Chiamata da ``AgentDefaults._clamp_gardener_clocks``, cioè **solo** sul
+        dizionario grezzo che arriva dal file. Costruire ``GardenerConfig`` in
+        codice con un valore fuori range resta un errore e alza: se la clemenza
+        stesse su questa classe, il ``le=`` non potrebbe più rifiutare niente.
+        """
+        if not isinstance(data, dict):
+            return data
+        out = data
+        for name in cls._CLAMPED_FIELDS:
+            finfo = cls.model_fields[name]
+            low, high = int(finfo.ge or 0), int(finfo.le or 0)
+            aliases = getattr(finfo.validation_alias, "aliases", ())
+            for key in (*aliases, name):
+                if key not in out:
+                    continue
+                raw = out[key]
+                if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                    # Non un numero: lo boccia la validazione del campo, e non è
+                    # questo il posto dove indovinare cosa volesse dire.
+                    break
+                clamped = min(max(raw, low), high)
+                if clamped != raw:
+                    logger.warning(
+                        "Config: gardener.{} was {}, outside {}..{}; clamped to {}",
+                        key, raw, low, high, clamped,
+                    )
+                    out = {**out, key: clamped}
+                break
+        return out
 
     def build_schedule(self) -> CronSchedule:
         return CronSchedule(kind="every", every_ms=self.interval_min * self._MINUTE_MS)
@@ -343,6 +436,27 @@ class AgentDefaults(Base):
         default=None,
         validation_alias=AliasChoices("modelPreset", "model_preset"),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _clamp_gardener_clocks(cls, data: Any) -> Any:
+        """Fa entrare i tre numeri del giardiniere nei tetti aggiunti dopo di loro.
+
+        Il punto di chiamata è qui e non su ``GardenerConfig`` di proposito: qui il
+        valore è ancora il dizionario grezzo del file, mentre una clemenza montata
+        sulla classe si applicherebbe anche a ``GardenerConfig(interval_min=10**9)``
+        e il ``le=`` non potrebbe più rifiutare nulla. Il perché il file vada
+        salvato invece che bocciato sta in :meth:`GardenerConfig.clamp_raw`.
+        """
+        if not isinstance(data, dict):
+            return data
+        raw = data.get("gardener")
+        if not isinstance(raw, dict):
+            return data
+        clamped = GardenerConfig.clamp_raw(raw)
+        if clamped is not raw:
+            data = {**data, "gardener": clamped}
+        return data
 
 
 class AgentsConfig(Base):

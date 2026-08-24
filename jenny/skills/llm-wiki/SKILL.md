@@ -139,6 +139,7 @@ python_exec(
 │   ├── 20260409-143022-claude-code-size.md
 │   └── resolved/      ← Processed feedback, archived with resolution notes
 ├── raw/               ← Immutable source documents (LLM reads, never writes)
+│   ├── journal/       ← The conversation itself, one file per day, append-only
 │   ├── articles/
 │   ├── papers/
 │   ├── notes/
@@ -151,6 +152,8 @@ python_exec(
 └── outputs/
     └── queries/       ← Query answers (promote durable ones to wiki/)
 ```
+
+`raw/journal/` is in **every** wiki, whatever its shape: it is where the conversation itself is captured, one file per day, append-only. `scaffold.py` creates it in both layouts, and the lint checks it in both — the folders that a project and a research library have in common are defined once, in the app's project scaffolder (`jenny/webui/project_scaffold.py::PROJECT_DIRS`), and the skill's script carries a pinned copy.
 
 `AGENTS.md` is the wiki's **instructions file** — what this wiki covers, what it excludes, and anything true of it and no other wiki. Read `references/schema-guide.md` for what to put in it. Read it at the start of every session.
 
@@ -214,7 +217,7 @@ Large binaries (videos, model weights, installers, datasets, large PDFs >10 MB) 
   ---
   ```
   followed by a short description of what it is and why it matters to this wiki.
-- Wiki pages cite `[[raw/refs/<slug>]]` exactly like any other source.
+- Wiki pages cite it like any other source — but as a **path**, `raw/refs/<slug>.md`, not as `[[raw/refs/<slug>]]`. A wikilink only reaches pages under `wiki/`, so `[[raw/…]]` renders as a dead link in the app; `lint` reports it. The same holds for `log/`, `audit/` and anything in another project: a `[[link]]` that leaves `wiki/` is dead.
 
 This keeps the wiki repo git-friendly and portable.
 
@@ -336,6 +339,7 @@ python_exec(
 ```
 
 Per-wiki, the script reports:
+- **Encoding** — every page under `wiki/` must be UTF-8, and this is printed first. Reported 🔴: the project block reads pages as strict UTF-8 and skips a page it cannot decode **whole**, every turn — so a page in latin-1 exists, is linked, declares its state, and is still invisible to you; and `wiki/index.md` not decoding does not fail quietly. Re-save the file as UTF-8. The checks below keep reading it, with `�` in place of the bad bytes, so their findings on it are usable but its text is not exact.
 - **Dead wikilinks** — `[[Target]]` where `Target.md` doesn't exist (includes cross-wiki links, which are dead by design — see core principle 5)
 - **Orphan pages** — pages with no inbound wikilinks
 - **Missing index entries** — pages not listed in `wiki/index.md`
@@ -348,7 +352,34 @@ Per-wiki, the script reports:
 - **Cross-link coverage** — every concept/entity page has at least one wikilink to or from another content page (being listed in `index.md` alone doesn't count)
 - **Summary completeness** — every ingested source under `raw/{articles,papers,notes}` has a matching `wiki/summaries/<slug>.md`
 
+Three checks are about what **every turn of that project pays for**, and they were missing from this list while the script had them:
+- **Map size** — `wiki/index.md` over 2,000 characters. Reported 🟡: the project block injects the map into every turn and cuts it there, so past that ceiling the rest exists and you never see it. What outgrew a few lines belongs on a page.
+- **Page size** — a page over 6,000 characters. Reported 🟡, and the difference from the map is what happens past the ceiling: the map arrives truncated, a page does not arrive **at all** — nothing enters half a page, so an oversized one is skipped whole, every turn, and the selection is alphabetical, so no question can call it up. Split it along the things it talks about.
+- **A page list inside `AGENTS.md`** — over 1,000 characters of it. Reported 🟡: nothing there is false, it is paid for twice. `AGENTS.md` is injected **whole** into every turn of the project, with no ceiling, while the map it duplicates is cut at 2,000 — and a list here is a second index that nobody curates and that no check reads, so an entry naming a deleted page stays there silently (in the map, "Dead wikilinks" would catch it). Move the entries into `wiki/index.md` and leave `AGENTS.md` the scope, the conventions and the open questions. **Do not trim the tail instead** — that is where the open questions live, and it is the only part nothing else carries.
+
+In a **notebook** layout (flat pages under `wiki/`) two more checks apply to every page:
+- **Page state** — every page declares `state:` from the closed vocabulary `open` / `hypothesis` / `decided` / `done`. Reported 🔴: a page without a state says something false, because an idea jotted down in passing reads a month later as a settled fact.
+- **Page source** — `source:` is the trail from a page back to the sentence that caused it (normally `source: raw/journal/<day>.md`). Two **separate** 🟡 findings, because they are two different facts: a page with **no** `source:` is not wrong, it is *unverifiable*; a page whose `source:` **names a file that is not there** had a trail that now leads nowhere — a journal day pruned or renamed, or a wrong value — and since the journal is append-only, a day that vanished is itself worth a look. `<placeholder>` values and URLs are not path-checked.
+
+**Exit codes**, because a lint that cannot be told apart from a clean run is worse than no lint:
+
+| code | meaning |
+|------|---------|
+| `0` | linted, no issues |
+| `1` | linted, issues found |
+| `2` | **nothing was linted** — no `wiki/` under the given root, no wikis under the given workspace, or bad arguments |
+
+Everything, errors included, goes to **stdout** (the `wiki_lint` builtin captures only that). So `2` reads as a `🔴 wiki/ directory not found at …` line, never as an empty report: a path typo must not look like a healthy wiki.
+
+Every list in the report is **capped at 20 entries** and then says `…and N more`; the count in each heading is always the real total. That cap is not cosmetic — `python_exec` keeps the head and tail of an over-long result and drops the middle, so an uncapped list would silently swallow whole later checks.
+
+The **first line of the report names the layout it linted in** — `research` or `notebook` — and why. Research means at least one page actually lives under `concepts/`, `entities/` or `summaries/`; an empty folder decides nothing. Read that line: it tells you which checks are in play, and a check that quietly stops running is worse than one that never existed.
+
+Two things about the **journal**, which is checked in every layout. Its append-only property is verified against the previous run, so the first run on a wiki records a baseline and says so — and only says so when the baseline was really written (in a read-only turn it cannot be). And an append-only violation **stays reported until the file is actually put back**: re-running the lint does not clear it, because "lint, fix, re-run until clean" must not be a way to erase the record that a promoted line was altered.
+
 `lint_workspace` lints every wiki, then verifies `wikis/_index.md`'s registry block is in sync with the wikis on disk (missing, extra, or stale entries). Pass `fix=True` to repair registry drift automatically, or call `reindex_wikis.regenerate_index('<workspace>/wikis')`.
+
+**One bad wiki costs one wiki.** Each wiki is linted in isolation, and so is the registry pass: a crash prints `🔴 the lint crashed on this wiki: …` and the run carries on. If a whole lint dies anyway, what you get back is still every finding it had already printed, followed by `🔴 the lint crashed before it finished: …` — read that line, because it means the checks after that point never ran: the wiki is neither clean nor a known set of issues, and the count above the line is not the total.
 
 For each issue, propose a fix, confirm with the user, then apply. Log: `## [HH:MM] lint | <N> issues found, <M> fixed`.
 
@@ -414,9 +445,13 @@ python_exec(
 )
 ```
 
-Creates the full tree (including `log/<today>.md`, `audit/`, `audit/resolved/`), a blank `AGENTS.md` based on the new template, and a blank `wiki/index.md` with the recommended category layout. It also registers the new wiki in `wikis/_index.md`.
+Creates the full tree (including `raw/journal/`, `log/<today>.md`, `audit/`, `audit/resolved/`), a blank `AGENTS.md` based on the new template, and a blank `wiki/index.md` with the recommended category layout. It also registers the new wiki in `wikis/_index.md`.
+
+If something of the **wrong kind** is in the way — a *directory* named `AGENTS.md` or `wiki/index.md`, a *file* named `log` — the script writes nothing there and reports it as a collision instead of claiming success: read the `🔴 Wrong kind of thing in the way` block, fix those paths by hand, and re-run. A run that ends with that block has left the wiki incomplete, and the lint will fail on it.
 
 **Safe to re-run on a wiki that already exists.** Every file is written only when it is absent, so run it on an older wiki to add what the scaffold has grown since — the pieces appear, everything already on disk stays byte-identical, and the return value (also printed) lists what was added. It does *not* append to today's log when that file already exists: read the printed report instead, and log the top-up yourself if the wiki's history should carry it.
+
+**On a folder that is already a notebook project it tops up that shape instead** — the journal and the plain tree, no `concepts/`, `entities/` or `summaries/`, and a flat map if the map is missing. It says so in its output when it does. The marker is a working journal plus pages that live directly under `wiki/`; a research wiki whose taxonomy is still empty is *not* a notebook and still gets the whole tree.
 
 After scaffolding:
 1. Fill in `AGENTS.md` — define scope, naming conventions, initial research questions.
@@ -458,8 +493,9 @@ The LLM rebuilds `index.md` on every compile and touches it on every ingest. For
 ```
 
 Rules:
-- Every wiki page must appear exactly once in `index.md`. `lint` enforces this.
+- Every wiki page must appear exactly once in `index.md`. `lint` checks half of that: it reports a page **no** wikilink in `index.md` resolves to. A page listed twice is on you — nothing enforces the "once".
 - Folder-split concepts show hierarchy via indented bullets.
+- **How a `[[link]]` resolves**, in the app and in `lint` alike: the exact path under `wiki/`, then the folder's `index.md`, then the same path ignoring case, spaces and accents, then **any page whose path ends with the link** (so `[[Bar/aspect-1]]` finds `concepts/Bar/aspect-1.md` from anywhere), then — for a link with no `/` — any page with that name. A link with a `/` in it must match a real *tail* of the page's path: `[[Baz/aspect-1]]` is dead even when `aspect-1.md` exists under another folder. When two pages could match, the one closest to `wiki/` wins.
 - After selecting the target wiki (see "Session start & wiki selection"), its `wiki/index.md` + `AGENTS.md` are what the AI reads before operating on it.
 
 ## `log/` format

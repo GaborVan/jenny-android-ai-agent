@@ -56,7 +56,10 @@ class TestRegistration:
         specs = {spec.command: spec for spec in BUILTIN_COMMAND_SPECS}
 
         assert "/gardener" in specs
-        assert specs["/gardener"].arg_hint == "[project]"
+        # Corto di proposito: il suggerimento accanto al comando nella palette, non
+        # la sua documentazione. Le forme per esteso (``off``, ``interval``, …)
+        # stanno in ``_gardener_usage()``, che `/gardener settings` stampa in coda.
+        assert specs["/gardener"].arg_hint == "[project|settings]"
 
 
 @pytest.fixture()
@@ -116,9 +119,13 @@ class TestOutcomeMessages:
                 "skipped_no_delta",
                 "written",
                 "nothing_to_promote",
+                "partial_write",
+                "commit_failed",
                 "no_write",
                 "incomplete",
                 "failed",
+                "aborted_user_active",
+                "already_running",
             )
         }
 
@@ -144,3 +151,112 @@ class TestOutcomeMessages:
 
         assert "marked as read" in promoted
         assert "will try again" in blocked
+
+    def test_a_half_done_pass_is_not_reported_as_a_failure(self):
+        """I due esiti a metà — scritture rifiutate, cursore non registrato —
+        cadevano nel fondo, cioè si raccontavano come «the gardener failed»: falso
+        due volte, perché le pagine sono su disco. E non possono nemmeno prendere
+        in prestito la frase di ``no_write``: «finished without writing» è la
+        stessa bugia al contrario."""
+        partial = _format_gardener_outcome(
+            "viaggio",
+            GardenerOutcome(
+                status="partial_write", elapsed=2.0, lines=4, writes=2,
+                detail="2 of 3 writes landed; 1 refused",
+            ),
+        )
+        stuck = _format_gardener_outcome(
+            "viaggio",
+            GardenerOutcome(
+                status="commit_failed", elapsed=2.0, lines=4, writes=2,
+                detail="no space left on device",
+            ),
+        )
+
+        for text in (partial, stuck):
+            assert "The gardener failed" not in text
+            assert "without writing" not in text
+            # Le pagine scritte si nominano: è il fatto che l'esito rischiava di
+            # perdere.
+            assert "wrote 2 pages" in text
+            assert "see those lines again" in text
+        assert "refused" in partial
+        assert "no space left on device" in stuck
+        assert "on disk" in stuck
+
+    def test_a_pass_that_gave_way_to_the_user_says_so_and_not_that_it_finished(self):
+        """Una passata ceduta può aver lasciato pagine su disco, quindi non può
+        prendere in prestito né la frase di ``no_write`` («finished without
+        writing») né quella del fondo («the gardener failed»): non ha finito e non
+        è fallita, si è spostata. E il motivo va detto, perché è l'unico esito che
+        parla di **chi altro c'era** e non del lavoro."""
+        text = _format_gardener_outcome(
+            "viaggio",
+            GardenerOutcome(status="aborted_user_active", elapsed=18.0, lines=4, writes=2),
+        )
+
+        assert "The gardener failed" not in text
+        assert "without writing" not in text
+        assert "came back to viaggio" in text
+        assert "2 pages had already landed" in text
+        assert "see those lines again" in text
+
+    def test_a_refused_second_pass_says_one_at_a_time(self):
+        """``already_running`` non è un fallimento e non è «niente da fare»: è
+        «lo sta già facendo qualcuno». Se si raccontasse come uno dei due, un
+        utente che rilancia ``/gardener`` due volte crederebbe di aver rotto
+        qualcosa, o di aver ottenuto due passate."""
+        text = _format_gardener_outcome(
+            "viaggio", GardenerOutcome(status="already_running")
+        )
+
+        assert "The gardener failed" not in text
+        assert "already running" in text
+        assert "one pass at a time" in text
+
+
+class TestAMapPassSaysWhatItMoved:
+    """Una passata girata **per la mappa** (T3.5) non ha righe di diario, e ogni
+    frase che le conta diventa falsa: «read 0 journal lines and judged that none of
+    them earned a page» è un comando che ha smesso di dire la verità.
+
+    E il freno va detto qui, non nei log di un telefono: un utente che rilancia il
+    comando e non vede partire niente deve poter sapere perché.
+    """
+
+    def _line(self, **kw) -> str:
+        return _format_gardener_outcome(
+            "viaggio", GardenerOutcome(map_pass=True, elapsed=12.5, **kw)
+        )
+
+    def test_it_does_not_report_zero_journal_lines(self):
+        text = self._line(status="nothing_to_promote", map_before=9000, map_after=9000)
+
+        assert "0 journal lines" not in text
+        assert "the map alone" in text
+
+    def test_a_map_brought_under_the_ceiling_says_so_with_both_numbers(self):
+        text = self._line(status="written", writes=4, map_before=9000, map_after=1500)
+
+        assert "9000" in text and "1500" in text
+        assert "fits now" in text
+
+    def test_a_map_still_over_the_ceiling_says_it_will_not_be_retried(self):
+        text = self._line(status="written", writes=4, map_before=9000, map_after=5000)
+
+        assert "still over" in text
+        assert "until the map grows" in text
+
+    def test_a_map_nothing_was_moved_out_of_says_that_too(self):
+        text = self._line(status="no_write", map_before=9000, map_after=9000)
+
+        assert "nothing was moved out of it" in text
+        assert "until the map grows" in text
+
+    def test_a_provider_that_fell_over_keeps_its_own_sentence(self):
+        """Il ramo della mappa non si mangia i due esiti che parlano d'altro: su
+        ``failed`` la misura «dopo» non esiste, e raccontarla come «la mappa è
+        ancora 0 caratteri» sarebbe peggio del silenzio."""
+        text = self._line(status="failed", detail="provider is down", map_before=9000)
+
+        assert "The gardener failed" in text and "provider is down" in text

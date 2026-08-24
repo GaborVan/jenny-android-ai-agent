@@ -85,6 +85,34 @@ def test_the_menu_is_capped_and_lays_out_as_a_column() -> None:
     )
 
 
+def test_the_cap_is_written_with_the_tokens_it_depends_on() -> None:
+    """Il tetto sottraeva un `172px` calcolato a mano.
+
+    Quel numero era `--dock-height + 58 + --scope-row + 25` di margine, cioe' la
+    stessa somma che la geometria della mascotte fa con i token
+    (`bottom: calc(var(--dock-height) + 58px + var(--scope-row))`). Con la somma
+    ricalcolata, ritoccare il padding del chip — cioe' `--scope-row` — muoveva la
+    mascotte e lasciava il menu dov'era: il token esiste per non avere due
+    misure della stessa cosa.
+    """
+    cap = re.search(r"max-height:\s*([^;]+);", _rule(".scope-menu"))
+    assert cap, "il tetto del pannello e' sparito"
+    value = cap.group(1)
+    assert "var(--dock-height)" in value and "var(--scope-row)" in value, (
+        f"il tetto torna a ricalcolare a mano lo spazio dei suoi vicini: {value}"
+    )
+    assert not re.search(r"\b172px\b", value)
+    # E la somma non e' cambiata: 56 + 58 + 33 + 25 = 172.
+    subtracted = re.search(r"100vh -(.*)", value)
+    assert subtracted, f"lo spazio sottratto non parte piu' da 100vh: {value}"
+    numbers = [int(n) for n in re.findall(r"(\d+)px", subtracted.group(1))]
+    tokens = {
+        name: int(re.search(rf"--{name}:\s*(\d+)px", _css()).group(1))
+        for name in ("dock-height", "scope-row")
+    }
+    assert sum(numbers) + tokens["dock-height"] + tokens["scope-row"] == 172
+
+
 def test_only_the_project_list_scrolls() -> None:
     rule = _rule(".scope-menu-scroll")
     assert "overflow-y: auto" in rule

@@ -90,12 +90,11 @@ def discover_wikis(wikis_dir: Path) -> list[str]:
     return sorted(names)
 
 
-def read_wiki_scope(wiki_root: Path, name: str) -> str:
+def read_wiki_scope(wiki_root: Path) -> str:
     """One-line scope for a wiki, in priority order:
 
-    1. A `summary:` (or `scope:`) field in the instructions file's YAML
-       frontmatter of `AGENTS.md` (wikis created before the
-       rename — the explicit, stable source.
+    1. A `summary:` (or `scope:`) field in the YAML frontmatter of the wiki's
+       instructions file, `AGENTS.md` — the explicit, stable source.
     2. The first real bullet under "What this wiki covers:" in the `## Scope`
        section.
     3. A neutral fallback, so the registry is always generated deterministically.
@@ -106,13 +105,17 @@ def read_wiki_scope(wiki_root: Path, name: str) -> str:
     # copiato nel workspace e modificato dall'utente, non una libreria del
     # package. Il motivo e' lo stesso per cui la logica di scope qui sotto e'
     # gia' una seconda copia.
-    schema = next(
-        # Un nome solo, dal passo 7.5. La copia a mano resta (questo script gira
-        # sotto ``python_exec`` e non importa il package), ma la regola no.
-        (wiki_root / name for name in ("AGENTS.md",) if (wiki_root / name).is_file()),
-        None,
-    )
-    if schema is None:
+    #
+    # **Un nome solo**, dal passo 7.5: il ripiego su ``CLAUDE.md`` e' stato
+    # tolto perche' due nomi per lo stesso file sono due nomi da tenere
+    # allineati in ogni lettore, e i lettori sono quattro. Il nome vecchio resta
+    # noto a chi lo *rinomina* (``utils/wiki_migration.py``, a ogni avvio), a
+    # ``wiki_paths.wiki_id`` e a chi deve solo accorgersi che c'e' per non
+    # scriverci accanto un secondo file (``scaffold.py``). Nessuno di quelli
+    # legge uno scope. Quindi una wiki non ancora migrata dice
+    # «(no AGENTS.md)» — che e' la verita', e la finestra la chiude l'avvio dopo.
+    schema = wiki_root / "AGENTS.md"
+    if not schema.is_file():
         return "(no AGENTS.md)"
     text = schema.read_text(encoding="utf-8")
 
@@ -148,7 +151,7 @@ def read_wiki_scope(wiki_root: Path, name: str) -> str:
 def build_registry_lines(wikis_dir: Path) -> list[str]:
     lines = []
     for name in discover_wikis(wikis_dir):
-        scope = read_wiki_scope(wikis_dir / name, name)
+        scope = read_wiki_scope(wikis_dir / name)
         lines.append(f"- [[{name}/wiki/index|{name}]] — {scope}")
     if not lines:
         lines.append("*(no wikis yet — scaffold one with scaffold.py)*")

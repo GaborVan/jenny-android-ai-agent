@@ -24,6 +24,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from loguru import logger
 
 from jenny.agent.context import ContextBuilder
 from jenny.agent.memory import Consolidator, MemoryStore
@@ -94,6 +95,60 @@ class TestLaClassificazioneETernaria:
         assert is_personal_session_key(key) is (kind == "personal")
         assert is_project_session_key(key) is (kind == "project")
         assert is_internal_session_key(key) is (kind == "internal")
+
+    @pytest.mark.parametrize(
+        "key",
+        ["api:vision", "system", "review:20260823", "qualcosa-di-nuovo", "websocketx:y"],
+    )
+    def test_un_prefisso_non_registrato_non_e_personale(self, key):
+        """**T4.10.** Il residuo cade nel bucket prudente, non nel diario.
+
+        Prima di oggi ``session_kind`` era: interna se il prefisso e' registrato,
+        progetto se e' ``project:``, **personale tutto il resto**. Cioe' un kind
+        nuovo il cui prefisso qualcuno si dimenticasse di registrare finiva nel
+        solo bucket che Dream consuma (``MemoryStore.build_dream_prompt`` filtra
+        su ``is_personal_session_key``): il suo contenuto entrava in
+        ``MEMORY.md``, senza che nessuna riga dica da dove viene.
+
+        Ora la terza categoria e' una whitelist vera e il residuo e' ``internal``,
+        che e' il bucket "lavoro del sistema": non alimenta la memoria di lungo
+        periodo e non compare negli elenchi user-facing. Un kind legittimo nuovo
+        classificato cosi' si rompe **a vista** al primo giro; uno classificato
+        personale non si rompe affatto, scrive nel diario e non lo si scopre.
+        """
+        assert not is_personal_session_key(key)
+        assert session_kind(key) == "internal"
+
+    def test_la_whitelist_personale_e_la_conversazione_e_le_chiavi_di_prima(self):
+        """Chi *puo'* alimentare ``MEMORY.md``: la sessione unica e le legacy.
+
+        Le ``<canale>:<chat_id>`` non sono piu' sessioni, ma stanno scritte nelle
+        voci di ``history.jsonl`` di prima della sessione unica ed erano la
+        conversazione con l'utente: tenerle fuori dalla whitelist renderebbe
+        invisibile a Dream la storia gia' sul disco.
+        """
+        assert is_personal_session_key(PERSONAL)
+        assert is_personal_session_key("websocket:qualunque")
+        assert is_personal_session_key("telegram:12345")
+
+    def test_una_chiave_non_classificata_lo_dice(self):
+        """Fail-closed **e** ad alta voce: il silenzio era metà del difetto.
+
+        Il rifiuto non e' un'eccezione di proposito: ``session_kind`` gira anche
+        sul campo ``session_key`` delle voci di ``history.jsonl``, scritte da
+        versioni precedenti e modificabili a mano, e un'eccezione la' farebbe
+        cadere Dream e l'autocompaction su una riga vecchia. Resta il log.
+        """
+        from jenny.session import keys as keys_mod
+
+        keys_mod._UNCLASSIFIED_WARNED.discard("zzsconosciuto")
+        messages: list[str] = []
+        sink = logger.add(lambda m: messages.append(m.record["message"]), level="WARNING")
+        try:
+            assert session_kind("zzsconosciuto:1") == "internal"
+        finally:
+            logger.remove(sink)
+        assert any("zzsconosciuto:1" in m for m in messages), messages
 
     def test_un_progetto_non_e_ne_interno_ne_personale(self):
         """Il difetto che questa categoria esiste per chiudere.

@@ -144,6 +144,9 @@ export class JennyCompanion {
     wsManager.addEventListener('chat:message', this._onWsMessage);
     this._onChatSent = (e) => this._handleChatSent(e.detail);
     wsManager.addEventListener('chat:sent', this._onChatSent);
+    // Cambio di conversazione: v. `_releaseTrackedTurn`.
+    this._onChatSwitch = () => this._releaseTrackedTurn();
+    sessionManager.addEventListener('chat:switch', this._onChatSwitch);
 
     // Preferenze mascotte (Impostazioni → Personalizzazione): visibilità e
     // lato dello schermo, v. shared/mascot.js.
@@ -978,7 +981,10 @@ export class JennyCompanion {
   }
 
   _handleWsMessage(msg) {
-    const current = (sessionManager.currentKey || '').replace(/^websocket:/, '');
+    // La conversazione aperta, nella forma che portano i frame: la regola della
+    // conversione sta in un posto solo (`ws-manager.chatIdOf`), e deve essere la
+    // stessa con cui la chat decide cosa rendere.
+    const current = sessionManager.currentChatId;
     if (msg.chat_id && current && msg.chat_id !== current) return;
     if (this.mode === 'chat') {
       this._handleChatStream(msg);
@@ -1071,11 +1077,36 @@ export class JennyCompanion {
 
   _handleChatSent(detail) {
     if (this.mode !== 'chat') return;
-    const current = (sessionManager.currentKey || '').replace(/^websocket:/, '');
+    const current = sessionManager.currentChatId;
     if (detail?.chat_id && current && detail.chat_id !== current) return;
     this._turnActive = true;
     if (!this.el.classList.contains('out')) return; // docked: niente pensa visibile
     this._setAgentState('thinking'); // _syncArt -> think
+  }
+
+  /* Cambio di conversazione: la mascotte lascia il turno che stava seguendo.
+
+     Ne anima uno alla volta e resta sul proprio finché non si chiude
+     (`_trackedTurnMatches`): giusto contro un avviso proattivo che atterra in
+     mezzo, fatale al cambio di chat, perché il `turn_end` di quel turno lo
+     scarta il filtro sul `chat_id` qui sopra — non arriverà mai, e lei
+     resterebbe a pensare per sempre. È lo stesso incantesimo già visto quando
+     una consegna proattiva non emetteva `turn_end`, per un'altra porta.
+
+     Non "chiude" il turno: lo dimentica. Nessuna risposta da mostrare, nessuna
+     cronologia da invalidare — quella la ricarica la chat, che il thread lo
+     ridisegna da sé. */
+  _releaseTrackedTurn() {
+    this._turnActive = false;
+    this._pendingTurn = false;
+    this._streamTurnId = null;
+    this.awaiting = false;
+    if (this._replyTimer) {
+      clearTimeout(this._replyTimer);
+      this._replyTimer = null;
+    }
+    this._deltaBuffer = '';
+    this._setAgentState('idle');
   }
 
   /* Il turno che la mascotte sta seguendo.

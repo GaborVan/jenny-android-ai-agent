@@ -13,11 +13,11 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+from port_alloc import free_port
+
 from jenny.bus.events import OUTBOUND_META_SUBAGENT_STATUS, OutboundMessage
 from jenny.channels.websocket import WebSocketChannel, WebSocketConfig
 from jenny.webui.gateway_services import build_gateway_services
-
-_PORT = 29891
 
 _SNAPSHOT: dict[str, Any] = {
     "running": [{
@@ -56,7 +56,7 @@ def _channel(bus: Any = None) -> WebSocketChannel:
         "enabled": True,
         "allowFrom": ["*"],
         "host": "127.0.0.1",
-        "port": _PORT,
+        "port": free_port(),
         "path": "/ws",
         "websocketRequiresToken": False,
     }

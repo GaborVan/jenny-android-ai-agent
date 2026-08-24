@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+from loguru import logger
 
 from jenny import __version__
 from jenny.bus.events import OutboundMessage
@@ -100,11 +102,16 @@ BUILTIN_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
         "/gardener",
         "Run the gardener",
         (
-            "Turn this project's new journal lines into pages and update its map. Inside a "
-            "project it works on that one; elsewhere name it: '/gardener <project>'."
+            "Turn this project's new journal lines into pages and update its map — or, with "
+            "nothing new to promote, bring an oversized map back under its ceiling. Inside a "
+            "project it works on that one; elsewhere name it: '/gardener <project>'. Add "
+            "'settings' to read the periodic pass, or 'off' to stop it."
         ),
         "sprout",
-        "[project]",
+        # Corto di proposito: è il suggerimento accanto al comando nella palette,
+        # non la sua documentazione. Le forme per esteso stanno in
+        # ``_gardener_usage()``, che `/gardener settings` stampa in coda.
+        "[project|settings]",
     ),
     BuiltinCommandSpec(
         "/skill",
@@ -302,7 +309,13 @@ async def cmd_dream(ctx: CommandContext) -> OutboundMessage:
         # chiama il provider. Il ramo senza argomento resta intatto sotto.
         return await _dream_budget_command(ctx, args)
 
-    async def _run_dream():
+    from jenny.agent.dream_cycle import (
+        DREAM_ALREADY_RUNNING,
+        claim_dream_cycle,
+        release_dream_cycle,
+    )
+
+    async def _dream_cycle():
         async def _silent(*_args, **_kwargs):
             pass
 
@@ -490,7 +503,32 @@ async def cmd_dream(ctx: CommandContext) -> OutboundMessage:
             channel=msg.channel, chat_id=msg.chat_id, content=content,
         ))
 
-    asyncio.create_task(_run_dream())
+    async def _run_dream():
+        # Il ``finally`` sta **un livello fuori** dal lavoro, così non c'è un
+        # cammino dentro ``_dream_cycle`` che possa saltarlo: ritorno, eccezione e
+        # cancellazione passano tutti da qui. Una presa che resta presa spegnerebbe
+        # Dream fino al riavvio del processo, e in silenzio.
+        try:
+            await _dream_cycle()
+        finally:
+            release_dream_cycle()
+
+    # La presa si prende **qui**, sincrona, prima di ``create_task``: il corpo del
+    # task non parte fino al primo punto di sospensione, quindi controllarla là
+    # dentro lascerebbe passare due ``/dream`` di fila. E prendendola prima, la
+    # risposta immediata al comando può dire la verità invece di promettere
+    # "Dreaming..." a un ciclo che non partirà.
+    if not claim_dream_cycle():
+        return OutboundMessage(
+            channel=msg.channel, chat_id=msg.chat_id, content=DREAM_ALREADY_RUNNING,
+        )
+    try:
+        asyncio.create_task(_run_dream())
+    except BaseException:
+        # Se il task non arriva nemmeno a esistere, il suo ``finally`` non girerà:
+        # la presa va restituita qui o resta appesa a un ciclo che non c'è.
+        release_dream_cycle()
+        raise
     return OutboundMessage(
         channel=msg.channel, chat_id=msg.chat_id, content="Dreaming...",
     )
@@ -515,24 +553,101 @@ def _format_dream_review_note(outcome: "ReviewOutcome") -> str:
     che il suo prompt chiede esplicitamente — la conta come liberata. La frase
     lo dice, perché quel numero serve a tarare quei tre tetti e non a stimare
     quanto è dimagrito il disco.
+
+    E ``freed`` da solo **non basta a dire cosa è successo**: sono due domande
+    diverse, "quanto spazio" e "quali fatti", e la seconda è quella che l'utente
+    riconosce. Un review che sposta sei voci personali da ``USER.md``
+    all'archivio — cosa che ``dream_review.md`` autorizza esplicitamente —
+    poteva rispondere "nothing was freed" se nello stesso passaggio un altro
+    file era cresciuto: il numero era vero e la frase era falsa. Le degradazioni
+    hanno quindi una riga loro, sempre, con gli id da citare a ``recall``.
+
+    Terza notizia, e la sola su cui l'utente possa fare qualcosa subito: i
+    **rifiuti di budget rimasti aperti**. Una degradazione si ritrova con
+    ``recall``; una scrittura rifiutata non è in nessun file, e resta rifiutata a
+    ogni run finché il tetto non si alza o il file non si pota. Sta subito dopo la
+    riga dei caratteri perché è la sua *spiegazione*: "nothing was freed" con un
+    rifiuto aperto non è un run che non aveva niente da fare, è un run che non è
+    riuscito a farlo.
     """
     from jenny.agent.dream_review import STATUS_FAILED
 
     files = "MEMORY.md, USER.md, SOUL.md"
     if outcome.status == STATUS_FAILED:
-        return (
+        note = (
             "A memory review pass ran first but did not complete cleanly; "
             f"{outcome.freed:,} chars freed across {files}."
         )
-    if outcome.freed > 0:
-        return (
+    elif outcome.freed > 0:
+        note = (
             f"A memory review pass ran first and freed {outcome.freed:,} chars "
             f"across {files}."
         )
-    # Zero o negativo. Un review che non trova niente da potare è un esito
-    # valido — il suo prompt lo dice al modello — e il negativo è il caso in cui
-    # ha ristrutturato spostando testo *fra* i tre file misurati.
-    return f"A memory review pass ran first; nothing was freed across {files}."
+    else:
+        # Zero o negativo. Un review che non trova niente da potare è un esito
+        # valido — il suo prompt lo dice al modello — e il negativo è il caso in
+        # cui ha ristrutturato spostando testo *fra* i tre file misurati.
+        note = f"A memory review pass ran first; nothing was freed across {files}."
+    extra = [_format_dream_refusals(outcome), _format_dream_demotions(outcome)]
+    return " ".join([note, *(part for part in extra if part)])
+
+
+def _format_dream_refusals(outcome: "ReviewOutcome") -> str:
+    """Le scritture che il budget ha rifiutato e che non sono mai atterrate.
+
+    ``unresolved_refusals`` conta **contenuto**, non tentativi: un file rifiutato
+    e poi riscritto con dentro il fatto è stato recuperato e non arriva qui
+    (v. ``FileStates.record_write_refused``). Quel che resta è un fatto che non è
+    in nessun file, e nessuno degli altri numeri della nota lo dice — con lo
+    status ``no-change`` è indistinguibile da "non c'era niente da potare".
+
+    La frase dice il numero e la mossa, non la diagnosi: da qui non si sa *quale*
+    dei tre tetti ha rifiutato (l'esito porta un conteggio, non i percorsi), e
+    ``/dream budget`` è esattamente il comando che lo mostra. Non promette invece
+    quel che non può sapere: se il fatto era in viaggio da un file all'altro,
+    lo status è già ``failed`` e la riga sopra lo dice.
+    """
+    # ``getattr`` per la stessa ragione di ``memory_entries`` qui sopra: i doppi di
+    # ``run_dream_review`` nei test costruiscono l'esito a mano e non espongono
+    # tutti i campi. Il contratto vero non è affidato a questo default — lo fissa
+    # un test che fa girare ``run_dream_review`` davvero e legge la nota che ne
+    # esce, quindi un campo che sparisse dal dataclass farebbe rosso lì.
+    refused = getattr(outcome, "unresolved_refusals", 0)
+    if refused <= 0:
+        return ""
+    return (
+        f"{refused} write(s) were refused by their size budget and never landed — "
+        "`/dream budget` shows which file is full: raise its cap or prune it, then "
+        "run `/dream` again."
+    )
+
+
+# Quanti id di voci degradate si nominano nella risposta di `/dream`. Il tetto non
+# serve al costo — otto caratteri per id — ma a impedire che una passata patologica
+# trasformi la nota in un muro di hash. Oltre il tetto la via è comunque aperta:
+# ``recall`` senza argomenti elenca l'archivio intero dalla voce più recente, e le
+# voci di questa passata sono in testa a quell'elenco.
+_DEMOTIONS_NAMED_IN_NOTE = 10
+
+
+def _format_dream_demotions(outcome: "ReviewOutcome") -> str:
+    """Cosa il review ha spostato in archivio, e come richiamarlo.
+
+    Il numero da solo non è azionabile, e la reazione a "sei fatti in meno" senza
+    un modo di guardarli è la stessa che a una cancellazione — cioè l'effetto che
+    l'archivio esiste per non produrre. Gli id sono ciò che il tool ``recall``
+    accetta, quindi la frase è già l'istruzione.
+    """
+    ids = outcome.demoted_ids
+    if not ids:
+        return ""
+    shown = ids[:_DEMOTIONS_NAMED_IN_NOTE]
+    more = len(ids) - len(shown)
+    tail = f", and {more} more" if more else ""
+    return (
+        f"It also moved {len(ids)} fact(s) into `memory/archive/` instead of "
+        f"deleting them — ask me to recall {', '.join(shown)}{tail} to read them back."
+    )
 
 
 def _format_dream_no_input_message() -> str:
@@ -569,10 +684,14 @@ class _DreamBudgetField:
     """Un campo tarabile di ``DreamConfig``, con il vincolo che lo schema gli impone.
 
     ``minimum`` rispecchia il ``ge=`` dello schema e ``too_low`` è la frase che
-    l'utente legge quando lo sfora. Duplicare qui il vincolo non è ridondanza:
+    l'utente legge quando lo sfora. Duplicare qui il vincolo non è ridondanza, ma
+    non per la ragione che stava scritta qui: la prima stesura diceva che
     assegnare un valore fuori range dentro la callback di ``mutate`` alzerebbe un
-    ``ValidationError`` che risale come guasto di scrittura, indistinguibile da
-    un `config.json` non scrivibile, per quello che è solo un errore di battitura.
+    ``ValidationError``. Non lo alza. ``pydantic_compat.BaseModel.__setattr__``
+    inoltra a ``object.__setattr__`` per ogni campo noto **senza validare**
+    (``pydantic_compat/core.py``), quindi il valore fuori range viene *scritto* su
+    `config.json` e alza alla lettura successiva — cioè all'avvio dopo, addosso a
+    un utente che non sta più guardando. Il controllo qui è l'unico che esista.
     """
 
     attr: str
@@ -585,17 +704,46 @@ class _DreamBudgetField:
     measured: bool
 
 
-# Sotto questa cadenza il review pass smette di essere manutenzione e comincia a
-# cancellare. Un consiglio e non un vincolo: lo schema ammette ``ge=1``, che è
-# corretto in senso stretto (un review ogni run *è* una configurazione), e un
-# ``config.json`` scritto a mano è una scelta dell'utente. Ma è il solo numero di
-# questa feature che sotto soglia perde dati invece di limitarne la crescita, e
-# chi lo abbassa da chat deve leggere la misura prima di scoprirla dai file.
+# Sotto questa cadenza le passate di review cominciano a incontrarsi, e la
+# seconda arriva su un file che la prima ha già potato continuando a cercare cose
+# da togliere. Le misure, sul Titan 2:
 #
-# Sei e non dodici: dodici è il default e "sotto il default" non è un allarme.
-# Il difetto misurato è la passata *consecutiva*, e sotto sei run — con
-# ``interval_h`` al default, mezza giornata — le passate cominciano a incontrarsi.
-_REVIEW_CADENCE_ADVISED_FLOOR = 6
+#   * 2026-08-16 (``roadmap/memory-budget.md``): due passate di review, `USER.md`
+#     3.524 → 1.626 caratteri, "−31% on the second pass alone".
+#   * 2026-08-18 (``.agent/memory-plan.md``, difetto **D4**): "The review pass
+#     deletes real facts on a second consecutive forced pass — lost five entries:
+#     two open questions, a plan, a biographical detail and one insight; the
+#     ``[permanent]`` one survived. −564 bytes".
+#
+# **Dodici e non sei**, e la ragione è cambiata insieme al codice. Il sei
+# documentato nasceva dalla cancellazione: la fase 2 del piano l'ha chiusa —
+# ``make_entry_archiver`` è montato al confine di scrittura di tutti i tool di
+# Dream, e la verifica su device del 2026-08-19 (``reviewEveryRuns: 1``, due run,
+# dieci voci in ``memory/archive/``) dice "nothing was lost". Quindi sotto soglia
+# oggi non si perdono fatti: si spendono token, ogni run, senza nessuno a
+# guardare. Il numero che resta è quello che il piano tiene: *"keep
+# ``reviewEveryRuns`` at 12 and treat forced reviews as the rare path they are
+# meant to be"* (``.agent/memory-plan.md``), e scendere sotto dodici è l'item
+# **6.1**, deliberatamente non fatto — "no run has asked for it".
+#
+# Lo schema resta ``ge=1`` di proposito: un restore deve poter riscrivere
+# qualunque valore storico. Il pavimento vive qui, dove c'è una persona a cui
+# spiegarlo.
+_REVIEW_CADENCE_FLOOR = 12
+
+# La via d'uscita, e non è un ornamento: le misure di questo progetto si fanno
+# con ``reviewEveryRuns: 1`` (fase 2 verificata così, e l'item 6.1 dovrà farlo di
+# nuovo), e sul telefono non c'è una shell di root — se il comando rifiutasse
+# senza scampo, il protocollo di misura del progetto diventerebbe irraggiungibile
+# proprio dallo strumento nato per raggiungerlo.
+#
+# Una frase e non un ``--force``: un flag corto e convenzionale è esattamente ciò
+# che un modello aggiunge per essere d'aiuto, mentre questa è una frase in prima
+# persona che afferma qualcosa a nome dell'utente. Non rende la conferma
+# impossibile da emettere a un modello — nessun token stampato nel rifiuto lo
+# sarebbe — ma la sposta da "flag plausibile" a "asserzione riconoscibile", e
+# costa comunque **due turni**: il rifiuto prima, la frase dopo.
+_REVIEW_CADENCE_OVERRIDE = "i-accept-back-to-back-reviews"
 
 _DREAM_BUDGET_FIELDS: dict[str, _DreamBudgetField] = {
     "memory": _DreamBudgetField(
@@ -659,7 +807,43 @@ def _dream_usage() -> str:
         "- `/dream` — run memory consolidation now",
         "- `/dream budget` — show the current sizes, budgets, and review state",
         "- `/dream budget <memory|user|soul> <chars>` — set a size budget (`0` = measure only)",
-        "- `/dream budget review <runs>` — Dream runs between review passes (minimum 1)",
+        f"- `/dream budget review <runs>` — Dream runs between review passes "
+        f"(minimum {_REVIEW_CADENCE_FLOOR})",
+    ])
+
+
+def _review_cadence_refusal(value: int, *, override: str) -> str:
+    """Perché ``review`` sotto soglia non passa, e cosa si digita se si insiste.
+
+    Ritorna la stringa da mostrare, oppure ``""`` se la scrittura può procedere.
+    Chiamata **prima** di ``mutate``: un valore rifiutato non tocca il file e non
+    ruota il `.bak`.
+    """
+    if override and override.lower() != _REVIEW_CADENCE_OVERRIDE:
+        # Un terzo token sbagliato non si ignora: chi l'ha scritto voleva
+        # confermare, e mangiarselo in silenzio scriverebbe (o rifiuterebbe) senza
+        # dire che la conferma non è arrivata.
+        return (
+            f"`{override}` is not the confirmation phrase. To set a review cadence below "
+            f"{_REVIEW_CADENCE_FLOOR} runs the phrase is exactly "
+            f"`{_REVIEW_CADENCE_OVERRIDE}`.\n\n{_dream_usage()}"
+        )
+    if value >= _REVIEW_CADENCE_FLOOR or override:
+        return ""
+    return "\n\n".join([
+        f"A review cadence of {value} runs is below the floor of {_REVIEW_CADENCE_FLOOR}, "
+        "so `config.json` was not written.",
+        "Below it the review passes start landing on files a previous pass has already "
+        "pruned, and the pass keeps looking for things to remove. Measured on this device: "
+        "two passes took `USER.md` from 3,524 to 1,626 characters, 31% of it on the second "
+        "pass alone, and a forced pass removed five real entries — two open questions, a "
+        "plan, a biographical detail and one insight.",
+        "That no longer loses anything: every entry that leaves `USER.md` or "
+        "`memory/MEMORY.md` is archived under `memory/archive/` before the write lands. What "
+        "a faster cadence still costs is tokens, on every Dream run, unattended.",
+        "If you want it anyway — measuring on a real device is why this path exists — repeat "
+        f"the command with the confirmation phrase:\n\n`/dream budget review {value} "
+        f"{_REVIEW_CADENCE_OVERRIDE}`",
     ])
 
 
@@ -797,22 +981,16 @@ def _format_dream_budget_change(
     """Conferma di una scrittura, con il prima e il dopo."""
     if not field.measured:
         lines = [f"{field.label}: every {before} → every {after} {field.unit}."]
-        if field.attr == "review_every_runs" and after < _REVIEW_CADENCE_ADVISED_FLOOR:
-            # Scritto comunque — è una manopola dell'utente — ma detto, perché
-            # questo è l'unico numero della feature che sotto una certa soglia
-            # **cancella dati** invece di limitarne la crescita.
-            #
-            # Misurato il 2026-08-16 sul Titan 2: una prima passata di review è
-            # esemplare, la seconda di fila arriva a un file già potato e continua
-            # a cercare cose da togliere — sono finiti i fatti personali. Il
-            # prompt del review dichiara valido un run che non cambia niente, ma
-            # il modello obbedisce all'istruzione di rimpicciolire.
+        if field.attr == "review_every_runs" and after < _REVIEW_CADENCE_FLOOR:
+            # Qui si arriva solo con la frase di conferma già digitata, quindi la
+            # misura è già stata letta nel rifiuto: questa riga non la ripete, dice
+            # cosa resta acceso e come si torna indietro.
             lines.append(
-                f"Note: below {_REVIEW_CADENCE_ADVISED_FLOOR} runs the review pass starts "
-                "landing on files a previous pass has already pruned, and measured on this "
-                "device the second consecutive pass deletes personal facts rather than "
-                "redundancy. It is written — this is your call — but the safe range starts "
-                f"at {_REVIEW_CADENCE_ADVISED_FLOOR}."
+                f"Note: below {_REVIEW_CADENCE_FLOOR} runs the review passes land "
+                "back-to-back on files a previous pass has already pruned. Entries they "
+                "drop are archived under `memory/archive/`, so nothing is lost — but the "
+                "churn is paid on every Dream run. Back to the default with "
+                f"`/dream budget review {_REVIEW_CADENCE_FLOOR}`."
             )
         return "\n".join(lines)
     lines = [f"`{field.label}` budget: {before:,} → {after:,} {field.unit}."]
@@ -856,6 +1034,13 @@ async def _dream_budget_command(ctx: CommandContext, args: str) -> OutboundMessa
     rest = parts[1:]
     if len(rest) == 1:
         return reply(f"`/dream budget {rest[0]}` is missing a value.\n\n{_dream_usage()}")
+    # Un terzo token lo accetta solo `review`, ed è la frase di conferma del
+    # pavimento di cadenza. Staccato qui e non dentro il ramo perché il resto del
+    # comando resta a due argomenti esatti.
+    override = ""
+    if len(rest) == 3 and rest[0].lower() == "review":
+        override = rest[2]
+        rest = rest[:2]
     if len(rest) > 2:
         return reply(
             "`/dream budget` takes at most a name and a value.\n\n" + _dream_usage()
@@ -899,6 +1084,10 @@ async def _dream_budget_command(ctx: CommandContext, args: str) -> OutboundMessa
         value, error = _parse_dream_budget_value(rest[1], name, field)
         if value is None:
             return reply(error)
+        if field.attr == "review_every_runs":
+            refusal = _review_cadence_refusal(value, override=override)
+            if refusal:
+                return reply(refusal)
 
         # ``before`` lo cattura la callback e non la config letta qui sopra:
         # ``mutate`` rilegge il file dentro il proprio lock, quindi solo lì il
@@ -1005,12 +1194,19 @@ async def cmd_gardener(ctx: CommandContext) -> OutboundMessage:
     (delta, trenta minuti di fermo, sei ore di distanza) rendono la strada
     naturale impossibile da percorrere in una sessione di prova, ed è la stessa
     ragione per cui ``/atlas`` e ``/dream`` esistono.
+
+    Con una delle parole riservate al posto del nome del progetto (v.
+    ``_GARDENER_SETTINGS_WORDS``) il comando non lancia niente e tara la passata
+    periodica: quel ramo risponde nello stesso turno, come `/dream budget`.
     """
     from jenny.session.keys import PROJECT_SESSION_PREFIX, is_project_session_key
 
     loop = ctx.loop
     msg = ctx.msg
     named = ctx.args.strip()
+    parts = named.split()
+    if parts and parts[0].lower() in _GARDENER_SETTINGS_WORDS:
+        return await _gardener_settings_command(ctx, parts)
     if named:
         target = named
     elif is_project_session_key(ctx.key):
@@ -1073,6 +1269,26 @@ def _format_gardener_outcome(name: str, outcome: "GardenerOutcome") -> str:
     comando che risponde "fatto" senza aver fatto niente è peggio di uno che dice
     perché — e qui i modi di non fare niente sono tre, e vogliono dire cose molto
     diverse.
+
+    Ai modi di non fare niente si aggiungono due modi di farlo **a metà**
+    (``partial_write``, ``commit_failed``), e sono i due che vanno detti con più
+    cura: le pagine sono su disco ma il diario è rimasto da rileggere. Senza un
+    ramo proprio cadevano nel fondo, cioè si raccontavano come un fallimento —
+    che è falso — e la frase di ``no_write`` («finished without writing») sarebbe
+    falsa allo stesso modo, al contrario.
+
+    Poi ci sono i due esiti che non parlano del lavoro ma di **chi altro c'era**.
+    ``already_running`` è una passata che non è partita perché un'altra era in
+    volo sullo stesso progetto; ``aborted_user_active`` è una passata che si è
+    fermata perché l'utente è tornato su quel progetto mentre scriveva — e questa
+    ha bisogno di una frase sua per la stessa ragione delle due a metà: può avere
+    lasciato pagine su disco, quindi «finished without writing» sarebbe falso.
+
+    Infine, **trasversale a quasi tutti**, la passata girata per la mappa
+    (``outcome.map_pass``, T3.5): lì le righe di diario sono zero per costruzione, e
+    ogni frase che le conta diventa falsa. Il ramo sta **prima** di tutti gli esiti
+    che le nominano, e resta fuori solo per i due che parlano d'altro
+    (``failed``/``incomplete``). V. ``_gardener_map_pass_line``.
     """
     elapsed = f"{outcome.elapsed:.1f}s"
     if outcome.status == "skipped_no_delta":
@@ -1080,6 +1296,8 @@ def _format_gardener_outcome(name: str, outcome: "GardenerOutcome") -> str:
             f"Nothing new in {name}'s journal since the last pass, so there was nothing to "
             "promote — no tokens spent."
         )
+    if outcome.map_pass and outcome.status not in ("failed", "incomplete"):
+        return _gardener_map_pass_line(name, outcome, elapsed)
     if outcome.status == "written":
         return (
             f"The gardener read {outcome.lines} journal lines in {name} and wrote "
@@ -1090,6 +1308,30 @@ def _format_gardener_outcome(name: str, outcome: "GardenerOutcome") -> str:
             f"The gardener read {outcome.lines} journal lines in {name} in {elapsed} and "
             "judged that none of them earned a page. The journal is marked as read."
         )
+    if outcome.status == "partial_write":
+        return (
+            f"The gardener wrote {outcome.writes} pages in {name} in {elapsed}, but some writes "
+            "were refused, so the journal was left unread — the next pass will see those lines "
+            "again."
+        )
+    if outcome.status == "commit_failed":
+        return (
+            f"The gardener wrote {outcome.writes} pages in {name} in {elapsed}, but could not "
+            f"record how far it had read: {outcome.detail}. The pages are on disk and the "
+            "journal was left unread, so the next pass will see those lines again."
+        )
+    if outcome.status == "aborted_user_active":
+        return (
+            f"You came back to {name} while the gardener was working there, so it stood down "
+            f"after {elapsed} rather than write over you ({outcome.writes} pages had already "
+            "landed). The journal was left unread, so the next pass will see those lines again."
+        )
+    if outcome.status == "already_running":
+        return (
+            f"A pass on {name} is already running, so this one did not start — the gardener "
+            "works on one project one pass at a time, or two passes overwrite each other's "
+            "pages. Try again once it has finished."
+        )
     if outcome.status == "no_write":
         return (
             f"The gardener finished in {elapsed} without writing (attempts blocked or refused); "
@@ -1098,6 +1340,480 @@ def _format_gardener_outcome(name: str, outcome: "GardenerOutcome") -> str:
     if outcome.status == "incomplete":
         return f"The gardener did not finish after {elapsed}; nothing was changed."
     return f"The gardener failed after {elapsed}: {outcome.detail}"
+
+
+def _gardener_map_pass_line(name: str, outcome: "GardenerOutcome", elapsed: str) -> str:
+    """Messaggio di una passata girata **per la mappa** e non per il diario.
+
+    Serve un ramo suo perché tutte le frasi qui sopra contano righe di diario, e su
+    una passata così sono zero: «read 0 journal lines and judged that none of them
+    earned a page» è la risposta di un comando che ha smesso di dire la verità. Il
+    numero che questa passata esiste per muovere è un altro, e va detto.
+
+    E va detto anche il **freno**: la mappa che resta sopra il tetto non si
+    ritenta, perché una ragione che resta vera dopo la passata è un livelock (v.
+    ``GardenerState.map_left_at``). Un utente che rilancia il comando e non vede
+    partire niente deve poter sapere perché da qui, non dai log di un telefono.
+    """
+    from jenny.agent.gardener import MAP_TARGET_CHARS
+
+    lede = f"Nothing new in {name}'s journal, so the gardener went in for the map alone"
+    if outcome.map_after < outcome.map_before:
+        moved = (
+            f"`wiki/index.md` went from {outcome.map_before} to {outcome.map_after} characters "
+            f"in {elapsed}, against a ceiling of {MAP_TARGET_CHARS}"
+        )
+        if outcome.map_after <= MAP_TARGET_CHARS:
+            return f"{lede}: {moved} — it fits now, so every turn sees all of it again."
+        return (
+            f"{lede}: {moved} — still over, and it will not be tried again until the map grows "
+            "past that."
+        )
+    return (
+        f"{lede}, and after {elapsed} it is still {outcome.map_after} characters against a "
+        f"ceiling of {MAP_TARGET_CHARS}: nothing was moved out of it. It will not be tried "
+        "again until the map grows past that."
+    )
+
+
+# ---------------------------------------------------------------------------
+# /gardener settings — leggere e tarare la passata periodica
+# ---------------------------------------------------------------------------
+#
+# Prima di questo blocco niente in ``jenny/webui/`` o ``jenny/command/`` leggeva o
+# scriveva ``agents.defaults.gardener``, e la conseguenza non era "una manopola
+# scomoda": ``enabled=False`` — la via d'uscita documentata, e la ragione per cui
+# esiste il cancello di dispatch in ``CronDispatcher._run_gardener`` — non era
+# raggiungibile da nessuna superficie. L'unico modo di spegnere il giardiniere era
+# una shell di root sul telefono, e ``compactProjectsWhenIdle`` ci era arrivato
+# così: scritto a mano fuori da ``store.mutate()``, e spento con un ``sed -i`` che
+# ha rotto l'etichetta SELinux del file.
+
+
+@dataclass(frozen=True)
+class _GardenerNumber:
+    """Un numero tarabile della passata periodica.
+
+    Il range **non** è duplicato qui: lo si legge da
+    ``GardenerConfig.model_fields`` (v. :func:`_gardener_range`), perché un range
+    scritto due volte diventa due range appena uno dei due si muove — ed è
+    esattamente ciò che questo comando racconta all'utente nei suoi rifiuti.
+
+    ``attr`` è il campo di ``GardenerConfig``; ``means`` è la riga della vista di
+    lettura; ``out_of_range`` è la frase di chi ha appena sforato, che deve dire
+    *perché* quel tetto e quale sia l'alternativa reversibile; ``effect`` traduce
+    il valore appena scritto in quel che cambia.
+    """
+
+    attr: str
+    label: str
+    unit: str
+    usage: str
+    means: str
+    out_of_range: str
+    effect: Callable[[int], str]
+
+
+def _gardener_range(attr: str) -> tuple[int, int]:
+    """Il range che lo schema impone a *attr*, letto dallo schema stesso."""
+    from jenny.config.schema import GardenerConfig
+
+    finfo = GardenerConfig.model_fields[attr]
+    return int(finfo.ge or 0), int(finfo.le or 0)
+
+
+def _interval_effect(value: int) -> str:
+    return f"It now looks for a project to garden every {value}min."
+
+
+def _idle_effect(value: int) -> str:
+    if value == 0:
+        return (
+            "A pass will now start even while you are talking in that project — it can "
+            "promote half of a conversation, and rewrite the map under you while you read it."
+        )
+    return f"A pass now waits for {value}min of silence in that project's conversation."
+
+
+def _distance_effect(value: int) -> str:
+    if value == 0:
+        return (
+            "It can now come back to the same project immediately. That is the measured "
+            "failure mode of Dream written as a number: a second close pass on one subject "
+            "reworks what the first wrote instead of adding to it."
+        )
+    return f"It now waits {value}h before coming back to the same project."
+
+
+_GARDENER_NUMBERS: dict[str, _GardenerNumber] = {
+    "interval": _GardenerNumber(
+        attr="interval_min",
+        label="Interval",
+        unit="min",
+        usage="how often it looks for work",
+        means=(
+            "how often it looks for work. A tick that finds nothing spends no tokens, so "
+            "looking often is cheap — what decides is the silence below"
+        ),
+        out_of_range=(
+            "The interval must be between {low} and {high} minutes. Zero would be a tick with "
+            "no gap; past a day the periodic pass has stopped being periodic, and "
+            "`/gardener off` is the reversible way to say never."
+        ),
+        effect=_interval_effect,
+    ),
+    "idle": _GardenerNumber(
+        attr="idle_min",
+        label="Required silence",
+        unit="min",
+        usage="silence required in that project before a pass",
+        means=(
+            "how long that project's conversation must have been silent before a pass starts. "
+            "The gardener works on cold material; `0` lets it in while you are talking"
+        ),
+        out_of_range=(
+            "The required silence must be between {low} and {high} minutes. Past a day no "
+            "live project ever reaches it, which is an off switch in disguise — "
+            "`/gardener off` says that reversibly, and says it where you can read it."
+        ),
+        effect=_idle_effect,
+    ),
+    "distance": _GardenerNumber(
+        attr="min_hours_between_passes",
+        label="Distance between passes",
+        unit="h",
+        usage="minimum gap between two passes on one project",
+        means=(
+            "how long before it comes back to the same project. Per project, because the "
+            "degradation it guards against is per subject"
+        ),
+        out_of_range=(
+            "The distance must be between {low} and {high} hours (a year). Past that it no "
+            "longer means distance, it means never — and `/gardener off` says never "
+            "reversibly."
+        ),
+        effect=_distance_effect,
+    ),
+}
+
+# Le parole che al posto del nome di un progetto significano "non lanciare niente".
+# Un progetto che si chiamasse davvero così viene oscurato, e la lista di
+# ``_gardener_usage`` lo dice: il rimedio è ``/gardener`` da dentro il progetto,
+# che non passa dal nome.
+_GARDENER_SETTINGS_WORDS = ("settings", "off", "on", "compact", *_GARDENER_NUMBERS)
+
+
+def _gardener_usage() -> str:
+    """Le forme valide del comando, con i range dentro.
+
+    In coda alla vista di lettura e a ogni rifiuto, non alle conferme: è l'unico
+    posto in cui si scopre che ``distance`` e ``compact`` esistono, e chi ha appena
+    sbagliato la sintassi ne ha bisogno. Chi ha appena scritto un valore no.
+    """
+    lines = [
+        "Valid forms:",
+        "- `/gardener` — run a pass on this project now",
+        "- `/gardener <project>` — run a pass on a named project",
+        "- `/gardener settings` — show what the periodic pass is set to",
+        "- `/gardener off` / `/gardener on` — stop or start the periodic pass",
+    ]
+    for name, field in _GARDENER_NUMBERS.items():
+        low, high = _gardener_range(field.attr)
+        lines.append(
+            f"- `/gardener {name} <{field.unit}>` — {field.usage} ({low}–{high})"
+        )
+    lines.extend([
+        "- `/gardener compact on|off` — archive a project's chat history once it goes idle",
+        "",
+        "A project actually named `"
+        + "`, `".join(_GARDENER_SETTINGS_WORDS)
+        + "` is shadowed by these forms; `/gardener` from inside it still works.",
+    ])
+    return "\n".join(lines)
+
+
+def _gardener_off_line() -> str:
+    """Cosa resta possibile a giardiniere spento. Detto ogni volta che si spegne.
+
+    Spegnere non è disinstallare, e un utente che legge solo "off" non ha modo di
+    saperlo: la strada a mano è precisamente quella che ha reso collaudabile la
+    feature, e resta aperta.
+    """
+    return (
+        "The periodic pass will not run; `/gardener` and `/gardener <project>` still work "
+        "by hand."
+    )
+
+
+def _format_gardener_settings(cfg: Any, compact_projects: bool) -> str:
+    """Vista di lettura: com'è tarata la passata periodica, adesso.
+
+    ``/gardener`` senza argomento **lancia una passata**, quindi la lettura ha
+    bisogno di una parola sua: un comando che scrive dei numeri e non ha modo di
+    rileggerli manda l'utente a cercarli in `config.json`, che è il problema da cui
+    è nato questo blocco.
+    """
+    if cfg.enabled:
+        head = f"**On** — {cfg.describe_schedule()}."
+    else:
+        head = f"**Off** — {_gardener_off_line()}"
+    lines = ["## Gardener", "", head, ""]
+    for name, field in _GARDENER_NUMBERS.items():
+        low, high = _gardener_range(field.attr)
+        value = int(getattr(cfg, field.attr))
+        lines.append(
+            f"- `{name}` — {value} {field.unit} ({low}–{high}): {field.means}."
+        )
+    lines.extend(["", _format_compact_projects_state(compact_projects), "", _gardener_usage()])
+    return "\n".join(lines)
+
+
+def _format_compact_projects_state(enabled: bool) -> str:
+    """Stato di ``compactProjectsWhenIdle``, con cosa costa e cosa no.
+
+    Sta nella vista del giardiniere perché è la stessa decisione vista dall'altro
+    lato: il recinto che tiene la cronologia di un progetto si può togliere quando
+    la verità sta nelle pagine, e chi le pagine le produce è il giardiniere.
+    """
+    if enabled:
+        return (
+            "Project history compaction: **on** — a project's conversation is archived once "
+            "it goes idle, like the personal one. The agent then has in context what was "
+            "*written* in the wiki, not what was said. The visible transcript is untouched, "
+            "so a person can still read back: the amnesia is the agent's, not the record's."
+        )
+    return (
+        "Project history compaction: **off** — a project's conversation is never archived "
+        "for sitting idle. It can sit for three weeks and pick up where it was."
+    )
+
+
+# Il flag di P4 si legge quando l'agente si costruisce (``AgentLoop`` lo passa ad
+# ``AutoCompact``), quindi scriverlo non lo applica al processo in corso. Detto,
+# non taciuto: una manopola che sembra fatta e non è fatta è peggio di una che
+# dichiara quando ha effetto.
+_COMPACT_TAKES_EFFECT = (
+    "This one is read when the agent starts, so it takes effect from the next gateway start."
+)
+
+
+def _parse_gardener_value(raw: str, name: str, field: _GardenerNumber) -> tuple[int | None, str]:
+    """Interpreta il valore richiesto, o spiega perché non si può.
+
+    Ritorna ``(valore, "")`` oppure ``(None, messaggio)``. Nel secondo caso il
+    chiamante **non entra in** ``mutate``: un input sbagliato non tocca il file,
+    non ruota il `.bak` e non prende il lock.
+
+    Il rifiuto vive qui e non nello schema per una ragione asimmetrica: lo schema
+    deve poter *leggere* qualunque valore storico — un ``le=`` che boccia manda in
+    quarantena il `config.json` di chi aggiorna (v. ``GardenerConfig.clamp_raw``) —
+    mentre un numero appena battuto a mano non ha nessuna storia da rispettare.
+    Lo schema è il tetto di ciò che può esistere, il comando è il tetto di ciò che
+    si può chiedere.
+    """
+    low, high = _gardener_range(field.attr)
+    try:
+        value = int(raw)
+    except ValueError:
+        return None, (
+            f"`{raw}` is not a whole number.\n\n"
+            f"Usage: `/gardener {name} <{field.unit}>`\n\n"
+            f"{_gardener_usage()}"
+        )
+    if not low <= value <= high:
+        return None, f"{field.out_of_range.format(low=low, high=high)}\n\n{_gardener_usage()}"
+    return value, ""
+
+
+def _rearm_gardener_job(ctx: CommandContext, saved: Any) -> str | None:
+    """Fa vedere al cron la pianificazione appena scritta, senza riavvio.
+
+    ``interval_min`` non vive nel ``Config`` letto a ogni tick: è diventato lo
+    ``schedule`` del ``CronJob`` nello store del cron. E su un gateway partito col
+    giardiniere spento il job non è nemmeno registrato, quindi ``/gardener on``
+    scriverebbe un ``enabled=True`` che nessuno va a leggere. Entrambi i casi li
+    chiude ``refresh_gardener_job``.
+
+    Ritorna la pianificazione armata, o ``None``: senza servizio cron in mano — un
+    test, un loop costruito a parte — non c'è niente da riarmare, e non è un
+    errore.
+    """
+    cron = getattr(ctx.loop, "cron_service", None)
+    if cron is None:
+        return None
+    from jenny.runtime.cron_dispatch import refresh_gardener_job
+
+    try:
+        return refresh_gardener_job(cron, config=saved)
+    except Exception as e:  # noqa: BLE001 — il valore è scritto: questo è il contorno
+        logger.warning("Could not re-arm the gardener cron job: {}", e)
+        return None
+
+
+async def _gardener_settings_command(ctx: CommandContext, parts: list[str]) -> OutboundMessage:
+    """Gestisci ``/gardener settings|off|on|interval|idle|distance|compact``."""
+    metadata = {**dict(ctx.msg.metadata or {}), "render_as": "text"}
+
+    def reply(content: str) -> OutboundMessage:
+        return OutboundMessage(
+            channel=ctx.msg.channel, chat_id=ctx.msg.chat_id,
+            content=content, metadata=metadata,
+        )
+
+    word = parts[0].lower()
+    rest = parts[1:]
+    try:
+        if word in ("settings", "off", "on"):
+            if rest:
+                return reply(
+                    f"`/gardener {word}` takes no value.\n\n{_gardener_usage()}"
+                )
+            if word == "settings":
+                return reply(await _gardener_settings_view())
+            return reply(await _set_gardener_enabled(ctx, word == "on"))
+        if word == "compact":
+            return reply(await _set_compact_projects(rest))
+        field = _GARDENER_NUMBERS[word]
+        if not rest:
+            return reply(f"`/gardener {word}` is missing a value.\n\n{_gardener_usage()}")
+        if len(rest) > 1:
+            return reply(f"`/gardener {word}` takes one value.\n\n{_gardener_usage()}")
+        value, error = _parse_gardener_value(rest[0], word, field)
+        if value is None:
+            return reply(error)
+        return reply(await _set_gardener_number(ctx, word, field, value))
+    except Exception as e:
+        # Come ``/dream budget``: un comando che muore in silenzio lascia la chat
+        # senza risposta. Se a sollevare è stata ``mutate``, il file non è stato
+        # scritto — la sua callback o completa o non salva.
+        return reply(f"Could not read or write the gardener settings: {e}")
+
+
+async def _gardener_settings_view() -> str:
+    from jenny.config.loader import load_config
+
+    config = load_config()
+    return _format_gardener_settings(
+        config.agents.defaults.gardener,
+        config.agents.defaults.compact_projects_when_idle,
+    )
+
+
+async def _set_gardener_enabled(ctx: CommandContext, enabled: bool) -> str:
+    """``/gardener off`` e ``/gardener on``.
+
+    ``off`` è la via d'uscita, e deve funzionare anche da una config che lo schema
+    di oggi boccerebbe: chi ha un ``intervalMin`` fuori range scritto da una
+    versione precedente passa comunque da qui, perché ``GardenerConfig.clamp_raw``
+    riporta quei numeri dentro i tetti al parse invece di far fallire la lettura.
+    Senza quella clemenza ``mutate`` rileggerebbe un file in quarantena e questa
+    scrittura ripartirebbe dai default, cioè lo spegnimento cancellerebbe il
+    provider.
+    """
+    from jenny.config import store as config_store
+
+    seen: dict[str, bool] = {}
+
+    def _apply(config) -> bool:
+        cfg = config.agents.defaults.gardener
+        seen["before"] = bool(cfg.enabled)
+        if cfg.enabled == enabled:
+            # ``False``: il file non viene toccato e il `.bak` non ruota per nulla.
+            return False
+        cfg.enabled = enabled
+        return True
+
+    saved = await config_store.mutate(_apply)
+    cfg = saved.agents.defaults.gardener
+    if seen.get("before") == enabled:
+        state = "on" if enabled else "off"
+        return (
+            f"The gardener is already {state}; `config.json` was not rewritten."
+        )
+    if not enabled:
+        return f"The gardener is off. {_gardener_off_line()}"
+    lines = [f"The gardener is on: {cfg.describe_schedule()}."]
+    if _rearm_gardener_job(ctx, saved):
+        lines.append("The periodic job is armed for that schedule now — no restart needed.")
+    return "\n".join(lines)
+
+
+async def _set_gardener_number(
+    ctx: CommandContext, name: str, field: _GardenerNumber, value: int
+) -> str:
+    """Scrive uno dei tre numeri e dice cosa cambia."""
+    from jenny.config import store as config_store
+
+    # ``before`` lo cattura la callback e non una config letta prima: ``mutate``
+    # rilegge il file dentro il proprio lock, quindi solo lì il valore corrente è
+    # quello vero al momento della scrittura.
+    seen: dict[str, int] = {}
+
+    def _apply(config) -> bool:
+        cfg = config.agents.defaults.gardener
+        before = int(getattr(cfg, field.attr))
+        seen["before"] = before
+        if before == value:
+            return False
+        setattr(cfg, field.attr, value)
+        return True
+
+    saved = await config_store.mutate(_apply)
+    before = seen.get("before", value)
+    if before == value:
+        return (
+            f"{field.label} is already {value} {field.unit}; "
+            "`config.json` was not rewritten."
+        )
+    lines = [
+        f"{field.label}: {before} → {value} {field.unit}.",
+        field.effect(value),
+    ]
+    cfg = saved.agents.defaults.gardener
+    if not cfg.enabled:
+        # Scritto comunque — è un numero della passata periodica anche mentre è
+        # ferma — ma un utente che tara una cosa spenta e non vede effetti deve
+        # sapere da qui che manca l'interruttore, non dai log di un telefono.
+        lines.append(
+            "Note: the gardener is off, so nothing is looking. `/gardener on` starts it."
+        )
+    elif field.attr == "interval_min" and _rearm_gardener_job(ctx, saved):
+        lines.append("The periodic job is armed on the new interval now — no restart needed.")
+    return "\n".join(lines)
+
+
+async def _set_compact_projects(rest: list[str]) -> str:
+    """``/gardener compact on|off`` — l'interruttore di P4, il più pesante dei due.
+
+    Non è un campo di ``GardenerConfig`` (sta in ``agents.defaults``), ma è la
+    stessa decisione vista dall'altro lato, e soprattutto è **il valore che è
+    arrivato acceso sul device passando fuori da** ``store.mutate()``. Averlo qui è
+    il rimedio a quella classe di incidente: la strada a mano era un ``sed -i`` che
+    ha rotto l'etichetta SELinux del file.
+    """
+    from jenny.config import store as config_store
+
+    if len(rest) != 1 or rest[0].lower() not in ("on", "off"):
+        return f"`/gardener compact` needs `on` or `off`.\n\n{_gardener_usage()}"
+    enabled = rest[0].lower() == "on"
+    seen: dict[str, bool] = {}
+
+    def _apply(config) -> bool:
+        defaults = config.agents.defaults
+        seen["before"] = bool(defaults.compact_projects_when_idle)
+        if defaults.compact_projects_when_idle == enabled:
+            return False
+        defaults.compact_projects_when_idle = enabled
+        return True
+
+    await config_store.mutate(_apply)
+    if seen.get("before") == enabled:
+        state = "on" if enabled else "off"
+        return (
+            f"Project history compaction is already {state}; "
+            "`config.json` was not rewritten."
+        )
+    return f"{_format_compact_projects_state(enabled)}\n\n{_COMPACT_TAKES_EFFECT}"
 
 
 _HISTORY_DEFAULT_COUNT = 10

@@ -18,6 +18,12 @@ There is no in-app "new wiki" form: everything starts as a chat request.
 
 The one thing that *does* happen on its own is the reverse direction: a background job called **Atlas** reads your wikis every 12 hours and compiles a short directory of them into `memory/WIKI.md`, which Jenny loads at the start of every conversation. It never writes to the wiki — it only reads it. See [Atlas](./memory.md#atlas-the-wiki-side-of-memory).
 
+## Wikis and projects
+
+Everything on this page describes a wiki as something you *ask* Jenny to build and maintain. There is a second way to work with one: open it as a **[project](./projects.md)** from the chip above the message box. A project is a wiki — the same folder, the same pages, the same graph — but the conversation is bound to it, its map and pages are put in front of Jenny on every turn, facts you mention are captured into a journal inside it, and a background pass (the [gardener](./gardener.md)) turns those journal lines into pages between conversations.
+
+So the two views are not alternatives: a wiki you created by asking can be opened as a project tomorrow, and a project you created from the chip appears in the Wiki tab immediately.
+
 ## Multiple wikis
 
 You can have more than one wiki side by side — for example, one about a research topic and a separate one for a hobby project. Each one lives under `workspace/wikis/<name>/`, entirely isolated from the others; Jenny works on one wiki root at a time and won't mix content across them unless you ask it to. A top-level `wikis/_index.md` file lists all of them.
@@ -99,6 +105,8 @@ A config key, `wiki.enabled` (default `true`), can disable the wiki backend enti
 
 ## See also
 
+- [Projects](projects.md) — opening a wiki as a conversation: capture, the map, and the write boundary.
+- [The gardener](gardener.md) — the pass that maintains a project's pages on its own.
 - [Tour of the WebUI](webui-tour.md) — overall navigation, dock, and tab layout.
 - [Backup and restore](backup.md) — wiki content is part of your regular workspace backup.
 - [Phone app launcher](app-launcher.md) — the other under-documented corner of the Apps tab.

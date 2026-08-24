@@ -45,16 +45,41 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # ``project:`` sta nello stesso insieme e non in uno a parte: chi classifica una
 # session key deve chiedere a ``keys.py``, e la domanda è una sola quale che sia
 # la categoria che gli interessa.
+#
+# **Esteso al lato personale** con T4.10 (2026-08-23): da quando ``personal`` è
+# una whitelist e non il residuo, i suoi membri — la sessione unica e i prefissi
+# dei canali legacy — sono vocabolario di classificazione come gli altri, e
+# ricopiarseli ha lo stesso costo di prima al contrario (una copia che dimentica
+# le legacy fa sparire a Dream la storia già sul disco).
 VOCABULARY = frozenset(
-    {"subagent:", "cron:", "dream:", "atlas:", "internal:", "heartbeat", "project:"}
+    {
+        "subagent:",
+        "cron:",
+        "dream:",
+        "atlas:",
+        "gardener:",
+        "internal:",
+        "heartbeat",
+        "project:",
+        "unified:default",
+        "websocket:",
+        "telegram:",
+    }
 )
 
 # Chi può nominarne quanti vuole: il modulo canonico (è la sua definizione) e
 # questo file (l'insieme qui sopra è il dato del test, non una quinta copia).
+#
+# ``test_keys.py`` è il terzo, e per una ragione scritta nella sua docstring: il
+# suo mestiere è **inchiodare i valori letterali**, perché sono persistiti nei
+# file di sessione su disco. Nomina ``"unified:default"`` e ``"dream:"`` in
+# posizione di confronto per dire "questa stringa non deve cambiare", che è
+# l'opposto di ricopiarsi la partizione.
 EXEMPT = frozenset(
     {
         Path("jenny/session/keys.py"),
         Path("tests/session/test_internal_key_vocabulary.py"),
+        Path("tests/session/test_keys.py"),
     }
 )
 
@@ -166,3 +191,32 @@ class TestInternalKeyVocabulary:
     def test_sweep_covers_the_whole_tree(self):
         """Guardia sulla guardia: se lo sweep smette di trovare file, si accorge."""
         assert len(_sources()) > 300
+
+    def test_the_swept_vocabulary_is_the_registered_one(self):
+        """``VOCABULARY`` è un dato scritto a mano: qui si controlla che sia aggiornato.
+
+        **Era già stale.** ``gardener:`` è registrato in
+        ``_INTERNAL_KIND_BY_PREFIX`` da quando il giardiniere esiste e non era in
+        questo insieme: lo sweep non l'ha mai cercato, quindi un modulo che si
+        ricopiasse ``("cron:", "gardener:")`` sarebbe passato con un membro solo
+        visto su due. È il difetto tipico di un elenco a mano che difende un
+        elenco a mano, e si chiude derivandone uno dall'altro.
+
+        Il verso è uno solo: ogni membro *registrato* deve essere spazzato. Il
+        contrario no — ``"websocket:"`` e ``"telegram:"`` sono prefissi legacy che
+        il modulo tiene in una tupla a parte, e la whitelist personale nomina
+        ``unified:default`` per uguaglianza.
+        """
+        from jenny.session import keys
+
+        registered = (
+            {prefix for prefix, _ in keys._INTERNAL_KIND_BY_PREFIX}
+            | set(keys._INTERNAL_KIND_BY_KEY)
+            | set(keys._PERSONAL_SESSION_KEYS)
+            | set(keys._LEGACY_CHANNEL_KEY_PREFIXES)
+            | {keys.PROJECT_SESSION_PREFIX}
+        )
+        assert registered <= VOCABULARY, (
+            "questi membri sono registrati in jenny.session.keys ma lo sweep non li "
+            f"cerca: {sorted(registered - VOCABULARY)}"
+        )

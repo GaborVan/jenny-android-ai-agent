@@ -71,13 +71,16 @@ tags: [relevant tags]
 
 ## Current articles
 
-### Concepts
-- [[<Concept Title>]] — one-line summary
-- [[concepts/<Topic>/index|<Topic>]] — (folder-split) one-line summary
-    - [[<Topic>/<aspect-1>]] — ...
+> **The article list lives in `wiki/index.md`, not here.** Keep a pointer, not a copy:
+> see that wiki's map for what exists.
 
-### Entities
-- [[<Entity Name>]] — one-line summary
+<!-- Measured 24/08 on a real project: 4,381 of 7,161 chars of an AGENTS.md — 61% — were an
+     article list duplicating the map's job. AGENTS.md is injected into the prompt of EVERY turn
+     unfiltered, while the map is injected up to a cap, so the duplicate is the copy that is
+     never trimmed: the prompt carries a truncated map plus an untruncated second index of the
+     same pages. Worse, the map is the file the gardener curates and the lint's dead-link pass
+     walks; an entry here naming a deleted page is checked by nobody. The lint reports a list
+     that grows back (pass 18). -->
 
 ### Summaries
 - [[summaries/<slug>]] — source title (date)
@@ -112,7 +115,7 @@ Count of open audits per target (filled in after running `audit_review.py --open
 
 **Explicit naming conventions** keep wikilinks from breaking. If you decide concept pages use Title Case, enforce it — a broken wikilink is an orphan.
 
-**Maintained article list** lets the LLM know what already exists before creating a new page. The most common error is creating duplicate articles with slightly different names.
+**Knowing what already exists** prevents the most common error: creating duplicate articles with slightly different names. That list is `wiki/index.md`, which is read at session start and on every turn — so keep it there and keep it current, rather than maintaining a second copy in this file that nothing checks.
 
 **Open research questions** give the LLM direction. Without them, the LLM defaults to ingesting the most obvious sources and missing your actual questions.
 
@@ -120,7 +123,7 @@ Count of open audits per target (filled in after running `audit_review.py --open
 
 ## Update cadence
 
-- After every new concept page: add to "Current articles".
+- After every new concept page: add it to `wiki/index.md` (the map), not to this file.
 - After every ingest batch: update "Sources to ingest" checklist.
 - After every lint pass: update "Research gaps".
 - After every audit pass: refresh the "Audit backlog" counts.

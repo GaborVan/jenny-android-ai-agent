@@ -15,17 +15,27 @@ I cancelli sono due e vanno provati tutti e due, perché hanno forme diverse: i
 tool file (dove lettura e scrittura erano già funzioni separate) e `python_exec`
 (dove c'era un cancello solo, e dove `open()` grezza è una terza superficie che
 non passa dai builtin).
+
+**La superficie `os` è un cancello a sé, e ci è arrivata mancandolo.** Dentro
+`python_exec` c'erano due confini di scrittura che non si parlavano:
+`_resolve_workspace_write` restringeva alla cartella del progetto, i wrapper di
+`os` validavano contro la radice con cui il tool era stato costruito. Con uno
+scope su `wikis/patreon`, `open('<ws>/SOUL.md', 'w')` veniva rifiutata e
+`os.remove('<ws>/SOUL.md')` cancellava. Le prove stanno in
+`TestSuperficieOsAsincrona`, che passa dal tool VERO — vedi lì perché non basta
+chiamare il namespace.
 """
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from jenny.agent.tools.filesystem import ReadFileTool, WriteFileTool
-from jenny.agent.tools.python_exec import PythonNamespace
+from jenny.agent.tools.python_exec import PythonExecTool, PythonNamespace
 from jenny.agent.tools.python_exec_builtins import _register_builtin_functions
 from jenny.config.tool_schemas import PythonExecConfig
 from jenny.security.workspace_access import (
@@ -232,3 +242,153 @@ class TestSenzaProgetto:
         _builtins(ws)["write_file"](str(ws / "sotto" / "x.txt"), "ok")
 
         assert (ws / "sotto" / "x.txt").read_text(encoding="utf-8") == "ok"
+
+
+# ── la superficie `os`, dal tool vero ───────────────────────────────────────
+#
+# PERCHÉ DA QUI SI PASSA DAL TOOL E NON DAL NAMESPACE. Le prove qui sopra
+# chiamano `PythonNamespace.execute()` dal thread del test, e per il confine di
+# path va bene: quel confine è thread-local e lo monta `_enter_guard` sul thread
+# che esegue. Il confine di scrittura del PROGETTO no: arriva da un ContextVar
+# (`current_tool_workspace`), e in produzione il codice del modello gira su un
+# worker raggiunto con `loop.run_in_executor`, che **non copia il contesto**.
+# Una prova sincrona vede quindi un cancello che in produzione non c'era. Da qui
+# la regola: ogni prova di questo cancello passa da `await
+# PythonExecTool.execute()`.
+
+_BOUNDARY_ERROR = "WorkspaceBoundaryError"
+
+# (id, codice, che tipo di bersaglio serve). `{p}` è il percorso da colpire,
+# `{d}` una destinazione accanto a lui.
+_MUTAZIONI: tuple[tuple[str, str, str], ...] = (
+    ("os.remove", "import os; os.remove({p!r})", "file"),
+    ("os.rename", "import os; os.rename({p!r}, {d!r})", "file"),
+    (
+        "os.open-trunc",
+        "import os; os.close(os.open({p!r}, os.O_WRONLY | os.O_TRUNC))",
+        "file",
+    ),
+    ("shutil.rmtree", "import shutil; shutil.rmtree({p!r})", "dir"),
+    ("shutil.move", "import shutil; shutil.move({p!r}, {d!r})", "file"),
+    ("pathlib-unlink", "from pathlib import Path; Path({p!r}).unlink()", "file"),
+    ("pathlib-rename", "from pathlib import Path; Path({p!r}).rename({d!r})", "file"),
+)
+_MUTAZIONI_IDS = [nome for nome, _code, _kind in _MUTAZIONI]
+
+
+def _tool(workspace: Path) -> PythonExecTool:
+    """Il tool COSTRUITO SULLA RADICE dell'installazione.
+
+    È la forma con `orchestrator_mode=False`: `AgentLoop` passa ai tool
+    `ctx.workspace`, cioè la radice, e la restrizione al progetto può venire
+    solo dallo scope del turno. Un subagent con scope invece riceve già la
+    cartella del progetto come radice — lì i due confini coincidono e il difetto
+    non si vede, che è la ragione per cui va provata questa forma.
+    """
+    cfg = PythonExecConfig()
+    tool = PythonExecTool(
+        working_dir=str(workspace),
+        timeout=30,
+        allowed_modules=cfg.allowed_modules,
+        blocked_modules=cfg.blocked_modules,
+        restrict_to_workspace=True,
+        workspace=str(workspace),
+    )
+    _register_builtin_functions(
+        tool.namespace, workspace=str(workspace), restrict_to_workspace=True
+    )
+    return tool
+
+
+class TestSuperficieOsAsincrona:
+    @pytest.mark.parametrize(("_id", "code", "kind"), _MUTAZIONI, ids=_MUTAZIONI_IDS)
+    async def test_fuori_dal_progetto_e_rifiutata(self, scoped, _id, code, kind):
+        ws, _project, other, _skill = scoped
+        if kind == "dir":
+            target = other  # la wiki di un ALTRO progetto
+            assert target.is_dir()
+        else:
+            target = ws / "SOUL.md"  # chi è Jenny, fuori da ogni progetto
+
+        out = await _tool(ws).execute(
+            code=code.format(p=str(target), d=str(target) + ".spostato")
+        )
+
+        assert _BOUNDARY_ERROR in out, f"passata: {code!r} -> {out!r}"
+        assert target.exists(), "rifiutato ma cancellato è il caso peggiore"
+        if kind == "file":
+            assert target.read_text(encoding="utf-8") == "chi sono"
+            assert not Path(str(target) + ".spostato").exists()
+
+    @pytest.mark.parametrize(("_id", "code", "kind"), _MUTAZIONI, ids=_MUTAZIONI_IDS)
+    async def test_dentro_il_progetto_passa(self, scoped, _id, code, kind):
+        """La controprova: il cancello è lo SCOPE, non un divieto generale."""
+        ws, project, _other, _skill = scoped
+        if kind == "dir":
+            target = project / "da-buttare"
+            target.mkdir()
+            (target / "x.txt").write_text("x", encoding="utf-8")
+        else:
+            target = project / "dentro.txt"
+            target.write_text("contenuto", encoding="utf-8")
+
+        out = await _tool(ws).execute(
+            code=code.format(p=str(target), d=str(target) + ".spostato")
+        )
+
+        assert _BOUNDARY_ERROR not in out, f"chiusa per sbaglio: {code!r} -> {out!r}"
+        assert "Traceback" not in out, f"caduta per altro: {code!r} -> {out!r}"
+        # L'effetto è avvenuto davvero: il bersaglio è sparito (rimosso,
+        # rinominato, spostato) oppure è stato troncato sul posto.
+        spostato = Path(str(target) + ".spostato")
+        assert not target.exists() or spostato.exists() or (
+            kind == "file" and target.read_text(encoding="utf-8") == ""
+        ), f"nessun effetto da {code!r}: {out!r}"
+
+    async def test_la_lettura_fuori_dal_progetto_resta_aperta(self, scoped):
+        """La metà che conta: il confine è asimmetrico e deve restarlo."""
+        ws, _project, _other, skill = scoped
+
+        out = await _tool(ws).execute(
+            code=f"import os; print(os.stat({str(skill / 'SKILL.md')!r}).st_size)"
+        )
+
+        assert _BOUNDARY_ERROR not in out
+        assert out.strip().isdigit(), out
+
+
+class TestIlContestoDelTurnoArrivaAlWorker:
+    """Il test che muore se il cancello torna a essere solo sincrono.
+
+    Non prova un rifiuto: prova il *meccanismo*. Se qualcuno toglie la copia del
+    contesto in `run_python_async`, i due assert qui sotto cadono con un
+    messaggio che dice esattamente cosa si è rotto — mentre ogni prova che
+    chiama il namespace dal proprio thread continuerebbe a passare.
+    """
+
+    async def test_lo_scope_del_progetto_e_visibile_sul_thread_di_esecuzione(
+        self, scoped
+    ):
+        ws, project, _other, _skill = scoped
+        visto: dict[str, Any] = {}
+
+        def _registra() -> None:
+            from jenny.security.workspace_access import current_workspace_scope
+
+            scope = current_workspace_scope()
+            visto["thread"] = threading.get_ident()
+            visto["project_path"] = None if scope is None else str(scope.project_path)
+
+        tool = _tool(ws)
+        tool.namespace.register_function("_registra", _registra)
+
+        await tool.execute(code="_registra()")
+
+        assert visto["thread"] != threading.get_ident(), (
+            "il codice ha girato sul thread del test: questa prova non dice più "
+            "niente sulla produzione"
+        )
+        assert visto["project_path"] == str(project), (
+            "lo scope del turno non arriva al thread che esegue: il confine di "
+            "scrittura del progetto è tornato alla radice del workspace"
+        )

@@ -34,9 +34,15 @@ from jenny.utils.prompt_templates import render_template
 def _dream_write_surface(tmp_path: Path) -> dict[str, tuple[str | None, set[str]]]:
     """Per ogni tool di scrittura di Dream: la dir consentita e i file esatti.
 
-    Le due metà contano entrambe. ``write_file`` non ha file extra e vive nella
-    sola ``skills/``; sono ``edit_file`` e ``apply_patch`` a portare i tre file di
-    memoria. Un test che guardasse un solo tool concluderebbe il falso.
+    Le due metà contano entrambe: la dir e la allowlist di file esatti. Un test
+    che guardasse una sola metà — o un solo tool — concluderebbe il falso.
+
+    I tre tool hanno la **stessa** superficie, e da T7.2 anche ``write_file``:
+    prima era l'unico senza i tre file di memoria, e quella differenza non era
+    documentata da nessuna parte mentre ``dream.md`` diceva al modello il
+    contrario. Era lo stesso difetto che questo file descrive per ``AGENTS.md``,
+    con la stessa fattura — un tentativo rifiutato, cursore fermo, run buttato —
+    solo su un percorso che il prompt dichiara *consentito*.
     """
     store = MemoryStore(tmp_path)
     tools = store.build_dream_tools()
@@ -61,8 +67,7 @@ def _dream_write_surface(tmp_path: Path) -> dict[str, tuple[str | None, set[str]
 def test_no_dream_tool_can_write_agents_md(tmp_path: Path) -> None:
     """``AGENTS.md`` non è raggiungibile da nessuno dei tre tool di scrittura."""
     surface = _dream_write_surface(tmp_path)
-    assert surface["write_file"] == ("skills", set())
-    for name in ("edit_file", "apply_patch"):
+    for name in ("write_file", "edit_file", "apply_patch"):
         assert surface[name] == ("skills", {"SOUL.md", "USER.md", "MEMORY.md"}), surface[name]
     for name, (_, files) in surface.items():
         assert "AGENTS.md" not in files, f"{name} ha guadagnato AGENTS.md"

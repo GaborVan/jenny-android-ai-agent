@@ -17,6 +17,20 @@ class TestDreamSessionKey:
         datetime.strptime(ts_part, "%Y%m%d-%H%M%S")
 
     def test_unique_across_calls(self):
+        """E resta unica di proposito, non per caso.
+
+        È il motivo per cui il lock per sessione **non** esclude due run di Dream
+        fra loro — chiave diversa, lock diverso — e la tentazione è collassarla su
+        un valore fisso per ottenere la mutua esclusione gratis. Non si fa: la
+        chiave nomina il file di sessione (``sessions/dream_<ts>.jsonl``), ed è
+        l'unica cosa che ``prune_internal_sessions`` ordina e pota (tiene i 10 più
+        recenti, ``TestPruneDreamSessions`` qui sotto), che l'eviction delle cache
+        di ``AgentLoop`` usa come identità, e che il transcript e
+        ``docs/internals/agent-turn.md`` documentano come "una sessione per run".
+        Fissarla farebbe di ogni run un'aggiunta allo stesso file, che nessuno
+        pota più. La mutua esclusione sta altrove, in
+        ``dream_cycle.claim_dream_cycle``.
+        """
         now = datetime(2026, 5, 28, 10, 0, 0)
         with patch("jenny.agent.memory.datetime") as mock_dt:
             mock_dt.now.side_effect = [now, now + timedelta(seconds=1)]

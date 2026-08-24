@@ -112,6 +112,31 @@ class WorkspaceScope:
         """
         return self if not self.writable else replace(self, writable=False)
 
+    def write_root(self) -> Path:
+        """**L'unica risposta a «dove posso scrivere» per questo turno.**
+
+        Passo T4.4: il confine di scrittura era ricalcolato in sei posti — i
+        tool file, i builtin di ``python_exec``, i wrapper di ``os``/``io`` dello
+        stesso modulo, ``download`` e ``journal`` — e i sei non erano d'accordo.
+        Nessuno dei sei aveva torto da solo; l'insieme sì, perché "che cosa puo'
+        cambiare questo turno" e' UNA domanda e sei risposte non possono che
+        divergere. Da qui questo metodo, e la regola: chi deve scrivere lo chiede
+        qui, e non ricava una radice da se'.
+
+        Torna sempre una cartella, mai ``None``: la radice del turno esiste anche
+        quando non c'e' nessun confine da far rispettare. E' un dato diverso da
+        "la restrizione e' attiva" (``restrict_to_workspace``) e da "questo turno
+        puo' scrivere" (``writable``), e mescolarli e' esattamente come sono nate
+        le sei versioni. Chi ha bisogno del **confine** — cioe' della radice piu'
+        ``None`` quando non ce n'e' uno — chiede a
+        :meth:`ToolWorkspace.write_root`, che e' derivata da questa.
+
+        In scrittura e' la cartella del progetto legato; **in lettura non e'
+        questa** (v. ``FileSystemTools._read_allowed_root``): il confine e'
+        asimmetrico di proposito.
+        """
+        return self.project_path
+
     def metadata(self) -> dict[str, str]:
         return {
             "project_path": str(self.project_path),
@@ -135,16 +160,40 @@ class ToolWorkspace:
     project_path: Path | None
     restrict_to_workspace: bool
     scope: WorkspaceScope | None = None
-    # v. ``WorkspaceScope.writable``. **Non si esprime con ``allowed_root``**:
+    # v. ``WorkspaceScope.writable``. **Non si esprime con ``write_root()``**:
     # li' ``None`` significa gia' "nessuna restrizione", quindi una radice nulla
     # per dire "sola lettura" aprirebbe tutto invece di chiudere tutto.
     writable: bool = True
 
+    def write_root(self) -> Path | None:
+        """Il **confine** entro cui una scrittura di questo turno deve restare.
+
+        La forma "confine" di :meth:`WorkspaceScope.write_root`: la stessa
+        radice, piu' ``None`` per dire "nessun confine da far rispettare" — che
+        e' cio' che ``restrict_to_workspace`` spento significa, e che i cancelli
+        di percorso traducono in ``UNRESTRICTED``. Un turno in sola lettura
+        **non** si esprime qui: v. il commento su ``writable`` qui sopra.
+
+        Quando c'e' uno scope legato la risposta e' la sua, non una seconda copia
+        calcolata qui: e' il punto del passo T4.4. Le due sono comunque lo stesso
+        valore, perche' ``current_tool_workspace`` — l'unico costruttore di
+        questa classe — prende ``project_path`` proprio dallo scope.
+        """
+        if not self.restrict_to_workspace or self.project_path is None:
+            return None
+        return self.scope.write_root() if self.scope is not None else self.project_path
+
     @property
     def allowed_root(self) -> Path | None:
-        if self.restrict_to_workspace and self.project_path is not None:
-            return self.project_path
-        return None
+        """Alias storico di :meth:`write_root`, **non** una seconda risposta.
+
+        Resta perche' ``agent/tools/message.py`` lo legge per risolvere gli
+        allegati in uscita, che e' una domanda di lettura e non di scrittura:
+        spostarlo vuol dire decidere quale confine gli spetta, ed e' lavoro a
+        parte. Ogni sito di **scrittura** e' stato portato su ``write_root()``;
+        ``tests/security/test_one_write_root.py`` impedisce che ne ricompaia uno.
+        """
+        return self.write_root()
 
 
 @dataclass(frozen=True)

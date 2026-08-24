@@ -7,11 +7,11 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+from port_alloc import free_port
+
 from jenny.bus.events import OutboundMessage
 from jenny.channels.websocket import WebSocketChannel, WebSocketConfig
 from jenny.webui.gateway_services import build_gateway_services
-
-_PORT = 29877
 
 
 def _ch(bus: Any) -> WebSocketChannel:
@@ -19,7 +19,7 @@ def _ch(bus: Any) -> WebSocketChannel:
         "enabled": True,
         "allowFrom": ["*"],
         "host": "127.0.0.1",
-        "port": _PORT,
+        "port": free_port(),
         "path": "/ws",
         "websocketRequiresToken": False,
     }

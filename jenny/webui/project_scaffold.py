@@ -53,6 +53,7 @@ from loguru import logger
 from jenny.utils.path import atomic_write
 from jenny.utils.wiki_paths import (
     JOURNAL_DIRNAME,
+    WIKI_INDEX_FILENAME,
     WIKI_SCHEMA_FILENAME,
     new_wiki_id,
 )
@@ -61,6 +62,17 @@ from jenny.utils.wiki_paths import (
 # cartella una wiki per tutti i lettori (``is_wiki_root``): se un giorno lo
 # scaffold morisse a metà, meglio che il pezzo già scritto sia visibile al
 # picker che invisibile.
+#
+# **Questa è la definizione unica della forma di un progetto**, e ha una copia
+# fuori dal pacchetto: ``jenny/skills/llm-wiki/scripts/scaffold.py`` la ripete
+# come ``_COMMON_DIRS`` perche' quello e' un checkout modificabile dall'utente e
+# non puo' importare ``jenny`` (stessa ragione della regola di slug copiata in
+# ``lint_wiki.py``). A tenerle allineate non c'e' la buona volontà: c'e'
+# ``tests/skills/llm_wiki/test_scaffold_topup.py::
+# test_i_due_scaffolder_non_possono_divergere``, che importa questa tupla e la
+# confronta — la prossima divergenza è un test rosso, non un difetto silenzioso
+# scoperto sul telefono (era: i due scaffolder disaccordavano sul diario, cioè
+# sull'unica cartella che il ramo chiama universale).
 PROJECT_DIRS: tuple[str, ...] = (
     "wiki",
     JOURNAL_DIRNAME,
@@ -205,8 +217,15 @@ def scaffold_project(
     )):
         created.append(WIKI_SCHEMA_FILENAME)
 
-    if _write_if_absent(root, "wiki/index.md", _index_md(title, seed)):
-        created.append("wiki/index.md")
+    # Il nome della mappa viene da ``wiki_paths``, non da un letterale qui
+    # (T6.13): **questo e' il modulo che il file lo crea**, e gli altri cinque
+    # lettori danno per buono il nome che sceglie. Una copia qui sarebbe la copia
+    # peggiore delle sei — la mappa nascerebbe con un nome che il blocco di
+    # progetto non apre e che l'elenco delle pagine non esclude, e la si vedrebbe
+    # solo dal fatto che il prompt non porta piu' la mappa.
+    map_rel = f"wiki/{WIKI_INDEX_FILENAME}"
+    if _write_if_absent(root, map_rel, _index_md(title, seed)):
+        created.append(map_rel)
 
     # Il log per ultimo: la sua voce elenca quel che questo giro ha creato
     # davvero, e per saperlo devono essere passati tutti gli altri file. Se il

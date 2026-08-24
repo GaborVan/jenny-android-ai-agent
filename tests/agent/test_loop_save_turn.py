@@ -28,6 +28,15 @@ from jenny.session.webui_turns import (
     maybe_generate_webui_title,
 )
 
+# La chiave esplicita del turno, diversa da quella della chat: serve a un solo
+# test, che controlla che il goal di una chat non finisca nel contesto di
+# un'altra sessione. Era ``"system"`` — un prefisso che nessun vocabolario
+# registra, quindi da T4.10 ``session_kind`` la classifica ``internal`` e
+# ``resolve_turn_visibility`` rende il turno SILENT su un canale utente: il
+# ``process_direct`` non tornava piu' niente. Il soggetto del test e' l'isolamento
+# fra due sessioni, non la visibilita'.
+_OTHER_KEY = "websocket:system"
+
 
 def _mk_loop() -> AgentLoop:
     loop = AgentLoop.__new__(AgentLoop)
@@ -880,7 +889,7 @@ async def test_process_message_uses_explicit_session_metadata_for_goal_context(
         "objective": "This chat goal must not leak into system.",
     }
     loop.sessions.save(chat_session)
-    system_session = loop.sessions.get_or_create("system")
+    system_session = loop.sessions.get_or_create(_OTHER_KEY)
     system_session.metadata = {}
     loop.sessions.save(system_session)
 
@@ -909,7 +918,7 @@ async def test_process_message_uses_explicit_session_metadata_for_goal_context(
             chat_id="chat-with-goal",
             content="system work",
         ),
-        session_key="system",
+        session_key=_OTHER_KEY,
     )
 
     assert result.message is not None
@@ -991,10 +1000,15 @@ async def test_process_direct_appends_notice_when_images_stripped(tmp_path: Path
         return_value=LLMResponse(content="Ecco la risposta", images_stripped=True)
     )
 
+    # Chiave nel vocabolario di ``jenny.session.keys``: con un prefisso non
+    # registrato (era ``api:``, un canale che non esiste) da T4.10 il turno cade
+    # su ``internal`` e ``resolve_turn_visibility`` lo rende SILENT su un canale
+    # utente, cioe' ``process_direct`` non torna niente. Qui il soggetto e'
+    # l'avviso, non la visibilita'.
     result = await loop.process_direct(
         "descrivi questa immagine",
-        session_key="api:vision-test",
-        channel="api",
+        session_key="websocket:vision-test",
+        channel="websocket",
         chat_id="vision-test",
     )
 
@@ -1003,7 +1017,7 @@ async def test_process_direct_appends_notice_when_images_stripped(tmp_path: Path
     assert result.content.startswith("Ecco la risposta")
     assert "non supporta input visivi" in result.content
 
-    session = loop.sessions.get_or_create("api:vision-test")
+    session = loop.sessions.get_or_create("websocket:vision-test")
     assistant_messages = [m["content"] for m in session.messages if m["role"] == "assistant"]
     assert assistant_messages
     assert "non supporta input visivi" in assistant_messages[-1]
@@ -1019,8 +1033,8 @@ async def test_process_direct_no_notice_when_images_not_stripped(tmp_path: Path)
 
     result = await loop.process_direct(
         "ciao",
-        session_key="api:vision-test-2",
-        channel="api",
+        session_key="websocket:vision-test-2",
+        channel="websocket",
         chat_id="vision-test-2",
     )
 

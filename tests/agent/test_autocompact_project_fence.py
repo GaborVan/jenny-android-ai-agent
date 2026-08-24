@@ -18,6 +18,13 @@ non si compattano», che è falso e sarebbe una brutta sorpresa al primo progett
 da duecento turni: la compattazione per **lunghezza** li raggiunge come tutti, a
 ogni turno. Il recinto è sul tempo passato, non sulla dimensione.
 
+**E da T2.6 una terza: il cancello che regge la premessa della manopola.**
+«Archiviare non butta via nulla perché la verità sta nelle pagine» era una
+premessa che nessuno verificava — e che i due orologi rendevano di norma falsa,
+perché ``idleCompactAfterMinutes`` scade prima che il giardiniere abbia potuto
+promuovere. Ora la compattazione per inattività di un progetto chiede che il
+delta di diario sia vuoto **e** che esista almeno una pagina.
+
 Perché archiviare per tempo un progetto è sbagliato, e non solo diverso: un
 progetto può stare fermo tre settimane e riprendere dove era — è il suo mestiere.
 Comprimerlo perché è stato zitto butta la sola cosa che una sessione di progetto
@@ -26,13 +33,18 @@ ha in più della sua cartella.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from loguru import logger
 
 from jenny.agent.autocompact import AutoCompact
+from jenny.agent.gardener import GardenerStore
+from jenny.agent.gardener_state import GardenerState, write_state
 from jenny.session.manager import SessionManager
 
 PROJECT = "project:patreon"
@@ -46,6 +58,39 @@ def autocompact(tmp_path: Path) -> AutoCompact:
     return AutoCompact(
         sessions=SessionManager(tmp_path), consolidator=consolidator, session_ttl_minutes=30
     )
+
+
+def _project_folder(autocompact: AutoCompact, name: str = "patreon") -> Path:
+    """La cartella del progetto, dedotta come la deduce il codice.
+
+    ``SessionManager.workspace`` è la radice del workspace, quindi il progetto
+    sta in ``<workspace>/wikis/<nome>``: la stessa risoluzione di
+    ``WorkspaceScopeResolver.for_project`` e di ``GardenerStore.for_project``.
+    """
+    folder = autocompact.sessions.workspace / "wikis" / name
+    (folder / "wiki").mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def _promoted(autocompact: AutoCompact, name: str = "patreon") -> Path:
+    """Un progetto con almeno una pagina e nessuna riga di diario da leggere."""
+    folder = _project_folder(autocompact, name)
+    (folder / "wiki" / "canone.md").write_text(
+        "# Il canone\n\nQuel che la conversazione ha detto, promosso.\n", encoding="utf-8"
+    )
+    return folder
+
+
+def _unread_journal(autocompact: AutoCompact, name: str = "patreon") -> Path:
+    """Un progetto con una voce di diario che il giardiniere non ha ancora letto."""
+    folder = _promoted(autocompact, name)
+    journal = folder / "raw" / "journal"
+    journal.mkdir(parents=True, exist_ok=True)
+    (journal / "20260823.md").write_text(
+        "# 2026-08-23\n\n- 09:00 — l'utente ha detto una cosa che non è ancora una pagina\n",
+        encoding="utf-8",
+    )
+    return folder
 
 
 def _stale(autocompact: AutoCompact, key: str) -> None:
@@ -248,6 +293,9 @@ def test_the_transcript_files_are_not_mistaken_for_sessions(
 @pytest.mark.asyncio
 async def test_the_switch_lets_an_idle_project_be_archived(switched_on: AutoCompact) -> None:
     _stale(switched_on, PROJECT)
+    # Un progetto le cui pagine portano già quel che si è detto: il secondo
+    # cancello (T2.6, sotto) chiede questo, e senza non si compatta.
+    _promoted(switched_on)
     scheduled: list[object] = []
 
     switched_on.check_expired(scheduled.append)
@@ -285,3 +333,325 @@ def test_the_knob_reaches_autocompact_from_the_config() -> None:
     source = inspect.getsource(AgentLoop)
     assert "compact_projects=compact_projects_when_idle" in source
     assert "compact_projects_when_idle=defaults.compact_projects_when_idle" in source
+
+
+# ── T2.6: le pagine prima della compattazione ────────────────────────────
+#
+# Il recinto aperto poggia su una premessa — «la verità sta nelle pagine» — che
+# fino a T2.6 nessuno verificava, e che i due orologi rendevano di norma
+# **falsa**: ``idleCompactAfterMinutes`` sta a 15 minuti, mentre il giardiniere
+# vuole mezz'ora di quiete più fino a sei ore di distanza più un tick da
+# mezz'ora. Su un progetto nuovo l'ordine normale era *compatta, poi promuovi*.
+#
+# Cosa **non** è questo cancello: una difesa dalla perdita della coda. Quella è
+# T1.1 — se ``archive()` fallisce, i messaggi rimossi finiscono in
+# ``raw/compacted/`` e, se nemmeno quella copia si scrive, non si tronca niente.
+# Qui la perdita è di un altro genere: una conversazione compattata **bene**, il
+# cui contenuto non è mai diventato pagine.
+
+
+@contextmanager
+def _log_lines(level: str = "INFO") -> Iterator[list[str]]:
+    """Le righe di loguru emesse dentro il blocco.
+
+    Il log è materia del test: un progetto che non si compatta mai si spiega
+    **solo** da lì — la sessione resta intatta, e "intatta" non ha una voce.
+    """
+    seen: list[str] = []
+    handler = logger.add(lambda message: seen.append(str(message)), level=level)
+    try:
+        yield seen
+    finally:
+        logger.remove(handler)
+
+
+# (a) diario non letto ⇒ non si compatta
+
+
+def test_a_project_with_unread_journal_lines_is_not_compacted(
+    switched_on: AutoCompact,
+) -> None:
+    _stale(switched_on, PROJECT)
+    _unread_journal(switched_on)
+
+    scheduled: list[object] = []
+    switched_on.check_expired(scheduled.append)
+
+    assert scheduled == [], "compattata prima che il giardiniere avesse letto il diario"
+
+
+@pytest.mark.asyncio
+async def test_and_the_write_is_gated_too_not_just_the_scheduling(
+    switched_on: AutoCompact,
+) -> None:
+    """``_archive`` è pianificabile da sola: il cancello vale anche là.
+
+    È la stessa asimmetria del recinto — la prima guardia protegge l'ingresso,
+    questa la riscrittura della sessione, che è l'ultimo istante utile.
+    """
+    _stale(switched_on, PROJECT)
+    _unread_journal(switched_on)
+
+    await switched_on._archive(PROJECT)
+
+    switched_on.consolidator.compact_idle_session.assert_not_awaited()
+
+
+def test_the_deferral_is_logged_with_its_reason(switched_on: AutoCompact) -> None:
+    _stale(switched_on, PROJECT)
+    _unread_journal(switched_on)
+
+    with _log_lines() as lines:
+        switched_on.check_expired(lambda coro: coro.close())
+
+    detail = "\n".join(lines)
+    assert PROJECT in detail
+    assert "journal lines are not promoted yet" in detail, detail
+
+
+def test_the_same_deferral_is_not_logged_every_minute(switched_on: AutoCompact) -> None:
+    """Il giro TTL passa ogni sessanta secondi: a INFO la prima volta, poi zitto.
+
+    Un cancello che parla una volta si legge; sessanta volte l'ora seppellisce
+    il resto del log — cioè rende il progetto *meno* spiegabile, non più.
+    """
+    _stale(switched_on, PROJECT)
+    _unread_journal(switched_on)
+
+    with _log_lines() as lines:
+        for _ in range(3):
+            switched_on.check_expired(lambda coro: coro.close())
+
+    deferrals = [line for line in lines if "deferring idle compaction" in line]
+    assert len(deferrals) == 1, deferrals
+
+
+# (b) delta vuoto ⇒ si compatta come prima
+
+
+@pytest.mark.asyncio
+async def test_an_empty_delta_compacts_exactly_as_before(switched_on: AutoCompact) -> None:
+    _stale(switched_on, PROJECT)
+    _promoted(switched_on)
+
+    scheduled: list = []
+    switched_on.check_expired(scheduled.append)
+
+    assert len(scheduled) == 1
+    await scheduled[0]
+    switched_on.consolidator.compact_idle_session.assert_awaited_once()
+
+
+def test_a_journal_already_read_to_the_end_does_not_block(switched_on: AutoCompact) -> None:
+    """Il caso vero: il diario **esiste** e il giardiniere l'ha finito.
+
+    Con il solo ``_promoted`` (nessun file di diario) il cancello passerebbe
+    anche se leggesse il cursore alla rovescia: qui il file c'è, il cursore lo
+    copre, e il delta è vuoto perché *è stato letto*.
+    """
+    folder = _unread_journal(switched_on)
+    state = GardenerState().advanced(
+        GardenerStore(folder, switched_on.sessions.workspace).read_delta()
+    )
+    write_state(folder, state)
+
+    assert switched_on._pages_carry_the_project(PROJECT) is True
+
+
+# La decisione in più: **anche** almeno una pagina
+
+
+def test_a_project_with_no_pages_yet_is_not_compacted(switched_on: AutoCompact) -> None:
+    """Delta vuoto ha due significati che da fuori si assomigliano.
+
+    «Il giardiniere ha promosso tutto» e «in ``raw/journal/`` non c'è mai finito
+    niente» danno lo stesso delta vuoto — ``read_journal_delta`` restituisce un
+    delta vuoto quando la cartella del diario non esiste — e sono l'opposto: nel
+    secondo caso la conversazione è l'unico depositario esistente, che è
+    esattamente il caso da fermare. Il conto del rinvio di troppo è basso e
+    limitato: la compattazione per **lunghezza** gira comunque a ogni turno.
+    """
+    _stale(switched_on, PROJECT)
+    _project_folder(switched_on)  # cartella di progetto, zero pagine
+
+    scheduled: list[object] = []
+    with _log_lines() as lines:
+        switched_on.check_expired(scheduled.append)
+
+    assert scheduled == []
+    assert "no pages yet" in "\n".join(lines)
+
+
+def test_the_shape_measured_on_the_device_is_the_shape_that_defers(
+    switched_on: AutoCompact,
+) -> None:
+    """T9.7, misurato sul telefono il 23/08 e replicato qui riga per riga.
+
+    Il progetto piu' piccolo di quelli veri era la prova che il solo cancello
+    del delta non basta, e le due meta' del suo albero lo dicono da sole:
+
+    * ``raw/journal/`` **esiste ed e' vuota** — non manca. Il delta e' vuoto in
+      entrambi i casi, quindi il cancello (a) passa: se la decisione si fermasse
+      li', questa conversazione — l'unico depositario esistente — verrebbe
+      riassunta.
+    * l'unico ``.md`` sotto ``wiki/`` e' ``index.md``, cioe' **la mappa**. Un
+      conteggio ingenuo (``rglob("*.md")`` senza l'esclusione dell'indice di
+      :func:`iter_wiki_pages`) troverebbe una pagina e compatterebbe: la mappa
+      dice quali pagine esistono, non e' una di esse, e qui non ne nomina
+      nessuna. Le sottocartelle vuote del formato di ricerca ci sono per la
+      stessa ragione — sono cartelle, non contenuto.
+
+    Il pavimento sulle pagine e' quindi quel che regge la premessa di P4 su
+    questo progetto, non il delta.
+    """
+    _stale(switched_on, PROJECT)
+    folder = _project_folder(switched_on)
+    (folder / "wiki" / "index.md").write_text(
+        "# Il progetto\n\nAncora nessuna pagina.\n", encoding="utf-8"
+    )
+    for sub in ("concepts", "entities", "summaries"):
+        (folder / "wiki" / sub).mkdir()
+    (folder / "raw" / "journal").mkdir(parents=True)
+
+    # Il cancello (a) da solo direbbe si': e' il punto della misura.
+    store = GardenerStore.for_project(switched_on.sessions.workspace, "patreon")
+    assert store is not None
+    assert store.read_delta().is_empty is True
+
+    scheduled: list[object] = []
+    with _log_lines() as lines:
+        switched_on.check_expired(scheduled.append)
+
+    assert scheduled == []
+    assert "no pages yet" in "\n".join(lines)
+
+
+def test_a_missing_project_folder_defers_instead_of_compacting(
+    switched_on: AutoCompact,
+) -> None:
+    """Nessuna cartella, nessuna pagina: il verso sicuro è il rinvio.
+
+    È anche il modo in cui una ``wiki.wikisDir`` non di serie si presenta
+    finché ``AgentLoop`` non passa ``projects_subdir`` qui — rumorosa, non muta.
+    """
+    _stale(switched_on, PROJECT)
+
+    scheduled: list[object] = []
+    with _log_lines() as lines:
+        switched_on.check_expired(scheduled.append)
+
+    assert scheduled == []
+    assert "no project folder at wikis/patreon" in "\n".join(lines)
+
+
+def test_the_projects_subdir_is_configurable_and_not_hardcoded(tmp_path: Path) -> None:
+    """La cartella dei progetti è ``config.wiki.wikis_dir``, non ``"wikis"``.
+
+    ``Consolidator`` la riceve già come ``projects_subdir``; questo cancello
+    guarda la stessa cartella, quindi la prende dalla stessa manopola.
+    """
+    consolidator = MagicMock()
+    consolidator.compact_idle_session = AsyncMock(return_value="riassunto")
+    autocompact = AutoCompact(
+        sessions=SessionManager(tmp_path),
+        consolidator=consolidator,
+        session_ttl_minutes=30,
+        compact_projects=True,
+        projects_subdir="progetti",
+    )
+    folder = tmp_path / "progetti" / "patreon"
+    (folder / "wiki").mkdir(parents=True)
+    (folder / "wiki" / "canone.md").write_text("# Canone\n", encoding="utf-8")
+
+    assert autocompact._pages_carry_the_project(PROJECT) is True
+
+
+def test_the_gate_counts_the_pages_without_opening_them(
+    switched_on: AutoCompact, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T3.16. Al cancello serve solo *quante* pagine ci sono, e il titolo di
+    ognuna costa una lettura: sul progetto vero più grande (``main``, 52 pagine)
+    erano 52 ``read_text`` e 1,30 ms, ora zero e 0,47 ms — a ogni giro TTL, cioè
+    ogni minuto, per ogni progetto scaduto.
+
+    L'asserzione guarda i file aperti, non il tempo, e tiene ferma la risposta:
+    il cancello passa ancora. Un cancello più veloce che risponde diverso non
+    sarebbe un'ottimizzazione ma un difetto.
+    """
+    folder = _project_folder(switched_on)
+    for i in range(5):
+        (folder / "wiki" / f"pagina{i}.md").write_text(
+            f"# Pagina {i}\n\nTesto.\n", encoding="utf-8"
+        )
+    opened: list[Path] = []
+    real_read_text = Path.read_text
+
+    def spy(self: Path, *args, **kwargs):
+        opened.append(self)
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", spy)
+
+    assert switched_on._pages_carry_the_project(PROJECT) is True
+    assert [p.name for p in opened if p.name.startswith("pagina")] == []
+
+
+# (c) la sessione personale non è toccata dal cancello nuovo
+
+
+def test_the_personal_session_is_untouched_by_the_new_gate(switched_on: AutoCompact) -> None:
+    """La personale ha Dream, non il giardiniere.
+
+    Legarla a un diario che non ha spegnerebbe la compattazione proprio dove
+    funziona — e nessun file di progetto esiste in questo test.
+    """
+    assert switched_on._pages_carry_the_project(PERSONAL) is True
+
+
+@pytest.mark.asyncio
+async def test_the_personal_session_still_compacts_with_the_switch_on(
+    switched_on: AutoCompact,
+) -> None:
+    _stale(switched_on, PERSONAL)
+
+    scheduled: list = []
+    switched_on.check_expired(scheduled.append)
+
+    assert len(scheduled) == 1
+    await scheduled[0]
+    switched_on.consolidator.compact_idle_session.assert_awaited_once()
+    assert switched_on.consolidator.compact_idle_session.await_args[0][0] == PERSONAL
+
+
+@pytest.mark.asyncio
+async def test_the_personal_session_compacts_with_the_switch_off_too(
+    autocompact: AutoCompact,
+) -> None:
+    """Controprova sul verso opposto: il cancello nuovo non è un interruttore
+    generale mascherato."""
+    _stale(autocompact, PERSONAL)
+
+    scheduled: list = []
+    autocompact.check_expired(scheduled.append)
+
+    assert len(scheduled) == 1
+    await scheduled[0]
+    autocompact.consolidator.compact_idle_session.assert_awaited_once()
+
+
+# (d) manopola spenta ⇒ niente si compatta, come prima
+
+
+def test_with_the_knob_off_a_promoted_project_still_does_not_compact(
+    autocompact: AutoCompact,
+) -> None:
+    """Anche col diario letto e le pagine al loro posto: la manopola resta la
+    prima parola, e il cancello nuovo non è una scorciatoia per accenderla."""
+    _stale(autocompact, PROJECT)
+    _promoted(autocompact)
+
+    scheduled: list[object] = []
+    autocompact.check_expired(scheduled.append)
+
+    assert scheduled == []
+    assert autocompact._idle_candidates() == (PERSONAL,)

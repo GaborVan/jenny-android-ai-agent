@@ -31,10 +31,19 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from jenny.agent.tools.context import (
+    RequestContext,
+    bind_request_context,
+    reset_request_context,
+)
 from jenny.agent.tools.download import DOWNLOADS_SUBDIR, DownloadFileTool
 from jenny.apps.manifest import AppAction
 from jenny.apps.storage import StorageError, execute_storage_action
-from jenny.security.workspace_access import build_workspace_scope, enter_workspace_scope
+from jenny.security.workspace_access import (
+    WorkspaceScopeResolver,
+    build_workspace_scope,
+    enter_workspace_scope,
+)
 
 
 @pytest.fixture
@@ -140,6 +149,82 @@ async def test_a_bound_scope_that_is_not_a_wiki_is_not_a_project(install: Path) 
     assert result["ok"] is True
 
 
+# ── ma la domanda è sul *turno*, non sulla cartella (T4.9) ───────────────
+
+
+async def test_a_project_whose_folder_is_missing_is_still_a_project(
+    install: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Il difetto del 23/08: una cartella che manca non contiene ``wiki/``.
+
+    ``WorkspaceScopeResolver.for_project`` tiene di proposito il percorso che non
+    esiste — le scritture falliscono, ma il lavoro di un progetto non finisce nel
+    workspace personale. Solo che ``is_wiki_root`` su quella cartella dice
+    ``False``, quindi il gate si apriva: dentro una chat di progetto la Todo
+    personale tornava scrivibile, cioè esattamente la scrittura che il 22/08 è
+    stata chiusa. La chiave del turno lo sa, e la cartella no.
+    """
+    resolver = WorkspaceScopeResolver(
+        default_workspace=install, default_restrict_to_workspace=True
+    )
+    key = "project:mai-creato"
+    scope = resolver.for_project(key)
+    assert scope.project_path == install / "wikis" / "mai-creato"
+    assert not (scope.project_path / "wiki").exists(), "la cartella deve mancare davvero"
+
+    token = bind_request_context(RequestContext(channel="websocket", chat_id=key, session_key=key))
+    try:
+        with enter_workspace_scope(scope):
+            with pytest.raises(StorageError) as err:
+                await execute_storage_action(
+                    install / "apps" / "todo", _action("append"), {"text": "x"}
+                )
+    finally:
+        reset_request_context(token)
+    assert "personal" in str(err.value).lower()
+
+
+async def test_a_personal_root_that_happens_to_contain_a_wiki_is_not_a_project(
+    install: Path,
+) -> None:
+    """Il rovescio della stessa medaglia: la forma da sola sbaglia anche in su.
+
+    Un workspace personale che un giorno si trovasse una ``wiki/`` in radice —
+    una cartella creata a mano, uno scaffold andato nel posto sbagliato —
+    diventerebbe "un progetto" per il solo test strutturale, e **ogni** scrittura
+    personale sulle mini-app verrebbe rifiutata. Il turno però è la chat
+    personale, e l'app vive dentro la radice che questo turno può cambiare.
+    """
+    (install / "wiki").mkdir()
+    with enter_workspace_scope(build_workspace_scope(install, "restricted")):
+        result = await execute_storage_action(
+            install / "apps" / "todo", _action("append"), {"text": "x"}
+        )
+    assert result["ok"] is True
+
+
+async def test_a_subagent_inside_a_project_has_no_key_and_is_still_refused(
+    install: Path,
+) -> None:
+    """La ragione per cui la forma della cartella resta il secondo ramo.
+
+    Un subagent lanciato dentro un progetto **eredita lo scope** ma la sua chiave
+    è ``subagent:<lineage>``, che non è una chiave di progetto: la sorgente
+    autorevole non c'è, e la cartella è il solo segnale. Togliere il secondo ramo
+    riaprirebbe qui la scrittura del 22/08.
+    """
+    key = "subagent:abc123"
+    token = bind_request_context(RequestContext(channel="internal", chat_id="x", session_key=key))
+    try:
+        with enter_workspace_scope(build_workspace_scope(_project(install), "restricted")):
+            with pytest.raises(StorageError):
+                await execute_storage_action(
+                    install / "apps" / "todo", _action("append"), {"text": "x"}
+                )
+    finally:
+        reset_request_context(token)
+
+
 # ── e il guardiano dell'inventario copre entrambe ────────────────────────
 
 
@@ -151,5 +236,8 @@ def test_both_are_still_in_the_write_inventory() -> None:
     """
     from tests.security.test_readonly_write_surfaces import _ASKS_FOR_ITSELF
 
-    assert "download.py" in _ASKS_FOR_ITSELF
-    assert "storage.py" in _ASKS_FOR_ITSELF
+    # Chiavi per percorso e non per basename: da T4.7 l'inventario guarda anche
+    # fuori da ``agent/tools/``, e lì un ``store.py`` da solo non dice quale
+    # (``config/store.py`` e ``snapshot/store.py`` esistono entrambi).
+    assert "agent/tools/download.py" in _ASKS_FOR_ITSELF
+    assert "apps/storage.py" in _ASKS_FOR_ITSELF
