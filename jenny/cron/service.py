@@ -66,6 +66,20 @@ def _now_ms() -> int:
 
 _CRON_MODES: tuple[str, ...] = ("reminder", "monitor")
 
+# Quanti record di esecuzione tenere in ``runs/``. Fino al 24/08/2026 non c'era
+# nessun tetto e nessuna potatura: la directory cresceva per sempre, e i record
+# di un job cancellato restavano li' dopo di lui.
+#
+# **Un conteggio e non un'eta'.** Una scadenza a giorni non protegge da un job
+# che gira ogni minuto; un tetto sul numero si', e vale in entrambi i regimi. A
+# due esecuzioni al giorno (il ritmo misurato sul telefono) sono circa otto
+# mesi; a una ogni cinque minuti, un giorno e mezzo.
+#
+# Si puo' scegliere un numero senza tante cerimonie perche' **quei record non li
+# legge nessuno**: ne' il gateway, ne' le route della WebUI, ne' il client, ne' il
+# tool ``cron``. Sono una traccia per il post-mortem, e basta.
+_RUN_RECORDS_KEEP = 500
+
 
 def _load_session_key(raw: Any) -> str | None:
     """Legge ``payload.sessionKey`` **da disco** riportandolo alla forma corrente.
@@ -625,6 +639,86 @@ class CronService:
     def _safe_run_record_name(run_id: str) -> str:
         return "".join(c if c.isalnum() or c in "._-" else "_" for c in run_id)
 
+    def _run_record_paths(self) -> list[Path]:
+        """I file in ``runs/``, o lista vuota se la directory non c'e'.
+
+        Non solleva: la potatura e' igiene, e un problema nell'igiene non deve
+        poter impedire al cron di partire.
+        """
+        try:
+            return [p for p in self._run_records_dir.iterdir() if p.is_file()]
+        except OSError:
+            return []
+
+    @staticmethod
+    def _run_record_sort_key(path: Path) -> int | None:
+        """Il timestamp dentro il nome, o ``None`` se il nome non ha quella forma.
+
+        Il nome e' ``<job_id>_<ms>_<rand>.json`` (v. ``bound_runner``). Si legge
+        **dal nome e non dall'mtime**: e' deterministico, sopravvive a una copia
+        del workspace, e si puo' provare senza toccare l'orologio — che in questo
+        repo e' una regola e non un gusto.
+
+        ``None`` vuol dire «non lo capisco», e quel che non si capisce non si
+        cancella (v. :meth:`_prune_run_records`).
+        """
+        parts = path.stem.split("_")
+        if len(parts) < 2:
+            return None
+        try:
+            return int(parts[1])
+        except ValueError:
+            return None
+
+    def _prune_run_records(self) -> int:
+        """Tiene i :data:`_RUN_RECORDS_KEEP` record piu' recenti. Ritorna quanti ne toglie.
+
+        **I file che non hanno la forma attesa restano.** Sono l'unico caso in
+        cui questa funzione non sa che sta guardando, e cancellare per non aver
+        capito e' il modo di trasformare un'igiene in una perdita di dati.
+        """
+        dated = []
+        for path in self._run_record_paths():
+            stamp = self._run_record_sort_key(path)
+            if stamp is not None:
+                dated.append((stamp, path))
+        if len(dated) <= _RUN_RECORDS_KEEP:
+            return 0
+        dated.sort(key=lambda item: item[0], reverse=True)
+        removed = 0
+        for _, path in dated[_RUN_RECORDS_KEEP:]:
+            try:
+                path.unlink()
+                removed += 1
+            except OSError:
+                logger.opt(exception=True).warning(
+                    "Cron: record di esecuzione non rimosso: {}", path.name
+                )
+        if removed:
+            logger.info("Cron: potati {} record di esecuzione", removed)
+        return removed
+
+    def _remove_run_records(self, job_id: str) -> int:
+        """Toglie i record del job *job_id*. Ritorna quanti ne toglie.
+
+        Il confronto e' sul **segmento** dell'id e non su una sottostringa:
+        ``<job_id>_`` col separatore, cosi' un id che sia prefisso di un altro
+        non si porta via i record del vicino.
+        """
+        prefix = f"{job_id}_"
+        removed = 0
+        for path in self._run_record_paths():
+            if not path.name.startswith(prefix):
+                continue
+            try:
+                path.unlink()
+                removed += 1
+            except OSError:
+                logger.opt(exception=True).warning(
+                    "Cron: record di {} non rimosso: {}", job_id, path.name
+                )
+        return removed
+
     def write_run_record(self, run_id: str, record: dict[str, Any]) -> None:
         """Write an internal audit record for one cron execution."""
         name = self._safe_run_record_name(run_id)
@@ -653,6 +747,10 @@ class CronService:
         self._recompute_next_runs()
         self._save_store()
         self._arm_timer()
+        # Una volta per avvio, che su Android vuol dire spesso. Costa una
+        # ``iterdir`` di qualche centinaio di voci e non puo' fallire il boot.
+        with suppress(Exception):
+            self._prune_run_records()
         logger.info("Cron service started with {} jobs", len(self._store.jobs if self._store else []))
 
     def _corrupt_store_error(self) -> RuntimeError:
@@ -1156,7 +1254,16 @@ class CronService:
                 self._arm_timer()
             else:
                 self._append_action("del", {"job_id": job_id})
-            logger.info("Cron: removed job {}", job_id)
+            # I record di esecuzione sono indicizzati per id del job, e nessuno
+            # li potava: restavano dietro al job per sempre. Non e' la
+            # reincarnazione che colpiva i progetti (gli id dei job sono opachi,
+            # quindi un job nuovo non eredita mai), e' una perdita lenta — ma e'
+            # la stessa mancanza, e si chiude qui perche' questo e' il punto in
+            # cui quel job smette di esistere.
+            dropped = self._remove_run_records(job_id)
+            logger.info(
+                "Cron: removed job {} ({} run records)", job_id, dropped
+            )
             return "removed"
 
         return "not_found"
