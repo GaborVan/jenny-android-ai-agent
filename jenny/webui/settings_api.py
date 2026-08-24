@@ -1026,8 +1026,31 @@ def _upsert_provider(
 
 
 async def delete_provider(data: dict[str, Any]) -> dict[str, Any]:
-    """Remove a provider from the array."""
+    """Remove a provider from the array, e i riferimenti che restavano appesi.
+
+    **Un provider e' indirizzato per nome da due posti**, non da uno:
+    ``providers.default`` e il campo ``provider`` di ogni preset di modello
+    (``config.model_presets``, ``schema.ModelPresetConfig``). Il default lo si
+    riparava gia'; i preset no, e restavano a nominare qualcosa che non c'e'
+    piu' — la stessa forma del difetto dei progetti del 24/08/2026, dove un nome
+    tornava libero in un deposito e restava occupato in un altro.
+
+    Oggi quel campo a runtime **non lo legge nessuno** (``_apply_preset`` cambia
+    modello e parametri sul provider *attivo*, e i processi provider non si
+    scambiano a caldo), quindi il riferimento appeso non fa danno *adesso*: si
+    ripara perche' la trappola scatti mai, non perche' stia scattando.
+
+    **Si azzera il campo, non si cancella il preset.** Un preset senza provider
+    resta valido — usa quello attivo — mentre buttare via la configurazione di
+    qualcuno perche' una sua riga e' rimasta orfana sarebbe sproporzionato al
+    guasto.
+
+    Entrambe le riparazioni stanno nello stesso ``_apply``, quindi nella stessa
+    transazione del funnel di scrittura: un config con il provider tolto e i
+    riferimenti ancora appesi non esiste in nessun istante.
+    """
     name = (data.get("name") or "").strip()
+    repointed: list[str] = []
 
     def _apply(config: Config) -> None:
         config.providers.providers = [
@@ -1041,7 +1064,24 @@ async def delete_provider(data: dict[str, Any]) -> dict[str, Any]:
                 else None
             )
 
+        # ``repointed`` si ricostruisce da zero a ogni giro: ``mutate`` puo'
+        # rieseguire il callback, e una lista che si accumula racconterebbe il
+        # doppio del lavoro fatto.
+        repointed.clear()
+        for preset_name, preset in (config.model_presets or {}).items():
+            if getattr(preset, "provider", None) == name:
+                preset.provider = None
+                repointed.append(preset_name)
+
     await store.mutate(_apply)
+    if repointed:
+        # Detto e non taciuto: un preset che cambia dove manda le richieste
+        # senza che nessuno lo dica e' il genere di cosa che poi si cerca per
+        # mezz'ora.
+        logger.info(
+            "Provider {} rimosso: {} preset non lo nominano piu' ({})",
+            name, len(repointed), ", ".join(sorted(repointed)),
+        )
     return settings_payload()
 
 
