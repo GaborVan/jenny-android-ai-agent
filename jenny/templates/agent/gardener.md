@@ -123,6 +123,12 @@ Three limits, and they matter more than the task:
   which line it meant. Where a page joins several lines, name the one that carries its state. The
   value is the trail from a page back to the sentence that caused it, and it is what makes a wrong
   page correctable instead of merely wrong.
+- **A minute can hold several lines, and then the minute alone is not the anchor.** Capture writes
+  one line per fact, so a single turn often puts two or three at the same `HH:MM` — and one of them
+  can be the user's while the next is something the assistant concluded. Count from 1 within that
+  minute and add the position: `source: raw/journal/20260822.md#09:12.2` is the second line at
+  09:12. Only needed when that minute is mixed — where every line at that minute is the user's, the
+  bare minute still carries any state, and the refusal will tell you when it does not.
 - **The map is the exception to "do not rewrite", in one part only.** Its list of pages describes
   the folder, so bring it in line with what exists. Its other sections — what is decided, what is
   open — you *amend*: add a line, move a line from open to decided when a page says so. Do not

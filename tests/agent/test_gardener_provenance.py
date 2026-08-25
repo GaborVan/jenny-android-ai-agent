@@ -50,6 +50,13 @@ JOURNAL = (
     "- 19:20 — [said] La connessione la risolve con Starlink.\n"
     "- 19:21 — [recovered] Base Roma.\n"
     "- 19:22 — Una riga di prima che i marcatori esistessero.\n"
+    # Il minuto misto, nell'ordine che fa danno: la riga detta **prima** di quella
+    # dedotta. V. la sezione D13 in fondo al file.
+    "- 19:23 — [said] Il furgone è un Ducato.\n"
+    "- 19:23 — [inferred] Quindi il letto sta in fondo.\n"
+    # E un minuto con due righe entrambe dell'utente: la metà che non va punita.
+    "- 19:24 — [said] Si parte il 12.\n"
+    "- 19:24 — [recovered] Rientro il 20.\n"
 )
 
 
@@ -129,6 +136,111 @@ def test_an_unmarked_line_cannot_be_decided_either(project, guard) -> None:
     toccano, e solo le promozioni **future** hanno bisogno di un marcatore.
     """
     assert guard(project / "wiki" / "p.md", _page("decided", "raw/journal/20260824.md#19:22")) is not None
+
+
+# ── D13: un minuto tiene più righe, e il minuto nudo non dice quale ─────────
+#
+# **Non era un difetto di tracciabilità, era il buco della guardia.** L'ancoraggio
+# è al minuto, quindi `#19:23` combacia con *tutte* le righe di quel minuto, e la
+# prima versione tornava alla prima che trovava. Con `[said]` appesa prima e
+# `[inferred]` dopo — l'ordine che un turno normale produce — una pagina che citava
+# il fatto dedotto **passava** come `decided`: D1 rientrato dalla finestra, in
+# silenzio e in un verso solo.
+#
+# E il minuto misto non è esotico: da Fase 4 la cattura fa una chiamata per fatto,
+# quindi un turno in cui l'utente dice una cosa e Jenny ne deduce la conseguenza
+# scrive esattamente quelle due righe allo stesso `HH:MM`.
+
+
+def test_the_bare_minute_cannot_certify_when_that_minute_is_mixed(project, guard) -> None:
+    """Il buco, dal lato in cui faceva danno. **La regressione da tenere.**
+
+    Prima del 25/08 questa pagina passava: la guardia trovava `[said]` — la *prima*
+    riga di 19:23 — e non guardava oltre. La pagina rivendica il fatto dedotto,
+    che è la seconda.
+    """
+    refusal = guard(
+        project / "wiki" / "letto.md", _page("decided", "raw/journal/20260824.md#19:23")
+    )
+
+    assert refusal is not None
+
+
+def test_and_the_refusal_asks_for_the_missing_half_not_a_new_anchor(project, guard) -> None:
+    """La riparazione è un'**aggiunta**, e la frase lo deve dire.
+
+    Detto «non punta a una riga», il modello riscriverebbe il minuto — l'unica
+    parte che qui è giusta. Un rifiuto su cui non si può agire è un rifiuto che si
+    riprova identico.
+    """
+    refusal = guard(
+        project / "wiki" / "letto.md", _page("decided", "raw/journal/20260824.md#19:23")
+    )
+
+    assert "#19:23.2" in refusal, "deve mostrare l'ancoraggio da scrivere, non descriverlo"
+    assert "line not found" not in refusal
+    assert "does not point at one journal line" not in refusal
+
+
+def test_the_ordinal_says_which_line_and_the_verdict_follows_it(project, guard) -> None:
+    """Le due metà dello stesso minuto, e devono decidere in modo opposto.
+
+    Insieme sono la prova che l'ordinale **si legge** invece di essere ignorato: un
+    solo caso passerebbe anche con «accetta tutto ciò che ha un ordinale».
+    """
+    said = guard(
+        project / "wiki" / "furgone.md", _page("decided", "raw/journal/20260824.md#19:23.1")
+    )
+    inferred = guard(
+        project / "wiki" / "letto.md", _page("decided", "raw/journal/20260824.md#19:23.2")
+    )
+
+    assert said is None, "la prima riga di quel minuto l'utente l'ha detta"
+    assert inferred is not None
+    assert "`[inferred]`" in inferred, "ora si sa quale riga è: il rifiuto è quello preciso"
+
+
+def test_a_minute_where_every_line_is_the_user_s_needs_no_ordinal(project, guard) -> None:
+    """La metà che non va punita, ed è la ragione per cui l'ambiguo non è «più di
+    una riga» ma «più di una riga e non tutte dell'utente».
+
+    A 19:24 ci sono due righe, `[said]` e `[recovered]`: quale delle due la pagina
+    intenda non cambia la risposta, quindi il minuto nudo basta. Senza questo test
+    «rifiuta ogni minuto con più di una riga» sarebbe verde — e romperebbe ogni
+    `source:` già scritta su un turno che ha catturato due fatti.
+    """
+    assert guard(
+        project / "wiki" / "date.md", _page("decided", "raw/journal/20260824.md#19:24")
+    ) is None
+
+
+@pytest.mark.parametrize(
+    ("anchor", "case"),
+    [
+        ("#19:23.3", "oltre il numero di righe di quel minuto"),
+        ("#19:23.0", "gli ordinali contano da 1, non da 0"),
+        ("#19:20.2", "un ordinale su un minuto che ha una riga sola"),
+    ],
+)
+def test_an_ordinal_that_points_nowhere_is_not_a_free_pass(project, guard, anchor, case) -> None:
+    """Un errore di conto si ripara contando, quindi è «non risolve» e non «ambiguo».
+
+    Il verso conta: se un ordinale fuori range ricadesse sul minuto nudo, scriverne
+    uno qualsiasi diventerebbe il modo di aggirare il controllo su un minuto misto.
+    """
+    refusal = guard(
+        project / "wiki" / "p.md", _page("decided", f"raw/journal/20260824.md{anchor}")
+    )
+
+    assert refusal is not None, case
+
+
+def test_the_ordinal_also_works_where_it_is_not_needed(project, guard) -> None:
+    """`.1` su un minuto con una riga sola non è un errore: è la forma generale, e
+    un modello che la scrive sempre non deve trovarsi rifiutato per questo."""
+    assert guard(
+        project / "wiki" / "starlink.md", _page("decided", "raw/journal/20260824.md#19:20.1")
+    ) is None
 
 
 # ── Dove il gancio non ha opinioni ──────────────────────────────────────────
@@ -373,3 +485,30 @@ async def test_when_the_user_is_back_that_refusal_wins(tmp_path) -> None:
     assert agent.results
     assert "giving way" in agent.results[0], agent.results[0]
     assert "[inferred]" not in agent.results[0], "il secondo gancio non deve nemmeno girare"
+
+
+def test_the_anchor_the_prompt_teaches_is_the_anchor_the_code_accepts() -> None:
+    """Il montaggio fra la prosa e la grammatica, e senza è il difetto tipico.
+
+    La regola su `source:` vive in `agent/gardener.md` e mostra la forma per
+    esempio; il codice la impone con `_ANCHOR_RE`. Sono la stessa cosa detta due
+    volte, quindi possono divergere — e la divergenza è muta nel verso peggiore: il
+    modello scrive l'ancoraggio che il suo prompt gli insegna e la guardia lo
+    rifiuta come «non risolve», su ogni pagina, senza che nessun test cada.
+
+    Legge gli esempi **dal template**, non da un elenco qui: un elenco scritto a
+    mano proverebbe l'accordo fra sé stesso e il codice.
+    """
+    import re
+
+    import jenny
+    from jenny.agent.gardener import _ANCHOR_RE
+
+    template = (
+        pathlib.Path(jenny.__file__).parent / "templates" / "agent" / "gardener.md"
+    ).read_text(encoding="utf-8")
+    taught = set(re.findall(r"\.md#(\d{2}:\d{2}(?:\.\d+)?)", template))
+
+    assert len(taught) >= 2, "gli esempi non sono stati letti: l'asserzione sarebbe vuota"
+    for anchor in sorted(taught):
+        assert _ANCHOR_RE.match(anchor), anchor

@@ -1287,19 +1287,61 @@ def _page_frontmatter(text: str) -> dict[str, list[str]]:
     return out
 
 
-def _journal_line_is_said(root: Path, source: str) -> bool | None:
-    """Se la riga citata da *source* e' attribuita all'utente. ``None`` = non si sa.
+# I quattro esiti di una ``source:``, e sono quattro perche' si riparano in quattro
+# modi. ``SAID`` passa; ``INFERRED`` si ripara cambiando lo stato della pagina;
+# ``UNRESOLVED`` cambiando l'ancoraggio; ``AMBIGUOUS`` **aggiungendo** l'ordinale.
+# Il rifiuto e' lo stesso per gli ultimi tre (fail-closed), ma la frase che il
+# modello legge deve dire quale: un rifiuto su cui non si puo' agire e' un rifiuto
+# che si riprova identico.
+_SAID = "said"
+_INFERRED = "inferred"
+_UNRESOLVED = "unresolved"
+_AMBIGUOUS = "ambiguous"
 
-    ``None`` e ``False`` **non** sono la stessa cosa per chi chiama, ed e' il punto:
-    ``False`` e' una riga trovata e marcata ``[inferred]``, ``None`` e' una
-    ``source:`` che non punta a **una** riga — il giorno nudo, un'ora che nel file
-    non c'e', un percorso illeggibile. Il rifiuto e' lo stesso (fail-closed) ma la
-    frase che il modello legge deve dire quale delle due, perche' le due si
-    riparano in modi opposti: la prima cambiando lo stato, la seconda l'ancoraggio.
+# ``HH:MM`` o ``HH:MM.N``, con *N* la posizione della riga **dentro quel minuto**,
+# da 1. La forma con l'ordinale non cambia una virgola del diario — v.
+# ``_journal_line_provenance``.
+_ANCHOR_RE = re.compile(r"^(\d{2}:\d{2})(?:\.(\d+))?$")
+
+
+def _journal_line_provenance(root: Path, source: str) -> str:
+    """A chi e' attribuita la riga citata da *source*, o perche' non si sa.
+
+    **D13, e non era un difetto di tracciabilita'.** L'ancoraggio e' al *minuto*,
+    quindi ``#13:55`` combacia con **tutte** le righe di quel minuto; la prima
+    versione tornava alla prima che trovava. In un minuto ad attribuzione mista —
+    ``[said]`` appesa prima, ``[inferred]`` dopo — una pagina che citava il fatto
+    dedotto passava come ``decided`` perche' la guardia aveva letto *l'altra riga*.
+    Cioe' D1, il difetto che questa guardia esiste per chiudere, rientrato dalla
+    finestra in un verso solo e in silenzio. E il minuto misto non e' un caso
+    esotico: da T4 la cattura fa **una chiamata per fatto**, quindi un turno in cui
+    l'utente dice una cosa e Jenny ne deduce la conseguenza produce esattamente
+    quelle due righe allo stesso minuto.
+
+    **Il minuto ambiguo si rifiuta, ma solo se e' davvero ambiguo.** Se tutte le
+    righe di quel minuto sono dell'utente, quale delle due la pagina intenda non
+    cambia la risposta: passa. E' lo stesso ragionamento che il chiamante applica a
+    due ``source:`` diverse — ognuna deve reggere — applicato dentro un minuto.
+
+    **L'ordinale non tocca il diario.** ``#13:55.2`` vuol dire «la seconda riga di
+    quel minuto» e si risolve contando, quindi il file resta byte per byte quello
+    di prima: nessuna migrazione, nessun secondo aggiunto al formato, e le
+    ``source:`` gia' scritte continuano a valere dove il minuto ha una riga sola.
+    Il diario e' append-only per costruzione (``JournalAppendTool``), quindi
+    dentro un minuto la posizione di una riga non cambia piu': e' quel contratto a
+    rendere un ordinale un indirizzo stabile invece di un numero fortunato.
+
+    Quel che resta aperto, e va detto qui: un ordinale **sbagliato** su un minuto
+    misto passa, se punta a una riga detta. E' la stessa cosa che dichiarare
+    ``[said]`` su un fatto dedotto — la provenienza la dichiara un modello e il
+    codice impone solo la conseguenza (v. ``jenny/agent/tools/journal.py``). Il
+    verso in cui si sbaglia da qui e' esplicito, non accidentale.
     """
     rel, _, anchor = source.partition("#")
-    if not anchor:
-        return None
+    match = _ANCHOR_RE.match(anchor.strip())
+    if match is None:
+        return _UNRESOLVED
+    minute, ordinal = match.group(1), match.group(2)
     page = (root / rel.strip()).resolve()
     try:
         # Contenuta nel progetto: ``source:`` e' testo che il modello scrive, quindi
@@ -1307,12 +1349,23 @@ def _journal_line_is_said(root: Path, source: str) -> bool | None:
         page.relative_to(root.resolve())
         text = page.read_text(encoding="utf-8")
     except (OSError, ValueError):
-        return None
-    prefix = f"- {anchor.strip()} \u2014 "
-    for line in text.splitlines():
-        if line.startswith(prefix):
-            return line[len(prefix):].lstrip().startswith(_SAID_MARKERS)
-    return None
+        return _UNRESOLVED
+    prefix = f"- {minute} \u2014 "
+    bodies = [
+        line[len(prefix):].lstrip() for line in text.splitlines() if line.startswith(prefix)
+    ]
+    if not bodies:
+        return _UNRESOLVED
+    if ordinal is not None:
+        index = int(ordinal) - 1
+        # Fuori range e' un ancoraggio che non risolve, non un minuto ambiguo:
+        # ``#13:55.4`` su tre righe e' un errore di conto, e si ripara contando.
+        if not 0 <= index < len(bodies):
+            return _UNRESOLVED
+        bodies = [bodies[index]]
+    if all(body.startswith(_SAID_MARKERS) for body in bodies):
+        return _SAID
+    return _AMBIGUOUS if len(bodies) > 1 else _INFERRED
 
 
 def _provenance_guard(root: Path, pages: Path) -> Any:
@@ -1327,8 +1380,10 @@ def _provenance_guard(root: Path, pages: Path) -> Any:
     tipograficamente identiche. Ora il diario le distingue, e questo gancio e' il
     lettore che quel marcatore non aveva.
 
-    **Fail-closed su tutte e tre le vie di non-sapere** — riga ``[inferred]``,
-    ``source:`` senza ancoraggio, ancoraggio che non risolve. Il verso opposto
+    **Fail-closed su tutte e quattro le vie di non-sapere** — riga ``[inferred]``,
+    ``source:`` senza ancoraggio, ancoraggio che non risolve, e un minuto che tiene
+    piu' righe di cui non tutte dell'utente (**D13**, v.
+    ``_journal_line_provenance``). Il verso opposto
     («se non riesco a controllare, lascio passare») e' precisamente il difetto:
     quel che passa e' una certificazione, e una certificazione sbagliata resta
     scritta finche' qualcuno non la nota. ``open`` non e' un castigo — e' quel che
@@ -1358,24 +1413,37 @@ def _provenance_guard(root: Path, pages: Path) -> Any:
         # una dedotta sono una pagina che si dichiara decisa in parte, cioe' una
         # pagina che si dichiara decisa.
         sources = front.get("source", [""])
-        said: bool | None = True
+        verdict = _SAID
         source = ""
         for candidate in sources:
-            verdict = _journal_line_is_said(root, candidate)
-            if not verdict:
-                said, source = verdict, candidate
+            outcome = _journal_line_provenance(root, candidate)
+            if outcome != _SAID:
+                verdict, source = outcome, candidate
                 break
-        if said:
+        if verdict == _SAID:
             return None
-        why = (
-            "its `source:` line is `[inferred]` — the assistant concluded it, the user did "
-            "not say it"
-            if said is False
-            else (
-                "its `source:` does not point at one journal line: add the line's own time "
-                f"after a `#` (`source: raw/journal/<day>.md#HH:MM`). Got {source!r}"
+        if verdict == _INFERRED:
+            why = (
+                "its `source:` line is `[inferred]` — the assistant concluded it, the user "
+                "did not say it"
             )
-        )
+        elif verdict == _AMBIGUOUS:
+            # **La riparazione e' un'aggiunta, non una correzione**, e la frase lo
+            # deve dire: l'ancoraggio non e' sbagliato, e' incompleto. Detto come
+            # «non punta a una riga» il modello riscriverebbe il minuto, che e'
+            # l'unica cosa che qui e' giusta.
+            why = (
+                "that minute holds more than one journal line and they are not all the "
+                "user's, so its `source:` does not say which one this page rests on. Keep "
+                "the minute and add the line's place within it, counting from 1: "
+                f"`{source}.2` is the second line at that minute"
+            )
+        else:
+            why = (
+                "its `source:` does not point at one journal line: add the line's own time "
+                "after a `#` (`source: raw/journal/<day>.md#HH:MM`, or `#HH:MM.2` for the "
+                f"second line at that minute). Got {source!r}"
+            )
         return _PROVENANCE_REFUSAL_TEMPLATE.format(
             page=target.name, state=state, why=why
         )
