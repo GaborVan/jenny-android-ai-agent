@@ -69,13 +69,13 @@ async def test_the_first_line_creates_the_page_with_its_heading(tool, tmp_path) 
     project = _wiki(tmp_path)
     token = _bind(project)
     try:
-        out = await tool.execute(text="il furgone ha le gomme da cambiare")
+        out = await tool.execute(text="il furgone ha le gomme da cambiare", attribution="said")
     finally:
         reset_workspace_scope(token)
 
     text = _page(project).read_text(encoding="utf-8")
     assert text.startswith("# 2026-08-22\n\n")
-    assert "— il furgone ha le gomme da cambiare\n" in text
+    assert "— [said] il furgone ha le gomme da cambiare\n" in text
     assert "journal/20260822.md" in out
 
 
@@ -88,12 +88,12 @@ async def test_the_timestamp_is_added_and_the_text_is_not(tool, tmp_path) -> Non
     project = _wiki(tmp_path)
     token = _bind(project)
     try:
-        await tool.execute(text="12:00 non è l'ora, è il testo")
+        await tool.execute(text="12:00 non è l'ora, è il testo", attribution="said")
     finally:
         reset_workspace_scope(token)
 
     line = _page(project).read_text(encoding="utf-8").strip().splitlines()[-1]
-    assert re.fullmatch(r"- \d{2}:\d{2} — 12:00 non è l'ora, è il testo", line), line
+    assert re.fullmatch(r"- \d{2}:\d{2} — \[said\] 12:00 non è l'ora, è il testo", line), line
 
 
 async def test_a_multiline_text_becomes_one_line(tool, tmp_path) -> None:
@@ -103,14 +103,14 @@ async def test_a_multiline_text_becomes_one_line(tool, tmp_path) -> None:
     project = _wiki(tmp_path)
     token = _bind(project)
     try:
-        await tool.execute(text="prima parte\n\nseconda   parte\n")
+        await tool.execute(text="prima parte\n\nseconda   parte\n", attribution="said")
     finally:
         reset_workspace_scope(token)
 
     body = _page(project).read_text(encoding="utf-8")
     entries = [ln for ln in body.splitlines() if ln.startswith("- ")]
     assert len(entries) == 1, f"un testo su più righe deve fare una voce, non {len(entries)}"
-    assert body.strip().endswith("— prima parte seconda parte")
+    assert body.strip().endswith("— [said] prima parte seconda parte")
 
 
 # ── L'append-only ────────────────────────────────────────────────────────────
@@ -290,12 +290,12 @@ async def test_the_page_and_the_time_come_from_one_reading_of_the_clock(tmp_path
     tool = JournalAppendTool(now=lambda: next(readings))
     token = _bind(project)
     try:
-        await tool.execute(text="si parte domani")
+        await tool.execute(text="si parte domani", attribution="said")
     finally:
         reset_workspace_scope(token)
 
     assert not (project / "raw" / "journal" / "20260823.md").exists()
-    assert "- 23:59 — si parte domani" in _page(project).read_text(encoding="utf-8")
+    assert "- 23:59 — [said] si parte domani" in _page(project).read_text(encoding="utf-8")
 
 
 async def test_the_hour_is_the_configured_timezone_not_the_system_one(tmp_path) -> None:
@@ -354,3 +354,103 @@ def test_it_is_registered_in_the_loader() -> None:
     from jenny.agent.tools.journal import TOOLS
 
     assert TOOLS == [JournalAppendTool]
+
+
+# ── L'attribuzione: di chi è il fatto che la riga registra ───────────────────
+#
+# Il difetto (D1): il 24/08 Jenny ha chiesto «l'ogoh-ogoh te lo porti, *o quello
+# resta a casa*?», l'utente ha risposto «l ogoh ogoh che cenrtra?» — una domanda,
+# nessuna scelta — e la cattura ha registrato «resta a casa» come decisione
+# dell'utente. Poi il giardiniere l'ha promossa a `state: decided`.
+#
+# Il bit lo dichiara il modello. Quel che il codice impone è la *conseguenza*, e
+# sta in `tests/agent/test_gardener_provenance.py`.
+
+
+@pytest.mark.parametrize(
+    ("attribution", "marker"),
+    [("said", "[said]"), ("inferred", "[inferred]")],
+)
+async def test_the_attribution_becomes_the_line_marker(tool, tmp_path, attribution, marker) -> None:
+    project = _wiki(tmp_path)
+    token = _bind(project)
+    try:
+        out = await tool.execute(text="si parte a maggio", attribution=attribution)
+    finally:
+        reset_workspace_scope(token)
+
+    assert f"— {marker} si parte a maggio" in _page(project).read_text(encoding="utf-8")
+    # Il marcatore torna anche nella risposta: il modello deve vedere cosa ha scritto.
+    assert marker in out
+
+
+@pytest.mark.parametrize("given", ["", "   ", "detto", "maybe", "true", "said,inferred"])
+async def test_a_missing_or_unknown_attribution_falls_back_to_inferred(tool, tmp_path, given) -> None:
+    """**Fail-closed, e detto.** Dedurre «detto» dal silenzio è il modo in cui
+    un'omissione diventa una certificazione falsa, che è D1. E la cattura non
+    fallisce per questo: un fatto perduto costa più di un fatto sottostimato.
+
+    Maiuscole e spazi **non** sono in questa lista: il tool normalizza, e quel
+    caso ha un test suo. Qui ci sono solo valori che non sono `said` nemmeno
+    normalizzati — compreso `detto`, che è la traduzione ovvia e non è il token.
+    """
+    project = _wiki(tmp_path)
+    token = _bind(project)
+    try:
+        out = await tool.execute(text="un fatto", attribution=given)
+    finally:
+        reset_workspace_scope(token)
+
+    body = _page(project).read_text(encoding="utf-8")
+    assert "[inferred] un fatto" in body
+    assert "[said]" not in body
+    assert "inferred" in out, "il ripiegamento va detto: silenzioso, perde un fatto vero"
+
+
+async def test_the_attribution_is_case_and_space_insensitive(tool, tmp_path) -> None:
+    project = _wiki(tmp_path)
+    token = _bind(project)
+    try:
+        await tool.execute(text="un fatto", attribution="  SaId  ")
+    finally:
+        reset_workspace_scope(token)
+
+    assert "[said] un fatto" in _page(project).read_text(encoding="utf-8")
+
+
+async def test_the_cap_is_still_measured_on_the_fact(tmp_path) -> None:
+    """La regressione che `journal.py` documenta per `[recovered]`: col marcatore
+    messo *prima* del controllo, una riga da 495 caratteri veniva rifiutata citando
+    un limite di 500 che il chiamante non aveva sforato — un rifiuto su cui non si
+    può agire. Vale per i marcatori nuovi come per quello vecchio.
+    """
+    tool = JournalAppendTool(today=lambda: _DAY)
+    project = _wiki(tmp_path)
+    token = _bind(project)
+    try:
+        out = await tool.execute(text="x" * 495, attribution="said")
+    finally:
+        reset_workspace_scope(token)
+
+    assert "Too long" not in out
+    assert "[said] " + "x" * 495 in _page(project).read_text(encoding="utf-8")
+
+
+async def test_a_recovery_pass_keeps_its_own_marker_and_ignores_attribution(tmp_path) -> None:
+    """Un marcatore per riga, e chi ce l'ha fisso vince.
+
+    La cassetta di una passata monta `origin_marker="[recovered]"`, che vale *come
+    detto* per contratto del suo prompt: chiederle anche l'attribuzione sarebbe
+    offrirle una scelta che non ha. Il parametro resta nello schema — lo schema è
+    del tool, non dell'istanza — e qui va ignorato, anche quando dice `inferred`.
+    """
+    project = _wiki(tmp_path)
+    tool = JournalAppendTool(today=lambda: _DAY, root=project, origin_marker="[recovered]")
+
+    out = await tool.execute(text="base Roma", attribution="inferred")
+
+    body = _page(project).read_text(encoding="utf-8")
+    assert "— [recovered] base Roma" in body
+    assert "[inferred]" not in body, "l'attribuzione non deve poter degradare un recupero"
+    assert "[said]" not in body, "e nemmeno raddoppiare il prefisso"
+    assert "inferred" not in out, "niente nota di ripiegamento: non ha ripiegato niente"

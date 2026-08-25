@@ -34,6 +34,12 @@ Work only from those.
 1. **Promote what earns a page.** A line that names a thing the project will keep talking about —
    a place, a person, a vehicle, a constraint, a decision — becomes or joins a page named after
    that thing. Several lines about the same thing are one page, not three.
+   **But a thing that would still be true if this project ended gets its own page**, even when it
+   only came up because of this project and reads like background to it: what the user does for a
+   living, what they own, where they are based, a constraint they carry with them. The test is not
+   "is this about the project" — everything in the journal is — it is "does this stop being true
+   when the project does". Folded into the project's page it disappears with the project, and it is
+   usually the thing the rest depends on: name it, and let the pages that rely on it link to it.
 2. **Leave the rest.** Chatter, one-off logistics, a detail that only made sense that day: these
    pass through. A pass that promotes nothing has done its job correctly.
 3. **Link.** A page that names something with a page of its own links to it: `[[page-name]]`.
@@ -101,13 +107,22 @@ Three limits, and they matter more than the task:
 - **A promoted line starts at `state: open`.** The frontmatter of a page carries `state:` (`open` |
   `hypothesis` | `decided` | `done`) and `source:`. Something said in passing does not become
   `decided` because a maintenance pass walked past it — only the user's own words, or a page that
-  already says so, can justify anything stronger.
-- **`source:` points at the journal day it came from**, written from the project root and *not*
-  from the workspace: `source: raw/journal/20260822.md`. It is a value you write inside the page —
-  not a path you resolve — which is why it is the one place that does not start with
-  `{{ project_path }}/`; to actually open that file, prefix it like any other path. The value is
-  the trail from a page back to the sentence that caused it, and it is what makes a wrong page
-  correctable instead of merely wrong.
+  already says so, can justify anything stronger. **The journal marks which is which**, and this
+  is no longer only a rule: a line the conversation attributed to the user reads `[said]`, one the
+  assistant concluded reads `[inferred]`, one a past pass recovered reads `[recovered]` and counts
+  as said. A page whose `source:` line is `[inferred]` — or is a line you cannot point at — is
+  refused above `open`, by the same hook that stops a pass when the user starts typing. When that
+  is the situation, the page still gets written at `open` and the question goes in the map's open
+  section; that is the outcome, not a workaround.
+- **`source:` points at the journal line it came from**, written from the project root and *not*
+  from the workspace, with the line's own time after a `#`: `source: raw/journal/20260822.md#09:12`.
+  It is a value you write inside the page — not a path you resolve — which is why it is the one
+  place that does not start with `{{ project_path }}/`; to actually open that file, prefix it like
+  any other path and ignore the `#`. The day alone still parses, and still names a real file, but it
+  points at N lines instead of one: it cannot carry a state above `open`, because nothing can check
+  which line it meant. Where a page joins several lines, name the one that carries its state. The
+  value is the trail from a page back to the sentence that caused it, and it is what makes a wrong
+  page correctable instead of merely wrong.
 - **The map is the exception to "do not rewrite", in one part only.** Its list of pages describes
   the folder, so bring it in line with what exists. Its other sections — what is decided, what is
   open — you *amend*: add a line, move a line from open to decided when a page says so. Do not

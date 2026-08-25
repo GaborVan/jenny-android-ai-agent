@@ -62,11 +62,63 @@ _NO_PROJECT_REFUSAL = (
 # la cattura (v. la docstring del modulo).
 _MAX_TEXT_CHARS = 500
 
+# ── Attribuzione: di chi e' il fatto che la riga registra ────────────────────
+#
+# Il difetto che questi due token chiudono (**D1**): il 24/08 Jenny ha chiesto
+# «l'ogoh-ogoh te lo porti, *o quello resta a casa*?», l'utente ha risposto «l
+# ogoh ogoh che cenrtra?» — una domanda, nessuna scelta — e la cattura ha
+# registrato «L'ogoh-ogoh non c'entra col viaggio — **resta a casa**». Cioe'
+# l'opzione B della domanda di Jenny, scritta come decisione dell'utente. Poi il
+# giardiniere l'ha promossa a ``state: decided`` e la mappa l'ha messa sotto
+# «Decided», dove entra a ogni turno. Nessuno dei due messaggi dell'utente
+# contiene la parola «casa».
+#
+# **Perche' un bit dichiarato e non una verifica.** Tre varianti di «controlla la
+# citazione contro le parole dell'utente» sono state provate su quel caso e
+# cadono tutte, l'ultima in modo istruttivo: chiedere che le parole di contenuto
+# della pagina compaiano nei messaggi dell'utente boccia la fabbricazione **e**
+# boccia ``starlink.md``, che registra una decisione vera e detta chiaramente, solo
+# parafrasata. La parafrasi e' legittima e pervasiva, quindi nessun controllo a
+# livello di stringa separa una parafrasi onesta da una fabbricazione. Il
+# ragionamento intero sta in ``roadmap/memory-scope-and-journal-provenance.md``
+# (T3.0b) — chi vuole "rafforzare" questo con un confronto di stringhe lo legga
+# prima.
+#
+# **Perche' qui e non a valle.** La cattura e' l'unico momento in cui chi giudica
+# ha davanti la **propria domanda** e la risposta dell'utente insieme. A valle il
+# giardiniere vede solo la riga, dove le due cose sono tipograficamente
+# identiche: la regola «only the user's own words can justify anything stronger
+# than ``open``» non era rispettabile per costruzione.
+SAID_MARKER = "[said]"
+INFERRED_MARKER = "[inferred]"
+# ``[recovered]`` (``gardener.py``) vale **come detto**: la passata recupera solo
+# fatti che l'utente ha detto e che la cattura ha perso — e' il contratto del suo
+# prompt, non una scelta che le si concede, quindi la sua cassetta non riceve
+# questo parametro affatto.
+_ATTRIBUTIONS = {"said": SAID_MARKER, "inferred": INFERRED_MARKER}
+
+# **Il default e' il lato conservativo, non il comodo.** Un'attribuzione mancante
+# diventa ``inferred``, cioe' una riga che non potra' giustificare niente di piu'
+# forte di ``open``. Il verso opposto — dedurre "detto" dal silenzio — e' il modo
+# in cui un'omissione diventa una certificazione falsa, che e' esattamente D1. E
+# la cattura non fallisce mai per questo: un fatto perduto costa piu' di un fatto
+# sottostimato, e il valore ripiegato viene **detto nella risposta** al modello,
+# non applicato di nascosto.
+_DEFAULT_ATTRIBUTION = "inferred"
+
 _PARAMETERS = tool_parameters_schema(
     text=StringSchema(
         "The fact to record, as one short line and in the user's own terms — what will still "
         "be true next week, not what was said. No leading '- ', no timestamp: both are added. "
         f"At most {_MAX_TEXT_CHARS} characters; anything longer belongs on a page, not here."
+    ),
+    attribution=StringSchema(
+        "Whose fact this is. 'said' when the user stated it themselves; 'inferred' when you "
+        "concluded it, including when you offered the options and they only rejected one — an "
+        "answer to your own question is not their statement. Only a 'said' line can ever "
+        "become a decided page, so 'inferred' costs nothing but a wrong 'said' certifies "
+        "something the user never chose. Defaults to 'inferred' when omitted.",
+        enum=["said", "inferred"],
     ),
     required=["text"],
 )
@@ -138,7 +190,7 @@ class JournalAppendTool(Tool):
             "file, so it is always safe to call. Only inside a project."
         )
 
-    async def execute(self, text: str = "", **_: Any) -> str:
+    async def execute(self, text: str = "", attribution: str = "", **_: Any) -> str:
         line = " ".join((text or "").split())
         if not line:
             return "Nothing to append: `text` was empty."
@@ -153,8 +205,25 @@ class JournalAppendTool(Tool):
                 f"Too long for a journal line ({len(line)} characters, max {_MAX_TEXT_CHARS}). "
                 "A journal line is one fact; this is page material."
             )
+        # **Un solo marcatore per riga, e chi ce l'ha fisso vince.** La cassetta
+        # di una passata monta ``origin_marker="[recovered]"``, che vale *come
+        # detto* per contratto del suo prompt: chiederle anche l'attribuzione
+        # sarebbe offrirle una scelta che non ha, e due marcatori in fila sarebbero
+        # ventidue caratteri di prefisso su una riga che ne ha cinquecento in
+        # tutto. Il parametro resta nello schema per tutti — lo schema e' del tool,
+        # non dell'istanza — e qui viene semplicemente ignorato: e' l'unico posto in
+        # cui la differenza esiste.
+        fallback = ""
         if self._origin_marker:
             line = f"{self._origin_marker} {line}"
+        else:
+            choice = (attribution or "").strip().lower()
+            if choice not in _ATTRIBUTIONS:
+                # Non un rifiuto: v. ``_DEFAULT_ATTRIBUTION``. Ma detto, perche' un
+                # ripiegamento silenzioso e' come si perde un fatto davvero detto.
+                fallback = choice or "(omitted)"
+                choice = _DEFAULT_ATTRIBUTION
+            line = f"{_ATTRIBUTIONS[choice]} {line}"
 
         # L'ordine dei due gate non e' indifferente. Prima "non c'e' un
         # progetto", che e' vero indipendentemente dal modo del turno: dire
@@ -171,7 +240,16 @@ class JournalAppendTool(Tool):
         if current_turn_is_readonly():
             return READONLY_TOOL_REFUSAL
 
-        return await self._append(root, line)
+        written = await self._append(root, line)
+        if fallback:
+            return (
+                f"{written}\n\nNote: attribution {fallback!r} is not one of 'said' / "
+                f"'inferred', so this line was recorded as '{_DEFAULT_ATTRIBUTION}' — it "
+                "cannot later become a decided page. If the user stated this themselves, "
+                "append it again with attribution='said'; the journal is append-only, so "
+                "the line above stays either way."
+            )
+        return written
 
     def _stamp(self) -> datetime:
         """L'istante della riga, nel fuso in cui il modello legge l'ora.

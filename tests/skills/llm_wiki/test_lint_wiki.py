@@ -215,8 +215,15 @@ def _notebook(
     (root / "wiki" / "semine.md").write_text(
         f"---\n{head}{src}---\n{body}\n", encoding="utf-8"
     )
+    # ``open`` e non ``decided``, e non e' indifferente: dal passo 19 uno stato che
+    # rivendica una decisione chiede di **chi** siano le parole, e la ``source:``
+    # di default e' un giorno nudo — cioe' questa pagina diventerebbe un reperto
+    # giallo dentro ogni test che asserisce l'assenza di un altro difetto. Il
+    # principio e' quello scritto qui sopra; lo stato di questa pagina non e'
+    # il soggetto di nessun test (quelli sullo stato usano ``semine.md``, che il
+    # parametro ``state`` pilota).
     (root / "wiki" / "terreno.md").write_text(
-        f"---\nstate: decided\n{src}---\n\n# Terreno\n\nArgilloso. Vedi [[semine]].\n",
+        f"---\nstate: open\n{src}---\n\n# Terreno\n\nArgilloso. Vedi [[semine]].\n",
         encoding="utf-8",
     )
     return root
@@ -2059,3 +2066,110 @@ def test_the_ceiling_is_derived_from_the_map_ceiling(lint_wiki):
     numeri sono una famiglia — la stessa disciplina della coppia di T3.12.
     """
     assert lint_wiki.AGENTS_LIST_MAX_CHARS == lint_wiki.MAP_MAX_CHARS // 2
+
+
+# ── Passo 19: di chi sono le parole su cui una pagina si dichiara decisa ─────
+#
+# Il difetto (D1): il 24/08 una pagina è nata `state: decided` su un fatto che
+# l'utente non aveva detto — era l'opzione B di una domanda che l'assistente
+# aveva fatto lui — ed è finita sotto «Decided» nella mappa, che entra in ogni
+# turno. La guardia in `gardener._provenance_guard` chiude il lato scrittura;
+# questo passo è l'unico che raggiunge quel che è **già** sul disco.
+
+
+def _attributed_notebook(root: Path, *, state: str, anchor: str, marked: str) -> Path:
+    """Un taccuino la cui unica pagina decide su una riga marcata *marked*.
+
+    ``marked=""`` è una riga com'era prima che i marcatori esistessero.
+    """
+    _notebook(root, state=None, source=None)
+    (root / "raw" / "journal" / "20260823.md").write_text(
+        "# 2026-08-23\n\n"
+        f"- 09:12 — {marked + ' ' if marked else ''}Si semina a maggio.\n",
+        encoding="utf-8",
+    )
+    (root / "wiki" / "semine.md").write_text(
+        f"---\nstate: {state}\nsource: raw/journal/20260823.md{anchor}\n---\n\n"
+        "# Semine\n\nA maggio. Vedi [[terreno]].\n",
+        encoding="utf-8",
+    )
+    return root
+
+
+def test_a_decision_on_an_inferred_line_is_red(lint_wiki, tmp_path, capsys):
+    """🔴 perché la pagina **dice una cosa falsa**: il diario stesso dice che
+    l'ha concluso l'assistente, quindi l'utente quella cosa non l'ha decisa. È la
+    riga di confine del passo 17 applicata qui — rosso per il contenuto che
+    inganna, giallo per quello che non si può verificare."""
+    _attributed_notebook(tmp_path, state="decided", anchor="#09:12", marked="[inferred]")
+    lint_wiki.lint(str(tmp_path))
+    out = capsys.readouterr().out
+
+    assert "🔴 Pages claiming a decision the journal attributes to the assistant (1)" in out
+    assert "wiki/semine.md" in out
+
+
+def test_a_decision_on_a_said_line_is_quiet(lint_wiki, tmp_path, capsys):
+    """Il test che tiene onesto il precedente: senza, «rifiuta tutto» passerebbe.
+
+    È l'errore in cui è caduta la terza variante scartata del disegno, che
+    bocciava la fabbricazione **e** la decisione vera, perché parafrasata.
+    """
+    _attributed_notebook(tmp_path, state="decided", anchor="#09:12", marked="[said]")
+    lint_wiki.lint(str(tmp_path))
+    out = capsys.readouterr().out
+
+    assert "claiming a decision" not in out
+
+
+def test_a_recovered_line_is_quiet_too(lint_wiki, tmp_path, capsys):
+    """Una passata recupera solo fatti che l'utente ha detto: è il contratto del
+    suo prompt, non una scelta che le si concede."""
+    _attributed_notebook(tmp_path, state="decided", anchor="#09:12", marked="[recovered]")
+    lint_wiki.lint(str(tmp_path))
+
+    assert "claiming a decision" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("anchor", "marked", "case"),
+    [
+        ("", "[said]", "nessuna ora: la source punta a N righe"),
+        ("#23:59", "[said]", "un'ora che nel file non c'è"),
+        ("#09:12", "", "una riga scritta prima che i marcatori esistessero"),
+    ],
+)
+def test_what_cannot_be_attributed_is_yellow(lint_wiki, tmp_path, capsys, anchor, marked, case):
+    """🟡 e non 🔴: inverificabile, non falso.
+
+    È anche la ragione di campo che il passo 17 spiega — le pagine nate prima dei
+    marcatori non ce l'hanno, e un 🔴 su ognuna trasformerebbe otto wiki sane in
+    muri rossi, che è il modo più rapido di far ignorare un lint.
+    """
+    _attributed_notebook(tmp_path, state="decided", anchor=anchor, marked=marked)
+    lint_wiki.lint(str(tmp_path))
+    out = capsys.readouterr().out
+
+    assert "🟡 Pages claiming a decision on a line nobody attributed (1)" in out, case
+    assert "🔴 Pages claiming a decision" not in out, case
+
+
+@pytest.mark.parametrize("state", ["open", "hypothesis"])
+def test_a_page_that_claims_nothing_is_not_asked_whose_words(lint_wiki, tmp_path, capsys, state):
+    _attributed_notebook(tmp_path, state=state, anchor="", marked="")
+    lint_wiki.lint(str(tmp_path))
+
+    assert "claiming a decision" not in capsys.readouterr().out
+
+
+def test_the_anchor_is_not_part_of_the_path(lint_wiki, tmp_path, capsys):
+    """La regressione che il passo 19 introdurrebbe se il passo 17 non lo sapesse:
+    `raw/journal/20260823.md#09:12` non esiste **come percorso**, quindi senza il
+    taglio del frammento ogni pagina ancorata bene finirebbe fra le `source:` che
+    non portano da nessuna parte — la modifica che rende la provenienza
+    verificabile diventerebbe un muro giallo."""
+    _attributed_notebook(tmp_path, state="decided", anchor="#09:12", marked="[said]")
+    lint_wiki.lint(str(tmp_path))
+    out = capsys.readouterr().out
+
+    assert "names a file that is not there" not in out

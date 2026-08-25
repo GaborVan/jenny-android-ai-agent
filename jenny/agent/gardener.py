@@ -1243,6 +1243,178 @@ _YIELD_REFUSAL = (
 )
 
 
+_PROVENANCE_REFUSAL_TEMPLATE = (
+    "Refused: `{page}` declares `state: {state}`, but {why}. Only a line the conversation "
+    "attributed to the user can carry a state above `open` — an answer to a question the "
+    "assistant asked is not the user's statement, and that is the mistake this hook exists to "
+    "stop. Write the page at `state: open` and put the question in the map's open section, "
+    "naming the page. Nothing else about the page needs to change."
+)
+
+# I marcatori che valgono «detto dall'utente». ``[recovered]`` c'e' perche' una
+# passata recupera solo fatti che l'utente ha detto e che la cattura ha perso: e'
+# il contratto del suo prompt (v. ``JournalAppendTool``).
+_SAID_MARKERS = ("[said]", "[recovered]")
+_STATES_NEEDING_A_SAID_LINE = ("decided", "done")
+
+_FRONTMATTER_VALUE = re.compile(r"^(state|source)\s*:\s*(.+?)\s*$", re.MULTILINE)
+
+
+def _page_frontmatter(text: str) -> dict[str, list[str]]:
+    """Tutti i valori di ``state`` e ``source`` nella frontmatter, in ordine.
+
+    Un parser di due campi e non YAML: la guardia gira **prima di ogni
+    scrittura**, e le due chiavi che le servono stanno in cima. Se la frontmatter
+    non c'e', il dizionario e' vuoto e la guardia non ha niente da dire — non e'
+    lei a decidere se una pagina debba averla (lo dice il lint, su tutte le pagine
+    e non solo su quelle che passano da qui).
+
+    **Liste e non un valore, e qui la prima versione sbagliava.** Davanti a due
+    ``state:`` prendeva il primo «come farebbe un parser YAML» — e quella e' una
+    via d'uscita, non una compatibilita': ``state: open`` in cima e
+    ``state: decided`` sotto passavano il gancio, e chi legge la pagina con un
+    parser vero (dove fra chiavi duplicate vince l'**ultima**) ci trova
+    ``decided``. Una guardia non deve indovinare quale valore vale: prende tutti e
+    decide sul piu' impegnativo. L'ordine non conta piu', che e' il punto.
+    """
+    if not text.startswith("---"):
+        return {}
+    end = text.find("\n---", 3)
+    head = text[: end if end != -1 else len(text)]
+    out: dict[str, list[str]] = {}
+    for match in _FRONTMATTER_VALUE.finditer(head):
+        out.setdefault(match.group(1), []).append(match.group(2).strip().strip("\"'"))
+    return out
+
+
+def _journal_line_is_said(root: Path, source: str) -> bool | None:
+    """Se la riga citata da *source* e' attribuita all'utente. ``None`` = non si sa.
+
+    ``None`` e ``False`` **non** sono la stessa cosa per chi chiama, ed e' il punto:
+    ``False`` e' una riga trovata e marcata ``[inferred]``, ``None`` e' una
+    ``source:`` che non punta a **una** riga — il giorno nudo, un'ora che nel file
+    non c'e', un percorso illeggibile. Il rifiuto e' lo stesso (fail-closed) ma la
+    frase che il modello legge deve dire quale delle due, perche' le due si
+    riparano in modi opposti: la prima cambiando lo stato, la seconda l'ancoraggio.
+    """
+    rel, _, anchor = source.partition("#")
+    if not anchor:
+        return None
+    page = (root / rel.strip()).resolve()
+    try:
+        # Contenuta nel progetto: ``source:`` e' testo che il modello scrive, quindi
+        # ``../..`` e' una cosa che puo' capitare — qui non serve leggere fuori.
+        page.relative_to(root.resolve())
+        text = page.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return None
+    prefix = f"- {anchor.strip()} \u2014 "
+    for line in text.splitlines():
+        if line.startswith(prefix):
+            return line[len(prefix):].lstrip().startswith(_SAID_MARKERS)
+    return None
+
+
+def _provenance_guard(root: Path, pages: Path) -> Any:
+    """Il gancio che impedisce a una pagina nuova di certificare cio' che nessuno ha detto.
+
+    **T3, D1.** Il 24/08 una pagina e' nata ``state: decided`` su un fatto che
+    l'utente non aveva detto — era l'opzione B di una domanda che Jenny aveva fatto
+    lei — ed e' finita sotto «Decided» nella mappa, che entra a ogni turno.
+    ``agent/gardener.md`` la regola ce l'aveva gia' scritta («only the user's own
+    words … can justify anything stronger»), ma non era **rispettabile**: il
+    giardiniere promuove dal diario, dove una riga citata e una dedotta erano
+    tipograficamente identiche. Ora il diario le distingue, e questo gancio e' il
+    lettore che quel marcatore non aveva.
+
+    **Fail-closed su tutte e tre le vie di non-sapere** — riga ``[inferred]``,
+    ``source:`` senza ancoraggio, ancoraggio che non risolve. Il verso opposto
+    («se non riesco a controllare, lascio passare») e' precisamente il difetto:
+    quel che passa e' una certificazione, e una certificazione sbagliata resta
+    scritta finche' qualcuno non la nota. ``open`` non e' un castigo — e' quel che
+    la pagina vale, e la pagina si scrive comunque.
+
+    **Solo verso l'alto, e solo dentro ``wiki/``.** Una pagina che si dichiara
+    ``open`` o ``hypothesis`` non passa da qui, e nemmeno la mappa (che di
+    ``state:`` non ne ha): il gancio non ha nessuna opinione sulla prosa, solo su
+    chi si dichiara deciso.
+    """
+
+    def _guard(path: Any, text: str) -> str | None:
+        try:
+            target = Path(path).resolve()
+            target.relative_to(pages)
+        except (ValueError, OSError, TypeError):
+            return None
+        front = _page_frontmatter(text)
+        # Lo stato piu' impegnativo fra quelli dichiarati, non "il" dichiarato:
+        # v. ``_page_frontmatter``.
+        claimed = [v.lower() for v in front.get("state", [])]
+        strong = [v for v in claimed if v in _STATES_NEEDING_A_SAID_LINE]
+        if not strong:
+            return None
+        state = strong[0]
+        # E **ogni** ``source:`` deve reggere, non almeno una: due sorgenti di cui
+        # una dedotta sono una pagina che si dichiara decisa in parte, cioe' una
+        # pagina che si dichiara decisa.
+        sources = front.get("source", [""])
+        said: bool | None = True
+        source = ""
+        for candidate in sources:
+            verdict = _journal_line_is_said(root, candidate)
+            if not verdict:
+                said, source = verdict, candidate
+                break
+        if said:
+            return None
+        why = (
+            "its `source:` line is `[inferred]` — the assistant concluded it, the user did "
+            "not say it"
+            if said is False
+            else (
+                "its `source:` does not point at one journal line: add the line's own time "
+                f"after a `#` (`source: raw/journal/<day>.md#HH:MM`). Got {source!r}"
+            )
+        )
+        return _PROVENANCE_REFUSAL_TEMPLATE.format(
+            page=target.name, state=state, why=why
+        )
+
+    return _guard
+
+
+def _compose_write_guards(*guards: Any) -> Any:
+    """Un gancio dai molti, perche' lo slot e' **uno**.
+
+    ``_FsTool`` ha un solo parametro pre-scrittura (``write_size_guard``), e la
+    docstring di ``GardenerStore.build_tools`` dice che montarne un secondo gemello
+    e' stato rifiutato di proposito: allargare quella firma vorrebbe dire
+    duplicarne la semantica in tutti i tool di scrittura del repo per un bisogno di
+    un solo chiamante. Si compone qui.
+
+    **L'ordine conta e non e' alfabetico.** La cessione del passo va per prima:
+    quando l'utente e' rientrato, quel rifiuto e' l'unica cosa vera da dire, e
+    ``aborted`` va riempito con *quel* motivo. Un rifiuto di provenienza che
+    arrivasse prima racconterebbe alla passata una storia diversa da quella per cui
+    e' stata fermata — la proprieta' che la docstring di ``_yield_to_user_guard``
+    chiama «al primo rifiuto la passata e' decisa».
+    """
+    active = [g for g in guards if g is not None]
+    if not active:
+        return None
+    if len(active) == 1:
+        return active[0]
+
+    def _guard(path: Any, text: str) -> str | None:
+        for guard in active:
+            refusal = guard(path, text)
+            if refusal is not None:
+                return refusal
+        return None
+
+    return _guard
+
+
 def _yield_to_user_guard(agent: Any, name: str, aborted: list[str]) -> Any:
     """Il gancio pre-scrittura che cede il passo all'utente, o ``None``.
 
@@ -1373,7 +1545,6 @@ async def _run_pass(
     agent: Any, store: GardenerStore, delta: JournalDelta | None = None
 ) -> GardenerOutcome:
     """La passata vera, con la presa su ``_PASSES_IN_FLIGHT`` già ottenuta."""
-    from jenny.agent.token_usage import record_response_token_usage
 
     # ``None`` solo da ``/gardener``: v. l'argomento in ``run_gardener``.
     if delta is None:
@@ -1412,7 +1583,11 @@ async def _run_pass(
     # funzione, che nel frattempo è dentro ``process_direct``.
     aborted: list[str] = []
     tools = store.build_tools(
-        write_guard=_yield_to_user_guard(agent, store.name, aborted)
+        write_guard=_compose_write_guards(
+            # Ordine: v. ``_compose_write_guards``. La cessione del passo prima.
+            _yield_to_user_guard(agent, store.name, aborted),
+            _provenance_guard(store.root.resolve(), (store.root / "wiki").resolve()),
+        )
     )
     # **Una volta sola, e messa da parte**: ``store.session_key()`` legge
     # l'orologio a ogni chiamata, quindi due chiamate nella stessa passata danno
@@ -1481,9 +1656,15 @@ async def _run_pass(
                 map_before=map_before,
             ))
         finally:
-            record_response_token_usage(
-                resp, source="gardener", timezone_name=_timezone_of(agent)
-            )
+            # La contabilita' dei token **non passa da qui**: la fa
+            # ``TokenUsageHook.after_iteration`` sul turno, che e' l'unico punto in
+            # cui l'``usage`` del provider esiste. Qui c'era una
+            # ``record_response_token_usage(resp, source="gardener")``: ``resp`` e'
+            # un ``OutboundMessage``, che ``usage`` non ce l'ha — e per una passata
+            # e' anche ``None``, perche' non c'e' niente da consegnare. Non ha mai
+            # contato un token. La passata finisce nel bucket ``gardener`` per la
+            # mappa in ``token_usage._INTERNAL_KIND_TO_SOURCE``, dalla sua chiave.
+            pass
 
         elapsed = time.monotonic() - t0
         # Il fuso in cui il registro va datato, letto **una volta** qui: è il solo

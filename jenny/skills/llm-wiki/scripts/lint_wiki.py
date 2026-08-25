@@ -73,7 +73,15 @@ Notebook layout only (flat pages, no page under concepts/entities/summaries):
  17. Page source — `source:` is the trail from a page back to the sentence that
      caused it. Missing, it is 🟡: the page is not wrong, it is unverifiable.
      Naming a file that is not there is a **separate** 🟡: the trail was written
-     and now leads nowhere.
+     and now leads nowhere. The `#HH:MM` anchor is not part of the path.
+ 19. Whose words a decision rests on — a page at `state: decided`/`done` whose
+     journal line reads `[inferred]` is 🔴: the journal itself says the assistant
+     concluded it, so the page asserts something false. A line with no marker, a
+     `source:` with no `#time`, or an anchor that does not resolve is 🟡:
+     unverifiable, not false — pages written before the markers existed cannot be
+     attributed at all, and a 🔴 each would turn healthy projects into red walls.
+     The write-time half of this is `gardener._provenance_guard`, which only sees
+     writes; this pass is what reaches what is already on disk.
 
 Every list in this report is capped (see `LIST_MAX_ENTRIES`) and says how many
 entries it did not print. The header count is always the real total.
@@ -176,6 +184,46 @@ RESEARCH_SUBDIRS = ("concepts", "entities", "summaries")
 # l'anticorpo alla deriva auto-confermante: senza stato, un'ipotesi appuntata di
 # passaggio si rilegge fra un mese come un fatto stabilito.
 PAGE_STATES = {"open", "hypothesis", "decided", "done"}
+
+# Gli stati che **rivendicano una decisione dell'utente**, e non solo un appunto.
+# Sono gli unici per cui il passo 19 chiede di chi siano le parole: `open` e
+# `hypothesis` non rivendicano niente, quindi non c'è niente da attribuire.
+_STATES_CLAIMING_A_DECISION = {"decided", "done"}
+
+# I marcatori di attribuzione che la cattura scrive nel diario. Duplicati **a
+# mano** e non importati da ``jenny.agent.tools.journal``: questo file è uno
+# script della skill, gira anche con `python3 lint_wiki.py <wiki>` fuori dal
+# package, e un import del runtime lo renderebbe non eseguibile da lì. Se i
+# letterali divergono il passo 19 smette di riconoscere le righe e degrada in
+# giallo — inverificabile, non falso — che è il verso giusto in cui rompersi.
+_SAID_MARKERS = ("[said]", "[recovered]")
+_INFERRED_MARKER = "[inferred]"
+
+
+def _journal_line_marker(
+    root_path: Path, file_part: str, anchor: str, cache: dict[str, dict[str, str]]
+) -> str | None:
+    """Il marcatore della riga di diario a *anchor*, o ``None`` se non c'è.
+
+    ``None`` copre due casi che il chiamante distingue nel messaggio ma non nella
+    severità: il file illeggibile e l'ora che nel file non compare. La cache è per
+    file, perché una wiki con venti pagine ancorate allo stesso giorno lo
+    rileggerebbe venti volte.
+    """
+    if file_part not in cache:
+        lines: dict[str, str] = {}
+        try:
+            text = (root_path / file_part).read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+        for line in text.splitlines():
+            match = re.match(r"^-\s+(\d{2}:\d{2})\s+\u2014\s+(.*)$", line)
+            if match:
+                body = match.group(2).lstrip()
+                marker = body.split(" ", 1)[0] if body.startswith("[") else ""
+                lines[match.group(1)] = marker
+        cache[file_part] = lines
+    return cache[file_part].get(anchor.strip())
 
 # Tetto della mappa, in caratteri. **Non è un numero scelto qui**: è la soglia
 # oltre la quale il blocco di progetto smette di iniettare la mappa intera in
@@ -1413,12 +1461,18 @@ def lint(root: str) -> int:
         # messaggi: dirli insieme manderebbe a cercare la cosa sbagliata.
         no_source: list[str] = []
         dangling_source: list[str] = []
+        # Passo 19 (v. sotto il ciclo): quel che si raccoglie strada facendo, per
+        # non rileggere ogni pagina e ogni giorno di diario una seconda volta.
+        unattributed: list[str] = []
+        inferred_but_decided: list[str] = []
+        journal_lines: dict[str, dict[str, str]] = {}
         for page in flat_pages:
             fm = parse_frontmatter(read_md(page)) or {}
             raw_value = fm.get("source")
             values = raw_value if isinstance(raw_value, list) else [raw_value]
             values = [str(v).strip() for v in values if str(v or "").strip()]
             rel_page = page.relative_to(root_path).as_posix()
+            state = str(fm.get("state", "")).strip().strip("\"'").lower()
             if not values:
                 no_source.append(f"   {rel_page}")
                 continue
@@ -1428,8 +1482,34 @@ def lint(root: str) -> int:
                 # fonte legittima che nessun controllo di percorso può risolvere.
                 if "://" in value or ("<" in value and ">" in value):
                     continue
-                if not (root_path / value).exists() and not (wiki_path / value).exists():
+                # **L'ancoraggio non fa parte del percorso.** Da quando
+                # ``gardener.md`` chiede l'ora della riga dopo un ``#``, un
+                # ``source:`` giusto è ``raw/journal/20260824.md#19:19`` — e senza
+                # questo taglio il controllo di esistenza qui sotto chiamerebbe
+                # «dangling» ogni pagina ancorata bene, cioè trasformerebbe la
+                # modifica che rende la provenienza verificabile in un muro giallo.
+                file_part, _, anchor = value.partition("#")
+                file_part = file_part.strip()
+                if not (root_path / file_part).exists() and not (wiki_path / file_part).exists():
                     dangling_source.append(f"   {rel_page} → source: {value}")
+                    continue
+                if state not in _STATES_CLAIMING_A_DECISION:
+                    continue
+                if not anchor:
+                    unattributed.append(f"   {rel_page} → source: {value} (no #time)")
+                    continue
+                marker = _journal_line_marker(root_path, file_part, anchor, journal_lines)
+                if marker in _SAID_MARKERS:
+                    continue
+                if marker == _INFERRED_MARKER:
+                    inferred_but_decided.append(
+                        f"   {rel_page} (state: {state}) → {value}"
+                    )
+                else:
+                    unattributed.append(
+                        f"   {rel_page} → source: {value} "
+                        f"({'line not found' if marker is None else 'line not marked'})"
+                    )
         if no_source:
             print(f"\n🟡 Pages with no `source:` ({len(no_source)}) — unverifiable:")
             print_entries(no_source)
@@ -1444,6 +1524,44 @@ def lint(root: str) -> int:
             print("    now leads nowhere — a journal day pruned or renamed, or a wrong value.")
             print("    The journal is append-only, so a day that vanished is worth a look too.)")
             issues += len(dangling_source)
+
+        # ── Pass 19: chi si dichiara deciso, su parole di chi? ────────────────
+        #
+        # Il difetto (**D1**): il 24/08 una pagina è nata `state: decided` su un
+        # fatto che l'utente non aveva detto — era l'opzione B di una domanda che
+        # l'assistente aveva fatto lui — ed è finita sotto «Decided» nella mappa,
+        # che entra in ogni turno. In scrittura ora c'è una guardia
+        # (`gardener._provenance_guard`), ma quella agisce **solo** sulle
+        # scritture: le pagine già sul disco non le vede nessuno. Questo passo è
+        # il lato offline, e non dipende da nessun modello.
+        #
+        # **Due elenchi e due severità, e la riga di confine è quella del passo
+        # 17.** Una riga marcata `[inferred]` con una pagina che si dichiara
+        # decisa è 🔴: il diario stesso dice che l'ha concluso l'assistente,
+        # quindi la pagina *dice una cosa falsa* — l'utente non ha deciso quello.
+        # Tutto il resto — riga senza marcatore, `source:` senza ora, ora che non
+        # risolve — è 🟡: **inverificabile**, non falso. Ed è anche la ragione di
+        # campo che il passo 17 spiega: le pagine nate prima che i marcatori
+        # esistessero non ce l'hanno, e un 🔴 su ognuna trasformerebbe otto wiki
+        # sane in muri rossi, che è il modo più rapido di far ignorare un lint.
+        if inferred_but_decided:
+            print(f"\n🔴 Pages claiming a decision the journal attributes to the assistant "
+                  f"({len(inferred_but_decided)}):")
+            print_entries(inferred_but_decided)
+            print("   (the journal line is `[inferred]` — the assistant concluded it, the user")
+            print("    did not say it. An answer to a question the assistant asked is not the")
+            print("    user's statement. Set the page to `state: open` and put the question in")
+            print("    the map's open section.)")
+            issues += len(inferred_but_decided)
+        if unattributed:
+            print(f"\n🟡 Pages claiming a decision on a line nobody attributed "
+                  f"({len(unattributed)}):")
+            print_entries(unattributed)
+            print("   (not wrong, unverifiable: nothing says whether the user stated this or")
+            print("    the assistant concluded it. Anchor `source:` at the line's own time")
+            print("    (`raw/journal/<day>.md#HH:MM`); a line written before the markers")
+            print("    existed cannot be attributed at all, and `open` is what it is worth.)")
+            issues += len(unattributed)
 
         # Una pagina che non linka niente è una nota in una cartella, non una
         # voce di wiki: la stessa regola del passo 10, per le pagine piatte.
