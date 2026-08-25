@@ -99,7 +99,7 @@ def _gardener_key(root: pathlib.Path, name: str = "casa") -> str:
     return store.session_key()
 
 
-def _gardener_system_prompt(root: pathlib.Path) -> str:
+def _gardener_system_prompt(root: pathlib.Path, name: str = "casa") -> str:
     """Il prompt di sistema che il loop costruisce per una passata.
 
     ``channel`` interno e nessun ``workspace``: è quel che fa
@@ -107,9 +107,29 @@ def _gardener_system_prompt(root: pathlib.Path) -> str:
     ``WorkspaceScopeResolver.for_turn`` ripiega su ``default()`` per ogni canale
     che non è quello scopato — quindi la radice è l'installazione, e il blocco di
     progetto non si rende affatto.
+
+    **E i tool della passata, che qui mancavano.** Fino al 25/08 questo helper
+    chiamava ``build_system_prompt`` senza ``available_tools``, cioè lasciava il
+    context builder nello stato «non so quali tool ha questo turno» — dove per
+    contratto ogni gate per-tool si apre. In produzione quei nomi arrivano sempre
+    (``_build_initial_messages`` passa ``turn_tools.tool_names``, e la passata
+    porta il proprio registry), quindi il prompt misurato qui era **6.348
+    caratteri più grosso** di quello vero: fra l'altro si prendeva
+    ``agent/scheduling.md``, che in una passata non c'è mai stato. Un file che
+    dice di misurare «il prompt di sistema vero di una chiave ``gardener:``» non
+    può costruirlo con meno di quel che il loop gli dà: le asserzioni negative
+    diventano più larghe del vero (provano l'assenza da un prompt che nessuno
+    riceve) e quelle positive misurano prosa che il modello non legge.
+
+    La cassetta viene dallo store, non da un elenco scritto a mano, per la stessa
+    ragione di ``_gardener_key``.
     """
+    store = GardenerStore.for_project(root, name)
+    assert store is not None
     return ContextBuilder(root).build_system_prompt(
-        channel="internal", session_key=_gardener_key(root)
+        channel="internal",
+        session_key=store.session_key(),
+        available_tools=sorted(store.build_tools().tool_names),
     )
 
 
@@ -190,13 +210,23 @@ def test_a_gardener_pass_is_not_shown_paths_its_toolbox_refuses(tmp_path) -> Non
     `wikis/<nome>/...`. Toglierla romperebbe la scrittura invece di stringere una
     lettura — ed è l'errore facile da fare qui.
 
-    **L'asserzione guarda il blocco `## Workspace`, non tutto il prompt**, e la
-    prima versione sbagliava proprio lì. Quei percorsi compaiono anche altrove —
-    `agent/scheduling.md` avverte che «writing a reminder into `memory/MEMORY.md`
-    schedules nothing», la sezione skill nomina `skills/<nome>/SKILL.md` — ma
-    quella è **prosa su come funziona il sistema**, non un elenco di file
-    indirizzato a *te*, ed è una questione diversa (che una passata riceva
-    istruzioni sul cron è registrato a parte, non allargato qui di soppiatto).
+    **L'asserzione guarda il blocco `## Workspace`**, e la prima versione
+    sbagliava proprio lì: i due percorsi comparivano anche altrove, quindi un
+    `not in prompt` bocciava per prosa che non è un elenco indirizzato a *te*.
+
+    **Dal 25/08 i due `memory/` non ci sono più in nessun punto, e l'asserzione lo
+    dice.** L'altra occorrenza era `## Which File a Fact Belongs In`
+    (`agent/tool_contract.md`), che a una passata non arriva più (**D11**, il test
+    qui sotto); quella di `agent/scheduling.md` non c'era mai stata — la vedeva
+    solo questo file, che costruiva il prompt senza i tool del turno (v.
+    `_gardener_system_prompt`). Le due forme restano entrambe perché provano cose
+    diverse: il blocco che la riga di radice resta **senza** di loro, il prompt
+    intero che nessun altro blocco li rinomina.
+
+    `SKILL.md` resta misurato sul solo blocco, e non è una dimenticanza: con una
+    skill installata l'indice delle skill quel percorso lo nomina — stessa classe
+    (un indirizzo verso una porta che la cassetta rifiuta), residuo già registrato
+    accanto a D8, non allargato qui di soppiatto.
     """
     root = tmp_path
     _install(root)
@@ -205,10 +235,10 @@ def test_a_gardener_pass_is_not_shown_paths_its_toolbox_refuses(tmp_path) -> Non
     prompt = _gardener_system_prompt(root)
     block = prompt.split("## Workspace", 1)[1].split("\n## ", 1)[0]
 
-    assert "memory/MEMORY.md" not in block
-    assert "memory/history.jsonl" not in block
     assert "SKILL.md" not in block
     assert "Your workspace is at:" in block, "la radice dei percorsi relativi resta"
+    assert "memory/MEMORY.md" not in prompt
+    assert "memory/history.jsonl" not in prompt
 
 
 def test_everyone_else_still_gets_them(tmp_path) -> None:
@@ -236,6 +266,65 @@ def test_everyone_else_still_gets_them(tmp_path) -> None:
         )
         block = prompt.split("## Workspace", 1)[1].split("\n## ", 1)[0]
         assert "memory/history.jsonl" in block, key
+
+
+_FACT_ROUTING = "## Which File a Fact Belongs In"
+_OUTPUT_CONVENTIONS = "## Where Produced Files Go"
+
+
+def test_a_gardener_pass_is_not_told_where_facts_go_in_the_installation(tmp_path) -> None:
+    """I due blocchi che parlano della radice come cartella di lavoro. **D11.**
+
+    `agent/tool_contract.md` li chiude già con un flag — quello nato quando un
+    subagent scrisse il file di prova in `wikis/<nome>/output/` obbedendo alla
+    lettera a un prompt che gli dava le convenzioni del workspace dentro una
+    cartella di progetto. Il flag è `is_wiki_root(root)`, cioè una domanda sulla
+    **cartella**, e per una passata quella domanda risponde a un'altra: un turno
+    interno non ha scope legato, quindi la radice è l'installazione e il flag è
+    falso — mentre la sua superficie di scrittura è `wikis/<nome>/wiki/` e
+    nient'altro.
+
+    **Il costo non era il contesto sprecato.** `## Which File a Fact Belongs In`
+    dice «`memory/MEMORY.md` — project context: what is going on, what was
+    decided, what is still open», e lo diceva all'unico attore il cui mestiere è
+    *produrre* esattamente quello: gli nominava come casa dei fatti decisi di un
+    progetto il file da cui il cancello di Fase 1 li ha appena tolti, e che la sua
+    cassetta rifiuta comunque.
+
+    **Il difetto registrato come D11 era un altro blocco** — `agent/scheduling.md`
+    — ed era già chiuso da un gate per-tool: nella cassetta della passata `cron`
+    non c'è. Si vedeva solo dal fixture di questo file, che costruiva il prompt
+    senza i tool del turno. È la ragione per cui il test qui sotto asserisce anche
+    la metà positiva: un flag che si spegne per tutti chiuderebbe la stessa riga
+    senza che nessuna asserzione se ne accorga.
+    """
+    root = tmp_path
+    _install(root)
+    _project(root)
+
+    prompt = _gardener_system_prompt(root)
+
+    assert _FACT_ROUTING not in prompt
+    assert _OUTPUT_CONVENTIONS not in prompt
+
+
+def test_a_conversation_still_learns_where_facts_go(tmp_path) -> None:
+    """La metà positiva, e vale quanto l'altra.
+
+    Quel routing esiste perché prima viveva solo nella scheda di aiuto della
+    WebUI, cioè in un posto che nessun modello legge, e a «ricordati questo» si
+    scriveva dove capitava. Chiuderlo per la passata non deve chiuderlo per chi ha
+    davanti un utente che dice «ricordati questo».
+    """
+    root = tmp_path
+    _install(root)
+
+    prompt = ContextBuilder(root).build_system_prompt(
+        channel="webui", session_key=PERSONAL
+    )
+
+    assert _FACT_ROUTING in prompt
+    assert _OUTPUT_CONVENTIONS in prompt
 
 
 # ── quel che si chiude ───────────────────────────────────────────────────────

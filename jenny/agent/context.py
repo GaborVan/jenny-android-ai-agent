@@ -551,6 +551,28 @@ class ContextBuilder:
         # La rubrica qui sotto invece si chiude sulla *sessione*, perche' quella
         # e' una domanda su chi sta parlando, non su dove si lavora.
         in_project = is_wiki_root(root)
+        # La passata del giardiniere e' il caso in cui quella domanda sulla
+        # cartella da' la risposta giusta a una domanda diversa. **D11.** Un turno
+        # interno non ha uno scope legato, quindi ``root`` e' la radice
+        # dell'installazione e ``in_project`` e' falso — ma la sua superficie di
+        # scrittura e' ``wikis/<nome>/wiki/`` e nient'altro
+        # (``GardenerStore.build_tools``), cioe' le convenzioni del workspace su di
+        # lei sono false esattamente come dentro una wiki.
+        #
+        # Cosa costava, misurato sul prompt vero (25/08): le arrivava
+        # ``## Which File a Fact Belongs In``, che dice «``memory/MEMORY.md`` —
+        # project context: what is going on, what was decided, what is still open».
+        # Detto all'unico attore il cui mestiere e' **produrre** quella roba, e la
+        # cui cassetta quel file lo rifiuta: un indirizzo giusto verso una porta
+        # chiusa, che in piu' nomina come casa dei fatti decisi di un progetto il
+        # file da cui il cancello di Fase 1 li ha appena tolti.
+        #
+        # Il difetto **registrato** come D11 era un altro blocco
+        # (``agent/scheduling.md``) ed era gia' chiuso: quel gate legge i tool del
+        # turno, e nella cassetta della passata ``cron`` non c'e'. Si vedeva solo
+        # dal fixture di un test che il prompt lo costruiva **senza** i tool —
+        # 6.348 caratteri che in produzione non ci sono mai stati.
+        is_gardener_pass = is_gardener_session_key(session_key)
         if in_project:
             with suppress(Exception):  # workspace sincronizzato da una versione precedente
                 parts.append(render_template(
@@ -623,7 +645,10 @@ class ContextBuilder:
             # file di prova in ``wikis/<nome>/output/``. La pianta giusta la dice
             # ``agent/project.md``, quindi qui quelle due sezioni si spengono
             # invece di essere riscritte: un solo proprietario per regola.
-            project=in_project,
+            # v. ``is_gardener_pass``: l'unione, perche' la domanda di questo
+            # flag non e' «dove sono» ma «le convenzioni della radice valgono per
+            # me», e per la passata la risposta e' no in entrambi i sensi.
+            project=in_project or is_gardener_pass,
         ))
 
         # Dove va un lavoro ricorrente: heartbeat, `reminder` o `monitor`. Era
@@ -681,7 +706,7 @@ class ContextBuilder:
         # Le due specie che non ricevono ``MEMORY.md`` intero, calcolate una volta
         # perche' il cancello della rubrica qui sotto chiede le stesse due.
         is_project = is_project_session_key(session_key or "")
-        is_gardener = is_gardener_session_key(session_key)
+        is_gardener = is_gardener_pass
         memory = self.memory.get_memory_context()
         if memory and not self._is_template_content(self.memory.read_memory(), "memory/MEMORY.md"):
             # ``MEMORY.md`` **non** e' identita', misurato e non dedotto: contate

@@ -78,11 +78,19 @@ refuse, plus an invitation to open it, is worse than the absence.
 `build_tools` comment, *"Lettura: dentro il progetto. Non l'intera installazione come Atlas"*, is a
 boundary somebody chose: T4.5 records a proposed fix that would have silently undone it).
 
-**Known and not closed**: `agent/identity.md`'s workspace listing still names `memory/MEMORY.md` and
-`memory/history.jsonl` to every session, the gardener included — two paths its toolbox refuses. It
-predates this gate and it does not close with the same boolean (for Dream that line is correct, and
-Atlas reads the whole installation), so it needs per-actor reasoning rather than the project/gardener
-test used here.
+**Closed since 25/08, and the residue is narrower.** `agent/identity.md`'s workspace listing named
+`memory/MEMORY.md` and `memory/history.jsonl` to every session, the gardener included — two paths its
+toolbox refuses. Those two are now absent from a gardener pass's prompt entirely: the listing is
+gated (`installation_files`), and the other block that named `MEMORY.md` —
+`agent/tool_contract.md`'s `## Which File a Fact Belongs In`, which told the pass that "what was
+decided, what is still open" belongs in `MEMORY.md` — no longer reaches it either. That block was
+already gated on "am I inside a project folder?", which for an internal turn answers a different
+question: its scope is the installation, its writable surface is `wikis/<name>/wiki/`. The gate now
+reads the union with the session kind (`context.py`, look for `is_gardener_pass`).
+
+What remains: with a skill installed, the skills index names `skills/<name>/SKILL.md` to the pass,
+and its toolbox refuses that too. Same class, one path, not closed — the pass arguably should not
+receive the skills index at all, which is a third narrowing and a separate decision.
 
 ## SSRF Protection
 
