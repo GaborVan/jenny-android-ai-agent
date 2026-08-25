@@ -121,6 +121,15 @@ _PROJECT_MD_RULES: tuple[tuple[str, str, str], ...] = (
         "no folder to choose",
     ),
     (
+        "una subordinata che nomina una cosa è una cosa",
+        "il caso del 25/08 su ``viaggio-pazzo``: «Pavia come tappa perché ci vive "
+        "l'amico X» è finita in **una** riga, quindi in una pagina intitolata alla "
+        "tappa, con la persona sepolta dentro come subordinata. Non era una regola "
+        "mancante: la regola c'era e puntava **dall'altra parte** («a fact that needs "
+        "a subordinate clause is still one fact»)",
+        "names a thing is a thing",
+    ),
+    (
         "segui la pianta che trovi",
         "due forme esistono su disco e **nessun flag** le distingue: le sette wiki vere "
         "hanno altre cartelle, e l'agente le deve seguire invece di tentare una "
@@ -189,7 +198,13 @@ def test_the_block_stays_small() -> None:
     """Un tetto, non un'abitudine — stessa ragione di ``agent/scheduling.md``.
 
     Si paga a **ogni** turno del progetto, compresi quelli in cui gli chiedi che
-    ore sono.
+    ore sono. Dal 25/08 la misura lo dice davvero: fino a quel giorno la frase
+    era vera del prompt e falsa del test (v. il commento sotto).
+
+    **Tetto a 5.400 dal 25/08**, su un pavimento misurato di 4.889 — non un
+    numero scelto per far entrare qualcosa, ma il costo reale più circa il 10%.
+    È stretto apposta: tre frasi in più lo sfondano, ed è quel che deve
+    succedere.
 
     **Il tetto è passato da 1500 a 3200 il 22/08 (T2), e la regola è cambiata
     con lui.** Prima diceva "la pianta sta qui, il come si opera sta nella
@@ -205,8 +220,39 @@ def test_the_block_stays_small() -> None:
     """
     from jenny.utils.prompt_templates import render_template
 
-    rendered = render_template("agent/project.md", project_path="/data/workspace/wikis/x")
-    assert len(rendered) <= 3200, (
+    # ``capture=True`` **è la modifica del 25/08**, e senza di essa questo test
+    # non misurava quel che dice di misurare. In Jinja una variabile non definita
+    # è falsa, quindi la chiamata di prima — solo ``project_path`` — escludeva
+    # tutto il blocco ``{% if capture %}``: sorvegliava 1.835 caratteri di un file
+    # che in produzione (``context.py``, ``capture=_turn_is_writable()``) ne rende
+    # 4.889. Il tetto era a 3.200 ed era **già sfondato di 1.259** da prima che
+    # qualcuno ci aggiungesse una riga. Ed è la beffa: il tetto era stato alzato a
+    # 3.200 il 22/08 *proprio perché* il blocco aveva accolto la politica di
+    # cattura — cioè giustificato con del testo che la misura non vedeva.
+    #
+    # Stessa forma del difetto chiuso lo stesso giorno in
+    # ``test_gardener_prompt_boundary`` (``available_tools=None``): un test sul
+    # prompt costruito senza gli argomenti che la produzione manda davvero.
+    #
+    # **Mappa e pagine restano fuori di proposito.** Hanno i loro tetti
+    # (``_PROJECT_MAP_MAX_CHARS``, ``_PROJECT_PAGES_MAX_CHARS``) e sono contenuto
+    # dell'utente, non testo di questo file: infilarle qui misurerebbe la wiki
+    # invece del prompt. Questo numero è il **costo fisso** del blocco.
+    rendered = render_template(
+        "agent/project.md", project_path="/data/workspace/wikis/x", capture=True
+    )
+    # **Il pavimento è il guardiano del guardiano.** Senza, la mutazione che
+    # riporta il difetto — togliere ``capture=True`` — lascia questo test
+    # *verde*: misurerebbe di nuovo 1.835 caratteri, comodamente sotto il tetto,
+    # e nessuno saprebbe che il tetto ha smesso di sorvegliare qualcosa. È il
+    # solo modo di far fallire un test che sbaglia per difetto invece che per
+    # eccesso, ed è la lezione del 25/08 scritta come asserzione.
+    assert len(rendered) > 4000, (
+        f"agent/project.md è {len(rendered)} caratteri: il blocco di cattura non è nel "
+        "render, quindi questo tetto non sta sorvegliando quel che dice di sorvegliare. "
+        "Manca `capture=True`?"
+    )
+    assert len(rendered) <= 5400, (
         f"agent/project.md è {len(rendered)} caratteri: sta diventando il manuale della "
         "skill. Qui ci sta quel che si applica a ogni turno; il come si esegue "
         "un'operazione sta in `skills/llm-wiki/SKILL.md`."
@@ -250,6 +296,50 @@ def test_the_capture_rule_names_the_file_and_the_moment(tmp_path) -> None:
     prompt = _project_prompt(tmp_path)
     assert CAPTURE_TIMING in prompt
     assert JOURNAL_PATH in prompt
+
+
+def test_the_two_halves_of_the_split_rule_are_both_there(tmp_path) -> None:
+    """Spezzare per cosa **e** non spezzare per punteggiatura: servono entrambe.
+
+    Il 25/08 ce n'era una sola. Il blocco diceva «a fact that needs a subordinate
+    clause is still one fact» — l'anticorpo al rumore, giusto e da tenere — e non
+    diceva che una subordinata *che nomina una cosa* è una cosa. Con quella metà
+    sola, «Pavia come tappa perché ci vive l'amico X» è una riga, quindi una
+    pagina intitolata alla tappa, con la persona sepolta dentro; e il giardiniere
+    che la riceve non può fare altro, perché il diario è append-only.
+
+    Il rischio che questo test copre è la **rimozione di una delle due**: tenere
+    solo l'anticorpo riporta al 25/08, tenere solo la deroga riempie il diario di
+    una riga per virgola. Un test per ciascuna metà cadrebbe solo su metà del
+    difetto, quindi stanno insieme.
+    """
+    prompt = _project_prompt(tmp_path)
+    assert "Split by thing, not by punctuation" in prompt, (
+        "tolto l'anticorpo: una riga per proposizione riempie il diario di rumore, "
+        "e una passata lo trasforma in pagine che litigano fra loro"
+    )
+    assert "names a thing is a thing" in prompt, (
+        "tolta la deroga: si torna al caso del 25/08 — il fatto durevole resta "
+        "sepolto come subordinata, e la fusione non è riparabile sulla riga"
+    )
+
+
+def test_the_split_rule_does_not_promise_a_free_repair(tmp_path) -> None:
+    """La riparazione esiste (la ripassa il giardiniere) e **non** va promessa qui.
+
+    ``gardener.md`` sa recuperare un fatto sepolto, quindi la vecchia frase «that
+    is not recoverable later» è diventata falsa e andava cambiata. Ma dire alla
+    cattura «tanto poi qualcuno ripara» toglie la ragione per cui spezza adesso,
+    e la prevenzione muore per mano della riparazione. La frase nuova costa il
+    recupero — una seconda riga quasi uguale — e chiude con il confronto, che è
+    la parte che deve restare.
+    """
+    prompt = _project_prompt(tmp_path)
+    assert "Splitting it here costs nothing" in prompt
+    assert "second line saying almost the same thing" in prompt
+    assert "not recoverable later" not in prompt, (
+        "affermazione ora falsa: dal 25/08 la passata può recuperare un fatto sepolto"
+    )
 
 
 def test_the_gesture_is_a_tool_call_and_not_a_file_instruction(tmp_path) -> None:
