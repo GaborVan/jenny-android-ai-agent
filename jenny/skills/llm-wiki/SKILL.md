@@ -505,6 +505,7 @@ See `references/log-guide.md` for full details. Minimum:
 - One file per day: `log/YYYYMMDD.md`
 - H1 = the date; H2 per entry with `## [HH:MM] <op> | <one-line description>`
 - Ops: `compile`, `ingest`, `query`, `lint`, `audit`, `promote`, `split`, `scaffold`
+- `gardener` is also valid, and is the one op you do not write: the gardener pass logs its own line (`## [HH:MM] gardener | …`) from code, not from a prompt.
 
 Quick grep across history: `grep -rh "^## \[" log/ | tail -20`.
 

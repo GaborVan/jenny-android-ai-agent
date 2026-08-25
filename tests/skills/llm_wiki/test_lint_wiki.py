@@ -2173,3 +2173,176 @@ def test_the_anchor_is_not_part_of_the_path(lint_wiki, tmp_path, capsys):
     out = capsys.readouterr().out
 
     assert "names a file that is not there" not in out
+
+
+# ── passo 12: il vocabolario delle operazioni del `log/` ─────────────────────
+#
+# **D14.** Il passo sul `log/` ha un elenco chiuso di operazioni e boccia quel che
+# non ci sta. Ma due scrittori legittimi non c'erano: il giardiniere, che la sua
+# riga la scrive **da codice**, e `reindex`, che la tabella della guida autorizza.
+# Su ogni progetto con una passata alle spalle il risultato era un 🟡 permanente
+# che non segnalava niente di vero — e il danno di un controllo così non è il
+# falso allarme, è che insegna a scorrere l'elenco senza leggerlo.
+#
+# I due test qui sotto non riscrivono l'elenco: lo confrontano con le **due
+# fonti** che lo devono contenere, cioè il codice che scrive e il documento che
+# autorizza. Un elenco riscritto a mano nel test resterebbe verde il giorno che
+# uno dei due cambia, che è precisamente come questo difetto è arrivato fino a
+# qui.
+
+
+def test_the_op_the_gardener_actually_writes_is_a_known_op(lint_wiki, tmp_path):
+    """L'operazione la prende da ``log_pass``, non da un letterale.
+
+    Guardare la riga vera è il punto: il difetto non era «manca la parola
+    *gardener*», era che nessuno aveva confrontato l'unico scrittore che non passa
+    da un prompt con il controllo che lo giudica. Un test con la stringa scritta a
+    mano proverebbe l'accordo fra sé stesso e l'elenco, non fra l'elenco e il
+    codice.
+    """
+    from jenny.agent.gardener import GardenerStore
+    from jenny.agent.gardener_state import JournalDelta
+
+    project = tmp_path / "wikis" / "casa"
+    (project / "wiki").mkdir(parents=True)
+    (project / "wiki" / "index.md").write_text("# Casa\n", encoding="utf-8")
+    store = GardenerStore.for_project(tmp_path, "casa")
+    assert store is not None
+
+    store.log_pass(JournalDelta(), elapsed=1.0, writes=1, timezone="Europe/Rome")
+
+    logs = sorted((project / "log").glob("*.md"))
+    assert logs, "senza riga scritta questo test non prova niente"
+    ops = [
+        match.group(1)
+        for line in logs[0].read_text(encoding="utf-8").splitlines()
+        if (match := lint_wiki.LOG_ENTRY_RE.match(line))
+    ]
+    assert ops, "la riga della passata deve avere la forma che il passo 12 riconosce"
+    assert set(ops) <= lint_wiki.VALID_LOG_OPS
+
+
+def test_every_op_the_guide_authorises_is_a_known_op(lint_wiki):
+    """Fra un riferimento che autorizza e un controllo che boccia, vince il primo.
+
+    ``references/log-guide.md`` è il documento da cui il modello copia la forma
+    della riga prima di scriverla: un'operazione elencata **là** e assente **qui**
+    è un 🟡 su una riga scritta seguendo le istruzioni. Era il caso di
+    ``reindex``, che col giardiniere non c'entra niente — trovato di lato, stessa
+    classe.
+    """
+    guide = _SCRIPTS_DIR.parent / "references" / "log-guide.md"
+    table = guide.read_text(encoding="utf-8").split("## Ops allowed in the log", 1)[1]
+    documented = set(re.findall(r"^\|\s*`(\w+)`", table.split("\n## ", 1)[0], re.MULTILINE))
+
+    assert len(documented) >= 8, "la tabella non è stata letta: l'asserzione sotto sarebbe vuota"
+    assert documented <= lint_wiki.VALID_LOG_OPS
+
+
+def test_an_op_nobody_authorised_is_still_flagged(lint_wiki, tmp_path, capsys):
+    """La metà negativa, e mancava: allargare un elenco non deve poter svuotarlo.
+
+    Trovata da una mutazione — neutralizzato il confronto del passo 12
+    (``not in VALID_LOG_OPS`` → mai vero) i due test qui sopra restavano **verdi**,
+    perché asseriscono entrambi che certe operazioni *passano*. Cioè misuravano il
+    vocabolario e non il controllo: la stessa forma di difetto che la correzione
+    D14 ripara, un piano più in su.
+    """
+    _notebook(tmp_path)
+    (tmp_path / "log" / "20260823.md").write_text(
+        "# 2026-08-23\n\n## [09:12] frobnicate | qualcosa\n", encoding="utf-8"
+    )
+    lint_wiki.lint(str(tmp_path))
+    out = capsys.readouterr().out
+
+    assert "unknown op 'frobnicate'" in out
+
+
+# ── passo 19: la stessa domanda, due implementazioni ─────────────────────────
+#
+# **D13.** L'ancoraggio di `source:` è al minuto, e un minuto può tenere più righe.
+# Prima del 25/08 le due implementazioni della stessa domanda — «di chi è la riga
+# che questa pagina cita?» — sbagliavano entrambe e **in modi opposti**: la guardia
+# di `gardener.py` leggeva la prima riga del minuto, questo lint teneva un
+# dizionario `minuto → marcatore` e quindi leggeva l'ultima. Due copie dello stesso
+# difetto che non erano nemmeno d'accordo su quale riga guardare, cioè una pagina
+# potevano giudicarla in modo diverso.
+#
+# Questo script non importa `jenny` (gira anche fuori dall'app), quindi il codice
+# resta duplicato per forza. Quel che non deve restare duplicato è il *giudizio*: il
+# test qui sotto fa girare gli stessi casi nelle due implementazioni e chiede che
+# arrivino alla stessa conclusione. È la stessa forma di
+# `test_the_ceiling_matches_the_one_the_prompt_uses`, applicata a un
+# comportamento invece che a un numero.
+
+
+_MIXED_JOURNAL = (
+    "# 2026-08-24\n"
+    "\n"
+    "- 09:12 — [said] Il furgone è un Ducato.\n"
+    "- 09:12 — [inferred] Quindi il letto sta in fondo.\n"
+    "- 09:13 — [said] Si parte il 12.\n"
+    "- 09:13 — [recovered] Rientro il 20.\n"
+    "- 09:14 — [inferred] Meglio partire di notte.\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("anchor", "said", "case"),
+    [
+        ("#09:12", False, "minuto misto: non si sa quale riga"),
+        ("#09:12.1", True, "l'ordinale indica la riga detta"),
+        ("#09:12.2", False, "l'ordinale indica la riga dedotta"),
+        ("#09:13", True, "due righe, entrambe dell'utente: il minuto basta"),
+        ("#09:14", False, "una riga sola, dedotta"),
+        ("#09:12.3", False, "ordinale fuori range"),
+        ("#09:12.0", False, "gli ordinali contano da 1"),
+        ("#23:59", False, "un minuto che nel file non c'è"),
+        ("", False, "nessun ancoraggio"),
+    ],
+)
+def test_the_lint_and_the_gardener_read_the_same_line(lint_wiki, tmp_path, anchor, said, case):
+    """Stessa domanda, stessa risposta — misurata, non asserita due volte a mano.
+
+    ``said`` è l'unico esito che *passa*: sotto ci sono quattro modi di non sapere
+    e la severità li distingue nel messaggio, non nel verdetto. Il test confronta
+    quindi la sola cosa su cui le due implementazioni non possono divergere.
+    """
+    from jenny.agent.gardener import _journal_line_provenance
+
+    (tmp_path / "raw" / "journal").mkdir(parents=True)
+    (tmp_path / "raw" / "journal" / "20260824.md").write_text(_MIXED_JOURNAL, encoding="utf-8")
+    source = f"raw/journal/20260824.md{anchor}"
+
+    gardener = _journal_line_provenance(tmp_path.resolve(), source) == "said"
+    _, _, only_anchor = source.partition("#")
+    marker = lint_wiki._journal_line_marker(
+        tmp_path, "raw/journal/20260824.md", only_anchor, {}
+    )
+    lint = marker in lint_wiki._SAID_MARKERS
+
+    assert gardener is said, f"gardener.py: {case}"
+    assert lint is said, f"lint_wiki.py: {case}"
+
+
+def test_a_mixed_minute_is_yellow_and_says_what_to_add(lint_wiki, tmp_path, capsys):
+    """🟡 con la frase giusta: il minuto è ambiguo, non introvabile.
+
+    Il primo taglio di questa correzione riportava un minuto misto come «line not
+    found» — mandava a cercare una riga che c'è, cioè un avviso su cui non si può
+    agire. Il difetto vero è che l'ancoraggio è **incompleto**, e la riparazione è
+    un'aggiunta.
+    """
+    _notebook(tmp_path, state=None, source=None)
+    (tmp_path / "raw" / "journal" / "20260824.md").write_text(_MIXED_JOURNAL, encoding="utf-8")
+    (tmp_path / "wiki" / "semine.md").write_text(
+        "---\nstate: decided\nsource: raw/journal/20260824.md#09:12\n---\n\n"
+        "# Semine\n\nA maggio. Vedi [[terreno]].\n",
+        encoding="utf-8",
+    )
+    lint_wiki.lint(str(tmp_path))
+    out = capsys.readouterr().out
+
+    assert "🟡 Pages claiming a decision on a line nobody attributed (1)" in out
+    assert "#HH:MM.2" in out
+    assert "line not found" not in out

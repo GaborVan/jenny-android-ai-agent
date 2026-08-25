@@ -164,7 +164,23 @@ VALID_SEVERITIES = {"info", "suggest", "warn", "error"}
 VALID_STATUSES = {"open", "resolved"}
 
 # Canonical op names for log/ entries (SKILL.md § log/ format).
-VALID_LOG_OPS = {"compile", "ingest", "query", "lint", "audit", "promote", "split", "scaffold"}
+#
+# ``gardener`` non e' un'operazione della skill: e' l'unico attore che scrive qui
+# senza passare da un prompt (``GardenerStore.log_pass``, ``## [HH:MM] gardener |
+# ...``), e finche' non era in elenco ogni progetto con una passata alle spalle
+# portava un 🟡 permanente. **D14.** Il costo di un controllo che non conosce un
+# attore che esiste non e' il falso allarme in se': e' che accanto agli altri
+# diciotto insegna a scorrere l'elenco senza leggerlo.
+#
+# ``reindex`` non c'entra col giardiniere ed e' lo stesso difetto: sta nella
+# tabella «Ops allowed in the log» di ``references/log-guide.md`` — cioe' nel
+# documento da cui il modello copia la forma della riga — e non era qui. Fra un
+# riferimento che autorizza e un controllo che boccia vince il riferimento: e'
+# quello che si legge prima di scrivere.
+VALID_LOG_OPS = {
+    "compile", "ingest", "query", "lint", "audit", "promote", "split", "scaffold",
+    "reindex", "gardener",
+}
 LOG_ENTRY_RE = re.compile(r"^## \[\d{2}:\d{2}\] (\S+)")
 
 # Stop-words dropped when comparing page titles for near-duplicates.
@@ -200,18 +216,41 @@ _SAID_MARKERS = ("[said]", "[recovered]")
 _INFERRED_MARKER = "[inferred]"
 
 
-def _journal_line_marker(
-    root_path: Path, file_part: str, anchor: str, cache: dict[str, dict[str, str]]
-) -> str | None:
-    """Il marcatore della riga di diario a *anchor*, o ``None`` se non c'è.
+# Non è un marcatore e non può esserlo (nessuna riga di diario inizia così): è
+# l'esito «quel minuto tiene più righe e non sono tutte dell'utente», che il
+# chiamante deve poter dire con una frase sua. Riportato come «line not found»
+# mandava a cercare una riga che c'è — un avviso su cui non si può agire.
+_MIXED_MINUTE = "<mixed minute>"
 
-    ``None`` copre due casi che il chiamante distingue nel messaggio ma non nella
-    severità: il file illeggibile e l'ora che nel file non compare. La cache è per
-    file, perché una wiki con venti pagine ancorate allo stesso giorno lo
-    rileggerebbe venti volte.
+# ``HH:MM`` o ``HH:MM.N``: v. ``_journal_line_marker``. Tenuto uguale a
+# ``jenny/agent/gardener.py::_ANCHOR_RE`` da un test che fa girare gli stessi casi
+# nelle due implementazioni (questo script non importa ``jenny``).
+_ANCHOR_RE = re.compile(r"^(\d{2}:\d{2})(?:\.(\d+))?$")
+
+
+def _journal_line_marker(
+    root_path: Path, file_part: str, anchor: str, cache: dict[str, dict[str, list[str]]]
+) -> str | None:
+    """Il marcatore della riga di diario a *anchor*, o ``None`` se non si sa.
+
+    ``None`` copre i casi che il chiamante distingue nel messaggio ma non nella
+    severità: il file illeggibile, l'ora che nel file non compare, e un minuto che
+    tiene più righe di cui non tutte dell'utente. La cache è per file, perché una
+    wiki con venti pagine ancorate allo stesso giorno lo rileggerebbe venti volte.
+
+    **Una lista per minuto e non un marcatore. D13.** La prima versione teneva un
+    dizionario ``minuto → marcatore``, quindi su un minuto con più righe vinceva
+    **l'ultima** — e la guardia gemella in ``gardener.py`` leggeva la **prima**: due
+    copie dello stesso difetto che non erano nemmeno d'accordo su quale riga
+    guardare. Da T4 la cattura scrive una riga per fatto, quindi un turno in cui
+    l'utente dice una cosa e Jenny ne deduce la conseguenza mette ``[said]`` e
+    ``[inferred]`` allo stesso ``HH:MM``: l'ancoraggio al minuto nudo lì non
+    *dice* quale riga la pagina intenda, e ``#HH:MM.2`` — la seconda riga di quel
+    minuto, contando da 1 — è come lo si dice. Se sono tutte dell'utente il minuto
+    nudo basta: quale delle due la pagina intenda non cambia la risposta.
     """
     if file_part not in cache:
-        lines: dict[str, str] = {}
+        lines: dict[str, list[str]] = {}
         try:
             text = (root_path / file_part).read_text(encoding="utf-8")
         except OSError:
@@ -221,9 +260,22 @@ def _journal_line_marker(
             if match:
                 body = match.group(2).lstrip()
                 marker = body.split(" ", 1)[0] if body.startswith("[") else ""
-                lines[match.group(1)] = marker
+                lines.setdefault(match.group(1), []).append(marker)
         cache[file_part] = lines
-    return cache[file_part].get(anchor.strip())
+    anchored = _ANCHOR_RE.match(anchor.strip())
+    if anchored is None:
+        return None
+    markers = cache[file_part].get(anchored.group(1))
+    if not markers:
+        return None
+    if (ordinal := anchored.group(2)) is not None:
+        index = int(ordinal) - 1
+        return markers[index] if 0 <= index < len(markers) else None
+    if len(markers) == 1:
+        return markers[0]
+    if all(m in _SAID_MARKERS for m in markers):
+        return markers[0]
+    return _MIXED_MINUTE
 
 # Tetto della mappa, in caratteri. **Non è un numero scelto qui**: è la soglia
 # oltre la quale il blocco di progetto smette di iniettare la mappa intera in
@@ -1504,6 +1556,12 @@ def lint(root: str) -> int:
                 if marker == _INFERRED_MARKER:
                     inferred_but_decided.append(
                         f"   {rel_page} (state: {state}) → {value}"
+                    )
+                elif marker == _MIXED_MINUTE:
+                    unattributed.append(
+                        f"   {rel_page} → source: {value} "
+                        "(that minute holds several lines and not all are the user's: "
+                        "add the line's place within it, e.g. #HH:MM.2)"
                     )
                 else:
                     unattributed.append(
