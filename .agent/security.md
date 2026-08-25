@@ -20,31 +20,69 @@ rather than each carrying their own filter. A second key turn covers the read si
 written by an older version or by hand.
 
 **The reverse direction has no structural boundary, and that is deliberate.** `SOUL.md` and
-`USER.md` are always composed from the installation root (`ContextBuilder._IDENTITY_FILES`) and
-`MEMORY.md` is injected for every session kind, so a project's turn — and every internal pass that
-runs on the installation root, the gardener's included — carries the user's personal profile.
-`MemoryRecallTool` likewise captures the install-root archive at construction and ignores workspace
-scope, so a project session can `recall` the personal archive. The declared line is **who you are
-travels; where else you work does not**: what is gated on the session is the *cross-project
-inventory* (`memory/WIKI.md`, Atlas's directory of every wiki, person and plant), not the identity.
+`USER.md` are always composed from the installation root (`ContextBuilder._IDENTITY_FILES`), so a
+project's turn — and every internal pass that runs on the installation root, the gardener's
+included — carries the user's identity. `MemoryRecallTool` likewise captures the install-root
+archive at construction and ignores workspace scope, so a project session can `recall` the personal
+archive. The declared line is **who you are travels; where else you work does not**: what is gated
+on the session is the *cross-project inventory*, not the identity.
 
 So "the diary is kept personal" must not be read as symmetric. Personal is not secret-from-a-project.
 
-Two narrowings on that gated half, both keyed on the session and both about actors whose write
-surface is a single project — the second one is why the first is not the whole rule:
+Three narrowings on that gated half, all keyed on the session and all about actors whose write
+surface is a single project — each one is why the previous is not the whole rule:
 
-- a `project:` conversation gets no wiki directory and no `Recent History` block;
+- a `project:` conversation gets no wiki directory (`memory/WIKI.md`, Atlas's directory of every
+  wiki, person and plant) and no `Recent History` block;
 - a **gardener** pass (`gardener:` key) gets neither either (T7.8). Its toolbox reads inside one
   project and writes only in `wikis/<name>/wiki/`, and `agent/gardener.md` tells it to work only
   from the journal, the map and the page inventory. Before this, the pass with no user to talk to
   was shown the personal conversation's queue while the project conversation it maintains was shown
-  none of it.
+  none of it;
+- **neither gets `MEMORY.md`** (24/08). This one *moved* a file across the line rather than gating
+  a block that was already on the wrong side of it, so the argument is recorded below.
+
+### `MEMORY.md` is inventory, not identity
+
+Until 24/08 this file sat on the identity side and was injected for every session kind. That was a
+classification, never a measurement, and the measurement contradicts it: counted one by one, its
+entries each serve **one** project — a server to one wiki, an internal agent to another, the repo to
+a third — plus a residue that serves none. That is literally *where else you work*. And a fact that
+serves one project already has a home: that project's wiki, or its `AGENTS.md`. Pushing it into
+**every** project is a broadcast, and it cost more than the space it took — measured on one project
+chat, zero useful entries out of eleven and two harmful ones, of which one was false (a project
+declared closed while the conversation was reopening it) and one made the turn invent a connection
+the user had never mentioned.
+
+**The line did not move; the file did.** `SOUL.md` and `USER.md` are untouched, so the caution in
+`_load_bootstrap_files` — threading session kind through the most shared prompt path, and leaving
+the one actor with no identity to write pages the user reads — still holds and is still respected.
+
+**For the gardener there is a second argument that does not depend on that measurement**: its four
+read tools are built with `allowed_dir = wikis/<name>` (`GardenerStore.build_tools`), so its own
+toolbox *refuses* that path. The prompt was pushing in what the confinement forbids it to open.
+
+A `project:` conversation, which *can* read it, gets a one-line pointer instead
+(`MemoryStore.get_memory_pointer_context`): removing the block without one would make the file
+unreachable in practice, which is the same defect `get_archive_context` exists to avoid — a file the
+model does not know exists is, from where it stands, deleted. `recall` does not cover the gap: it
+reads `memory/archive/`, the cold tier, not the live file. The pointer also says the content is not
+project material, for the same reason the archive line says nothing is written there: naming the
+path in front of `agent/project.md`'s capture rule would otherwise reopen, from the write side, the
+boundary the gate closes on the read side. **The gardener gets no pointer** — a path its tools
+refuse, plus an invitation to open it, is worse than the absence.
 
 **Rule**: when adding an internal actor whose writable surface is one project, gate
-`get_wiki_memory_context` and `read_recent_history_for_prompt` on it — do not "fix" the identity
-path to match, and do not widen the gardener's read root (its `build_tools` comment, *"Lettura:
-dentro il progetto. Non l'intera installazione come Atlas"*, is a boundary somebody chose: T4.5
-records a proposed fix that would have silently undone it).
+`get_wiki_memory_context`, `read_recent_history_for_prompt` and the `MEMORY.md` block on it — do not
+"fix" the identity path (`_IDENTITY_FILES`) to match, and do not widen the gardener's read root (its
+`build_tools` comment, *"Lettura: dentro il progetto. Non l'intera installazione come Atlas"*, is a
+boundary somebody chose: T4.5 records a proposed fix that would have silently undone it).
+
+**Known and not closed**: `agent/identity.md`'s workspace listing still names `memory/MEMORY.md` and
+`memory/history.jsonl` to every session, the gardener included — two paths its toolbox refuses. It
+predates this gate and it does not close with the same boolean (for Dream that line is correct, and
+Atlas reads the whole installation), so it needs per-actor reasoning rather than the project/gardener
+test used here.
 
 ## SSRF Protection
 

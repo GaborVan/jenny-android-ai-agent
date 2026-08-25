@@ -106,6 +106,28 @@ def _agents_md(title: str, seed: str, wiki_id: str, quoted_seed: str) -> str:
     riscrive a ogni avvio. Copiarle qui vorrebbe dire congelarle alla versione in
     cui il progetto e' nato — l'errore che il 22/08 ha tolto da questo file.
 
+    **``## How we work here`` nasce vuota, e il 24/08 non lo era.** Ci stava un
+    segnaposto fra parentesi angolari che spiegava cosa scriverci: era l'ultima
+    istanza rimasta dell'errore che il paragrafo qui sopra dice di aver tolto.
+    Quel testo e' un'istruzione a chi compila il file, ma il file finisce nel
+    prompt di sistema di ogni turno del progetto — e ci finisce **intero**, perche'
+    ``id:`` e ``summary:`` sono gia' compilati e quindi ``_is_template_content``
+    non lo riconosce come template. Cioe' arrivava al modello sotto l'intestazione
+    «this project's own instructions», congelato alla versione del giorno in cui il
+    progetto e' nato, e in un file che il giardiniere ha il divieto esplicito di
+    riscrivere.
+
+    E non lascia scoperta nessuna promessa: la stessa istruzione la porta
+    ``agent/project.md``, viva, alla riga di ``AGENTS.md`` — «this project's own
+    instructions: scope, conventions, what it deliberately excludes … keep it
+    current when the answer to "how we work here" changes. It is yours to edit».
+
+    L'intestazione **resta**: e' il posto, e dice dove si scrive senza dire cosa.
+    Misurato il 25/08 sulle otto wiki del dispositivo, il campione utile e' uno —
+    le altre sette sono di un formato che precede questo scaffold e quel
+    segnaposto non l'hanno mai avuto — e in quell'uno era sopravvissuto a una
+    giornata, una conversazione e una passata del giardiniere.
+
     ``summary:`` non e' decorazione: e' il campo da cui ``read_wiki_scope``
     costruisce la riga del registro. ``id:`` e' l'identita' della wiki, e serve a
     ritrovare la propria chat se la cartella cambia nome (passo 7): nasce qui
@@ -124,10 +146,6 @@ summary: {quoted_seed}
 {seed}
 
 ## How we work here
-
-<Anything true of this project and no other: conventions to keep, what it
-deliberately leaves out, open questions about method. The folder layout and the
-general rules are not written here — the agent already carries them.>
 """
 
 

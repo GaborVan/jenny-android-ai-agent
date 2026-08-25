@@ -2,8 +2,8 @@
 
 Il confine fra un progetto e il diario personale vale in **un verso solo**, ed è
 voluto: un progetto non entra nel diario (l'imbuto di ``append_history``), ma
-l'identità esce sempre — ``SOUL.md``, ``USER.md`` e ``MEMORY.md`` li compone
-``ContextBuilder`` dalla radice dell'installazione per ogni tipo di sessione. La
+l'identità esce sempre — ``SOUL.md`` e ``USER.md`` li compone ``ContextBuilder``
+dalla radice dell'installazione per ogni tipo di sessione. La
 riga è «chi sei viaggia, dove altro lavori no» (T7.1), e questo file la misura
 sul solo attore in cui non c'è nessun utente a scegliere: la passata del
 giardiniere, la cui unica cartella scrivibile è ``wikis/<nome>/wiki/``.
@@ -20,21 +20,35 @@ il template stesso apre: la regola del controllo incrociato dice «cerca un fatt
 stabile che l'utente ha detto e che il diario non ha registrato» e la risposta è
 un ``journal_append``, cioè l'ingresso della passata dopo.
 
-**La decisione, e la sua metà negativa.** I tre file di identità **restano**: il
-turno di quel progetto li ha per progetto dichiarato (T7.1), la passata promuove
-le righe che quel turno ha scritto, e toglierli vorrebbe dire filare la specie di
-sessione dentro ``_get_identity``/``_load_bootstrap_files``, cioè il percorso di
-prompt più condiviso del repo, per lasciare l'unico attore senza identità a
-scrivere pagine che l'utente legge. Si chiudono i due blocchi che non sono
-identità: la rubrica fra progetti e la coda di qualcun altro. Sono due
+**La decisione, e la sua metà negativa.** I **due** file di identità
+(``SOUL.md``, ``USER.md``) **restano**: il turno di quel progetto li ha per
+progetto dichiarato (T7.1), la passata promuove le righe che quel turno ha
+scritto, e toglierli vorrebbe dire filare la specie di sessione dentro
+``_get_identity``/``_load_bootstrap_files``, cioè il percorso di prompt più
+condiviso del repo, per lasciare l'unico attore senza identità a scrivere pagine
+che l'utente legge. Si chiudono i **tre** blocchi che non sono identità: la
+rubrica fra progetti, la coda di qualcun altro, e ``MEMORY.md``. Sono tre
 restringimenti — nessuna lettura si allarga.
 
-**Cosa provano questi test.** I primi tre eseguono il codice vero: costruiscono
-il prompt di sistema che il loop costruirebbe per quella chiave (canale interno,
-nessuno scope legato, quindi radice dell'installazione) e ci cercano dentro dei
-marcatori piantati nei file. Il quarto e il quinto girano sulla regola della coda
-direttamente, che è dove sta la decisione. Nessuno di questi è un grep su prosa
-di template.
+**``MEMORY.md`` è il terzo, e ci è arrivato dopo (24/08).** Stava sul lato
+identità per classificazione, non per misura: contate una per una, le sue voci
+servono ognuna a **un** progetto — un server a una wiki, un agente interno a
+un'altra, il repo a una terza — cioè sono «dove altro lavori». Per il giardiniere
+c'è un argomento in più che non dipende da quella misura: i suoi quattro tool di
+lettura hanno ``allowed_dir = wikis/<nome>`` (``GardenerStore.build_tools``),
+quindi la sua cassetta quel file lo **rifiuta** — il prompt gli spingeva dentro
+ciò che il confinamento gli vieta di aprire, mentre ``agent/gardener.md`` gli dice
+«work only from those». La conversazione di progetto, che invece può leggerlo,
+riceve al suo posto una riga che dice dov'è (``get_memory_pointer_context``); la
+passata no, perché a lei quella riga indicherebbe un file che non può aprire *e*
+la inviterebbe ad aprirlo.
+
+**Cosa provano questi test.** I primi quattro eseguono il codice vero:
+costruiscono il prompt di sistema che il loop costruirebbe per quella chiave
+(canale interno, nessuno scope legato, quindi radice dell'installazione) e ci
+cercano dentro dei marcatori piantati nei file. Il quinto e il sesto girano sulla
+regola della coda direttamente, che è dove sta la decisione. Nessuno di questi è
+un grep su prosa di template.
 """
 
 from __future__ import annotations
@@ -103,13 +117,17 @@ def _gardener_system_prompt(root: pathlib.Path) -> str:
 
 
 def test_the_identity_still_travels_into_a_gardener_pass(tmp_path) -> None:
-    """**Decisione: i tre file di identità restano.** Non è un difetto non chiuso.
+    """**Decisione: i due file di identità restano.** Non è un difetto non chiuso.
 
     Il turno del progetto li ha per progetto dichiarato (T7.1: «il profilo
     personale non è segreto per un progetto»), e la passata promuove le righe che
     quel turno ha scritto — vedrebbe *meno* di chi le ha scritte. Il caso in cui
     la decisione conta: ``gardener.md`` chiede di recuperare una riga «in their
     terms», e i referenti di quelle parole stanno qui.
+
+    Separato dal test su ``MEMORY.md`` qui sotto di proposito: sono due decisioni
+    diverse con due argomenti diversi, e una che cambia non deve poter trascinare
+    l'altra dentro la stessa asserzione.
     """
     root = tmp_path
     _install(root)
@@ -119,7 +137,105 @@ def test_the_identity_still_travels_into_a_gardener_pass(tmp_path) -> None:
 
     assert "SOULMARK" in prompt
     assert "USERMARK" in prompt
-    assert "MEMMARK" in prompt
+
+
+def test_a_gardener_pass_does_not_see_the_long_term_memory(tmp_path) -> None:
+    """``MEMORY.md`` non entra, e per la passata l'argomento è duplice.
+
+    Non è identità — misurato voce per voce, ognuna serve a un progetto solo,
+    cioè è «dove altro lavori» — e in più la cassetta della passata quel file lo
+    rifiuta comunque (``allowed_dir = wikis/<nome>``), quindi il prompt le
+    spingeva dentro ciò che il confinamento le vieta di aprire.
+
+    E **nemmeno il puntatore** che la conversazione di progetto riceve al suo
+    posto: indica un percorso che i tool della passata non aprono, e sopra a
+    quello *invita* ad aprirlo.
+
+    Nota sul confine di questa asserzione, perché altrimenti prova più di quel che
+    può: il percorso ``memory/MEMORY.md`` **è già** nel prompt della passata, dal
+    listato dei file di ``agent/identity.md``, insieme a ``memory/history.jsonl``
+    — due path che la sua cassetta rifiuta. È un'incoerenza che precede questo
+    cancello e che non si chiude con lo stesso booleano (per Dream quella riga è
+    giusta, e Atlas legge l'installazione intera): è registrata a parte. Quindi
+    qui il marcatore negativo è **il testo del puntatore preso dal codice**, non
+    il path: un letterale scritto a mano diventerebbe verde da solo il giorno che
+    la frase cambia, cioè proverebbe zero.
+    """
+    root = tmp_path
+    _install(root)
+    _project(root)
+
+    pointer = MemoryStore(root).get_memory_pointer_context()
+    assert pointer, "il puntatore deve esistere, altrimenti l'asserzione sotto è vuota"
+
+    prompt = _gardener_system_prompt(root)
+
+    assert "MEMMARK" not in prompt
+    assert pointer not in prompt
+
+
+def test_a_gardener_pass_is_not_shown_paths_its_toolbox_refuses(tmp_path) -> None:
+    """I tre file dell'installazione non le vengono nominati. **D8.**
+
+    Non nasce da un difetto osservato ma dal test di un'altra correzione: il
+    listato di `agent/identity.md` (blocco `## Workspace`, nelle prime dieci righe
+    di *ogni* prompt) nomina `memory/MEMORY.md`, `memory/history.jsonl` e
+    `skills/<nome>/SKILL.md`, mentre i quattro tool di lettura della passata hanno
+    `allowed_dir = wikis/<nome>` — quindi sono tre indirizzi giusti verso porte
+    chiuse, davanti a un attore il cui prompt le dice «work only from those».
+
+    **La riga `Your workspace is at:` resta, e l'asserzione la fissa** perché è la
+    metà che non va tolta: per la passata quella radice è *vera*, è la base su cui
+    si risolvono i percorsi relativi che il suo prompt le insegna a scrivere come
+    `wikis/<nome>/...`. Toglierla romperebbe la scrittura invece di stringere una
+    lettura — ed è l'errore facile da fare qui.
+
+    **L'asserzione guarda il blocco `## Workspace`, non tutto il prompt**, e la
+    prima versione sbagliava proprio lì. Quei percorsi compaiono anche altrove —
+    `agent/scheduling.md` avverte che «writing a reminder into `memory/MEMORY.md`
+    schedules nothing», la sezione skill nomina `skills/<nome>/SKILL.md` — ma
+    quella è **prosa su come funziona il sistema**, non un elenco di file
+    indirizzato a *te*, ed è una questione diversa (che una passata riceva
+    istruzioni sul cron è registrato a parte, non allargato qui di soppiatto).
+    """
+    root = tmp_path
+    _install(root)
+    _project(root)
+
+    prompt = _gardener_system_prompt(root)
+    block = prompt.split("## Workspace", 1)[1].split("\n## ", 1)[0]
+
+    assert "memory/MEMORY.md" not in block
+    assert "memory/history.jsonl" not in block
+    assert "SKILL.md" not in block
+    assert "Your workspace is at:" in block, "la radice dei percorsi relativi resta"
+
+
+def test_everyone_else_still_gets_them(tmp_path) -> None:
+    """Il ragionamento è **per attore**, non per specie di sessione.
+
+    Dream monta `allowed_dir=workspace` più `skills/`, Atlas legge l'installazione
+    intera, un subagent ne ha la radice di lettura (T4.5) e una conversazione di
+    progetto legge ovunque per contratto di `agent/project.md`. Per tutti quelli i
+    tre percorsi si aprono — e nella chat personale quel listato è l'**unico** posto
+    in cui `history.jsonl` viene nominato. Un cancello sul solo «è interno?» li
+    avrebbe presi tutti.
+    """
+    root = tmp_path
+    _install(root)
+    project = _project(root)
+
+    for key, workspace in (
+        (PERSONAL, None),
+        ("project:casa", project),
+        ("dream:20260825-120537", None),
+        ("atlas:20260824-215737", None),
+    ):
+        prompt = ContextBuilder(root).build_system_prompt(
+            channel="internal", session_key=key, workspace=workspace
+        )
+        block = prompt.split("## Workspace", 1)[1].split("\n## ", 1)[0]
+        assert "memory/history.jsonl" in block, key
 
 
 # ── quel che si chiude ───────────────────────────────────────────────────────

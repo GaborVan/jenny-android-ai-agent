@@ -129,6 +129,33 @@ class TestUnProgettoNasceCompleto:
         assert list((root / "raw" / "journal").iterdir()) == []
         assert list((root / "raw" / "research").iterdir()) == []
 
+    async def test_agents_md_nasce_senza_istruzioni_al_modello(self, ctx, workspace):
+        """``## How we work here`` nasce **vuota**: c'è il posto, non il foglietto.
+
+        Il segnaposto che ci stava fino al 24/08 era un'istruzione a chi compila il
+        file, ma questo file finisce **intero** nel prompt di sistema di ogni turno
+        del progetto — intero perché `id:` e `summary:` sono già compilati, quindi
+        `_is_template_content` non lo riconosce come template — e ci arriva sotto
+        l'intestazione «this project's own instructions». Cioè era una regola di
+        lavoro congelata al giorno della nascita del progetto, in un file che il
+        giardiniere ha il divieto esplicito di riscrivere: lo stesso errore che il
+        22/08 ha tolto dal resto di questo template.
+
+        Non lascia scoperta nessuna promessa: quell'istruzione la porta
+        `agent/project.md`, viva e riscritta a ogni avvio.
+
+        Le due asserzioni sono la decisione presa da due lati — senza la seconda,
+        togliere l'intestazione insieme al testo passerebbe.
+        """
+        await _create(ctx, name="nuovo", seed="di cosa si tratta")
+
+        schema = (workspace / "wikis" / "nuovo" / "AGENTS.md").read_text("utf-8")
+
+        assert "## How we work here" in schema, "il posto resta: dice dove si scrive"
+        assert "<" not in schema.split("## How we work here", 1)[1], (
+            "e sotto non c'è niente: nessun segnaposto fra parentesi angolari"
+        )
+
     async def test_la_mappa_nasce_con_le_sue_sezioni(self, ctx, workspace):
         """Le sezioni nascono vuote ma nascono: il giardiniere (T4) aggiorna
         sezioni che esistono, invece di inventarsi una struttura ogni volta — che è

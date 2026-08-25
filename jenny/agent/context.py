@@ -530,7 +530,14 @@ class ContextBuilder:
         """
         orchestrating = self.orchestrator if orchestrator is None else orchestrator
         root = workspace or self.workspace
-        parts = [self._get_identity(channel=channel, workspace=root, orchestrating=orchestrating)]
+        parts = [
+            self._get_identity(
+                channel=channel,
+                workspace=root,
+                orchestrating=orchestrating,
+                session_key=session_key,
+            )
+        ]
 
         # La cartella del turno e' una wiki: allora e' *quella* la pianta che
         # vale, non le convenzioni del workspace.
@@ -671,9 +678,46 @@ class ContextBuilder:
         # template intatto. Heading unico e ordine fisso tengono stabile il
         # prefisso del prompt per la cache del provider.
         memory_sections: list[str] = []
+        # Le due specie che non ricevono ``MEMORY.md`` intero, calcolate una volta
+        # perche' il cancello della rubrica qui sotto chiede le stesse due.
+        is_project = is_project_session_key(session_key or "")
+        is_gardener = is_gardener_session_key(session_key)
         memory = self.memory.get_memory_context()
         if memory and not self._is_template_content(self.memory.read_memory(), "memory/MEMORY.md"):
-            memory_sections.append(memory)
+            # ``MEMORY.md`` **non** e' identita', misurato e non dedotto: contate
+            # una per una, le sue voci servono ognuna a **un** progetto — un
+            # server a una wiki, un agente interno a un'altra, il repo a una
+            # terza — piu' un residuo che non serve a nessuna. Cioe' e'
+            # l'inventario di «dove altro lavori», la categoria che la riga di
+            # confine chiude, e non «chi sei», che resta in ``SOUL.md`` e
+            # ``USER.md`` (:attr:`_IDENTITY_FILES`, sempre dalla radice
+            # dell'installazione, per **ogni** specie di sessione: quella meta'
+            # del confine questo cancello non la tocca).
+            #
+            # E un fatto che serve a un progetto ha gia' una casa: la wiki di quel
+            # progetto, o il suo ``AGENTS.md``. Spingerlo in **tutti** i progetti
+            # e' broadcast, ed e' costato piu' che il posto che occupa: misurato
+            # il 24/08 su una chat di progetto, zero voci utili su undici e due
+            # dannose — una falsa (un progetto dichiarato chiuso mentre la
+            # conversazione lo riapriva) e una che ha fatto inventare al turno un
+            # collegamento che l'utente non aveva mai nominato.
+            #
+            # **Per il giardiniere l'argomento e' piu' forte e non dipende da
+            # quella misura**: i suoi quattro tool di lettura hanno
+            # ``allowed_dir = wikis/<nome>`` (``GardenerStore.build_tools``),
+            # quindi la sua cassetta quel file lo **rifiuta** — il contesto gli
+            # spingeva dentro cio' che il suo confinamento gli vieta di aprire, e
+            # ``agent/gardener.md`` gli dice «work only from those». Togliendolo,
+            # prompt e cassetta dicono la stessa cosa.
+            #
+            # Il branching per specie di sessione nel percorso di prompt piu'
+            # condiviso che c'e' era la cautela da pesare: e' gia' pagata cinque
+            # righe sotto, dalla rubrica. Questo estende un ``if``, non ne apre uno.
+            if not (is_project or is_gardener):
+                memory_sections.append(memory)
+            elif is_project:
+                # Non al giardiniere: v. la docstring del metodo.
+                memory_sections.append(self.memory.get_memory_pointer_context())
         # La rubrica di Atlas elenca **tutte** le wiki, piu' persone, progetti e
         # piante. Nella chat personale e' portante — un indice che nessuno sa
         # esistere non viene mai aperto — ma dentro un progetto risponde a una
@@ -682,9 +726,12 @@ class ContextBuilder:
         # (v. il confine del passo 1) e ci porta dentro la vita privata.
         #
         # Chiusa sulla **sessione** e non sulla cartella: la domanda e' "chi sta
-        # parlando", non "dove si lavora". ``MEMORY.md`` qui sopra resta invece
-        # in tutti e due i casi, ed e' la stessa riga di confine dell'1.2 — chi
-        # sei viaggia, dove altro lavori no.
+        # parlando", non "dove si lavora". ``MEMORY.md`` qui sopra segue **la
+        # stessa** regola da quando e' stato misurato che di identita' non ne ha
+        # (v. il cancello sopra): la riga di confine non e' cambiata — chi sei
+        # viaggia, dove altro lavori no — e' cambiata la classificazione di quel
+        # file, che stava nella casella sbagliata. Cio' che viaggia comunque sono
+        # ``SOUL.md`` e ``USER.md``.
         #
         # **E vale anche per il giardiniere** (T7.8), che non e' una
         # conversazione ma ha lo stesso mestiere ristretto: la sua cassetta legge
@@ -823,6 +870,7 @@ class ContextBuilder:
         channel: str | None = None,
         workspace: Path | None = None,
         orchestrating: bool | None = None,
+        session_key: str | None = None,
     ) -> str:
         """Get the core identity section.
 
@@ -835,6 +883,33 @@ class ContextBuilder:
         Era il resto del lavoro dell'1.2, che aveva sdoppiato la radice dei file
         di bootstrap e non questa. Fuori da un progetto le due radici coincidono
         e il prompt resta byte-identico.
+
+        **E l'elenco dei tre non si rende affatto per il giardiniere.** Quel
+        passaggio non e' una conversazione con una radice diversa: i suoi quattro
+        tool di lettura hanno ``allowed_dir = wikis/<nome>``
+        (``GardenerStore.build_tools``), quindi quei percorsi la sua cassetta li
+        **rifiuta** — sono tre indirizzi giusti verso porte chiuse, nelle prime
+        dieci righe del prompt, davanti a un attore il cui template gli dice
+        «work only from those». Trovato il 25/08 scrivendo il test di un'altra
+        correzione, non da un difetto osservato: e' la stessa incoerenza fra
+        cassetta e prompt che il cancello di ``MEMORY.md`` ha chiuso, in un blocco
+        diverso, e precedeva quel lavoro.
+
+        **La riga ``Your workspace is at:`` resta**, ed e' la parte che va letta
+        prima di "semplificare" togliendo tutto il blocco: per la passata quella
+        radice e' *vera*, perche' e' la base su cui si risolvono i suoi percorsi
+        relativi — quelli che il suo prompt le insegna a scrivere come
+        ``wikis/<nome>/...``. Toglierla romperebbe la scrittura invece di stringere
+        una lettura.
+
+        **Chiuso sul giardiniere e su nessun altro**, perche' il ragionamento e'
+        per attore e non per specie: Dream monta ``allowed_dir=workspace``
+        (l'installazione) piu' ``skills/``, Atlas legge l'installazione intera, un
+        subagent ha la radice di lettura dell'installazione (T4.5), e una
+        conversazione di progetto legge ovunque per contratto di
+        ``agent/project.md``. Per tutti quelli i tre percorsi sono raggiungibili, e
+        per la chat personale sono anche l'unico posto in cui ``history.jsonl`` e'
+        nominato.
         """
         root = workspace or self.workspace
         workspace_path = str(_absolute_workspace(root))
@@ -848,6 +923,7 @@ class ContextBuilder:
             platform_policy=render_template("agent/platform_policy.md"),
             channel=channel or "",
             orchestrator=self.orchestrator if orchestrating is None else orchestrating,
+            installation_files=not is_gardener_session_key(session_key),
         )
 
     @staticmethod

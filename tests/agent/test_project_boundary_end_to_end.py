@@ -15,11 +15,18 @@ Le due direzioni non sono simmetriche, ed è il punto:
   contenere una riga di ``etf``, né il suo nome;
 - **da un progetto verso il personale:** niente. Il diario non deve contenere
   niente di nessun progetto;
-- **dal personale verso un progetto:** chi sei viaggia. ``SOUL.md``, ``USER.md``
-  e ``MEMORY.md`` entrano, perché Jenny resta Jenny anche al lavoro.
+- **dal personale verso un progetto:** chi sei viaggia. ``SOUL.md`` e ``USER.md``
+  entrano, perché Jenny resta Jenny anche al lavoro.
 
 L'asimmetria è la decisione del 21/08 in una riga: *chi sei viaggia, dove altro
 lavori no.*
+
+**``MEMORY.md`` stava nel primo elenco fino al 24/08, e non ci sta più.** La riga
+di confine non è cambiata: era la classificazione di quel file a essere sbagliata.
+Contate una per una, le sue voci servono ognuna a **un** progetto — cioè sono
+«dove altro lavori», non «chi sei», che resta in ``SOUL.md`` e ``USER.md``. Al suo
+posto un progetto riceve una riga che dice dov'è il file, perché un file che il
+modello non sa esistere è, dal suo punto di vista, cancellato.
 """
 
 from __future__ import annotations
@@ -100,7 +107,7 @@ def test_the_two_projects_do_not_leak_into_each_other(install: pathlib.Path) -> 
 
 @pytest.mark.parametrize(
     ("marker", "file"),
-    [("PAROLA-ANIMA", "SOUL.md"), ("PAROLA-UTENTE", "USER.md"), ("PAROLA-MEMORIA", "MEMORY.md")],
+    [("PAROLA-ANIMA", "SOUL.md"), ("PAROLA-UTENTE", "USER.md")],
 )
 def test_who_she_is_travels_into_a_project(
     install: pathlib.Path, marker: str, file: str
@@ -109,8 +116,31 @@ def test_who_she_is_travels_into_a_project(
 
     Era il difetto del passo 1.2, e succedeva **senza un errore e senza una riga
     di log**.
+
+    ``MEMORY.md`` era il terzo caso di questa parametrizzazione fino al 24/08, ed
+    è uscito: non è identità (v. il test qui sotto). Ciò che quel difetto del 1.2
+    riguardava — la personalità e chi è l'utente — sta in questi due, quindi la
+    regressione che questo test protegge resta protetta.
     """
     assert marker in _prompt(install, "patreon"), f"{file} non è arrivato nel progetto"
+
+
+def test_the_long_term_memory_does_not_travel_but_says_where_it_is(
+    install: pathlib.Path,
+) -> None:
+    """L'inventario resta fuori, e lascia un indirizzo.
+
+    Le due asserzioni sono una sola decisione presa da due lati: se il puntatore
+    sparisse insieme al contenuto, il file diventerebbe irraggiungibile in pratica
+    — e ``recall`` non lo copre, perché legge ``memory/archive/``, il tier freddo,
+    non il file vivo.
+    """
+    from jenny.agent.memory import MemoryStore
+
+    prompt = _prompt(install, "patreon")
+
+    assert "PAROLA-MEMORIA" not in prompt, "il contenuto è «dove altro lavori»"
+    assert MemoryStore(install).get_memory_pointer_context() in prompt
 
 
 def test_the_personal_chat_keeps_the_directory(install: pathlib.Path) -> None:

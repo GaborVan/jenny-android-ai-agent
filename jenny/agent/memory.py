@@ -217,6 +217,53 @@ class MemoryStore:
         long_term = self.read_memory()
         return f"## Long-term Memory\n{long_term}" if long_term else ""
 
+    def get_memory_pointer_context(self) -> str:
+        """Una riga per dire che ``MEMORY.md`` esiste, a chi non lo riceve intero.
+
+        Una conversazione di progetto non riceve piu' il blocco ``Long-term
+        Memory`` (il cancello sta in ``ContextBuilder.build_system_prompt``):
+        quel file e' l'inventario di *dove altro si lavora*, e misurando le sue
+        voci una per una ognuna serve a **un** progetto solo — cioe' appartiene a
+        quel progetto, non a tutti.
+
+        Ma toglierlo e basta lo renderebbe irraggiungibile in pratica, ed e'
+        esattamente il difetto che :meth:`get_archive_context` esiste per non
+        fare: un file che il modello non sa esistere non viene mai aperto, quindi
+        dal suo punto di vista non e' "non iniettato", e' cancellato. E ``recall``
+        non copre il buco — legge ``memory/archive/``, cioe' il tier *freddo*, i
+        fatti che Dream ha **tolto** da ``MEMORY.md``, non il file vivo.
+
+        Da cui questa riga: il percorso, e il tool con cui si apre. Piatta nella
+        dimensione del file, come quella dell'archivio, e assente quando il file
+        e' vuoto.
+
+        **E dice che non e' materiale di progetto**, per la stessa ragione per cui
+        quella dell'archivio dice che li' non si scrive. Senza, il percorso
+        nominato davanti alla regola di cattura di ``agent/project.md`` («what the
+        user tells you is material») e' un invito a promuovere la vita personale
+        dentro la wiki di un progetto: riaprirebbe dal lato della **scrittura** il
+        confine che il cancello chiude dal lato della lettura.
+
+        **Al giardiniere non va, e non e' una svista.** I suoi quattro tool di
+        lettura hanno ``allowed_dir = wikis/<nome>``
+        (``GardenerStore.build_tools``, sotto il commento «Lettura: dentro il
+        progetto»), quindi quel percorso la sua cassetta lo rifiuta comunque:
+        indicargli un file che non puo' aprire e' peggio dell'assenza. E il suo
+        template non nomina ``MEMORY.md`` in nessun punto, quindi togliergli il
+        blocco non lascia scoperta nessuna promessa.
+        """
+        if not self.read_memory().strip():
+            return ""
+        return (
+            "## Long-term Memory\n"
+            "The user's long-term memory is in `memory/MEMORY.md`, outside this project, "
+            "and is not shown here: it is the inventory of where else they work, and each "
+            "fact in it belongs to one project rather than to all of them. Open it with "
+            "`read_file` when a question actually turns on something outside this project. "
+            "What you read there is background, not this project's material — do not "
+            "journal it and do not promote it into a page."
+        )
+
     def get_wiki_memory_context(self, max_tokens: int | None = None) -> str:
         """Blocco rubrica per il system prompt, troncato al tetto configurato.
 

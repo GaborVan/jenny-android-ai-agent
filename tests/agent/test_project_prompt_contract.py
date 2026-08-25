@@ -40,6 +40,7 @@ import re
 import pytest
 
 from jenny.agent.context import ContextBuilder
+from jenny.agent.memory import MemoryStore
 
 SRC = pathlib.Path(__file__).resolve().parents[2] / "jenny"
 
@@ -711,8 +712,27 @@ def test_the_directory_is_gated_on_the_session_not_on_the_folder(tmp_path) -> No
     assert WIKI_DIRECTORY in prompt
 
 
-def test_long_term_memory_travels_into_a_project(tmp_path) -> None:
-    """Chi sei viaggia: è la decisione dell'1.2, e la rubrica non la tocca."""
+def test_long_term_memory_does_not_travel_into_a_project(tmp_path) -> None:
+    """``MEMORY.md`` **non** entra in un progetto, e al suo posto entra un puntatore.
+
+    Correzione del 24/08 alla decisione dell'1.2. Quella diceva «chi sei viaggia,
+    dove altro lavori no» e metteva questo file sul lato «chi sei»: la riga di
+    confine non è cambiata, era la **classificazione** a essere sbagliata.
+    Contate una per una, le voci di ``MEMORY.md`` servono ognuna a **un** progetto
+    — un server a una wiki, un agente interno a un'altra, il repo a una terza —
+    cioè sono «dove altro lavori», e un fatto che serve a un progetto ha già una
+    casa: la wiki di quel progetto.
+
+    «Jenny non è più Jenny» — la ragione con cui questa asserzione stava al
+    contrario — resta vera e resta coperta: sono ``SOUL.md`` e ``USER.md``, che
+    passano da ``_IDENTITY_FILES`` e questo cancello non li tocca
+    (``test_project_boundary_end_to_end.py``).
+
+    Il puntatore c'è per la stessa ragione della riga dell'archivio: un file che
+    il modello non sa esistere non viene mai aperto, quindi dal suo punto di vista
+    non è «non iniettato», è cancellato. E ``recall`` non copre il buco — legge
+    l'archivio, il tier freddo, non il file vivo.
+    """
     root = _with_directory(tmp_path)
     (root / "memory" / "MEMORY.md").write_text(
         "# Memoria\n\n- Il gatto si chiama Pixel.\n", encoding="utf-8"
@@ -720,7 +740,26 @@ def test_long_term_memory_travels_into_a_project(tmp_path) -> None:
     prompt = ContextBuilder(root).build_system_prompt(
         workspace=_wiki(root, "etf-finance"), session_key="project:etf-finance"
     )
-    assert "Pixel" in prompt, "MEMORY.md deve restare: senza, Jenny non è più Jenny"
+
+    assert "Pixel" not in prompt, "il contenuto di MEMORY.md non entra in un progetto"
+    assert MemoryStore(root).get_memory_pointer_context() in prompt, (
+        "ma il puntatore sì: senza, il file è irraggiungibile in pratica"
+    )
+
+
+def test_the_personal_chat_still_gets_the_whole_long_term_memory(tmp_path) -> None:
+    """Il verso che non deve muoversi: è un restringimento, non uno spostamento."""
+    root = _with_directory(tmp_path)
+    (root / "memory" / "MEMORY.md").write_text(
+        "# Memoria\n\n- Il gatto si chiama Pixel.\n", encoding="utf-8"
+    )
+
+    prompt = ContextBuilder(root).build_system_prompt(session_key="unified:default")
+
+    assert "Pixel" in prompt
+    assert MemoryStore(root).get_memory_pointer_context() not in prompt, (
+        "il puntatore è il sostituto, non un'aggiunta: chi ha il file non lo vuole"
+    )
 
 
 # ── Il subagent riceve lo stesso file, non una copia ──────────────────────
