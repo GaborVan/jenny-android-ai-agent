@@ -36,12 +36,16 @@ already ruled out are three, even when they arrive in one breath. The test is no
 is the page — one line for each thing that could end up being a page of its own. It matters because
 the line is where the split has to happen: a pass promotes a line into a page named after the thing
 it is about, so two facts fused into one line become one page, and the second one arrives as a
-sentence buried inside a page named after the first. That is not recoverable later — the journal is
-append-only, and nobody rewrites the source.
+sentence buried inside a page named after the first. A later pass can sometimes dig it back out, and
+it pays for that with a second line saying almost the same thing — the journal is append-only, and
+nobody rewrites the source. Splitting it here costs nothing.
 
-Do not read this as *more lines*. A fact that needs a subordinate clause is still one fact, and a
-line per clause is how a journal fills with noise that a pass then turns into pages that argue with
-each other. Split by thing, not by punctuation.
+Do not read this as *more lines*. Split by thing, not by punctuation: a clause that names nothing —
+*because it is cheaper*, *while we are there* — is not a fact of its own, and a line per clause is
+how a journal fills with noise that a pass then turns into pages that argue with each other. But a
+clause **that names a thing is a thing**: *we stop in Turin because the supplier is based there* is
+two — the stop, and the supplier. The tell is that one half stays true if the project is called off,
+and that half is usually the one that would have had a page.
 
 The one judgement it does ask for is **whose fact it is** — `attribution`. Say `said` when the
 user stated it; say `inferred` when you concluded it, and that includes the case where you offered

@@ -50,15 +50,22 @@ Work only from those.
 
 When you are also given the user's recent messages and what the journal already holds over the same
 recent stretch, do one more thing before anything else:
-**look for a stable fact they said that the journal never recorded.** Capture happens live, in the
-middle of a conversation, and it misses things.
+**look for a stable fact they said that the journal never recorded as a line of its own.** Capture
+happens live, in the middle of a conversation, and it misses things — and it also fuses them.
 
 If you find one, record it with `journal_append` — one line, in their terms. It lands marked as
 recovered, and the next pass promotes it like any other line. That is the whole of it: you recover
 the *line*, you do not write the page from the message.
 
-Three limits, and they matter more than the task:
+Four limits, and they matter more than the task:
 
+- **A fact buried in another line was recorded as a reason, not as a fact.** This is the one thing
+  you may recover that is already there in some form: a durable fact that appears **only** as a
+  subordinate clause of a line about something else — *we stop in Turin because the supplier is
+  based there* records the stop, and leaves the supplier as its reason. Give it its own line when
+  both hold: it would still be true if this project ended, and no page in the list below is already
+  named after it. Both, or leave it — the line you would add is otherwise the duplicate the next
+  limit exists to prevent.
 - **When in doubt, leave it.** A fact already in the journal in other words is not missing. And
   the journal you are shown is a **window** — the most recent days, and only as many of them as
   fit — not the whole record: a fact you cannot find in it may simply have been

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -991,10 +992,21 @@ class TestTheRun:
         # riga resta quella di prima e non parla di rifiuti.
         assert "refused" not in log
 
-    async def test_nothing_to_promote_is_an_outcome_and_leaves_no_log_line(self, tmp_path):
-        """Il cursore avanza comunque — riproporre le stesse righe darebbe la
-        stessa risposta a un costo nuovo — ma **il log resta pulito**: una riga
-        per ogni giro a vuoto renderebbe illeggibile l'unico registro che c'è.
+    async def test_nothing_to_promote_is_an_outcome_and_says_so_in_the_log(self, tmp_path):
+        """Il cursore avanza — riproporre le stesse righe darebbe la stessa
+        risposta a un costo nuovo — e **da oggi la riga di log si scrive**.
+
+        Questo test diceva l'opposto, e la sua ragione era che «una riga per ogni
+        giro a vuoto renderebbe illeggibile l'unico registro che c'è». Difendeva
+        da un caso che qui non arriva: senza delta la passata esce a
+        ``skipped_no_delta``, prima del modello. Chi arriva a scrivere il log ha
+        letto righe vere, e se non promuove **il cursore le brucia comunque** —
+        su un diario append-only, cioè per sempre.
+
+        Il caso di campo (25/08, ``viaggio-pazzo``): tre passate in un giorno,
+        **una** riga di log. Dal registro non si distingueva «non è mai passato»
+        da «è passato e ha deciso di no», che è il dubbio con cui l'utente ha
+        aperto l'indagine.
         """
         root = _project(tmp_path)
         store = _with_states(_store(tmp_path), _states(attempted=0, ok=0))
@@ -1003,7 +1015,11 @@ class TestTheRun:
 
         assert outcome.status == "nothing_to_promote"
         assert read_state(root).cursor == {"raw/journal/20260822.md": 4}
-        assert not (root / "log" / "20260823.md").exists()
+        log = (root / "log" / "20260823.md").read_text(encoding="utf-8")
+        # Il conto delle righe lette è la metà che conta: dice **su cosa** il
+        # cursore è passato. «0 writes» direbbe il numero e non il fatto.
+        assert "gardener | 2 journal lines (20260822) → nothing promoted" in log
+        assert "0 writes" not in log
 
     async def test_blocked_writes_leave_the_journal_unread(self, tmp_path):
         """La proprietà per cui il predicato di commit di Dream è condiviso: se
@@ -1983,12 +1999,70 @@ class TestTheCrossCheck:
 
     @pytest.mark.parametrize("rule", [
         "a stable fact they said that the journal never recorded",
+        "recorded as a reason, not as a fact",
         "When in doubt, leave it",
         "still be true next week",
         "cannot change the journal, only add to it",
     ])
-    def test_the_task_and_its_three_limits_are_stated(self, tmp_path, rule):
+    def test_the_task_and_its_four_limits_are_stated(self, tmp_path, rule):
         assert rule in self._prompt(tmp_path, "una cosa")
+
+    def test_the_number_of_limits_matches_the_limits(self, tmp_path):
+        """Il numero scritto e i punti elencati, confrontati invece che asseriti.
+
+        Sopravvissuto del giro di mutazioni del 25/08 — lo stesso giorno in cui il
+        quarto limite è stato aggiunto: riportare «Four» a «Three» non faceva
+        cadere niente. Il difetto che ne segue è silenzioso e del tipo peggiore,
+        perché agisce su chi legge: si contano tre punti e si smette, e quello
+        saltato è l'ultimo — qui la deroga appena scritta.
+
+        Contato dal testo e non fissato a quattro, così il prossimo limite non
+        deve ricordarsi di aggiornare anche un numero in un test.
+        """
+        prompt = self._prompt(tmp_path, "una cosa")
+        words = {"One": 1, "Two": 2, "Three": 3, "Four": 4, "Five": 5, "Six": 6}
+
+        header = re.search(r"(\w+) limits, and they matter more than the task:", prompt)
+        assert header, "la sezione dei limiti non è più riconoscibile"
+        declared = words.get(header.group(1))
+        assert declared, f"«{header.group(1)} limits»: numero non riconosciuto"
+        section = prompt.split(header.group(0), 1)[1].split("\n## ", 1)[0]
+        listed = len(re.findall(r"^- \*\*", section, re.M))
+
+        assert declared == listed, f"ne dichiara {declared} e ne elenca {listed}"
+
+    def test_the_buried_fact_carve_out_carries_both_of_its_conditions(self, tmp_path):
+        """La deroga del 25/08, e le due condizioni che la tengono stretta.
+
+        Recuperare un fatto **già presente in altre parole** è esattamente la
+        manovra che il limite accanto vieta, e per una ragione misurata: una riga
+        doppia diventa una seconda pagina, o una pagina che litiga con se stessa.
+        La deroga esiste perché un fatto sepolto come subordinata non è stato
+        registrato *come fatto* — è stato registrato come la ragione di un altro
+        — ma senza le due condizioni si allarga fino a coprire qualunque
+        riformulazione, cioè fino a essere il difetto che voleva curare.
+
+        Le due condizioni si asseriscono **qui e insieme**: tolta una, la deroga
+        resta scritta e smette di essere stretta, e nessun altro test se ne
+        accorgerebbe. La forma «only ... subordinate clause» è la terza gamba —
+        senza quella la deroga non dice nemmeno di cosa parla.
+        """
+        prompt = self._prompt(tmp_path, "una cosa")
+
+        assert "**only** as a\n  subordinate clause" in prompt, "manca il caso a cui si applica"
+        # **La frase intera, non il test di durata da solo.** «still be true if
+        # this project ended» compare *già* nel prompt, nella sezione «The work»
+        # che decide quali righe meritano una pagina: asserirla nuda passava
+        # anche con la condizione tolta di qui. L'ha scoperto la mutazione, non
+        # la lettura.
+        assert "it would still be true if this project ended, and no page" in prompt, (
+            "manca la condizione di durata *dentro la deroga*"
+        )
+        assert "already\n  named after it" in prompt, "manca la condizione della pagina esistente"
+        assert "Both, or leave it" in prompt, (
+            "senza «entrambe» le due condizioni si leggono come alternative, e una sola "
+            "basta a riaprire la porta ai duplicati"
+        )
 
     def test_the_model_is_told_the_journal_it_sees_is_a_window(self, tmp_path):
         """Il blocco registrato è una finestra, non il diario intero (T2.4 lo
