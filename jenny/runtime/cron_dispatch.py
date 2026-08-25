@@ -639,14 +639,14 @@ class CronDispatcher:
                 )
         except Exception:
             logger.exception("Dream cron job failed")
-        finally:
-            from jenny.agent.token_usage import record_response_token_usage
-
-            record_response_token_usage(
-                resp,
-                source="dream",
-                timezone_name=self._config.agents.defaults.timezone,
-            )
+        # La contabilita' dei token **non passa da qui**: la fa
+        # ``TokenUsageHook.after_iteration`` sul turno stesso, che e' l'unico punto
+        # in cui l'``usage`` del provider esiste davvero. Qui c'era un ``finally``
+        # con ``record_response_token_usage(resp, source="dream")``: ``resp`` e' un
+        # ``OutboundMessage``, che un campo ``usage`` non ce l'ha e non l'ha mai
+        # avuto, quindi quella riga non ha mai registrato niente — in nessuno dei
+        # cinque punti in cui era stata scritta. Toglierla non perde una misura, ne
+        # toglie una finta.
         # compact_history now acquires a threading.Lock and rewrites the whole
         # file; run it off the event loop so a concurrent append holding the
         # lock (on another thread) can't stall the loop on the blocking wait.

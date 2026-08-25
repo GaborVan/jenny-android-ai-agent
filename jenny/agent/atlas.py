@@ -336,7 +336,6 @@ async def run_atlas(
     sia lo slash command (``command/builtin.py``). *force* salta il controllo
     del fingerprint ma non quello sull'esistenza delle wiki.
     """
-    from jenny.agent.token_usage import record_response_token_usage
 
     if store is None:
         from jenny.config.loader import load_config
@@ -375,12 +374,14 @@ async def run_atlas(
             return AtlasOutcome(
                 status="failed", elapsed=time.monotonic() - t0, detail=str(exc)
             )
-        finally:
-            record_response_token_usage(
-                resp,
-                source="atlas",
-                timezone_name=_timezone_of(agent),
-            )
+        # La contabilita' dei token **non passa da qui**: la fa
+        # ``TokenUsageHook.after_iteration`` sul turno stesso, che e' l'unico
+        # punto in cui l'``usage`` del provider esiste davvero. Qui c'era una
+        # ``record_response_token_usage(resp, ...)``: ``resp`` e' un
+        # ``OutboundMessage``, che un campo ``usage`` non ce l'ha e non l'ha mai
+        # avuto, quindi quella riga non ha mai registrato niente in nessuno dei
+        # cinque punti in cui era stata scritta. Toglierla non perde una misura
+        # — ne toglie una finta.
 
         elapsed = time.monotonic() - t0
         file_states = getattr(tools, "file_states", None)

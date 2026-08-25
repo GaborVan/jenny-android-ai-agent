@@ -46,7 +46,6 @@ from loguru import logger
 from jenny.agent.memory import MemoryStore
 from jenny.agent.memory_archive import archived_ids, summarize_archived
 from jenny.agent.memory_budget import count_chars, render_gauge
-from jenny.agent.token_usage import record_response_token_usage
 from jenny.utils.prompt_templates import render_template
 
 if TYPE_CHECKING:
@@ -258,23 +257,15 @@ async def run_dream_review(
             # quindi non c'è nemmeno un riepilogo a valle che le nomini.
             demoted=_report_demotions(store, archived_before),
         )
-    finally:
-        # La contabilità dei token sta qui e non nel chiamante, come in
-        # ``run_atlas``: questa funzione è l'unico punto che vede la risposta del
-        # provider — restituisce un ``ReviewOutcome`` e non rilancia, quindi da
-        # fuori il ``resp`` non è raggiungibile. Senza questa riga un turno LLM
-        # completo, su un telefono, dentro una feature nata per contenere i
-        # costi, non comparirebbe in nessun conteggio.
-        #
-        # ``source="dream"`` e non ``"dream_review"``: ``_SOURCE_KEYS``
-        # (``agent/token_usage.py``) è un elenco chiuso e ``_clean_source``
-        # riscrive in silenzio qualunque valore fuori lista in ``"system"``, che
-        # non separerebbe i due run — li seppellirebbe nel secchio generico.
-        # Separarli davvero vuol dire aggiungere la chiave lì e la sua etichetta
-        # nella WebUI; finché non si fa, i due run di Dream restano un aggregato.
-        record_response_token_usage(
-            resp, source="dream", timezone_name=_timezone_of(agent),
-        )
+    # La contabilita' dei token **non passa da qui**: la fa
+    # ``TokenUsageHook.after_iteration`` sul turno stesso, che e' l'unico punto
+    # in cui l'``usage`` del provider esiste davvero. Qui c'era una
+    # ``record_response_token_usage(resp, ...)`` con sopra il ragionamento su
+    # quale bucket usare — e quel ragionamento era senza oggetto: ``resp`` e' un
+    # ``OutboundMessage``, che un campo ``usage`` non ce l'ha, quindi la riga non
+    # ha mai registrato niente. La revisione ricade sotto ``dream`` perche' la
+    # sua chiave e' ``dream:review-...``, cioe' per la mappa delle chiavi e non
+    # per una scelta fatta qui.
 
     after = _measure(report)
     demoted = _report_demotions(store, archived_before)

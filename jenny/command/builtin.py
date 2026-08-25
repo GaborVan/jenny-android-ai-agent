@@ -488,13 +488,14 @@ async def cmd_dream(ctx: CommandContext) -> OutboundMessage:
                 review_note, f"Dream failed after {elapsed:.1f}s: {e}"
             )
         finally:
-            from jenny.agent.token_usage import record_response_token_usage
-
-            record_response_token_usage(
-                resp,
-                source="dream",
-                timezone_name=getattr(loop.context, "timezone", None),
-            )
+            # La contabilita' dei token **non passa da qui**: la fa
+            # ``TokenUsageHook.after_iteration`` sul turno stesso, che e' l'unico
+            # punto in cui l'``usage`` del provider esiste davvero. Qui c'era una
+            # ``record_response_token_usage(resp, ...)``: ``resp`` e' un
+            # ``OutboundMessage``, che un campo ``usage`` non ce l'ha e non l'ha mai
+            # avuto, quindi quella riga non ha mai registrato niente in nessuno dei
+            # cinque punti in cui era stata scritta. Toglierla non perde una misura
+            # — ne toglie una finta.
             await asyncio.to_thread(store.compact_history)
             pruned_keys = prune_dream_sessions(loop.sessions.sessions_dir)
             if pruned_keys:

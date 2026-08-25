@@ -1171,7 +1171,16 @@ class TestEphemeralDirect:
 
 
 class TestEphemeralHooks:
-    """When ephemeral=True, extra hooks must not fire."""
+    """Su un turno effimero cadono gli hook che **parlano**, non tutti.
+
+    Fino al 25/08 la condizione era ``not ephemeral`` secca, e l'unico hook extra
+    che l'installazione monta è la contabilità dei token: «effimero» voleva quindi
+    dire «non misurato». Misurato su ``token-usage.json``: in 27 giorni i bucket
+    ``dream`` e ``atlas`` non erano comparsi **una volta**, con Dream che gira ogni
+    due ore. Ora la scelta la dichiara l'hook (``runs_when_ephemeral()``), e il
+    default resta ``False`` — cioè il contratto qui sotto non è cambiato per chi
+    non dice niente.
+    """
 
     @pytest.fixture
     def _make_loop_with_spy(self, tmp_path):
@@ -1195,6 +1204,12 @@ class TestEphemeralHooks:
 
         spy = MagicMock(spec=AgentHook)
         spy.wants_streaming.return_value = False
+        # **Esplicito, e non per pignoleria**: con ``spec=AgentHook`` un metodo non
+        # configurato torna un ``MagicMock``, che è *truthy* — quindi lo spy
+        # dichiarerebbe di voler restare sui turni effimeri senza che nessuno
+        # l'abbia deciso, e il test qui sotto proverebbe il contrario di quel che
+        # dice il suo nome.
+        spy.runs_when_ephemeral.return_value = False
         spy.before_iteration = AsyncMock()
         spy.after_iteration = AsyncMock()
 
@@ -1224,6 +1239,23 @@ class TestEphemeralHooks:
         )
         spy.before_iteration.assert_not_called()
         spy.after_iteration.assert_not_called()
+
+    async def test_a_hook_that_opts_in_fires_on_an_ephemeral_turn(
+        self, tmp_path, _make_loop_with_spy
+    ):
+        """L'eccezione, ed è quella che vale il cambio: misurare non è parlare.
+
+        Il lavoro effimero — Dream, Atlas, la revisione, il giardiniere — è
+        esattamente quello che l'utente non ha chiesto e non vede arrivare, cioè
+        quello che conviene misurare di più. `TokenUsageHook` è l'unico che lo
+        dichiara.
+        """
+        loop, spy = _make_loop_with_spy
+        spy.runs_when_ephemeral.return_value = True
+
+        await loop.process_direct("test", session_key="dream:hook-test", ephemeral=True)
+
+        spy.after_iteration.assert_called()
 
     async def test_extra_hooks_fire_for_normal_sessions(self, tmp_path, _make_loop_with_spy):
         """Without ephemeral, extra hooks should fire normally."""

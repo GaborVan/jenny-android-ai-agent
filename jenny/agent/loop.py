@@ -1192,8 +1192,20 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             on_iteration=lambda iteration: setattr(self, "_current_iteration", iteration),
         )
         hook: AgentHook = loop_hook
-        if not ephemeral and self._extra_hooks:
-            hook = CompositeHook([loop_hook] + self._extra_hooks)
+        # **Su un turno effimero non cadono tutti gli hook extra: cadono quelli
+        # che parlano.** La condizione era ``not ephemeral`` secca, e l'unico hook
+        # extra che questa installazione monta e' la contabilita' dei token — cioe'
+        # «effimero» voleva dire «non misurato». Misurato il 25/08 su
+        # ``token-usage.json``: in 27 giorni i bucket ``dream`` e ``atlas`` non
+        # erano comparsi **una volta**, mentre Dream gira ogni due ore, Atlas su
+        # cron e il giardiniere su otto wiki. Non un errore di categoria: lavoro
+        # non contato affatto, e proprio quello che l'utente non ha chiesto.
+        #
+        # Chi vuole restare dichiara ``runs_when_ephemeral()``; il default e' ``False``,
+        # quindi un hook che parla continua a non essere montato senza fare niente.
+        extra = [h for h in self._extra_hooks if not ephemeral or h.runs_when_ephemeral()]
+        if extra:
+            hook = CompositeHook([loop_hook] + extra)
 
         async def _checkpoint(payload: dict[str, Any]) -> None:
             if session is None:

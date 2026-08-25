@@ -226,16 +226,10 @@ class TestTheThreeThingsItMustNotDo:
         # una funzione da chiamare per fare il checkpoint.
         assert params["snapshotted"].annotation == "bool"
 
-        # La contabilità dei token è spenta qui perché scrive sotto la dir webui,
-        # che in un test risolve dentro il workspace: è una scrittura legittima
-        # (v. ``TestTokenAccounting``) e senza questo neutralizzatore
-        # sporcherebbe il confronto sull'albero, facendo fallire questo test per
-        # un motivo che non è il suo.
-        monkeypatch.setattr(
-            "jenny.agent.dream_review.record_response_token_usage",
-            lambda *_a, **_k: None,
-        )
-
+        # Il neutralizzatore della contabilità che stava qui non serve più: dal
+        # 25/08 ``run_dream_review`` non registra niente da sé (v.
+        # ``TestTokenAccounting``), quindi non c'è nessuna scrittura sotto la dir
+        # webui da spegnere.
         before = _tree(store.workspace)
         await _run(store, _FakeAgent(), snapshotted=True)
 
@@ -681,47 +675,57 @@ class TestTheCriteriaAreReachable:
 
 
 class TestTokenAccounting:
-    """Il turno del review pass non deve sparire dalla contabilità.
+    """Il turno del review pass non deve sparire dalla contabilità — e spariva.
 
-    La registrazione sta dentro ``run_dream_review`` e non nel dispatcher — come
-    in ``run_atlas`` — perché questa funzione è l'unico punto che vede la
-    risposta del provider: restituisce un ``ReviewOutcome`` e non rilancia,
-    quindi da fuori il ``resp`` non è raggiungibile. Senza, sarebbe un turno LLM
-    completo, su un telefono, invisibile in una feature nata per contenere i
-    costi.
+    **Questa classe provava il gesto, non l'effetto, ed è il motivo per cui il
+    difetto è vissuto invisibile.** Monkeypatchava
+    ``record_response_token_usage`` e asseriva che venisse *chiamata*; nessuna
+    asserzione toccava mai il conteggio. Il secondo test arrivava a scrivere
+    ``assert recorded == [None]`` — cioè documentava di aver passato ``None`` — e
+    si chiamava «is still charged». Verde, e su niente.
+
+    Misurato il 25/08 su ``token-usage.json`` del dispositivo: in **27 giorni** i
+    bucket ``dream`` e ``atlas`` non erano comparsi una volta. ``resp`` è un
+    ``OutboundMessage``, che un campo ``usage`` non ce l'ha e non l'ha mai avuto.
+
+    La contabilità la fa ``TokenUsageHook.after_iteration`` sul turno, che è
+    l'unico punto in cui l'``usage`` del provider esiste. La copertura sta dove sta
+    il meccanismo: ``tests/webui/test_token_usage.py`` (mappa chiave→bucket, e
+    l'opt-in del vero hook) e ``tests/agent/test_dream.py::TestEphemeralHooks``
+    (il montaggio su un turno effimero).
     """
 
-    async def test_the_review_turn_is_charged(
-        self, store: MemoryStore, monkeypatch: pytest.MonkeyPatch
+    def test_the_review_does_not_do_its_own_accounting(self) -> None:
+        """Il funnel è uno solo, e questa funzione non è quello.
+
+        Asserzione sull'**AST** e non sul comportamento, di proposito: qui il
+        comportamento corretto è *l'assenza* di una chiamata, e un test che prova
+        un'assenza monkeypatchando è esattamente l'errore che questa classe
+        documenta. Un secondo funnel non darebbe un errore, darebbe un doppio
+        conteggio silenzioso.
+
+        E sull'AST e non sul testo: il commento che in quel file spiega **perché**
+        la chiamata non c'è più nomina la funzione, quindi un `in source` fallirebbe
+        sulla prosa che documenta la correzione.
+        """
+        import ast
+
+        import jenny.agent.dream_review as module
+
+        tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+        called = {
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+
+        assert "record_response_token_usage" not in called
+        assert not hasattr(module, "record_response_token_usage")
+
+    async def test_a_turn_that_raises_still_returns_a_failed_outcome(
+        self, store: MemoryStore
     ) -> None:
-        recorded: list[dict[str, Any]] = []
-        monkeypatch.setattr(
-            "jenny.agent.dream_review.record_response_token_usage",
-            lambda response, *, source, timezone_name=None: recorded.append(
-                {"response": response, "source": source, "tz": timezone_name}
-            ),
-        )
-
-        agent = _FakeAgent()
-        await _run(store, agent)
-
-        assert len(recorded) == 1
-        # ``dream`` e non ``dream_review``: ``_SOURCE_KEYS`` in
-        # ``agent/token_usage.py`` è un elenco chiuso e ``_clean_source``
-        # riscrive in silenzio tutto il resto in ``"system"``, che non
-        # separerebbe i due run — li seppellirebbe nel secchio generico.
-        assert recorded[0]["source"] == "dream"
-        assert recorded[0]["response"] is not None
-
-    async def test_a_turn_that_raises_is_still_charged(
-        self, store: MemoryStore, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Il ``finally`` copre anche il turno che esplode: ``None`` è un no-op."""
-        recorded: list[Any] = []
-        monkeypatch.setattr(
-            "jenny.agent.dream_review.record_response_token_usage",
-            lambda response, *, source, timezone_name=None: recorded.append(response),
-        )
+        """Quel che il vecchio test provava davvero, senza la finzione sopra."""
 
         class _Exploding(_FakeAgent):
             async def process_direct(self, prompt: str, **kwargs: Any) -> Any:
@@ -730,7 +734,6 @@ class TestTokenAccounting:
         outcome = await _run(store, _Exploding())
 
         assert outcome.status == STATUS_FAILED
-        assert recorded == [None]
 
 
 class TestTheUserFileIsNotPrunedLikeTheOthers:

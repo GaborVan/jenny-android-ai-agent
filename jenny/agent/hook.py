@@ -83,6 +83,29 @@ class AgentHook:
     def wants_streaming(self) -> bool:
         return False
 
+    def runs_when_ephemeral(self) -> bool:
+        """Se questo hook va montato anche su un turno **effimero**.
+
+        Un turno effimero e' lavoro interno che non lascia traccia nella
+        conversazione — Dream, Atlas, la revisione, una passata del giardiniere —
+        e ``AgentLoop`` gli monta il solo hook di progresso, tenendo fuori quelli
+        registrati dall'esterno. Giusto per gli hook che *parlano* di un turno:
+        un effimero non ha nessuno a cui parlare.
+
+        **Ma non tutto quel che un hook fa e' parlare.** Chi misura non ha niente
+        a che vedere con la visibilita' del turno, e tenerlo fuori vuol dire non
+        misurare esattamente il lavoro che nessuno vede — che e' il lavoro che
+        conviene misurare di piu', perche' e' l'unico che l'utente non ha chiesto
+        e non vede arrivare. Misurato il 25/08: in **27 giorni** i bucket ``dream``
+        e ``atlas`` non erano mai comparsi una volta, con Dream che gira ogni due
+        ore.
+
+        Default ``False``: chi entra qui deve dichiararlo, perche' la domanda
+        «questo hook ha senso senza un interlocutore?» va risposta una volta per
+        hook e non dedotta dal silenzio.
+        """
+        return False
+
     async def before_run(self, context: AgentRunHookContext) -> None:
         pass
 
@@ -155,6 +178,9 @@ class CompositeHook(AgentHook):
 
     def wants_streaming(self) -> bool:
         return any(h.wants_streaming() for h in self._hooks)
+
+    def runs_when_ephemeral(self) -> bool:
+        return any(h.runs_when_ephemeral() for h in self._hooks)
 
     async def _for_each_hook_safe(self, method_name: str, *args: Any, **kwargs: Any) -> None:
         for h in self._hooks:
