@@ -906,9 +906,21 @@ class GardenerStore:
     ) -> None:
         """Una riga in ``log/AAAAMMGG.md``: il solo posto dove si vede la passata.
 
-        Si scrive **solo se qualcosa è stato scritto**: una passata che non
-        promuove niente è il caso normale, e una riga di log per ogni giro a
-        vuoto renderebbe illeggibile l'unico registro che c'è.
+        Si scrive **se la passata ha letto righe di diario**, che abbia promosso
+        o no. La regola di prima — solo a scrittura avvenuta — proteggeva il
+        registro da «una riga per ogni giro a vuoto», e la protezione era contro
+        un caso che qui non arriva mai: senza delta la passata esce a
+        ``skipped_no_delta``, prima del modello. Chi arriva fin qui ha letto
+        righe vere; se non ha promosso niente **ha comunque bruciato il cursore
+        su quelle righe**, e il diario è append-only, quindi nessun giro futuro
+        le rivedrà. Quello è l'evento più consequenziale che questa passata possa
+        produrre, ed era l'unico a non lasciare traccia: il 25/08 tre passate su
+        ``viaggio-pazzo`` ne hanno lasciata **una**, e dal registro non si
+        distingueva «non è mai passato» da «è passato e ha deciso di no».
+
+        La regola era già stata forzata una volta, per le segnalazioni, con
+        questo stesso argomento — una cosa importante non si perde per non aver
+        promosso niente. Questa è la seconda metà di quella stessa correzione.
 
         ``refused`` sono le scritture volute e non atterrate. Quando ce ne sono la
         riga **lo dice**, e dice anche che il cursore è fermo: la forma di prima
@@ -963,8 +975,13 @@ class GardenerStore:
                 f"{writes} of {writes + refused} writes ({refused} refused, journal "
                 "left unread)"
             )
-        else:
+        elif writes:
             outcome = f"{writes} writes"
+        else:
+            # «0 writes» direbbe il numero e non il fatto. Il fatto è che quelle
+            # righe sono state lette, giudicate e consumate: il cursore le ha
+            # passate, e non torneranno.
+            outcome = "nothing promoted"
         # A delta vuoto la passata è girata **per la mappa**: «0 journal lines ()»
         # sarebbe una riga di registro che non dice cosa è successo, ed è l'unico
         # registro che c'è.
@@ -1868,11 +1885,11 @@ async def _run_pass(
                 # A WARNING: e' la sola cosa che una passata puo' dire e che vale la
                 # pena vedere passando dai log, senza aprire il file.
                 logger.warning("gardener: {} segnala — {}", store.name, flag)
-            # Il log si scrive se qualcosa e' stato scritto **oppure** se c'e' una
-            # segnalazione: una passata a vuoto non lascia traccia (era la regola, e
-            # resta), ma una segnalazione e' la cosa piu' importante che una passata
-            # possa dire e non si perde per non aver promosso niente.
-            if writes or flag:
+            # Il log si scrive se qualcosa e' stato scritto, se c'e' una
+            # segnalazione, **oppure se la passata ha letto righe di diario** —
+            # anche senza promuovere niente. Quel terzo caso e' il cursore che
+            # avanza su righe che nessun giro rivedra': v. ``log_pass``.
+            if writes or flag or delta.line_count:
                 store.log_pass(
                     delta,
                     elapsed=elapsed,
