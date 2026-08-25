@@ -2346,3 +2346,92 @@ def test_a_mixed_minute_is_yellow_and_says_what_to_add(lint_wiki, tmp_path, caps
     assert "🟡 Pages claiming a decision on a line nobody attributed (1)" in out
     assert "#HH:MM.2" in out
     assert "line not found" not in out
+
+
+# ── passo 19, il lato muto: chi non potrà mai dichiararsi deciso ──────────────
+#
+# Il passo 19 guarda chi *si dichiara* deciso. Il 25/08 il caso di campo era
+# l'opposto: `wikis/viaggio-pazzo/wiki/viaggio-pazzo.md`, a `open`, ancorata al
+# **giorno intero** del 24/08 — e le righe di quel giorno sono anteriori ai
+# marcatori. Quella pagina non potrà mai essere marcata `decided`: la guardia in
+# scrittura la rifiuterebbe. Ma la guardia parla solo quando una passata *prova* a
+# promuovere, e in due giorni di lavoro nessuno ci ha provato — quindi il tetto è
+# rimasto invisibile, mentre l'utente si chiedeva perché la wiki non si muovesse.
+#
+# Il rischio di questo controllo è di diventare il muro che questo file evita per
+# principio: su una wiki scritta prima dei marcatori *quasi ogni* pagina a `open`
+# ricade qui. Da cui la divisione — si **nomina** quel che si ripara editando
+# `source:`, si **conta** quel che non si ripara affatto — che è la proprietà
+# vera di questa correzione e ha un test suo.
+
+
+_MARKED_JOURNAL = (
+    "# 2026-08-24\n"
+    "\n"
+    "- 09:12 — [said] Il furgone è un Ducato.\n"
+    "- 09:13 — [said] Si parte il 12.\n"
+)
+
+
+def test_a_page_capped_by_a_fixable_source_is_named(lint_wiki, tmp_path, capsys):
+    """Manca l'ora, ma il giorno ha marcatori da leggere: si ripara, quindi si nomina."""
+    root = _notebook(tmp_path, source="raw/journal/20260824.md")
+    (root / "raw" / "journal" / "20260824.md").write_text(_MARKED_JOURNAL, encoding="utf-8")
+
+    out = _run(lint_wiki, root, capsys)
+
+    assert "whose `source:` can be fixed (2)" in out
+    assert "wiki/semine.md (state: open)" in out
+    assert "no #time" in out
+
+
+def test_a_page_capped_by_history_is_counted_and_not_named(lint_wiki, tmp_path, capsys):
+    """Nessuna riga di quel giorno è attribuibile: aggiungere l'ora non cambia nulla.
+
+    Nominarle sarebbe mandare a una riparazione che non esiste, una pagina alla
+    volta, su tutta la wiki. Il conteggio dice che la situazione c'è; l'elenco
+    resta per chi può agire.
+    """
+    root = _notebook(tmp_path)
+    _journal(root, "un fatto")
+
+    out = _run(lint_wiki, root, capsys)
+
+    assert "2 more page(s) rest on a journal line that cannot be attributed" in out
+    assert "wiki/semine.md (state: open)" not in out
+    assert "can be fixed" not in out
+
+
+def test_a_page_anchored_at_a_said_line_is_not_reported_at_all(lint_wiki, tmp_path, capsys):
+    """Il contro-limite: una ``source:`` che *regge* un ``decided`` non è un tetto.
+
+    Senza questa asserzione il controllo potrebbe elencare ogni pagina a ``open``
+    del mondo e i due test qui sopra resterebbero verdi.
+    """
+    root = _notebook(tmp_path, source="raw/journal/20260824.md#09:12")
+    (root / "raw" / "journal" / "20260824.md").write_text(_MARKED_JOURNAL, encoding="utf-8")
+
+    out = _run(lint_wiki, root, capsys)
+
+    assert "can be fixed" not in out
+    assert "cannot be attributed" not in out
+
+
+def test_a_capped_page_does_not_make_the_wiki_unhealthy(lint_wiki, tmp_path, capsys):
+    """**La proprietà, e il motivo per cui è ℹ️ e non 🟡.**
+
+    ``open`` su una fonte debole non è un difetto: è il valore giusto. Contarlo
+    fra i problemi trasformerebbe ogni wiki nata prima dei marcatori in un muro,
+    che questo file chiama «il modo più rapido di far ignorare un lint». Il test
+    guarda il **codice d'uscita**, non la stampa: è l'unica cosa che una
+    mutazione (``issues += len(capped)``) non può lasciare verde.
+    """
+    root = _notebook(tmp_path, source="raw/journal/20260824.md")
+    (root / "raw" / "journal" / "20260824.md").write_text(_MARKED_JOURNAL, encoding="utf-8")
+
+    rc = lint_wiki.lint(str(root))
+    out = capsys.readouterr().out
+
+    assert "can be fixed (2)" in out, "il caso deve essersi presentato davvero"
+    assert rc == 0, "un tetto informativo non rende la wiki malata"
+    assert "Wiki is healthy" in out

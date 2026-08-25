@@ -80,6 +80,11 @@ Notebook layout only (flat pages, no page under concepts/entities/summaries):
      `source:` with no `#time`, or an anchor that does not resolve is 🟡:
      unverifiable, not false — pages written before the markers existed cannot be
      attributed at all, and a 🔴 each would turn healthy projects into red walls.
+     The same pass reports the **mute** side as ℹ️ and does not count it: a page
+     that does not claim a decision and whose `source:` could never support one,
+     i.e. one the write guard would refuse the day somebody tried. That guard
+     speaks only when a pass attempts a promotion, so a page nobody attempts
+     stays capped without anyone saying so.
      The write-time half of this is `gardener._provenance_guard`, which only sees
      writes; this pass is what reaches what is already on disk.
 
@@ -228,6 +233,33 @@ _MIXED_MINUTE = "<mixed minute>"
 _ANCHOR_RE = re.compile(r"^(\d{2}:\d{2})(?:\.(\d+))?$")
 
 
+def _journal_markers(
+    root_path: Path, file_part: str, cache: dict[str, dict[str, list[str]]]
+) -> dict[str, list[str]]:
+    """I marcatori di un giorno di diario, ``minuto → [marcatori]``, con cache.
+
+    Estratta da ``_journal_line_marker`` perché ``_decided_cap_reason`` deve
+    poter chiedere del **giorno intero** e non di un minuto: una ``source:``
+    senza ora si ripara aggiungendo l'ora *solo se* quel giorno ha marcatori da
+    leggere, e mandare a una riparazione che non può funzionare è peggio che
+    tacere. Un file illeggibile vale giorno vuoto, come prima.
+    """
+    if file_part not in cache:
+        lines: dict[str, list[str]] = {}
+        try:
+            text = (root_path / file_part).read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+        for line in text.splitlines():
+            match = re.match(r"^-\s+(\d{2}:\d{2})\s+—\s+(.*)$", line)
+            if match:
+                body = match.group(2).lstrip()
+                marker = body.split(" ", 1)[0] if body.startswith("[") else ""
+                lines.setdefault(match.group(1), []).append(marker)
+        cache[file_part] = lines
+    return cache[file_part]
+
+
 def _journal_line_marker(
     root_path: Path, file_part: str, anchor: str, cache: dict[str, dict[str, list[str]]]
 ) -> str | None:
@@ -249,19 +281,7 @@ def _journal_line_marker(
     minuto, contando da 1 — è come lo si dice. Se sono tutte dell'utente il minuto
     nudo basta: quale delle due la pagina intenda non cambia la risposta.
     """
-    if file_part not in cache:
-        lines: dict[str, list[str]] = {}
-        try:
-            text = (root_path / file_part).read_text(encoding="utf-8")
-        except OSError:
-            text = ""
-        for line in text.splitlines():
-            match = re.match(r"^-\s+(\d{2}:\d{2})\s+\u2014\s+(.*)$", line)
-            if match:
-                body = match.group(2).lstrip()
-                marker = body.split(" ", 1)[0] if body.startswith("[") else ""
-                lines.setdefault(match.group(1), []).append(marker)
-        cache[file_part] = lines
+    _journal_markers(root_path, file_part, cache)
     anchored = _ANCHOR_RE.match(anchor.strip())
     if anchored is None:
         return None
@@ -276,6 +296,52 @@ def _journal_line_marker(
     if all(m in _SAID_MARKERS for m in markers):
         return markers[0]
     return _MIXED_MINUTE
+
+
+def _decided_cap_reason(
+    root_path: Path, file_part: str, anchor: str, cache: dict[str, dict[str, list[str]]]
+) -> tuple[str, bool] | None:
+    """Perché questa pagina **non potrà** essere marcata ``decided``, o ``None``.
+
+    Il passo 19 guarda chi *si dichiara* deciso. Questo guarda il lato muto:
+    una pagina a ``open`` (o ``hypothesis``) la cui ``source:`` non regge un
+    ``decided``, cioè che verrebbe **rifiutata** il giorno in cui qualcuno prova
+    a promuoverla. Nessuno lo dice oggi: la guardia in scrittura parla solo
+    quando una passata ci prova, e se non ci prova mai il tetto resta invisibile.
+
+    Il caso di campo (25/08, ``viaggio-pazzo``): la pagina del progetto è nata il
+    24/08 ancorata al **giorno intero**, e le righe di quel giorno sono anteriori
+    ai marcatori. È a ``open`` per sempre, correttamente, e in due giorni di
+    lavoro niente e nessuno l'ha detto.
+
+    Torna ``(motivo, azionabile)``. **La seconda metà decide come si stampa**, e
+    non è pedanteria: su una wiki scritta prima dei marcatori *quasi ogni* pagina
+    a ``open`` è qui dentro, e un elenco che le nomina tutte per dire «non si può
+    fare niente» è il muro che questo file evita per principio in tre punti
+    diversi. Quel che si nomina è quel su cui si agisce; il resto è un conteggio.
+
+    Azionabile vuol dire che **una modifica a ``source:`` cambia l'esito**: manca
+    l'ora e il giorno ha marcatori da leggere, il minuto è misto e vuole
+    l'ordinale, l'ancora non risolve. Non azionabile vuol dire che la riga di
+    diario stessa non regge la promozione — perché è anteriore ai marcatori,
+    oppure perché è `[inferred]`, che non è un difetto ma la risposta giusta.
+    """
+    if not anchor:
+        day = _journal_markers(root_path, file_part, cache)
+        if day and not any(marker for markers in day.values() for marker in markers):
+            return ("no #time, and no line of that day carries a marker", False)
+        return ("no #time — nothing can check which line of that day it means; add it", True)
+    marker = _journal_line_marker(root_path, file_part, anchor, cache)
+    if marker in _SAID_MARKERS:
+        return None
+    if marker == _MIXED_MINUTE:
+        return ("that minute is mixed — add the line's place within it, e.g. #HH:MM.2", True)
+    if marker == _INFERRED_MARKER:
+        return ("the journal attributes that line to the assistant", False)
+    if marker is None:
+        return ("that line is not in the journal — check the anchor", True)
+    return ("that line carries no marker (written before they existed)", False)
+
 
 # Tetto della mappa, in caratteri. **Non è un numero scelto qui**: è la soglia
 # oltre la quale il blocco di progetto smette di iniettare la mappa intera in
@@ -1517,6 +1583,8 @@ def lint(root: str) -> int:
         # non rileggere ogni pagina e ogni giorno di diario una seconda volta.
         unattributed: list[str] = []
         inferred_but_decided: list[str] = []
+        capped: list[str] = []
+        capped_by_history = 0
         journal_lines: dict[str, dict[str, str]] = {}
         for page in flat_pages:
             fm = parse_frontmatter(read_md(page)) or {}
@@ -1546,6 +1614,15 @@ def lint(root: str) -> int:
                     dangling_source.append(f"   {rel_page} → source: {value}")
                     continue
                 if state not in _STATES_CLAIMING_A_DECISION:
+                    # Il lato muto del passo 19: non si dichiara decisa, e con
+                    # questa ``source:`` non potrà mai esserlo.
+                    capped_by = _decided_cap_reason(root_path, file_part, anchor, journal_lines)
+                    if capped_by:
+                        reason, actionable = capped_by
+                        if actionable:
+                            capped.append(f"   {rel_page} (state: {state}) → {value} — {reason}")
+                        else:
+                            capped_by_history += 1
                     continue
                 if not anchor:
                     unattributed.append(f"   {rel_page} → source: {value} (no #time)")
@@ -1620,6 +1697,17 @@ def lint(root: str) -> int:
             print("    (`raw/journal/<day>.md#HH:MM`); a line written before the markers")
             print("    existed cannot be attributed at all, and `open` is what it is worth.)")
             issues += len(unattributed)
+        if capped:
+            print(f"\nℹ️  Pages that could not be marked `decided`, and whose `source:` can be "
+                  f"fixed ({len(capped)}):")
+            print_entries(capped)
+            print("   (not counted as defects: `open` is what these are worth today. Said here")
+            print("    because the write guard speaks only when a pass tries to promote one, so")
+            print("    a page nobody attempts stays capped without anyone knowing.)")
+        if capped_by_history:
+            print(f"\nℹ️  {capped_by_history} more page(s) rest on a journal line that cannot be "
+                  "attributed — written before the markers existed, or `[inferred]`. Not listed "
+                  "and not counted: `open` is the right value and no edit changes it.")
 
         # Una pagina che non linka niente è una nota in una cartella, non una
         # voce di wiki: la stessa regola del passo 10, per le pagine piatte.
