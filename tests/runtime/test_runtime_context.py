@@ -44,11 +44,20 @@ def test_android_entry_set_android_context_writes_holder(
 def test_workspace_accessors_delegate_to_holder(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Legge l'holder, e **non crea niente**.
+
+    L'asserzione era rovesciata («get_workspace_path crea la dir») e fissava un
+    difetto: un accessor che chiama ``ensure_dir`` fa un ``mkdir`` sulla radice
+    del workspace a ogni chiamata, e dentro ``python_exec`` quella è una
+    scrittura fuori dalla cartella del progetto — rifiutata dalla guardia, e per
+    questo il 26/08 ``wiki_lint`` non era eseguibile in nessun turno di progetto.
+    Invertita, non cancellata: chi rimettesse l'``ensure_dir`` cade qui.
+    """
     from jenny.config import paths as paths_mod
 
     monkeypatch.setattr(get_runtime_context(), "workspace_dir", tmp_path / "ws")
     assert paths_mod.get_workspace_path() == tmp_path / "ws"
-    assert (tmp_path / "ws").is_dir()  # get_workspace_path crea la dir
+    assert not (tmp_path / "ws").exists()
 
 
 def test_workspace_unset_raises(monkeypatch: pytest.MonkeyPatch) -> None:

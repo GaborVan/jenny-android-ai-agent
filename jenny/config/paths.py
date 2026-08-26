@@ -20,7 +20,23 @@ def set_workspace_dir(path: str | Path) -> None:
     from jenny.runtime.context import get_runtime_context
     from jenny.utils.prompt_templates import forget_templates_root
 
-    get_runtime_context().workspace_dir = Path(path) if path else None
+    # **Risolto qui, una volta, e non ai punti d'uso.** Su Android la cartella
+    # dati è raggiungibile con due nomi — Java passa ``/data/user/0/<pkg>`` e
+    # ``resolve()`` la riscrive in ``/data/data/<pkg>`` — e le due forme non
+    # combaciano come prefisso. Il 26/08 quello è costato l'esecuzione del lint
+    # dentro un progetto: la guardia di ``python_exec`` confronta il percorso
+    # dell'operazione col confine (che è risolto), e con le due radici in forme
+    # diverse rifiutava anche uno ``stat`` legittimo. Lo stesso allineamento che
+    # ``GardenerStore.__init__`` fa sulle sue due radici, per la stessa ragione.
+    #
+    # **Al setter e non all'accessor**: ``resolve()`` fa un ``lstat`` per
+    # componente, e ``get_workspace_path`` è chiamata a ogni render di prompt e da
+    # dentro il sandbox, dove ogni lstat passa dalla guardia e produce una raffica
+    # di rifiuti spuri (v. ``_path_guard_bypass``). Qui si paga una volta per
+    # avvio.
+    get_runtime_context().workspace_dir = (
+        Path(path).resolve(strict=False) if path else None
+    )
     # L'ambiente Jinja e memoizzato sulla radice dei template, che *e* il
     # workspace: senza questo, cambiare workspace lascia in piedi un loader che
     # legge ancora dal precedente. In produzione succede una volta all'avvio,
@@ -57,6 +73,22 @@ def get_workspace_path() -> Path:
 
     The workspace must be set explicitly via ``set_workspace_dir`` before use.
 
+    **Non crea la cartella, e la correzione è del 26/08.** Chiamava
+    ``ensure_dir``, cioè un ``mkdir(parents=True, exist_ok=True)`` sulla radice
+    del workspace **a ogni chiamata** — un accessor che scrive. Dentro
+    ``python_exec`` il confine di lettura è il workspace ma quello di *mutazione*
+    è la cartella del progetto, quindi quel ``mkdir`` era una scrittura fuori dal
+    progetto e la guardia lo rifiutava, correttamente: ``wiki_lint``,
+    ``wiki_audit`` e ``wiki_scaffold`` non erano eseguibili in nessun turno legato
+    a un progetto, e il «hard gate» della skill ``llm-wiki`` era un passo che non
+    poteva riuscire.
+
+    Ed era inutile: la cartella la crea ``android_entry`` con un ``mkdir``
+    esplicito **prima** di ``set_workspace_dir``, che è il posto giusto — una
+    volta, all'avvio, fuori da ogni sandbox. Chi ha bisogno di creare una
+    *sottocartella* continua a passare da ``ensure_dir`` (v. ``get_data_dir``):
+    quelle stanno dentro il workspace e non è questo il caso.
+
     Raises:
         RuntimeError: if no workspace directory has been configured.
     """
@@ -64,7 +96,7 @@ def get_workspace_path() -> Path:
 
     workspace_dir = get_runtime_context().workspace_dir
     if workspace_dir is not None:
-        return ensure_dir(workspace_dir)
+        return workspace_dir
     raise RuntimeError(
         "Workspace directory is not configured. "
         "Call set_workspace_dir() before get_workspace_path()."
