@@ -30,6 +30,7 @@ numbers a turn in this project actually pays.
   off in every turn: the model reads its head and never learns the rest exists. Move the prose out
   into the pages it is about — word for word — and leave a `[[link]]` behind. Prune prose, never
   entries.{% else %} It fits.{% endif %}
+
 - **The pages**: {{ page_count }} in all, and a turn can inject {{ page_max }} characters of them,
   in the order the map names them.
 {%- if pages_over %}
@@ -39,10 +40,13 @@ numbers a turn in this project actually pays.
   Each of those is past the whole per-turn budget on its own, so it is **skipped whole** in every
   conversation in this project — it is on disk and nobody can read it. Splitting one is the first
   thing to do here.
+
 {%- else %}
   No page is over the budget on its own. That does not mean nothing needs splitting: a merely large
   page starves the pages the map lists after it, and the map's order decides who gets read.
+
 {%- endif %}
+
 
 ## What you have that a maintenance pass does not
 
@@ -65,6 +69,8 @@ thing to go: `compile` says **confirm a split or a merge with them before writin
 to tidy the wiki is not that confirmation — it is what makes the question worth asking, and they are
 right here to answer it.
 {% endif %}
+
+
 ## When you are done
 
 Write the log line — `## [HH:MM] compile | <what moved where>` — and run the lint, pasting its

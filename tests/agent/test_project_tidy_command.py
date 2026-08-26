@@ -407,3 +407,54 @@ async def test_the_measurements_are_in_both_layouts(tmp_path: Path) -> None:
     assert "research** layout" in prompt
     assert "`concepts/grossa.md`" in prompt
     assert "over the 6,000 budget" in prompt
+
+
+# ── La forma del testo, misurata come la rende la produzione ──────────────────
+
+
+@pytest.mark.parametrize(
+    ("kind", "pages", "map_text"),
+    [
+        ("taccuino, tutto a posto", ["camminata.md"], "# X\n\n## Pages\n"),
+        ("taccuino, mappa oltre", ["camminata.md"], "# X\n\n" + "y" * 2600),
+        ("ricerca, pagine oltre", ["concepts/grossa.md"], "# X\n\n## Pages\n"),
+    ],
+)
+async def test_no_heading_or_bullet_is_glued_to_the_line_before_it(
+    tmp_path: Path, kind: str, pages: list[str], map_text: str
+) -> None:
+    """**Il difetto visto sul telefono, e la ragione per cui va misurato qui.**
+
+    Il 26/08 il prompt è arrivato al modello con ``2,000. It fits.- **The pages**``
+    e ``thing to do here.## What you have``. L'avevo guardato renderizzato e mi
+    sembrava a posto: l'avevo renderizzato con un ``Environment`` costruito a
+    mano, **senza i flag della produzione** — ``jenny/utils/prompt_templates.py``
+    monta ``trim_blocks=True``, che mangia il newline subito dopo un tag di
+    blocco. È la stessa forma del difetto del 25/08 (``capture=True`` mancante):
+    un prompt misurato con argomenti — qui con un *ambiente* — diverso da quello
+    che la produzione usa davvero.
+
+    Da cui la regola di questo test: passa da ``_expand_project_tidy``, cioè dal
+    ``render_template`` vero, e guarda il testo **non normalizzato** — è l'unica
+    asserzione del file a cui gli spazi interessano.
+    """
+    loop = _loop(tmp_path)
+    project = _wiki(tmp_path, map_text=map_text)
+    for rel in pages:
+        _page(project, rel, 7000)
+
+    expanded = await loop._expand_project_tidy(_msg(), "project:salute")
+
+    assert expanded is not None
+    glued = [
+        line for line in expanded.content.splitlines()
+        if ".## " in line or ".- **" in line or ".- `" in line
+    ]
+    assert not glued, f"{kind}: righe incollate da trim_blocks: {glued}"
+    # E ogni titolo ha una riga vuota davanti, che è come si legge un titolo.
+    lines = expanded.content.splitlines()
+    orphans = [
+        line for i, line in enumerate(lines)
+        if line.startswith("## ") and i > 0 and lines[i - 1].strip()
+    ]
+    assert not orphans, f"{kind}: titoli senza riga vuota davanti: {orphans}"
