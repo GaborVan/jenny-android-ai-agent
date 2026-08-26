@@ -92,6 +92,7 @@ of date, the fix is to say so and correct the page, not to work around it in con
 
 ## Depth
 
-The `llm-wiki` skill is the manual of the **research** pattern: its five operations, page format,
-lint and audit. Read it when you are about to do one of those — its folder layout describes that
-pattern, not this project.
+The `llm-wiki` skill is the manual of its five operations, page format, lint and audit. Its folder
+layout describes the **research** pattern and not this project, but `compile` carries a section for
+this one — and **a request to tidy the wiki, or to split what has grown, is that operation.** Read
+it before restructuring, instead of inventing a shape for a job that already has one.

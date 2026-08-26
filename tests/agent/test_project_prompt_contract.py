@@ -100,6 +100,16 @@ _RETIRED_ABSOLUTE = "Answer from them"
 # template cambia la terza colonna; chi toglie una riga sta togliendo una regola.
 _PROJECT_MD_RULES: tuple[tuple[str, str, str], ...] = (
     (
+        "ristrutturare la wiki è un'operazione con un manuale, non un'improvvisazione",
+        "il caso del 26/08 su ``wikis/salute``: l'utente ha detto «sistema un po' la wiki, "
+        "se necessario spezza i concetti» e il risultato è stato buono — ma la passata si è "
+        "inventata la forma, e fra le altre cose ha scritto una ``source:`` a lista YAML che "
+        "i due parser leggono in due modi, rendendo illeggibile la provenienza di una pagina. "
+        "Il manuale c'era (``compile``) e questo blocco *scoraggiava* di leggerlo: diceva che "
+        "il layout della skill «non è questo progetto» e si fermava lì",
+        "is that operation",
+    ),
+    (
         "il criterio di cattura è verificabile da chi lo legge",
         "il difetto del 22/08: nessuno aveva mai detto all'agente che la conversazione "
         "è una fonte, quindi la regola se l'è inventata a sessione — e la sua versione "

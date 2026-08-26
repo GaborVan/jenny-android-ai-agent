@@ -266,6 +266,29 @@ Every action on the wiki is one of these five. Each appends an entry to the curr
 - [ ] A log line for this compile exists in `log/YYYYMMDD.md`.
 - [ ] **You actually ran `lint_wiki.lint('<workspace>/wikis/<name>')` and it exits clean** (or every issue is fixed / explicitly deferred to the user). This is a hard gate: run the script, read its real output, fix, re-run — then **paste the literal lint output into your reply**. Verification is by running the tool, not by remembering the rules; a summary of "looks satisfied" is not acceptable.
 
+#### `compile` in a **project** wiki (notebook layout)
+
+The steps above assume the research layout — `concepts/`, `entities/`, `summaries/`, pages measured in words. A **project** wiki (see `agent/project.md`) is flat pages under `wiki/`, each with `state:` and `source:`, fed by an append-only `raw/journal/`. Same operation, and it is the one the user asks for with *"tidy up the wiki"* or *"split the concepts"* — but five things differ, and every one of them has been got wrong in the field.
+
+1. **The trigger is characters, not words, and the number is 6000.** That is the total budget for *all* pages injected into a turn (`_PROJECT_PAGES_MAX_CHARS`). Pages are offered in **the order the map names them** and any that does not fit is skipped whole — not shortened, not summarised — in every conversation in that project. So a single page over 6000 can never be read by anyone, and a merely *large* page silently starves the pages the map lists after it. Split by the things the page talks about; each part becomes a page named after its own thing.
+
+2. **Move text verbatim. Do not merge and do not re-word.** This is the hard inversion of step 3 above: in a research wiki you may propose a merge and rewrite; here you may not. The sentences came from the user's own words through an append-only journal, and a re-wording detaches the page from the `source:` that justifies it. Nothing is deleted; text that moves into a page the original links to is still there and still reachable. Rewriting is how a wiki decays one careful pass at a time.
+
+3. **`source:` is a single value, and its shape is load-bearing.** Either a journal line — `raw/journal/<day>.md#HH:MM`, with `#HH:MM.2` for the second line of a mixed minute — or a document copied into `raw/`. **Never a YAML list.** Measured on 26/08: a pass turned one `source:` into a two-item list, and the two readers that parse it disagreed — one returned `- raw/journal/...` with the dash attached, the other returned the second item — so the page's provenance became unreadable and nothing said so. When a page now rests on two sources, keep the one that carries its `state:` and name the other in the body.
+
+4. **`state:` never goes up during a compile.** Restructuring moves text; it does not certify. Only the user's own words justify anything above `open`, and a page whose `source:` is a document or an `[inferred]` line is capped at `open` for good — which is the right value, not a defect to fix.
+
+5. **A contradiction between pages goes into the map's open section** — one line, naming both — unless the user is present and settles it, which during a compile they usually are. If they do, say so in the log line: that is the difference between a decision and a pass that decided on its own.
+
+And the map's **page list comes out of a compile whole**: every page it named before is still named after. The list is how a future conversation learns which pages exist, so an entry dropped from it is a page that has stopped existing.
+
+**Definition of done**, replacing the checklist above:
+- [ ] Every page appears exactly once in `wiki/index.md`, and no entry was lost.
+- [ ] No page is over 6000 characters, and the map is inside its own ceiling (2000).
+- [ ] Every page written or moved carries `state:` and a single-valued `source:`.
+- [ ] A log line exists: `## [HH:MM] compile | <what moved where>` (`split` is also a valid op when the pass was only a split).
+- [ ] **You actually ran `lint_wiki.lint('<workspace>/wikis/<name>')` and it exits clean**, and pasted its literal output into your reply. Same hard gate as everywhere else in this skill.
+
 ### 2. `ingest`
 
 Add a new source. **One source typically touches 5–15 wiki pages.**
