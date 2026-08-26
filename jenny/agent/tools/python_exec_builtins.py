@@ -415,32 +415,62 @@ def _register_builtin_functions(
 
     # ── LLM Wiki ──
     def _load_wiki_script(name: str):
-        """Load a script from the llm-wiki skill directory."""
+        """Load a script from the llm-wiki skill directory.
+
+        **Il caricamento gira sotto ``_path_guard_bypass()``, e la ragione è che
+        qui non c'è niente da contenere.** Il percorso è fisso —
+        ``<workspace>/skills/llm-wiki/scripts/<nome>.py`` — e *name* arriva da tre
+        call site letterali di questo file (``lint_wiki.py``, ``scaffold.py``,
+        ``audit_review.py``): il modello non lo scrive e non lo influenza. Farlo
+        passare dalla guardia non è un controllo, è un ostacolo, e il 26/08 sul
+        telefono era **l'ostacolo**: dentro un progetto la radice di lettura di un
+        subagent è la cartella del progetto, gli script della skill stanno fuori, e
+        ``wiki_lint``/``wiki_audit``/``wiki_scaffold`` erano irraggiungibili — con
+        loro il «hard gate» della skill, *esegui il lint e incolla il suo output*.
+        Sotto ``orchestratorMode`` l'agente principale non ha ``python_exec``
+        affatto, quindi non restava nessuna strada.
+
+        **Non allarga niente per il codice del modello.** La finestra copre solo
+        queste righe: quel che lo script fa dopo — leggere la wiki, scrivere il
+        proprio stato — gira fuori dal bypass e resta guardato come prima. È lo
+        stesso gesto, con la stessa motivazione, di ``_wiki_root`` qui sotto.
+
+        L'alternativa era allargare il confine di lettura del sandbox alla radice
+        dell'installazione (il gemello di ``_FsTool._installation_read_root``,
+        passo T4.5). Scartata: cambia una regola di sicurezza per tutto il codice
+        che il modello esegue, mentre il difetto è che tre builtin non riescono ad
+        aprire un file **loro**.
+        """
         import importlib.util
 
-        skill_dir = get_workspace_path() / "skills" / "llm-wiki" / "scripts"
-        script_path = skill_dir / name
-        if not script_path.exists():
-            raise FileNotFoundError(f"Script not found: {script_path}")
+        from jenny.agent.tools.python_exec import _path_guard_bypass
 
-        logger.debug("Loading wiki script via importlib: %s", script_path)
-        try:
-            spec = importlib.util.spec_from_file_location(name.removesuffix(".py"), script_path)
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            return mod
-        except Exception:
-            logger.warning("importlib failed for %s; falling back to exec()", script_path)
-            mod = types.ModuleType(name.removesuffix(".py"))
-            # `__file__` come lo metterebbe importlib: gli script delle skill
-            # ricavano da lì la propria directory
-            # (`sys.path.insert(0, dirname(abspath(__file__)))`), e su questo
-            # ramo il nome non esisteva affatto.
-            mod.__file__ = str(script_path)
-            code = script_path.read_text(encoding="utf-8")
-            # `_compile_script`, non `exec(code, ...)`: vedi lì il perché.
-            exec(_compile_script(code, str(script_path)), mod.__dict__)
-            return mod
+        with _path_guard_bypass():
+            skill_dir = get_workspace_path() / "skills" / "llm-wiki" / "scripts"
+            script_path = skill_dir / name
+            if not script_path.exists():
+                raise FileNotFoundError(f"Script not found: {script_path}")
+
+            logger.debug("Loading wiki script via importlib: %s", script_path)
+            try:
+                spec = importlib.util.spec_from_file_location(
+                    name.removesuffix(".py"), script_path
+                )
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                return mod
+            except Exception:
+                logger.warning("importlib failed for %s; falling back to exec()", script_path)
+                mod = types.ModuleType(name.removesuffix(".py"))
+                # `__file__` come lo metterebbe importlib: gli script delle skill
+                # ricavano da lì la propria directory
+                # (`sys.path.insert(0, dirname(abspath(__file__)))`), e su questo
+                # ramo il nome non esisteva affatto.
+                mod.__file__ = str(script_path)
+                code = script_path.read_text(encoding="utf-8")
+                # `_compile_script`, non `exec(code, ...)`: vedi lì il perché.
+                exec(_compile_script(code, str(script_path)), mod.__dict__)
+                return mod
 
     def _wiki_root(root: str) -> str:
         """Porta *root* alla stessa base degli altri builtin, prima di passarlo.

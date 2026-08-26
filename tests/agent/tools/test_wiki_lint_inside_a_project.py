@@ -251,3 +251,78 @@ async def test_wiki_lint_runs_when_the_workspace_was_given_by_an_alias(
 
     assert _BOUNDARY_ERROR not in out, f"il lint è ancora irraggiungibile: {out!r}"
     assert "linted" in out, f"lo script non ha girato: {out!r}"
+
+
+# ── Il subagent: la radice del tool È il progetto ────────────────────────────
+#
+# `SubagentManager._tool_context` costruisce i tool con `workspace` = la cartella
+# del progetto, quindi per un subagent il confine di **lettura** del sandbox è il
+# progetto e gli script della skill stanno fuori. E sotto `orchestratorMode`
+# l'agente principale non ha `python_exec` affatto: i subagent sono gli unici che
+# possono eseguire codice, quindi è questa la forma che decide se il cancello del
+# lint esiste o no. Il 26/08 non esisteva.
+
+
+def _subagent_tool(project: Path) -> PythonExecTool:
+    """Il tool come lo costruisce ``SubagentManager``: radice = il progetto."""
+    cfg = PythonExecConfig()
+    tool = PythonExecTool(
+        working_dir=str(project),
+        timeout=30,
+        allowed_modules=cfg.allowed_modules,
+        blocked_modules=cfg.blocked_modules,
+        restrict_to_workspace=True,
+        workspace=str(project),
+    )
+    _register_builtin_functions(
+        tool.namespace, workspace=str(project), restrict_to_workspace=True
+    )
+    return tool
+
+
+async def test_wiki_lint_runs_for_a_subagent_confined_to_the_project(
+    scoped_project,
+) -> None:
+    """**Il test che decide il cancello**, perché è l'unico attore che esegue codice."""
+    _ws, project = scoped_project
+
+    out = await _subagent_tool(project).execute(code="print(wiki_lint('.'))")
+
+    assert _BOUNDARY_ERROR not in out, f"il lint è ancora irraggiungibile: {out!r}"
+    assert "linted" in out, f"lo script non ha girato: {out!r}"
+
+
+async def test_the_bypass_does_not_leak_to_the_models_own_code(scoped_project) -> None:
+    """Il contro-limite, ed è la proprietà che rende accettabile un bypass.
+
+    La finestra copre il **caricamento** dello script, non l'esecuzione: dopo di
+    quella il codice che il modello scrive resta guardato come prima. Senza questa
+    asserzione la correzione potrebbe essere un'apertura del sandbox, e il test
+    sopra sarebbe verde per la ragione sbagliata.
+    """
+    ws, project = scoped_project
+    skill_file = ws / "skills" / "llm-wiki" / "scripts" / "lint_wiki.py"
+
+    out = await _subagent_tool(project).execute(
+        code=f"import os; print(os.stat({str(skill_file)!r}).st_size)"
+    )
+
+    assert _BOUNDARY_ERROR in out, f"il bypass è colato nel codice del modello: {out!r}"
+
+
+async def test_the_bypass_does_not_open_writes(scoped_project) -> None:
+    """E nemmeno in scrittura: ``wiki_scaffold`` fuori dal progetto resta rifiutato.
+
+    Passa dallo stesso ``_load_wiki_script``, quindi lo script lo apre — ed è poi
+    ``_wiki_root``, col confine di scrittura, a fermarlo sul bersaglio.
+    """
+    ws, project = scoped_project
+    (ws / "skills" / "llm-wiki" / "scripts" / "scaffold.py").write_text(
+        "def scaffold(root, title):\n    print(f'scaffolded {root}')\n", encoding="utf-8"
+    )
+
+    out = await _subagent_tool(project).execute(
+        code=f"print(wiki_scaffold({str(ws / 'wikis' / 'nuova')!r}, 'Nuova'))"
+    )
+
+    assert _BOUNDARY_ERROR in out, f"lo scaffold è uscito dal progetto: {out!r}"
