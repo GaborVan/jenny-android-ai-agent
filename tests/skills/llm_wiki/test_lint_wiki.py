@@ -2308,7 +2308,10 @@ def test_the_lint_and_the_gardener_read_the_same_line(lint_wiki, tmp_path, ancho
     e la severità li distingue nel messaggio, non nel verdetto. Il test confronta
     quindi la sola cosa su cui le due implementazioni non possono divergere.
     """
-    from jenny.agent.gardener import _journal_line_provenance
+    # Il gemello vive in ``wiki_provenance`` dal 26/08 (estratto da ``gardener``
+    # perché ora lo monta anche ``_FsTool``): il giardiniere resta un suo
+    # consumatore, non più la sua casa.
+    from jenny.agent.wiki_provenance import _journal_line_provenance
 
     (tmp_path / "raw" / "journal").mkdir(parents=True)
     (tmp_path / "raw" / "journal" / "20260824.md").write_text(_MIXED_JOURNAL, encoding="utf-8")
@@ -2415,6 +2418,64 @@ def test_a_page_anchored_at_a_said_line_is_not_reported_at_all(lint_wiki, tmp_pa
 
     assert "can be fixed" not in out
     assert "cannot be attributed" not in out
+
+
+def test_a_page_sourced_at_a_document_is_counted_apart_and_never_asked_for_a_time(
+    lint_wiki, tmp_path, capsys
+):
+    """**Il difetto del 26/08, e la ragione del terzo conteggio.**
+
+    Misurato su ``wikis/salute`` vero: cinque pagine su cinque con
+    ``source: raw/research/<documento>.md`` — la forma che ``project.md`` chiede
+    per il materiale che arriva da fuori — e il lint le mandava tutte e cinque ad
+    «aggiungi un ``#HH:MM``», *nominate fra le riparabili*. Su un documento quel
+    minuto non esiste e non esisterà: l'avviso mandava a una riparazione
+    impossibile, che è esattamente quel che il resto di questo passo evita.
+
+    Tre asserzioni, e servono tutte e tre: che non chieda l'ora, che non finisca
+    fra le riparabili, e che **non finisca nemmeno nel conteggio della storia** —
+    quella frase parla di righe anteriori ai marcatori e manderebbe a cercare
+    pagine vecchie, dove non c'è niente di vecchio.
+    """
+    root = _notebook(tmp_path, source="raw/research/documento.md")
+    (root / "raw" / "research").mkdir(parents=True)
+    (root / "raw" / "research" / "documento.md").write_text(
+        "# Documento\n\nCopiato verbatim da fuori.\n", encoding="utf-8"
+    )
+    _journal(root, "un fatto")
+
+    rc = lint_wiki.lint(str(root))
+    out = capsys.readouterr().out
+
+    assert "2 more page(s) rest on a document copied into `raw/`" in out
+    assert "#HH:MM" not in out
+    assert "can be fixed" not in out
+    assert "cannot be attributed" not in out
+    # Il codice d'uscita, come per il gemello qui sotto: è l'unica cosa che una
+    # mutazione ``issues += capped_by_document`` non può lasciare verde, e una
+    # fonte documentale è la forma *prescritta*, non un difetto.
+    assert rc == 0
+    assert "Wiki is healthy" in out
+
+
+def test_an_anchor_written_on_a_document_is_the_same_finding(lint_wiki, tmp_path, capsys):
+    """Il corollario: l'ancora **c'è** ma il file non ha righe di diario.
+
+    Prima usciva come «that line is not in the journal — check the anchor»,
+    riparabile: mandava a correggere un'ancora che non ha nessun minuto da
+    indovinare. È lo stesso fatto del test sopra, e senza questa asserzione la
+    correzione poteva chiudere solo il ramo senza ancora.
+    """
+    root = _notebook(tmp_path, source="raw/research/documento.md#09:12")
+    (root / "raw" / "research").mkdir(parents=True)
+    (root / "raw" / "research" / "documento.md").write_text(
+        "# Documento\n\nCopiato verbatim da fuori.\n", encoding="utf-8"
+    )
+
+    out = _run(lint_wiki, root, capsys)
+
+    assert "rest on a document copied into `raw/`" in out
+    assert "check the anchor" not in out
 
 
 def test_a_capped_page_does_not_make_the_wiki_unhealthy(lint_wiki, tmp_path, capsys):

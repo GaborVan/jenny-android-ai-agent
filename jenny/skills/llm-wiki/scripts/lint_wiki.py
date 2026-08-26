@@ -227,6 +227,17 @@ _INFERRED_MARKER = "[inferred]"
 # mandava a cercare una riga che c'è — un avviso su cui non si può agire.
 _MIXED_MINUTE = "<mixed minute>"
 
+# I tre esiti di un tetto su ``decided``, e sono tre perché si leggono in tre
+# modi. ``FIXABLE`` si ripara editando ``source:``, quindi si **nomina**.
+# ``HISTORY`` è una riga di diario che non regge la promozione (anteriore ai
+# marcatori, oppure ``[inferred]``): si **conta**. ``DOCUMENT`` è una fonte che
+# non è una riga di diario e non lo diventerà — un file copiato in ``raw/`` —
+# e si conta **a parte**: la frase di ``HISTORY`` manderebbe a cercare pagine
+# vecchie, e qui non c'è niente di vecchio né di sbagliato.
+_CAP_FIXABLE = "fixable"
+_CAP_HISTORY = "history"
+_CAP_DOCUMENT = "document"
+
 # ``HH:MM`` o ``HH:MM.N``: v. ``_journal_line_marker``. Tenuto uguale a
 # ``jenny/agent/gardener.py::_ANCHOR_RE`` da un test che fa girare gli stessi casi
 # nelle due implementazioni (questo script non importa ``jenny``).
@@ -300,7 +311,7 @@ def _journal_line_marker(
 
 def _decided_cap_reason(
     root_path: Path, file_part: str, anchor: str, cache: dict[str, dict[str, list[str]]]
-) -> tuple[str, bool] | None:
+) -> tuple[str, str] | None:
     """Perché questa pagina **non potrà** essere marcata ``decided``, o ``None``.
 
     Il passo 19 guarda chi *si dichiara* deciso. Questo guarda il lato muto:
@@ -314,33 +325,59 @@ def _decided_cap_reason(
     ai marcatori. È a ``open`` per sempre, correttamente, e in due giorni di
     lavoro niente e nessuno l'ha detto.
 
-    Torna ``(motivo, azionabile)``. **La seconda metà decide come si stampa**, e
-    non è pedanteria: su una wiki scritta prima dei marcatori *quasi ogni* pagina
-    a ``open`` è qui dentro, e un elenco che le nomina tutte per dire «non si può
+    Torna ``(motivo, esito)`` — uno di :data:`_CAP_FIXABLE`, :data:`_CAP_HISTORY`,
+    :data:`_CAP_DOCUMENT`. **La seconda metà decide come si stampa**, e non è
+    pedanteria: su una wiki scritta prima dei marcatori *quasi ogni* pagina a
+    ``open`` è qui dentro, e un elenco che le nomina tutte per dire «non si può
     fare niente» è il muro che questo file evita per principio in tre punti
     diversi. Quel che si nomina è quel su cui si agisce; il resto è un conteggio.
 
-    Azionabile vuol dire che **una modifica a ``source:`` cambia l'esito**: manca
+    ``FIXABLE`` vuol dire che **una modifica a ``source:`` cambia l'esito**: manca
     l'ora e il giorno ha marcatori da leggere, il minuto è misto e vuole
-    l'ordinale, l'ancora non risolve. Non azionabile vuol dire che la riga di
-    diario stessa non regge la promozione — perché è anteriore ai marcatori,
-    oppure perché è `[inferred]`, che non è un difetto ma la risposta giusta.
+    l'ordinale, l'ancora non risolve. ``HISTORY`` vuol dire che la riga di diario
+    stessa non regge la promozione — perché è anteriore ai marcatori, oppure
+    perché è `[inferred]`, che non è un difetto ma la risposta giusta.
+
+    **Il giorno si legge prima di tutto, e questa è la correzione del 26/08.**
+    Misurato sul progetto ``salute`` vero: cinque pagine su cinque hanno
+    ``source: raw/research/<documento>.md`` — la forma che ``project.md`` chiede
+    quando il materiale arriva da fuori — e questa funzione le mandava tutte e
+    cinque ad «aggiungi un ``#HH:MM``», cioè a una riparazione che su un documento
+    non esiste, marcate *riparabili*, che è la categoria peggiore in cui
+    sbagliare. Un file senza righe ``- HH:MM — `` non ha nessun minuto a cui
+    ancorarsi: non è un difetto della pagina, è ``_CAP_DOCUMENT``. La prova è
+    l'assenza di righe e non il percorso, perché è l'assenza che rende
+    irrisolvibile qualunque ancora — e copre da sé il caso dell'ancora scritta
+    comunque (``raw/research/x.md#09:12``), che prima usciva come «quella riga non
+    è nel diario, controlla l'ancora».
     """
+    day = _journal_markers(root_path, file_part, cache)
+    if not day:
+        return (
+            "`source:` names a file with no journal lines — a document copied into `raw/`, "
+            "where no `#HH:MM` exists to point at",
+            _CAP_DOCUMENT,
+        )
     if not anchor:
-        day = _journal_markers(root_path, file_part, cache)
-        if day and not any(marker for markers in day.values() for marker in markers):
-            return ("no #time, and no line of that day carries a marker", False)
-        return ("no #time — nothing can check which line of that day it means; add it", True)
+        if not any(marker for markers in day.values() for marker in markers):
+            return ("no #time, and no line of that day carries a marker", _CAP_HISTORY)
+        return (
+            "no #time — nothing can check which line of that day it means; add it",
+            _CAP_FIXABLE,
+        )
     marker = _journal_line_marker(root_path, file_part, anchor, cache)
     if marker in _SAID_MARKERS:
         return None
     if marker == _MIXED_MINUTE:
-        return ("that minute is mixed — add the line's place within it, e.g. #HH:MM.2", True)
+        return (
+            "that minute is mixed — add the line's place within it, e.g. #HH:MM.2",
+            _CAP_FIXABLE,
+        )
     if marker == _INFERRED_MARKER:
-        return ("the journal attributes that line to the assistant", False)
+        return ("the journal attributes that line to the assistant", _CAP_HISTORY)
     if marker is None:
-        return ("that line is not in the journal — check the anchor", True)
-    return ("that line carries no marker (written before they existed)", False)
+        return ("that line is not in the journal — check the anchor", _CAP_FIXABLE)
+    return ("that line carries no marker (written before they existed)", _CAP_HISTORY)
 
 
 # Tetto della mappa, in caratteri. **Non è un numero scelto qui**: è la soglia
@@ -1585,6 +1622,7 @@ def lint(root: str) -> int:
         inferred_but_decided: list[str] = []
         capped: list[str] = []
         capped_by_history = 0
+        capped_by_document = 0
         journal_lines: dict[str, dict[str, str]] = {}
         for page in flat_pages:
             fm = parse_frontmatter(read_md(page)) or {}
@@ -1618,9 +1656,11 @@ def lint(root: str) -> int:
                     # questa ``source:`` non potrà mai esserlo.
                     capped_by = _decided_cap_reason(root_path, file_part, anchor, journal_lines)
                     if capped_by:
-                        reason, actionable = capped_by
-                        if actionable:
+                        reason, outcome = capped_by
+                        if outcome == _CAP_FIXABLE:
                             capped.append(f"   {rel_page} (state: {state}) → {value} — {reason}")
+                        elif outcome == _CAP_DOCUMENT:
+                            capped_by_document += 1
                         else:
                             capped_by_history += 1
                     continue
@@ -1708,6 +1748,18 @@ def lint(root: str) -> int:
             print(f"\nℹ️  {capped_by_history} more page(s) rest on a journal line that cannot be "
                   "attributed — written before the markers existed, or `[inferred]`. Not listed "
                   "and not counted: `open` is the right value and no edit changes it.")
+        if capped_by_document:
+            # Frase separata da quella di ``capped_by_history`` perché la
+            # situazione è un'altra: qui non c'è niente di vecchio e niente di
+            # sbagliato — ``project.md`` chiede *esattamente* questa forma per il
+            # materiale che arriva da fuori. Detto comunque perché altrimenti un
+            # progetto alimentato da documenti non ha modo di sapere che
+            # ``decided`` lì è irraggiungibile: su ``salute`` (26/08) sono cinque
+            # pagine su cinque.
+            print(f"\nℹ️  {capped_by_document} more page(s) rest on a document copied into "
+                  "`raw/` rather than on a journal line — the shape `project.md` asks for when "
+                  "material arrives from outside. Nothing there attributes the fact to the user, "
+                  "so `open` is what they are worth; not counted, and there is nothing to fix.")
 
         # Una pagina che non linka niente è una nota in una cartella, non una
         # voce di wiki: la stessa regola del passo 10, per le pagine piatte.
