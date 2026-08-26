@@ -1150,6 +1150,27 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
                 if (chars := page_chars_if_over(root / "wiki" / rel, ceiling)) is not None
             ]
             map_chars = store.map_chars()
+            # Il layout **si legge dalle pagine**, come fa il lint
+            # (``lint_wiki.research_pages``): una wiki di ricerca le tiene sotto
+            # ``concepts/``/``entities/``/``summaries/``, un taccuino piatte. Copia
+            # dichiarata e non import, perché quello è uno script della skill che
+            # gira anche fuori dall'app. Serve perché la ricetta è **un'altra** nei
+            # due casi — su una wiki di ricerca un ``sources:`` a lista è la forma
+            # giusta e una fusione è permessa dopo conferma — e mandare il turno
+            # alla metà sbagliata del manuale è il difetto che questo comando
+            # esiste per chiudere, ripetuto un livello più in su.
+            #
+            # **Non si legge da ``entries``**, e un test lo impone: quella lista è
+            # fatta con ``is_wiki_page_rel``, che salta ``summaries/`` — quindi una
+            # wiki di ricerca con le sole sintesi risultava un taccuino. E sono le
+            # **pagine** a dichiarare, non le cartelle: finché bastava la cartella,
+            # il top-up dello scaffold creava le tre directory su un taccuino e lo
+            # trasformava in una biblioteca in silenzio.
+            notebook = not any(
+                (root / "wiki" / folder).is_dir()
+                and any((root / "wiki" / folder).rglob("*.md"))
+                for folder in ("concepts", "entities", "summaries")
+            )
             prompt = render_template(
                 "agent/tidy.md",
                 project_path=str(root.relative_to(Path(self.workspace).resolve(strict=False))),
@@ -1163,6 +1184,7 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
                 map_over_budget=map_chars > MAP_TARGET_CHARS,
                 page_count=len(entries),
                 page_max=f"{ceiling:,}",
+                notebook=notebook,
                 pages_over="\n".join(
                     f"  - `{rel}` — **{chars:,} characters, over the {ceiling:,} budget**"
                     for rel, chars in over

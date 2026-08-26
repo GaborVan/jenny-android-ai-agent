@@ -1,11 +1,24 @@
 The user has asked you to tidy this project's wiki: `{{ project_path }}`.
 
-This is the `compile` operation, and it has a recipe. **Read the `llm-wiki` skill first** — the
-section `compile` in a **project** wiki (notebook layout) — and follow it. It carries the five rules
-that differ from the research layout, and each of them has been got wrong before: the ceiling is
-characters and not words, text moves **verbatim** with no merge and no re-wording, `source:` is a
-single value and never a list, `state:` does not go up during a restructure, and the map's page list
-comes out whole.
+This is the `compile` operation, and it has a recipe. **Read the `llm-wiki` skill first** and follow
+it.
+{% if notebook %}
+This project is in the **notebook** layout — flat pages under `wiki/`, each with `state:` and
+`source:`, fed by an append-only `raw/journal/` — so the section you want is `compile` in a
+**project** wiki (notebook layout). It carries the five rules that differ from the research layout,
+and each of them has been got wrong before: the ceiling is characters and not words, text moves
+**verbatim** with no merge and no re-wording, `source:` is a single value and never a list, `state:`
+does not go up during a restructure, and the map's page list comes out whole.
+{% else %}
+This project is in the **research** layout — its pages live under `concepts/`, `entities/` and
+`summaries/` — so the recipe is the five numbered steps of `compile` as written. The section below
+them, `compile` in a **project** wiki, describes the *other* layout: do not apply its rules here,
+except the one thing that belongs to neither, which is the per-turn ceiling in the measurements
+below. The injector does not care which layout a page is in.
+{% endif %}
+**Follow the structure you find.** The folder is the authority, not your preference: put new pages
+where this project's organisation says they go, and open a new subfolder only when a group of pages
+has clearly earned one.
 
 ## What the measurements say, right now
 
@@ -41,11 +54,17 @@ numbers a turn in this project actually pays.
 - You may read any page in full. The pages in your context are the ones the map names first, not all
   of them; open the rest before moving their text.
 
+{% if notebook %}
 Everything else is unchanged, and the strongest rule is the one that is easiest to break with the
 user's encouragement in hand: **add and move, do not rewrite.** The sentences in these pages came
 from their own words through an append-only journal. A re-wording detaches a page from the `source:`
 that justifies it, and no one will notice for weeks.
-
+{% else %}
+It does not lift the recipe's own brake, and with the user's encouragement in hand that is the first
+thing to go: `compile` says **confirm a split or a merge with them before writing it**. Being asked
+to tidy the wiki is not that confirmation — it is what makes the question worth asking, and they are
+right here to answer it.
+{% endif %}
 ## When you are done
 
 Write the log line — `## [HH:MM] compile | <what moved where>` — and run the lint, pasting its

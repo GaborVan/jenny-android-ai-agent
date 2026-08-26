@@ -77,6 +77,7 @@ async def _prompt(loop: AgentLoop, key: str = "project:salute") -> str:
 
 def _page(project: Path, rel: str, chars: int) -> Path:
     path = project / "wiki" / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("---\nstate: open\n---\n\n# P\n\n" + "x" * chars, encoding="utf-8")
     return path
 
@@ -326,3 +327,83 @@ def test_the_expansion_is_wired_into_the_consume_loop() -> None:
 
     assert "_expand_project_tidy(msg, effective_key)" in source
     assert "raw == PROJECT_TIDY_COMMAND" in source
+
+
+# ── I due layout ─────────────────────────────────────────────────────────────
+#
+# Il difetto trovato **misurando i progetti veri** prima di provare il comando: su
+# nove wiki del telefono la maggioranza è in layout ricerca (`concepts/`,
+# `entities/`, `summaries/`), e il prompt mandava tutte alla sezione *notebook*.
+# Sarebbe stato lo stesso difetto che questo comando esiste per chiudere — mandare
+# il turno alla metà sbagliata del manuale — ripetuto un livello più in su. E non
+# è accademico: su una wiki di ricerca un `sources:` a lista è la forma **giusta**,
+# e una fusione è permessa dopo conferma.
+
+
+async def test_a_notebook_gets_the_notebook_section(tmp_path: Path) -> None:
+    loop = _loop(tmp_path)
+    project = _wiki(tmp_path)
+    _page(project, "camminata.md", 100)
+
+    prompt = await _prompt(loop)
+
+    assert "notebook** layout" in prompt
+    assert "`compile` in a **project** wiki (notebook layout)" in prompt
+    assert "add and move, do not rewrite" in prompt
+
+
+async def test_a_research_wiki_gets_the_five_numbered_steps(tmp_path: Path) -> None:
+    """E soprattutto: gli si dice che la sezione dell'altro layout **non** si applica.
+
+    Nominare la ricetta giusta non basta, perché la sezione sbagliata è nello
+    stesso file, subito sotto, e la sua regola più forte — «`source:` è un valore
+    solo, mai una lista» — contraddice quel che il layout ricerca prescrive.
+    """
+    loop = _loop(tmp_path)
+    project = _wiki(tmp_path)
+    _page(project, "concepts/istamina.md", 100)
+
+    prompt = await _prompt(loop)
+
+    assert "research** layout" in prompt
+    assert "the five numbered steps of `compile` as written" in prompt
+    assert "do not apply its rules here" in prompt
+    assert "add and move, do not rewrite" not in prompt
+    # Al posto di quel freno, il freno che la ricetta ricerca ha davvero.
+    assert "confirm a split or a merge with them before writing it" in prompt
+
+
+@pytest.mark.parametrize("rel", ["concepts/x.md", "entities/y.md", "summaries/z.md"])
+async def test_any_of_the_three_folders_declares_the_research_layout(
+    tmp_path: Path, rel: str
+) -> None:
+    """Le tre cartelle sono quelle del lint (``research_pages``), non due su tre.
+
+    Una wiki che ha solo ``entities/`` è di ricerca esattamente come una che ha
+    solo ``concepts/``, e il discriminante qui è una copia dichiarata di quello:
+    se le liste divergono, il comando e il lint dicono due layout diversi della
+    stessa cartella.
+    """
+    loop = _loop(tmp_path)
+    project = _wiki(tmp_path)
+    _page(project, rel, 100)
+
+    prompt = await _prompt(loop)
+
+    assert "research** layout" in prompt
+
+
+async def test_the_measurements_are_in_both_layouts(tmp_path: Path) -> None:
+    """Il tetto per turno **non** è una regola di layout, ed è il motivo per cui il
+    comando serve su tutte e due: l'iniettore non guarda in che cartella sta una
+    pagina. Su ``allergie`` (layout ricerca, misurata il 26/08) sono nove pagine
+    che nessuna conversazione può leggere."""
+    loop = _loop(tmp_path)
+    project = _wiki(tmp_path)
+    _page(project, "concepts/grossa.md", 7000)
+
+    prompt = await _prompt(loop)
+
+    assert "research** layout" in prompt
+    assert "`concepts/grossa.md`" in prompt
+    assert "over the 6,000 budget" in prompt
