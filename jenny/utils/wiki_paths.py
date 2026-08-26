@@ -227,6 +227,44 @@ def page_chars(text: str) -> int:
     return len(text.replace("\r\n", "\n").strip())
 
 
+def page_chars_if_over(path: Path, ceiling: int) -> int | None:
+    """La misura di *path* se sfonda *ceiling*, altrimenti ``None``.
+
+    **La misura è quella che il tetto guarda**: il testo *spogliato* ai bordi,
+    come fa l'iniettore e come fa il lint. Un secondo modo di contare la stessa
+    cosa sarebbe il modo di segnalare pagine che entravano, o di tacere su pagine
+    che non entrano — quindi la regola non è scritta qui: è :func:`page_chars`, e
+    da T9.12 la leggono anche i tool di scrittura, che avvisano *dentro* la
+    passata quando una scrittura ha appena portato una pagina oltre il tetto.
+
+    **Il primo passo è uno ``stat``, e non è un'ottimizzazione gratuita.**
+    :func:`iter_wiki_pages` ha già letto ogni pagina per estrarne il titolo, ma
+    butta la lunghezza e vive in uno strato neutro: rileggerle tutte vorrebbe dire
+    una seconda lettura completa della wiki a ogni passata. In UTF-8 un carattere
+    non pesa **mai meno di un byte** e ``strip()`` non aggiunge, quindi
+    ``st_size <= ceiling`` implica «sotto il tetto»: il filtro non può perdere una
+    pagina, e il testo si legge solo per le candidate. Misurato su ``main`` (52
+    pagine, 9 candidate): 0,27 ms contro 0,75 ms della rilettura completa.
+
+    **Era un metodo di ``GardenerStore``**, promosso qui il 26/08 quando `/tidy` è
+    diventato il secondo lettore: la passata annota il proprio inventario e il
+    comando misura la wiki per la conversazione, e due copie di questo conto
+    sarebbero due risposte a «questa pagina entra in un turno?».
+    """
+    try:
+        if path.stat().st_size <= ceiling:
+            return None
+    except OSError:
+        return None
+    try:
+        chars = page_chars(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        # Illeggibile è un altro guasto, non questo: chi elenca la nomina
+        # comunque, senza annotazione.
+        return None
+    return chars if chars > ceiling else None
+
+
 def wiki_page_rel(path: Path) -> str | None:
     """Il percorso di *path* dentro la ``wiki/`` di un progetto, o ``None``.
 

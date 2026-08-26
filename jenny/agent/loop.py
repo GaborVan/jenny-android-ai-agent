@@ -176,6 +176,13 @@ _TURN_WAKELOCK_TIMEOUT_S = 1800.0
 # e' solo una riga di documentazione — l'unico che decide e' questo.
 PROJECT_INIT_COMMAND = "/init"
 
+# Stessa forma e stessa ragione: `/tidy` **espande**, non risponde. Il valore di
+# questa operazione è tutto nel contesto del turno — le pagine iniettate, la
+# giornata di conversazione, l'utente presente — quindi lanciarla come passata
+# interna (la strada di `/gardener`) sarebbe buttare via esattamente quel che la
+# rende migliore di una passata. V. ``_expand_project_tidy``.
+PROJECT_TIDY_COMMAND = "/tidy"
+
 
 class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, LoopTasksMixin):
     """
@@ -1095,6 +1102,86 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             return None
         return dataclasses.replace(msg, content=prompt)
 
+    async def _expand_project_tidy(
+        self, msg: InboundMessage, key: str
+    ) -> InboundMessage | None:
+        """``/tidy`` diventa un turno normale, o un rifiuto. ``None`` = gia' risposto.
+
+        **Espansione come ``/init``, e non una passata come ``/gardener``.** La
+        differenza decide tutto: ``/gardener`` lancia un run interno, con sessione,
+        cassetta e contesto suoi — e il 26/08 quel che ha reso buono un riordino
+        *chiesto in conversazione* era proprio il contesto: le pagine iniettate nel
+        turno, la giornata di discussione, e l'utente presente a decidere una
+        contraddizione invece di parcheggiarla. Lanciato come passata, questo
+        comando sarebbe un giardiniere con un altro nome.
+
+        **Le misure le porta il codice.** L'unica cosa che il turno non ha già è
+        *quanto* misurano mappa e pagine contro i tetti che le governano, e a occhio
+        non si indovina: il 26/08 la passata a mano ha spezzato una pagina da 5.870
+        caratteri — buon giudizio, e **sotto** il tetto. Le due misure escono dagli
+        stessi lettori del giardiniere (``GardenerStore.map_chars``,
+        ``page_chars_if_over``), perché due conti della stessa cosa sarebbero due
+        risposte a «questa pagina entra in un turno?».
+        """
+        from jenny.agent.gardener import MAP_TARGET_CHARS, GardenerStore, page_ceiling
+        from jenny.utils.wiki_paths import iter_wiki_pages, page_chars_if_over
+
+        if not is_project_session_key(key):
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=(
+                    "`/tidy` only works inside a project — it restructures that project's "
+                    "wiki. Pick one from the chip above the message box first."
+                ),
+                metadata={**dict(msg.metadata or {}), "render_as": "text"},
+            ))
+            return None
+        try:
+            root = self.workspace_scopes.for_project(key).project_path
+            # Costruito diretto e non con ``for_project``: la radice arriva dallo
+            # scope, che l'ha gia' validata, e il nome del progetto qui non serve.
+            store = GardenerStore(root, Path(self.workspace))
+            ceiling = page_ceiling()
+            entries = iter_wiki_pages(root / "wiki")
+            over = [
+                (rel, chars)
+                for rel, _title in entries
+                if (chars := page_chars_if_over(root / "wiki" / rel, ceiling)) is not None
+            ]
+            map_chars = store.map_chars()
+            prompt = render_template(
+                "agent/tidy.md",
+                project_path=str(root.relative_to(Path(self.workspace).resolve(strict=False))),
+                # Assoluto solo per il ``lint``: ``python_exec`` gira dentro la
+                # cartella degli script della skill, e da là la forma relativa al
+                # workspace — quella che il progetto insegna per tutto il resto —
+                # non risolve.
+                project_abs=str(root),
+                map_chars=f"{map_chars:,}",
+                map_target=f"{MAP_TARGET_CHARS:,}",
+                map_over_budget=map_chars > MAP_TARGET_CHARS,
+                page_count=len(entries),
+                page_max=f"{ceiling:,}",
+                pages_over="\n".join(
+                    f"  - `{rel}` — **{chars:,} characters, over the {ceiling:,} budget**"
+                    for rel, chars in over
+                ),
+            )
+        except Exception as exc:
+            # Stessa scelta di ``/init``: dirlo, invece di mandare "/tidy" al
+            # modello come testo — lo interpreterebbe a caso e ristrutturerebbe
+            # comunque, senza nessuna delle misure che sono il senso del comando.
+            logger.warning("could not render agent/tidy.md: {}", exc)
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="`/tidy` is unavailable: its prompt template could not be loaded.",
+                metadata={**dict(msg.metadata or {}), "render_as": "text"},
+            ))
+            return None
+        return dataclasses.replace(msg, content=prompt)
+
     def _effective_session_key(self, msg: InboundMessage) -> str:
         """Return the session key used for task routing and mid-turn injections.
 
@@ -1476,6 +1563,12 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             self._remember_project_id(effective_key)
             if raw == PROJECT_INIT_COMMAND or raw.startswith(f"{PROJECT_INIT_COMMAND} "):
                 expanded = await self._expand_project_init(msg, effective_key)
+                if expanded is None:
+                    continue
+                msg = expanded
+                raw = msg.content.strip()
+            if raw == PROJECT_TIDY_COMMAND or raw.startswith(f"{PROJECT_TIDY_COMMAND} "):
+                expanded = await self._expand_project_tidy(msg, effective_key)
                 if expanded is None:
                     continue
                 msg = expanded

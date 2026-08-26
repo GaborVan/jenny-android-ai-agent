@@ -77,7 +77,7 @@ from jenny.utils.wiki_paths import (
     WIKI_INDEX_FILENAME,
     is_wiki_root,
     iter_wiki_pages,
-    page_chars,
+    page_chars_if_over,
     wiki_journal_dir,
 )
 
@@ -441,7 +441,7 @@ class GardenerStore:
         lines: list[str] = []
         over = 0
         for rel, title in shown:
-            chars = self._page_chars_if_over(rel, ceiling)
+            chars = page_chars_if_over(self.root / "wiki" / rel, ceiling)
             if chars is None:
                 lines.append(f"- `{rel}` — {title}")
                 continue
@@ -470,41 +470,6 @@ class GardenerStore:
                 "is a promotion, and it is work this pass may do.)_"
             )
         return "\n".join(lines)
-
-    def _page_chars_if_over(self, rel: str, ceiling: int) -> int | None:
-        """La misura di *rel* se sfonda *ceiling*, altrimenti ``None``.
-
-        **La misura è quella che il tetto guarda**: il testo *spogliato* ai bordi,
-        come fa l'iniettore e come fa il lint. Un secondo modo di contare la
-        stessa cosa sarebbe il modo di segnalare pagine che entravano, o di tacere
-        su pagine che non entrano — quindi la regola non è scritta qui: è
-        :func:`jenny.utils.wiki_paths.page_chars`, e da T9.12 la leggono anche i
-        tool di scrittura, che avvisano *dentro* la passata quando una scrittura
-        ha appena portato una pagina oltre il tetto.
-
-        **Il primo passo è uno ``stat``, e non è un'ottimizzazione gratuita.**
-        ``iter_wiki_pages`` ha già letto ogni pagina per estrarne il titolo, ma
-        butta la lunghezza e vive in uno strato neutro: rileggerle tutte qui
-        vorrebbe dire una seconda lettura completa della wiki a ogni passata. In
-        UTF-8 un carattere non pesa **mai meno di un byte** e ``strip()`` non
-        aggiunge, quindi ``st_size <= ceiling`` implica «sotto il tetto»: il
-        filtro non può perdere una pagina, e il testo si legge solo per le
-        candidate. Misurato su ``main`` (52 pagine, 9 candidate): 0,27 ms contro
-        0,75 ms della rilettura completa.
-        """
-        path = self.root / "wiki" / rel
-        try:
-            if path.stat().st_size <= ceiling:
-                return None
-        except OSError:
-            return None
-        try:
-            chars = page_chars(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError):
-            # Illeggibile è un altro guasto, non questo: l'elenco la nomina
-            # comunque, senza annotazione.
-            return None
-        return chars if chars > ceiling else None
 
     def _read_capped(self, path: Path, cap: int, label: str) -> str:
         try:

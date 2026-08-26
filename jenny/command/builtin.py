@@ -120,6 +120,17 @@ BUILTIN_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
         "puzzle",
     ),
     BuiltinCommandSpec(
+        "/tidy",
+        "Tidy this project's wiki",
+        (
+            "Inside a project: restructure its wiki now — split what has outgrown the per-turn "
+            "budget, move prose out of an oversized map, realign the page list. Runs in this "
+            "conversation, with its pages and your answers in hand; the gardener's periodic pass "
+            "cannot do that."
+        ),
+        "brush-cleaning",
+    ),
+    BuiltinCommandSpec(
         "/init",
         "Write this project's instructions",
         "Inside a project: read the wiki and write its AGENTS.md.",
