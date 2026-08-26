@@ -37,11 +37,8 @@ import pathlib
 
 import pytest
 
-from jenny.agent.gardener import (
-    _compose_write_guards,
-    _page_frontmatter,
-    _provenance_guard,
-)
+from jenny.agent.gardener import _compose_write_guards
+from jenny.agent.wiki_provenance import _page_frontmatter, _provenance_guard
 
 JOURNAL = (
     "# 2026-08-24\n"
@@ -502,7 +499,7 @@ def test_the_anchor_the_prompt_teaches_is_the_anchor_the_code_accepts() -> None:
     import re
 
     import jenny
-    from jenny.agent.gardener import _ANCHOR_RE
+    from jenny.agent.wiki_provenance import _ANCHOR_RE
 
     template = (
         pathlib.Path(jenny.__file__).parent / "templates" / "agent" / "gardener.md"

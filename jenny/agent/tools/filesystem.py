@@ -22,12 +22,19 @@ from jenny.agent.tools.schema import (
     StringSchema,
     tool_parameters_schema,
 )
+from jenny.agent.wiki_provenance import wiki_page_provenance_guard
 from jenny.config.tool_schemas import FileToolsConfig  # re-export (def in config.tool_schemas)
 from jenny.security.workspace_access import current_tool_workspace, current_turn_is_readonly
 from jenny.security.workspace_policy import ReadOnlyTurnError, _path_key, _safe_expanduser
 from jenny.utils.helpers import build_image_content_blocks, detect_image_mime
 from jenny.utils.path import atomic_write
 from jenny.utils.wiki_paths import page_chars, wiki_page_rel
+
+# Costruito una volta all'import: il gancio non ha stato e ricava tutto dal
+# percorso che riceve, quindi una istanza per tool sarebbe una istanza per niente.
+# ``wiki_provenance`` è una foglia — stdlib e ``wiki_paths``, che questo modulo
+# importa già — proprio perché è qui che va montata (v. la sua docstring).
+_WIKI_PROVENANCE_GUARD = wiki_page_provenance_guard()
 
 # Gancio pre-scrittura: riceve il path risolto e il testo esatto che finirebbe su
 # disco, ritorna ``None`` per lasciar passare o un messaggio di rifiuto da
@@ -391,11 +398,31 @@ class _FsTool(Tool):
         percorso non sa fare, perché il guard accetta sia una scrittura che
         rientra nel tetto sia una che rimpicciolisce (v.
         ``FileStates.record_write_refused``).
+
+        **Due ganci, e il secondo non lo monta nessuno.** Il primo è quello
+        iniettato dal chiamante (il tetto dei file di memoria, la cessione del
+        passo del giardiniere, la sua guardia di provenienza): chi non ne passa
+        nessuno non ne ha. Il secondo è
+        :func:`~jenny.agent.wiki_provenance.wiki_page_provenance_guard`, che vale
+        **sempre** e ricava il progetto dal percorso — perché il difetto del 26/08
+        era esattamente che un gancio andava montato e la conversazione non lo
+        montava: la passata con meno contesto era l'unica trattenuta. Fuori da una
+        ``wiki/`` di progetto quel gancio torna ``None`` e non costa niente.
+
+        Il gancio iniettato resta **primo**: quando è la cessione del passo, quel
+        rifiuto è l'unica cosa vera da dire alla passata (v.
+        ``gardener._compose_write_guards``), e un rifiuto di provenienza che
+        arrivasse prima le racconterebbe un'altra storia. Il nome del metodo dice
+        ancora «size» per la ragione già scritta in
+        ``GardenerStore.build_tools``: lo slot è uno e il suo contratto è generico
+        da un pezzo — «questo contenuto può andare su disco?».
         """
+        refusal = None
         guard = self._write_size_guard
-        if guard is None:
-            return None
-        refusal = guard(path, text)
+        if guard is not None:
+            refusal = guard(path, text)
+        if refusal is None:
+            refusal = _WIKI_PROVENANCE_GUARD(path, text)
         if refusal is None:
             return None
         self._file_states.record_write_refused(path, text)
