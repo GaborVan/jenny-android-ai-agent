@@ -63,7 +63,7 @@ from jenny.channels.http_utils import (
     safe_host_header as _safe_host_header,
 )
 from jenny.config.paths import get_workspace_path
-from jenny.session.keys import UNIFIED_SESSION_KEY
+from jenny.session.keys import UNIFIED_SESSION_KEY, is_project_session_key
 from jenny.session.webui_turns import websocket_turn_wall_started_at
 from jenny.webui.android_apps_api import (
     launch_android_app,
@@ -438,7 +438,7 @@ class GatewayHTTPHandler:
         decoded_key = _decode_api_key(key)
         if decoded_key is None:
             return _http_error(400, "invalid session key")
-        if not _is_websocket_channel_session_key(decoded_key):
+        if not _is_webui_readable_session_key(decoded_key):
             return _http_error(404, "session not found")
         core_key = self._to_core_session_key(decoded_key)
         scope = self.workspaces.scope_for_session_key(core_key)
@@ -468,6 +468,9 @@ class GatewayHTTPHandler:
             session_messages=session_messages,
             limit=limit,
             before=before,
+            # Un progetto appena creato non ha ancora scambiato un messaggio, e
+            # la sua chat deve aprirsi lo stesso: vuota, non con un 404.
+            allow_empty=is_project_session_key(core_key),
         )
         if data is None:
             return _http_error(404, "webui thread not found")
@@ -483,7 +486,7 @@ class GatewayHTTPHandler:
         decoded_key = _decode_api_key(key)
         if decoded_key is None:
             return _http_error(400, "invalid session key")
-        if not _is_websocket_channel_session_key(decoded_key):
+        if not _is_webui_readable_session_key(decoded_key):
             return _http_error(404, "session not found")
         core_key = self._to_core_session_key(decoded_key)
         path = _query_first(_parse_query(request.path), "path")
@@ -765,5 +768,15 @@ class GatewayHTTPHandler:
         )
 
 
-def _is_websocket_channel_session_key(key: str) -> bool:
-    return key.startswith("websocket:")
+def _is_webui_readable_session_key(key: str) -> bool:
+    """Le chiavi che la WebUI puo' chiedere: la conversazione, e i progetti.
+
+    Non e' un filtro estetico, e' cio' che tiene fuori dalle route HTTP le
+    sessioni interne (``cron:``, ``dream:``, ``subagent:``, ``heartbeat``): sono
+    lavoro del sistema, non conversazioni, e non devono essere leggibili da qui.
+
+    Si chiamava ``_is_websocket_channel_session_key`` e guardava il solo prefisso
+    ``websocket:``. Con le sessioni-progetto quella forma avrebbe risposto **404
+    a ogni progetto**, cioe' la chat di un progetto non si sarebbe potuta aprire.
+    """
+    return key.startswith("websocket:") or is_project_session_key(key)

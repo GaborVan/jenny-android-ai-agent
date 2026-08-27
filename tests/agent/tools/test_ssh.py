@@ -60,7 +60,22 @@ async def _handle_shell(process: asyncssh.SSHServerProcess) -> None:
         stderr=asyncio.subprocess.PIPE,
         stdin=asyncio.subprocess.DEVNULL,
     )
-    out, err = await proc.communicate()
+    try:
+        out, err = await proc.communicate()
+    finally:
+        # I due test sul timeout (`test_ssh_exec_timeout_points_at_ssh_job`,
+        # `test_ssh_exec_cannot_raise_the_configured_timeout`) abbandonano la
+        # richiesta, asyncssh cancella questa coroutine mentre `communicate()`
+        # sta ancora aspettando un figlio VIVO, e il transport sopravvive al
+        # loop del test. `BaseSubprocessTransport.close()` e' raggiunta solo da
+        # `__del__`, quindi il GC piu' tardi chiama `loop.call_soon()` su un
+        # loop chiuso: `RuntimeError: Event loop is closed`, sollevata dentro
+        # `__del__` e quindi attribuita a UN TEST QUALUNQUE — quello che stava
+        # girando quando e' scattato il GC. Chiuderlo qui uccide anche il figlio
+        # orfano. Misurato il 23/08: transport trapelati 2 -> 0 (T8.9).
+        transport = getattr(proc, "_transport", None)
+        if transport is not None:
+            transport.close()
     process.stdout.write(out.decode(errors="replace"))
     process.stderr.write(err.decode(errors="replace"))
     process.exit(proc.returncode or 0)

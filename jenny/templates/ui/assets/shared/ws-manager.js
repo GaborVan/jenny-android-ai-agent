@@ -2,6 +2,27 @@
 
 import { api } from './api-client.js';
 import { i18n } from './i18n.js';
+import { AppState } from './state.js';
+
+/** Il `chat_id` con cui il gateway marca i frame di una conversazione.
+ *
+ *  Una conversazione ha due nomi e questa è la conversione fra i due: la chiave
+ *  di sessione lato client (`websocket:default` per la personale,
+ *  `project:<nome>` per un progetto) e il `chat_id` che viaggia sul filo
+ *  (`default`, `project:<nome>` — v. `WEBUI_DEFAULT_CHAT_ID` e
+ *  `WebSocketChannel._envelope_chat_id`).
+ *
+ *  **Sta qui, in una funzione sola, perché la regola serve in due direzioni**:
+ *  in uscita per non mandare un prefisso doppio nell'`attach`, in entrata per
+ *  decidere se un frame appartiene alla conversazione aperta. Le due direzioni
+ *  devono rispondere identico — se divergono, l'`attach` va su una chat e il
+ *  filtro dei frame ne sorveglia un'altra, cioè il difetto sistemato ma al
+ *  contrario: nessun frame viene mai mostrato.
+ */
+export function chatIdOf(key) {
+  if (key && key.startsWith('websocket:')) return key.substring(10);
+  return key;
+}
 
 class WebSocketManager extends EventTarget {
   constructor() {
@@ -54,12 +75,9 @@ class WebSocketManager extends EventTarget {
 
   // Strip "websocket:" prefix so callers can pass either a raw UUID or a
   // full session key ("websocket:<uuid>") without creating a double prefix
-  // on the server side.
+  // on the server side. La regola è una sola: v. `chatIdOf`.
   _stripPrefix(chatId) {
-    if (chatId && chatId.startsWith('websocket:')) {
-      return chatId.substring(10);
-    }
-    return chatId;
+    return chatIdOf(chatId);
   }
 
   // ── Chat ──
@@ -127,10 +145,32 @@ class WebSocketManager extends EventTarget {
     }
   }
 
+  /** Smette di seguire una conversazione: la toglie dall'elenco che viene
+   *  ri-attaccato a ogni reconnect.
+   *
+   *  **Non è una detach lato server, e non può esserlo**: il gateway conosce
+   *  solo `attach` (v. `WebSocketChannel._dispatch_envelope`), e ogni nuova
+   *  connessione parte comunque iscritta alla chat personale. Quindi la
+   *  connessione aperta continua a ricevere i frame della chat lasciata, e a
+   *  decidere che non vanno resi è il filtro sul `chat_id` in chi li consuma —
+   *  questo serve solo a non far crescere `knownChats` per sempre, che dopo
+   *  qualche cambio di progetto significava ri-attaccare (e quindi ri-ricevere)
+   *  ogni conversazione mai aperta.
+   */
+  detachChat(chatId) {
+    this.knownChats.delete(chatIdOf(chatId));
+  }
+
   sendToChat(chatId, text, media = []) {
     if (!this.chatWs || this.chatWs.readyState !== WebSocket.OPEN) return false;
     const clean = this._stripPrefix(chatId);
     const payload = { type: 'message', chat_id: clean, content: text, webui: true };
+    // Sola lettura: **in ogni messaggio**, e non in uno stato sul server. Il
+    // gateway non se la ricorda apposta — se la ricordasse potrebbe applicare
+    // al turno un modo diverso da quello che l'utente aveva sotto gli occhi, e
+    // un messaggio partito non si ritira. Si manda solo quando è accesa: il
+    // gateway accende su `true` e ignora tutto il resto.
+    if (AppState.readonlyTurn === true) payload.readonly = true;
     if (media.length) payload.media = media;
     this.chatWs.send(JSON.stringify(payload));
     this.dispatchEvent(new CustomEvent('chat:sent', { detail: { chat_id: clean } }));

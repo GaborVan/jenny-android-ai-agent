@@ -271,3 +271,69 @@ class TestExtractReasoning:
         )
         assert reasoning == "plan"
         assert content == "answer"
+
+
+class TestStripThinkDeepSeekLeaks:
+    """Regression: deepseek-v4 occasionally writes its own template machinery
+    into the content channel. Measured on the device 2026-08-26 at 23:13:29 —
+    a heartbeat turn delivered the block below to the chat as a proactive
+    alert, one occurrence in 350 recorded turns. The endpoint's DSML parser
+    never recognised it (the generation broke off mid-parameter), so it came
+    through as plain text; `strip_think` let it pass because these delimiters
+    are FULLWIDTH VERTICAL LINE (U+FF5C), not the ASCII tokens it knew."""
+
+    MEASURED_LEAK = (
+        "<｜end▁of▁thinking｜>\n\n"
+        "<｜｜DSML｜｜tool_calls>\n"
+        '<｜｜DSML｜｜invoke name="complete_goal">\n'
+        '<｜｜DSML｜｜parameter name="recap" string="true">no'
+    )
+
+    def test_the_measured_leak_is_gone(self):
+        assert strip_think(self.MEASURED_LEAK) == ""
+
+    def test_end_of_thinking_marker_at_start_stripped(self):
+        assert strip_think("<｜end▁of▁thinking｜>\n\nciao papi") == "ciao papi"
+
+    def test_other_family_markers_at_start_stripped(self):
+        assert strip_think("<｜Assistant｜>risposta") == "risposta"
+        assert strip_think("<｜tool▁calls▁begin｜>\nrisposta") == "risposta"
+
+    def test_stacked_markers_at_start_stripped(self):
+        assert strip_think("<｜end▁of▁thinking｜><｜Assistant｜> risposta") == "risposta"
+
+    def test_dsml_block_after_a_marker_takes_the_whole_tail(self):
+        # The marker comes first, so the opener only becomes the head of the
+        # text once it has been peeled: a single pass would leave the block.
+        text = "<｜end▁of▁thinking｜>\n<｜｜DSML｜｜invoke name=\"send_message\">\nx"
+        assert strip_think(text) == ""
+
+    def test_complete_marker_at_the_end_stripped(self):
+        assert strip_think("risposta <｜end▁of▁thinking｜>") == "risposta"
+
+    def test_marker_cut_by_a_stream_boundary_stripped(self):
+        assert strip_think("risposta <｜end▁of") == "risposta"
+        assert strip_think("risposta <｜｜DSML") == "risposta"
+
+
+class TestStripThinkDeepSeekConservativePreserve:
+    """Same asymmetry as the ASCII tokens above, and for the same reason:
+    `strip_think` runs before history is persisted (memory.py), so stripping
+    these marks mid-text would rewrite any message discussing them — which
+    this repo's own docs and tests now do."""
+
+    def test_marker_quoted_in_prose_preserved(self):
+        text = "Il modello emette `<｜end▁of▁thinking｜>` a fine ragionamento."
+        assert strip_think(text) == text
+
+    def test_dsml_opener_quoted_in_prose_preserved(self):
+        text = "Il blocco `<｜｜DSML｜｜tool_calls>` apre una tool call di deepseek."
+        assert strip_think(text) == text
+
+    def test_dsml_opener_in_a_code_block_preserved(self):
+        text = "Esempio:\n```\nif text.startswith('<｜｜DSML｜｜'):\n    skip()\n```"
+        assert strip_think(text) == text
+
+    def test_ascii_pipe_is_not_a_marker(self):
+        assert strip_think("usa a|b come separatore") == "usa a|b come separatore"
+        assert strip_think("<|not_deepseek|>testo") == "<|not_deepseek|>testo"

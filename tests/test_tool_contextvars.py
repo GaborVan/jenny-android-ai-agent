@@ -265,8 +265,22 @@ async def test_cron_tool_basic_set_context_and_execute(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_webui_cron_tool_uses_origin_session_when_unified_enabled(tmp_path) -> None:
-    """WebUI-created cron jobs stay attached to the creating chat."""
+async def test_webui_cron_job_is_attached_to_the_chat_but_runs_in_the_conversation(
+    tmp_path,
+) -> None:
+    """L'attaccamento alla chat è ``origin_*``; la sessione è la conversazione.
+
+    Prima questo test si chiamava *uses_origin_session* e pretendeva
+    ``sessionKey == "websocket:chat-123"``: il tool, su un turno della
+    conversazione unica, si fabbricava la chiave dal canale. Ma quel valore non
+    è un'etichetta — ``bound_runner`` lo usa come chiave del turno — quindi il
+    promemoria girava in un file di sessione tutto suo, con il suo
+    consolidamento, accanto alla conversazione a cui appartiene.
+
+    Le due cose restano entrambe, separate: la consegna sa a quale chat tornare
+    (``origin_channel`` / ``origin_chat_id``, e i metadata con cui è nato), la
+    sessione è quella in cui l'utente sta parlando.
+    """
     tool = CronTool(CronService(tmp_path / "jobs.json"))
 
     class _Tools:
@@ -289,7 +303,7 @@ async def test_webui_cron_tool_uses_origin_session_when_unified_enabled(tmp_path
 
     jobs = tool._cron.list_jobs()
     assert len(jobs) == 1
-    assert jobs[0].payload.session_key == "websocket:chat-123"
+    assert jobs[0].payload.session_key == UNIFIED_SESSION_KEY
     assert jobs[0].payload.origin_channel == "websocket"
     assert jobs[0].payload.origin_chat_id == "chat-123"
     assert jobs[0].payload.origin_metadata == {"webui": True}

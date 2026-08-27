@@ -157,6 +157,31 @@ class TestLoadBootstrapFiles:
         result = builder._load_bootstrap_files()
         assert "用中文回复" in result
 
+    def test_identity_files_are_not_capped(self, tmp_path):
+        """``SOUL.md`` e ``USER.md`` entrano **interi**, e non per distrazione.
+
+        Sono identità: ``SOUL.md`` non è riscritto in nessun altro punto del
+        prompt, e la coda di ``USER.md`` non è archiviata da nessuna parte.
+        Tagliare l'ultima riga di "chi sei" non è come tagliare l'ultima voce di
+        una rubrica — là il tetto toglie un link e la pagina resta raggiungibile,
+        qui toglierebbe la cosa stessa, a ogni turno, e l'avviso non avrebbe dove
+        rimandare. Un tetto in lettura, poi, non sa distinguere una regola di
+        comportamento da una nota di piattaforma stantia: è la stessa ragione per
+        cui ``soul_budget_chars`` esce di fabbrica a 0 e lo strumento per quel
+        file è la review pass, che legge prima di scegliere.
+
+        L'argomento sta in ``docs/using/memory.md`` ("The budgets bound what
+        Dream writes, not what a turn pays"). Cambiare questo test è una
+        decisione, non un dettaglio di implementazione.
+        """
+        soul = "\n".join(f"- behaviour rule {i}" for i in range(1500))
+        user = "\n".join(f"- preference {i}" for i in range(1500))
+        (tmp_path / "SOUL.md").write_text(soul, encoding="utf-8")
+        (tmp_path / "USER.md").write_text(user, encoding="utf-8")
+        result = _builder(tmp_path)._load_bootstrap_files()
+        assert f"## SOUL.md\n\n{soul}" in result
+        assert f"## USER.md\n\n{user}" in result
+
 
 # ---------------------------------------------------------------------------
 # _load_bootstrap_files — guardia sul template intatto

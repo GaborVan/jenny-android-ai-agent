@@ -264,6 +264,18 @@ class FileStateStore:
             self._states_by_key[key] = states
         return states
 
+    def drop(self, session_key: str | None) -> None:
+        """Dimentica quel che *session_key* ha letto.
+
+        Serve a chi azzera una conversazione. Il dedup delle letture poggia su
+        un presupposto — «il contenuto di questo file e' gia' nel contesto» — che
+        vale finche' i messaggi che lo portavano esistono; svuotata la
+        conversazione, quel presupposto e' falso e lo stub risponderebbe «invariato
+        dall'ultima lettura» a un interlocutore che non l'ha mai letto (visto sul
+        telefono il 23/08).
+        """
+        self._states_by_key.pop(session_key or "__default__", None)
+
     def clear(self) -> None:
         self._states_by_key.clear()
 

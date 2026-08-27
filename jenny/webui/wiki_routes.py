@@ -27,6 +27,7 @@ from jenny.channels.http_utils import (
     parse_query,
     query_first,
 )
+from jenny.utils.wiki_paths import WIKI_INDEX_FILENAME
 
 QueryParams = dict[str, list[str]]
 
@@ -37,6 +38,23 @@ QueryParams = dict[str, list[str]]
 _FRONTMATTER_ALLOWLIST = frozenset(
     {"title", "type", "entity_type", "tags", "created", "updated"}
 )
+
+
+# Tetto di una pagina servita da ``/api/page``, in byte. **Non è il tetto
+# dell'iniettore** (6.000 caratteri, ``PAGE_MAX_CHARS``): quello dice cosa entra
+# in un prompt, questo dice cosa il telefono riesce a rendere. La risposta porta
+# il markdown grezzo *e* l'HTML, quindi un file da N byte costa più di 2N in
+# JSON su un canale WebSocket, e la lettura sta sul loop dell'evento. Un mega di
+# markdown è tre ordini di grandezza sopra la pagina più grande delle otto wiki
+# vere (16.385 caratteri, misurati il 23/08): chi lo supera non è una pagina
+# lunga, è un file finito lì per sbaglio.
+#
+# **Rifiuta invece di troncare**, e la ragione non è la prudenza: il client usa
+# il ``raw`` per calcolare gli offset di un audit, e ``audit.resolve`` rilegge il
+# file **intero** per ancorarlo. Un ``raw`` tagliato darebbe ancore giuste per un
+# testo che il server non ha, cioè un commento attaccato al punto sbagliato — un
+# guasto silenzioso al posto di un 413 che si legge.
+_PAGE_MAX_BYTES = 1_048_576
 
 
 def _filter_frontmatter(fm: Any) -> dict[str, Any] | None:
@@ -50,16 +68,65 @@ def safe_wiki_page_path(input_path: str) -> str | None:
     """Normalizza e valida un path di pagina wiki relativo.
 
     Rifiuta path assoluti o che risalgono fuori dalla wiki (``..``). Ritorna il
-    path normalizzato relativo, ``"index.md"`` se vuoto, o ``None`` se invalido.
+    path normalizzato relativo, la mappa (:data:`WIKI_INDEX_FILENAME`) se vuoto,
+    o ``None`` se invalido.
     """
     if not input_path:
-        return "index.md"
+        return WIKI_INDEX_FILENAME
     if os.path.isabs(input_path):
         return None
     normalized = os.path.normpath(input_path).replace(os.sep, "/")
     if normalized.startswith(".."):
         return None
     return normalized
+
+
+def _collect_projects(wikis_dir: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Le wiki divise in due: quelle apribili come chat, e quelle no.
+
+    ``[{name, modified}]`` per ognuna, nell'ordine in cui le da' la discovery.
+    ``modified`` e' l'mtime della radice della wiki, che oggi e' il solo segnale
+    di attivita' disponibile: la conversazione di un progetto non esiste ancora
+    (item 3). Quando esistera', l'ultima attivita' dovra' venire da lei, non dal
+    filesystem — un `lint` non e' attivita' dell'utente.
+
+    **La divisione e' il punto.** Il nome di una cartella e' anche il nome di una
+    sessione (``project:<nome>``), e i due lati non facevano la stessa domanda:
+    questo elenco dava qualunque cartella, mentre
+    ``channels/websocket.py::_envelope_chat_id`` accetta solo cio' che passa
+    ``is_valid_project_name``. Una wiki chiamata ``Ricerca ETF`` compariva nel
+    chip e, aprendola, ne apriva un'altra. Un nome che il server elenca deve
+    essere un nome che il server accetta.
+
+    Le altre non vengono **buttate**: viaggiano in ``unopenable``. Su un telefono
+    l'utente non ha un file manager per rinominare la cartella — la sola strada
+    e' chiederlo all'agente dalla chat personale, e per chiederlo deve sapere che
+    quella cartella esiste. Sparire dall'elenco sarebbe indistinguibile
+    dall'essere stata cancellata, cioe' il tipo di silenzio piu' costoso che
+    questo codice possa produrre. Stanno in una lista **separata** e non nella
+    stessa con un flag perche' il chip mappa ogni voce di ``projects`` in una
+    riga tappabile: un flag in piu' in quelle voci lo ignorerebbe, e
+    continuerebbe a offrire quel che non si apre.
+    """
+    from jenny.session.keys import is_valid_project_name
+    from jenny.utils.wiki_paths import discover_wiki_roots
+
+    projects: list[dict[str, Any]] = []
+    unopenable: list[dict[str, Any]] = []
+    for name, root in discover_wiki_roots(wikis_dir).items():
+        try:
+            modified = int(root.stat().st_mtime)
+        except OSError:
+            modified = 0
+        entry = {"name": name, "modified": modified}
+        if is_valid_project_name(name):
+            projects.append(entry)
+        else:
+            # ``reason`` perche' il motivo lo deve scegliere chi disegna la riga,
+            # non indovinare dal nome: oggi ce n'e' uno solo, ma la forma non
+            # deve cambiare quando ne nasce un secondo.
+            unopenable.append({**entry, "reason": "invalid_name"})
+    return projects, unopenable
 
 
 class WikiRoutes:
@@ -117,6 +184,10 @@ class WikiRoutes:
     async def dispatch(self, request: WsRequest, path: str) -> Response | None:
         if path == "/api/config":
             return await self._wiki_config(request)
+        if path == "/api/projects":
+            return await self._projects_list(request)
+        if path == "/api/project/describe":
+            return await self._project_describe(request)
         if path == "/api/tree":
             return await self._wiki_tree(request)
         if path == "/api/graph":
@@ -235,12 +306,12 @@ class WikiRoutes:
                 return http_error(404, "wiki not found")
             wiki_dir = wikis[wiki_name]
             wiki_root = wiki_dir.parent
-            rel = safe_wiki_page_path(page_path) if page_path else "index.md"
+            rel = safe_wiki_page_path(page_path) if page_path else WIKI_INDEX_FILENAME
             if not rel:
                 return http_error(400, "invalid page path")
             full = wiki_dir / rel
             if full.is_dir():
-                full = full / "index.md"
+                full = full / WIKI_INDEX_FILENAME
             if full.suffix != ".md":
                 full = full.with_suffix(".md")
             if not full.is_file():
@@ -260,6 +331,15 @@ class WikiRoutes:
             full.resolve().relative_to(containment_root.resolve())
         except ValueError:
             return http_error(403, "path escapes wiki root")
+
+        try:
+            size = full.stat().st_size
+        except OSError:
+            return http_error(404, "file not found")
+        if size > _PAGE_MAX_BYTES:
+            return http_error(
+                413, f"page too large: {size} bytes (limit {_PAGE_MAX_BYTES})"
+            )
 
         raw = full.read_text("utf-8")
         loop = asyncio.get_running_loop()
@@ -304,6 +384,70 @@ class WikiRoutes:
                 "homePath": "_index.md",
             }
         )
+
+    async def _projects_list(self, request: WsRequest) -> Response:
+        """Elenco dei progetti per lo scope chip.
+
+        **Un progetto e' una wiki**, quindi l'elenco e' `discover_wiki_roots` e
+        non il contenuto di una cartella `projects/`: quella non esiste, e il
+        chip la leggeva (v. `roadmap/project-sessions.md`, item 10). `dir` viaggia
+        col payload perche' il chip mostra lo scope come un percorso e il nome
+        della cartella e' configurabile (`config.wiki.wikis_dir`).
+
+        `projects` sono le wiki che si possono **aprire**; `unopenable` quelle il
+        cui nome di cartella non puo' essere il nome di una sessione. La ragione
+        della divisione sta su `_collect_projects`.
+        """
+        if not self._check_api_token(request):
+            return http_error(401, "Unauthorized")
+        err = self._check_wiki_enabled()
+        if err:
+            return err
+
+        wikis_dir = self._get_wikis_dir()
+        loop = asyncio.get_running_loop()
+        projects, unopenable = await loop.run_in_executor(
+            None, _collect_projects, wikis_dir
+        )
+        return http_json_response(
+            {"dir": wikis_dir.name, "projects": projects, "unopenable": unopenable}
+        )
+
+    async def _project_describe(self, request: WsRequest) -> Response:
+        """Cosa porterebbe via la cancellazione di un progetto. Sole letture.
+
+        Sta qui e non fra i comandi perche' e' una **lettura**: quella superficie
+        esiste per le scritture che portano contenuto (v. la docstring di
+        ``webui/commands.py``), e un nome di progetto sta in una query string.
+
+        Serve alla conferma, che e' meta' del fix del 24/08: una cancellazione e'
+        sicura quando la conferma dice il vero su cosa sparisce. La conferma
+        vecchia diceva solo *Delete "viaggio"?* e taceva la conversazione,
+        che era proprio la meta' che non spariva.
+        """
+        if not self._check_api_token(request):
+            return http_error(401, "Unauthorized")
+        err = self._check_wiki_enabled()
+        if err:
+            return err
+
+        from jenny.session.keys import is_valid_project_name
+        from jenny.webui.project_delete import describe_project
+
+        name = (query_first(parse_query(request.path), "name") or "").strip()
+        if not is_valid_project_name(name):
+            return http_error(400, "invalid project name")
+
+        wikis_dir = self._get_wikis_dir()
+        workspace = self._get_workspace_root()
+        loop = asyncio.get_running_loop()
+        described = await loop.run_in_executor(
+            None,
+            lambda: describe_project(wikis_dir=wikis_dir, workspace=workspace, name=name),
+        )
+        if not described["exists"] and not described["orphan"]:
+            return http_error(404, "project not found")
+        return http_json_response(described)
 
     # -- audit handlers --
 
@@ -353,7 +497,7 @@ class WikiRoutes:
         target = query_first(query, "target") or ""
 
         pages_dir = wikis[wiki_name]
-        raw_path = (pages_dir / (target or "index.md")).resolve()
+        raw_path = (pages_dir / (target or WIKI_INDEX_FILENAME)).resolve()
         try:
             raw_path.relative_to(pages_dir.resolve())
         except ValueError:

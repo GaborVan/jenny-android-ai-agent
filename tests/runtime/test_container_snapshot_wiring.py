@@ -81,6 +81,40 @@ async def test_snapshot_before_dream_noop_without_service() -> None:
     await container._snapshot_before_dream()  # nessun errore
 
 
+async def test_take_snapshot_passes_the_trigger_through() -> None:
+    """Il meccanismo generico dietro i checkpoint pre-lavoro. I contratti sopra
+    restano due — Dream promette al modello la reversibilità, il giardiniere no —
+    ma l'implementazione è una."""
+    order: list[str] = []
+    container = GatewayContainer.__new__(GatewayContainer)
+    container.snapshot = _RecordingSnapshot(order)
+
+    assert await container._take_snapshot("pre_gardener") is True
+    assert order == ["snapshot:pre_gardener"]
+
+
+async def test_take_snapshot_says_false_when_snapshots_are_off() -> None:
+    """«Nel dubbio si mente al ribasso»: con gli snapshot spenti il checkpoint
+    **non** è avvenuto, e dichiararlo avvenuto attaccherebbe a Dream una
+    rassicurazione falsa proprio nella frase che serve a fargli cancellare."""
+    container = GatewayContainer.__new__(GatewayContainer)
+    container.snapshot = None
+
+    assert await container._take_snapshot("pre_gardener") is False
+
+
+def test_the_agent_is_handed_the_generic_hook() -> None:
+    """Il giardiniere trova il gancio con ``getattr``, perché fuori dal gateway
+    non c'è. Quel ``getattr`` è sicuro **solo** se in produzione qualcuno lo
+    collega: questo test è la garanzia, e senza di lui una passata girerebbe per
+    sempre senza rete senza che nulla lo dica."""
+    import inspect
+
+    source = inspect.getsource(GatewayContainer)
+
+    assert "agent.take_snapshot = self._take_snapshot" in source
+
+
 async def test_run_takes_shutdown_snapshot_after_flush() -> None:
     """Lo snapshot finale deve fotografare le sessioni GIÀ flushate su disco."""
     order: list[str] = []

@@ -87,11 +87,23 @@ def test_workspace_scope_metadata_falls_back_for_stale_session(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_filesystem_tool_uses_current_restricted_workspace_scope(tmp_path: Path) -> None:
+async def test_filesystem_read_under_a_restricted_scope_stays_open(tmp_path: Path) -> None:
+    """Uno scope ristretto **non** restringe la lettura: v. il confine asimmetrico.
+
+    Questo test diceva il contrario, ed e' stato cambiato con la decisione del
+    2026-08-21: la prigione di una sessione-progetto e' sulla scrittura. In
+    lettura non serviva — fuori dalla directory privata dell'app non si arriva
+    comunque, il permesso di storage non ce l'abbiamo — e costava caro: sotto uno
+    scope stretto l'agente riceveva da ``SkillsLoader`` il percorso di
+    ``SKILL.md`` e poi se lo vedeva negare, quindi il caricamento progressivo
+    delle skill moriva dentro ogni progetto.
+
+    Il confine di lettura resta il workspace: v. il test qui sotto.
+    """
     project = tmp_path / "project"
     project.mkdir()
-    outside = tmp_path / "outside.txt"
-    outside.write_text("nope")
+    elsewhere = tmp_path / "elsewhere.txt"
+    elsewhere.write_text("un'altra cosa nel workspace")
     inside = project / "inside.txt"
     inside.write_text("ok")
     tool = ReadFileTool(workspace=tmp_path, restrict_to_workspace=False)
@@ -103,7 +115,28 @@ async def test_filesystem_tool_uses_current_restricted_workspace_scope(tmp_path:
     token = bind_workspace_scope(scope)
     try:
         assert "ok" in await tool.execute(path="inside.txt")
-        assert "outside allowed directory" in await tool.execute(path=str(outside))
+        assert "un'altra cosa nel workspace" in await tool.execute(path=str(elsewhere))
+    finally:
+        reset_workspace_scope(token)
+
+
+@pytest.mark.asyncio
+async def test_filesystem_read_still_stops_at_the_workspace(tmp_path: Path) -> None:
+    """Aperta sul workspace non vuol dire aperta sul disco."""
+    workspace = tmp_path / "workspace"
+    project = workspace / "project"
+    project.mkdir(parents=True)
+    far_away = tmp_path / "fuori.txt"
+    far_away.write_text("non si legge")
+    tool = ReadFileTool(workspace=workspace, restrict_to_workspace=True)
+    scope = validate_workspace_scope_payload(
+        {"project_path": str(project), "access_mode": "restricted"},
+        default_workspace=workspace,
+        default_restrict_to_workspace=True,
+    )
+    token = bind_workspace_scope(scope)
+    try:
+        assert "outside allowed directory" in await tool.execute(path=str(far_away))
     finally:
         reset_workspace_scope(token)
 

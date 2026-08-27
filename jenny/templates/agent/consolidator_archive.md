@@ -18,7 +18,7 @@ Marks (choose the best match):
 
 Priority: user corrections and preferences > solutions > decisions > events > environment facts. The most valuable memory prevents the user from having to repeat themselves.
 
-Do not mark something [skip] merely because it might already exist in long-term memory; Dream handles cross-file deduplication later.
+Never mark something [skip] on a guess about what long-term memory already holds. If this prompt shows you that memory, use what it shows; if it does not, extract the fact and let Dream deduplicate.
 
 Output concise bullet points only. No preamble, no commentary.
 If nothing noteworthy happened, output: (nothing)

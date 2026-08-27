@@ -2,6 +2,44 @@
 
 import { i18n } from './i18n.js';
 
+/** Chiude *dialog* e risolve **quando il suo evento `close` e' stato consegnato**.
+ *
+ * I tre modali di questo file condividono un solo elemento `<dialog>` ciascuno,
+ * e `close()` non consegna il proprio evento `close` all'istante: su alcuni
+ * motori — la WebView di Android fra questi — arriva come task separato.
+ * Risolvere prima che quel task sia stato eseguito lascia che il chiamante apra
+ * la *domanda successiva*; a quel punto l'evento e' sentito dai listener del
+ * nuovo prompt, che lo leggono come «chiuso dall'utente» e lo annullano.
+ *
+ * Visto sul telefono il 22/08, e non era un caso di bordo: creare un progetto
+ * fa due domande di seguito sullo stesso elemento (nome, poi riga di scope), e
+ * la seconda si chiudeva da se' prima di comparire. Dalla UI **non si poteva
+ * creare nessun progetto** — sempre e solo il toast «serve una riga».
+ *
+ * Qui c'era un `setTimeout(…, 0)`, che quell'evento lo consumava a vuoto *se*
+ * il task del `close` veniva eseguito prima del timer. Ma sono due task source
+ * diverse (DOM manipulation e timers) e l'ordine fra due source HTML non lo
+ * fissa: dove il timer vince, il chiamante riapre il dialogo e l'evento
+ * arretrato finisce nei listener nuovi, cioe' esattamente il guasto di sopra.
+ * Non era una cintura, era una scommessa che su Chromium si vince sempre.
+ *
+ * Risolvere **dall'evento stesso** toglie la scommessa: il chiamante riprende
+ * quando il `close` e' gia' passato, e passa mentre nessuno e' iscritto —
+ * `cleanup` ha appena rimosso i propri listener e nessun altro prompt e' aperto.
+ */
+function closeThenResolve(dialog, resolve, value) {
+  // Gia' chiuso: ci siamo arrivati dal suo stesso `close` (`close()` azzera
+  // `open` di sincrono e accoda l'evento). Un altro non ne arrivera', e
+  // aspettarlo vorrebbe dire non risolvere mai — cioe' il chiamante appeso, che
+  // e' peggio del guasto che stiamo togliendo.
+  if (!dialog.open) {
+    resolve(value);
+    return;
+  }
+  dialog.addEventListener('close', () => resolve(value), { once: true });
+  dialog.close();
+}
+
 export function confirmDialog(message, okText, cancelText) {
   okText = okText || i18n.t('dialog.confirm');
   cancelText = cancelText || i18n.t('dialog.cancel');
@@ -23,19 +61,19 @@ export function confirmDialog(message, okText, cancelText) {
 
   return new Promise((resolve) => {
     let settled = false;
-    const cleanup = () => {
+    const cleanup = (value) => {
       if (settled) return;
       settled = true;
       okBtn.removeEventListener('click', onOk);
       cancelBtn.removeEventListener('click', onCancel);
       dialog.removeEventListener('close', onClose);
       dialog.removeEventListener('cancel', onCancel);
-      dialog.close();
+      closeThenResolve(dialog, resolve, value);
     };
 
-    const onOk = () => { cleanup(); resolve(true); };
-    const onCancel = () => { cleanup(); resolve(false); };
-    const onClose = () => { cleanup(); resolve(false); };
+    const onOk = () => cleanup(true);
+    const onCancel = () => cleanup(false);
+    const onClose = () => cleanup(false);
 
     okBtn.addEventListener('click', onOk);
     cancelBtn.addEventListener('click', onCancel);
@@ -97,8 +135,7 @@ export function detailDialog({ title = '', bodyHtml = '', actions = [] } = {}) {
       dialog.removeEventListener('click', onBackdrop);
       dialog.removeEventListener('close', onClose);
       dialog.removeEventListener('cancel', onCancel);
-      dialog.close();
-      resolve(value);
+      closeThenResolve(dialog, resolve, value);
     };
     const onAction = (e) => {
       const btn = e.target.closest('[data-action-id]');
@@ -148,8 +185,7 @@ export function promptDialog(message, { placeholder = '', initial = '', okText, 
       inputEl.removeEventListener('keydown', onKey);
       dialog.removeEventListener('close', onClose);
       dialog.removeEventListener('cancel', onCancel);
-      dialog.close();
-      resolve(val);
+      closeThenResolve(dialog, resolve, val);
     };
     const onOk = () => cleanup(inputEl.value);
     const onCancel = () => cleanup(null);

@@ -307,3 +307,80 @@ class TestReadDescriptionUpdate:
     def test_description_no_longer_says_cannot_read(self):
         tool = ReadFileTool()
         assert "cannot read" not in tool.description.lower()
+
+# ---------------------------------------------------------------------------
+# Il presupposto del dedup, e cosa succede quando cade
+# ---------------------------------------------------------------------------
+# Lo stub "invariato dall'ultima lettura" e' vero sul *file* e afferma qualcosa
+# sul *contesto*: che il contenuto e' gia' nella conversazione. Svuotata la
+# conversazione — ``/new`` — quell'affermazione e' falsa, e il modello riceve
+# una risposta che non contiene ne' il file ne' un modo di ottenerlo. Visto sul
+# telefono il 23/08: la prima lettura di una sessione nuova tornava stub, e il
+# modello se n'e' accorto da solo ("I don't have its content in this
+# conversation") pagando un giro in piu'.
+
+class TestDedupWhenTheConversationIsGone:
+
+    @pytest.mark.asyncio
+    async def test_dropping_a_session_makes_the_next_read_full_again(self, tmp_path):
+        f = tmp_path / "page.md"
+        f.write_text("\n".join(f"line {i}" for i in range(10)), encoding="utf-8")
+        store = file_state.FileStateStore()
+        tool = ReadFileTool(workspace=tmp_path)
+
+        token = file_state.bind_file_states(store.for_session("project:viaggio"))
+        try:
+            await tool.execute(path=str(f))
+            repeat = await tool.execute(path=str(f))
+        finally:
+            file_state.reset_file_states(token)
+        assert "unchanged" in repeat.lower(), "il dedup deve valere dentro una conversazione"
+
+        store.drop("project:viaggio")
+
+        token = file_state.bind_file_states(store.for_session("project:viaggio"))
+        try:
+            after_reset = await tool.execute(path=str(f))
+        finally:
+            file_state.reset_file_states(token)
+
+        assert "line 0" in after_reset
+        assert "unchanged" not in after_reset.lower()
+
+    def test_dropping_one_session_leaves_the_others_alone(self):
+        store = file_state.FileStateStore()
+        keep = store.for_session("unified:default")
+        store.for_session("project:viaggio")
+
+        store.drop("project:viaggio")
+
+        assert store.for_session("unified:default") is keep
+        assert store.for_session("project:viaggio") is not keep
+
+    def test_dropping_a_session_that_never_read_anything_is_not_an_error(self):
+        file_state.FileStateStore().drop("project:mai-visto")
+
+    @pytest.mark.asyncio
+    async def test_the_stub_says_how_to_get_the_content_back(self, tmp_path):
+        """Il dedup poggia su un presupposto che il tool non puo' verificare: se
+        il contenuto sia ancora in conversazione. ``/new`` e' il caso in cui si sa
+        con certezza che non c'e' (e li' si azzera), ma una compattazione lascia
+        solo un suffisso e il contenuto puo' essere caduto oltre il confine.
+        Per quei casi lo stub deve **dire come rimediare**, invece di lasciare al
+        modello il compito di indovinarlo — che una volta gli e' riuscito e non e'
+        una garanzia.
+        """
+        f = tmp_path / "page.md"
+        f.write_text("contenuto\n", encoding="utf-8")
+        tool = ReadFileTool(workspace=tmp_path)
+        token = file_state.bind_file_states(file_state.FileStates())
+        try:
+            await tool.execute(path=str(f))
+            stub = await tool.execute(path=str(f))
+        finally:
+            file_state.reset_file_states(token)
+
+        assert "force=true" in stub
+        # E resta riconoscibile a chi la classifica per il pannello dei subagent
+        # (``agent/subagent_activity.py`` cerca questa frase).
+        assert "unchanged since last read" in stub.lower()

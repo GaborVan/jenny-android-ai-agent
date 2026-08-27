@@ -94,8 +94,17 @@ def test_resync_is_gated_on_the_four_conditions() -> None:
     )
     assert fn is not None
     src = fn.group(1)
-    # primo collegamento: ci pensa loadInitialHistory, non questo
-    assert "if (!this._initialHistoryLoaded) return;" in src
+    # Una fetch già in volo: la seconda disegnerebbe lo stesso thread una seconda
+    # volta (nessuna delle due è scaduta, la generazione non è cambiata).
+    #
+    # Qui c'era `if (!this._initialHistoryLoaded) return;`, scritta per il primo
+    # collegamento ("ci pensa loadInitialHistory"). Ma quel latch torna giù anche
+    # su un **fallimento**, e il caricamento che fallisce è quello che parte
+    # mentre il gateway sale: la riconnessione — il solo momento in cui ritentare
+    # ha senso — era il solo in cui non si ritentava. V.
+    # `test_history_load_failure_client.py`, che lo esegue.
+    assert "if (this._loadingInitialHistory) return;" in src
+    assert "if (!this._initialHistoryLoaded) return;" not in src
     # niente rientri sovrapposti, e non si calpesta una paginazione in corso
     assert "this._resyncingThread" in src
     assert "this.isLoadingHistory" in src

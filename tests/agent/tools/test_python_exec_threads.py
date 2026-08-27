@@ -415,3 +415,373 @@ class TestKnownRemainingDoors:
         )
         stdout, _, _ = _namespace(workspace).execute(code)
         assert "ESCAPED: TOP-SECRET" in stdout
+
+
+# ---------------------------------------------------------------------------
+# T4.13 — un salto porta DUE metà, e portarne una era ancora un buco
+# ---------------------------------------------------------------------------
+#
+# Le classi qui sopra provano la metà THREAD-LOCAL del salto (il confine di
+# percorso), e la provano in modo **sincrono**: chiamano
+# ``PythonNamespace.execute()`` dal thread del test. Per quella metà va bene —
+# `threading.local` ce l'ha anche il thread del test.
+#
+# L'altra metà è un ContextVar, e per quella una prova sincrona non dice niente:
+# in produzione il codice del modello gira su un worker raggiunto con
+# ``loop.run_in_executor``, che NON copia il contesto. Le due politiche del turno
+# — la sola lettura e il confine di scrittura dello scope — vivono là.
+#
+# MISURATO il 23/08, prima di T4.13, attraverso ``await PythonExecTool.execute()``:
+#
+#     await loop.run_in_executor(None, lambda: open(p, 'w').write('...'))
+#
+# scritto dal modello portava il thread-local e perdeva il ContextVar, quindi
+# scriveva durante un turno in **sola lettura** e scriveva su ``SOUL.md`` da
+# dentro una sessione-progetto. Cioè i difetti di T4.2 e T4.3 di nuovo, un salto
+# più in fuori. ``asyncio.to_thread`` non era bucata, ma solo perché la
+# ``to_thread`` della stdlib si copia il contesto da sé — copertura per caso.
+#
+# Quindi ogni test qui sotto passa dal **tool vero** e da ``await``, e ognuno
+# verifica che il codice sia davvero atterrato su un ALTRO thread: un test che
+# non salta non prova niente su un salto.
+
+
+class TestBothHalvesCrossTheHop:
+    @staticmethod
+    def _tool(ws, *, restrict: bool = True):
+        from jenny.agent.tools.python_exec import PythonExecTool
+        from jenny.agent.tools.python_exec_builtins import _register_builtin_functions
+
+        cfg = PythonExecConfig()
+        tool = PythonExecTool(
+            working_dir=str(ws),
+            timeout=30,
+            allowed_modules=cfg.allowed_modules,
+            blocked_modules=cfg.blocked_modules,
+            restrict_to_workspace=restrict,
+            workspace=str(ws),
+        )
+        _register_builtin_functions(
+            tool.namespace, workspace=str(ws), restrict_to_workspace=restrict
+        )
+        return tool
+
+    @staticmethod
+    def _hop_code(hop: str, target) -> str:
+        """Codice del modello che scrive DOPO il salto, e dice se il salto c'è stato.
+
+        ``T.get_ident`` invece di ``import threading``, che è rifiutato: è la
+        stessa strada del test in ``TestKnownRemainingDoors``. Senza il confronto
+        dei due ident un test che (per una qualunque ragione) esegue sul thread
+        di partenza passerebbe raccontando di aver provato un salto.
+        """
+        launch = {
+            "run_in_executor": (
+                "    loop = asyncio.get_running_loop()\n"
+                "    return await loop.run_in_executor(None, probe)\n"
+            ),
+            "to_thread": "    return await asyncio.to_thread(probe)\n",
+        }[hop]
+        return (
+            "import asyncio\n"
+            "T = asyncio.base_events.threading\n"
+            "outer = T.get_ident()\n"
+            "def probe():\n"
+            "    try:\n"
+            f"        open({str(target)!r}, 'w').write('BUCATO')\n"
+            "        return (T.get_ident(), 'WROTE')\n"
+            "    except BaseException as exc:\n"
+            "        return (T.get_ident(), type(exc).__name__)\n"
+            "async def main():\n"
+            + launch
+            + "inner, verdict = asyncio.run(main())\n"
+            "print('SAME-THREAD' if inner == outer else 'HOPPED', verdict)\n"
+        )
+
+    @pytest.mark.parametrize("hop", ["run_in_executor", "to_thread"])
+    @pytest.mark.parametrize("restrict", [True, False], ids=["restricted", "unrestricted"])
+    async def test_a_read_only_turn_cannot_write_after_the_hop(
+        self, tmp_path, hop: str, restrict: bool
+    ):
+        """La sola lettura è del TURNO, quindi vale anche oltre il salto.
+
+        Parametrizzata su ``restrict_to_workspace`` per la ragione di T4.3: senza
+        restrizione il confine di percorso non c'è, e la sola lettura non deve
+        dipendere da lui.
+        """
+        import dataclasses
+
+        from jenny.security.workspace_access import (
+            build_workspace_scope,
+            enter_workspace_scope,
+        )
+
+        target = tmp_path / "m.txt"
+        target.write_text("prima\n", encoding="utf-8")
+        scope = build_workspace_scope(tmp_path, "restricted").without_write_access()
+        scope = dataclasses.replace(scope, restrict_to_workspace=restrict)
+
+        with enter_workspace_scope(scope):
+            out = await self._tool(tmp_path, restrict=restrict).execute(
+                code=self._hop_code(hop, target)
+            )
+
+        assert "HOPPED" in out, f"il test non ha saltato niente: {out!r}"
+        assert "ReadOnlyTurnError" in out, f"scrittura passata oltre il salto: {out!r}"
+        assert target.read_text(encoding="utf-8") == "prima\n"
+
+    @pytest.mark.parametrize("hop", ["run_in_executor", "to_thread"])
+    async def test_a_project_scope_still_binds_writes_after_the_hop(self, tmp_path, hop: str):
+        """Il confine di scrittura dello scope vale oltre il salto.
+
+        Il tool è costruito sulla radice (la forma di ``AgentLoop``) e lo scope è
+        su ``wikis/p``: oltre il salto lo scope tornava assente, quindi il
+        confine tornava alla radice e da dentro un progetto si scriveva su
+        ``SOUL.md``.
+        """
+        import dataclasses
+
+        from jenny.security.workspace_access import (
+            build_workspace_scope,
+            enter_workspace_scope,
+        )
+
+        (tmp_path / "wikis" / "p" / "wiki").mkdir(parents=True)
+        soul = tmp_path / "SOUL.md"
+        soul.write_text("io\n", encoding="utf-8")
+        scope = dataclasses.replace(
+            build_workspace_scope(tmp_path, "restricted"),
+            project_path=tmp_path / "wikis" / "p",
+        )
+
+        with enter_workspace_scope(scope):
+            out = await self._tool(tmp_path).execute(code=self._hop_code(hop, soul))
+
+        assert "HOPPED" in out, f"il test non ha saltato niente: {out!r}"
+        assert soul.read_text(encoding="utf-8") == "io\n", (
+            f"scritto fuori dal progetto oltre il salto: {out!r}"
+        )
+
+    @pytest.mark.parametrize("hop", ["run_in_executor", "to_thread"])
+    async def test_a_writable_turn_still_writes_after_the_hop(self, tmp_path, hop: str):
+        """La metà che conta: il ponte non deve chiudere il lavoro legittimo.
+
+        Un ponte scritto troppo largo — «oltre il salto niente scritture» —
+        passerebbe i due test qui sopra e renderebbe inutilizzabile
+        ``asyncio.to_thread``, che è nell'allowlist perché il modello la usi.
+        """
+        from jenny.security.workspace_access import (
+            build_workspace_scope,
+            enter_workspace_scope,
+        )
+
+        target = tmp_path / "dentro.txt"
+        target.write_text("prima\n", encoding="utf-8")
+
+        with enter_workspace_scope(build_workspace_scope(tmp_path, "restricted")):
+            out = await self._tool(tmp_path).execute(code=self._hop_code(hop, target))
+
+        assert "HOPPED WROTE" in out, out
+        assert target.read_text(encoding="utf-8") == "BUCATO"
+
+    async def test_the_session_thread_carries_the_project_boundary(self, tmp_path):
+        """Il ramo ``yield_time_ms``: un ``threading.Thread`` grezzo, non patchato.
+
+        Non porta niente da sé — né ContextVar né thread-local — e da dentro
+        ``exec_session`` non c'è modo di rimediare. Il ponte lo costruisce
+        ``_ContextBoundNamespace`` sul thread dell'event loop.
+        """
+        import dataclasses
+
+        from jenny.security.workspace_access import (
+            build_workspace_scope,
+            enter_workspace_scope,
+        )
+
+        (tmp_path / "wikis" / "p" / "wiki").mkdir(parents=True)
+        soul = tmp_path / "SOUL.md"
+        soul.write_text("io\n", encoding="utf-8")
+        scope = dataclasses.replace(
+            build_workspace_scope(tmp_path, "restricted"),
+            project_path=tmp_path / "wikis" / "p",
+        )
+
+        with enter_workspace_scope(scope):
+            out = await self._tool(tmp_path).execute(
+                code=f"open({str(soul)!r}, 'w').write('BUCATO')",
+                yield_time_ms=400,
+            )
+
+        assert soul.read_text(encoding="utf-8") == "io\n", (
+            f"la sessione ha scritto fuori dal progetto: {out!r}"
+        )
+
+
+class TestTheGateKeepsTheHostOut:
+    """``asyncio.to_thread`` e ``run_in_executor`` sono patchate di **processo**.
+
+    Le attraversa anche il gateway — snapshot, backup, notifier, cron, le route
+    wiki. Il ponte deve restare inerte per loro: portare il contesto del turno
+    dentro ogni salto in executor dell'host cambierebbe la semantica di tutta
+    l'applicazione, cosa che nessuno ha chiesto, e pagherebbe una copia per
+    niente. Il gate è "su questo thread sta girando codice del modello,
+    guardato", cioè le regole di import — l'unica delle due metà che
+    ``_enter_guard`` mette in *entrambe* le modalità di ``restrict_to_workspace``.
+
+    Test debole per costruzione: guarda l'identità dell'oggetto, non un effetto.
+    Ma prima di questo, togliere il gate non faceva cadere niente in tutta la
+    suite — misurato — e una scelta di perimetro che nessun test difende è una
+    scelta che il prossimo refactoring disfa senza accorgersene.
+    """
+
+    def test_a_host_callable_crosses_untouched(self):
+        from jenny.agent.tools.python_exec import _carry_guard_state
+
+        def fn() -> None:
+            pass
+
+        assert _carry_guard_state(fn) is fn
+
+    def test_a_guarded_callable_gets_the_bridge(self, workspace):
+        """Controprova: con un guard attivo sul thread, la callable è avvolta."""
+        from jenny.agent.tools.python_exec import _carry_guard_state, _import_guard_state
+
+        def fn() -> None:
+            pass
+
+        previous = getattr(_import_guard_state, "rules", None)
+        _import_guard_state.rules = (frozenset(), frozenset())
+        try:
+            assert _carry_guard_state(fn) is not fn
+        finally:
+            _import_guard_state.rules = previous
+
+
+class TestOnlyOneBridgeExists:
+    """Che il ponte sia **uno** è strutturale, quindi si controlla nel sorgente.
+
+    **Onestà su quanto vale.** Le prime due asserzioni sono invarianti veri: le
+    quattro primitive di trasporto (``_guard_state_snapshot`` /
+    ``_apply_guard_state`` / ``_capture_snapshot`` / ``_apply_capture``) e
+    ``contextvars.copy_context`` compaiono **solo** dentro
+    ``_carry_turn_across_thread``, quindi una seconda copia del contesto o una
+    seconda installazione dello stato thread-local **non può** esistere senza
+    farlo cadere. Quello è il difetto che T4.13 chiude: due meccanismi di
+    trasporto, ognuno con metà del lavoro.
+
+    La terza è debole e va detto: elenca i costrutti di salto e pretende che
+    ognuno sia dichiarato. Prova che una **riga** esiste, non che il ponte venga
+    usato. Un salto nuovo che chiama ``_carry_turn_across_thread`` e poi ignora
+    il valore di ritorno passa questo test e apre il buco tale e quale; e un
+    ``threading.Thread`` raggiunto attraverso un alias che l'AST non riconosce
+    non lo vede nemmeno. La rete vera sono i test comportamentali qui sopra —
+    questo serve a fermarsi un attimo quando si scrive un salto, non a
+    garantirlo.
+    """
+
+    @staticmethod
+    def _tree(module):
+        import ast
+        import inspect
+
+        return ast.parse(inspect.getsource(module)), module.__name__
+
+    @staticmethod
+    def _enclosing(tree, lineno: int) -> frozenset[str]:
+        """**Tutte** le funzioni che contengono *lineno*, non la più interna.
+
+        Il ponte è una funzione che ne contiene un'altra (``_carried``): guardare
+        solo la più interna direbbe che il trasporto vive in ``_carried`` e non in
+        ``_carry_turn_across_thread``, che è vero e inutile.
+        """
+        import ast
+
+        names = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.lineno <= lineno <= getattr(node, "end_lineno", node.lineno):
+                    names.add(node.name)
+        return frozenset(names) or frozenset({"<module>"})
+
+    def test_the_transport_primitives_live_in_one_function_only(self):
+        """Le quattro primitive di trasporto, più la copia del contesto."""
+        import ast
+
+        from jenny.agent.tools import exec_session, python_exec
+
+        watched = {
+            "_guard_state_snapshot",
+            "_apply_guard_state",
+            "_capture_snapshot",
+            "_apply_capture",
+            "copy_context",
+        }
+        offenders = []
+        for module in (python_exec, exec_session):
+            tree, name = self._tree(module)
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                called = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+                if called not in watched:
+                    continue
+                where = self._enclosing(tree, node.lineno)
+                if not where & {"_carry_turn_across_thread", called}:
+                    offenders.append(
+                        f"{name}:{node.lineno} {called}() dentro {sorted(where)}"
+                    )
+        assert offenders == [], (
+            "il trasporto di un turno attraverso un thread deve stare in "
+            "_carry_turn_across_thread e in nessun altro posto — due meccanismi di "
+            "trasporto è esattamente il difetto di T4.13, dove uno portava il "
+            "thread-local e l'altro il ContextVar:\n  " + "\n  ".join(offenders)
+        )
+
+    def test_every_thread_hop_in_this_stack_is_declared(self):
+        """L'elenco dei salti. Debole: v. il docstring della classe."""
+        import ast
+
+        from jenny.agent.tools import exec_session, python_exec
+
+        # (modulo, funzione che contiene il salto) -> perché è a posto.
+        declared = {
+            ("jenny.agent.tools.python_exec", "_patch_asyncio_thread_hops"): (
+                "è il patch stesso: avvolge la callable in _carry_guard_state, "
+                "che è il ponte più il gate per il codice host"
+            ),
+            ("jenny.agent.tools.python_exec", "run_python_async"): (
+                "passa _run_carried, costruito con _carry_turn_across_thread sul "
+                "thread dell'event loop"
+            ),
+            ("jenny.agent.tools.exec_session", "__init__"): (
+                "il thread grezzo della sessione: il ponte lo costruisce "
+                "_ContextBoundNamespace, prima, dove il turno esiste ancora"
+            ),
+        }
+        hops = {"run_in_executor", "to_thread", "Thread"}
+        found = {}
+        for module in (python_exec, exec_session):
+            tree, name = self._tree(module)
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                called = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+                if called in hops:
+                    where = self._enclosing(tree, node.lineno)
+                    key = next(
+                        (
+                            (name, fn)
+                            for fn in sorted(where)
+                            if (name, fn) in declared
+                        ),
+                        (name, "/".join(sorted(where))),
+                    )
+                    found[key] = called
+
+        undeclared = sorted(k for k in found if k not in declared)
+        assert undeclared == [], (
+            "un salto di thread nuovo in questo stack: deve passare da "
+            "_carry_turn_across_thread (entrambe le metà del turno, non una) e poi "
+            "essere dichiarato qui con il perché — "
+            f"{undeclared}"
+        )

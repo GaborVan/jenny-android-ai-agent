@@ -126,10 +126,19 @@ def loop(workspace: Path, memory: MemoryStore) -> _FakeLoop:
 class _ReviewSpy:
     """Sostituto di ``run_dream_review`` che registra cosa gli è arrivato."""
 
-    def __init__(self, *, shrink_to: str | None = None, status: str = "completed") -> None:
+    def __init__(
+        self,
+        *,
+        shrink_to: str | None = None,
+        status: str = "completed",
+        demoted_ids: tuple[str, ...] = (),
+        unresolved_refusals: int = 0,
+    ) -> None:
         self.calls: list[dict[str, Any]] = []
         self._shrink_to = shrink_to
         self._status = status
+        self._demoted_ids = demoted_ids
+        self._unresolved_refusals = unresolved_refusals
 
     async def __call__(self, agent, *, store, report, snapshotted, write_size_guard=None):
         self.calls.append({
@@ -147,6 +156,8 @@ class _ReviewSpy:
             before=before,
             after=after,
             freed=sum(before[label] - after[label] for label in before),
+            demoted_ids=self._demoted_ids,
+            unresolved_refusals=self._unresolved_refusals,
         )
 
     @property
@@ -394,6 +405,156 @@ class TestReviewPass:
         assert "nothing was freed" in loop.published[0].content
 
     @pytest.mark.asyncio
+    async def test_the_reply_names_the_facts_the_review_moved_away(
+        self, router, loop, memory, monkeypatch
+    ):
+        """"Quanto ha liberato" non è "cosa ha tolto di mezzo", e l'utente riconosce
+        la seconda.
+
+        ``ReviewOutcome.demoted`` esisteva e non lo leggeva nessuno: una passata
+        che spostava sei fatti personali in archivio riferiva "nothing was freed".
+        Il numero da solo non basta — gli id sono ciò che ``recall`` accetta,
+        quindi la frase è già l'istruzione per riaverli.
+        """
+        spy = _ReviewSpy(demoted_ids=("a1b2c3d4", "e5f60718"))
+        _install_review(monkeypatch, spy)
+        memory.set_review_state(runs_since_review=12, stuck_runs=0)
+
+        await router.dispatch(_ctx(loop, "/dream"))
+        await _drain(loop)
+
+        content = loop.published[0].content
+        assert "moved 2 fact(s) into `memory/archive/`" in content
+        assert "recall a1b2c3d4, e5f60718" in content
+        # E la riga sui caratteri resta: sono due notizie, non una che sostituisce
+        # l'altra.
+        assert "A memory review pass ran first" in content
+
+    @pytest.mark.asyncio
+    async def test_a_review_that_moved_nothing_does_not_invent_a_demotion(
+        self, router, loop, memory, monkeypatch
+    ):
+        spy = _ReviewSpy()
+        _install_review(monkeypatch, spy)
+        memory.set_review_state(runs_since_review=12, stuck_runs=0)
+
+        await router.dispatch(_ctx(loop, "/dream"))
+        await _drain(loop)
+
+        assert "memory/archive/" not in loop.published[0].content
+
+    @pytest.mark.asyncio
+    async def test_the_reply_says_a_write_was_refused_by_its_budget(
+        self, router, loop, memory, monkeypatch
+    ):
+        """Un rifiuto aperto è la sola metà dell'esito su cui l'utente possa agire.
+
+        ``unresolved_refusals`` esisteva, era valorizzato su ogni percorso e non lo
+        leggeva nessuno in ``jenny/``: la review che lasciava un fatto fuori da
+        tutti i file riferiva "nothing was freed" — vero come numero, muto sul
+        fatto che una scrittura era stata *bloccata*. A differenza di una
+        degradazione, questa non si ripara con ``recall``: si ripara alzando il
+        tetto o potando, e la frase deve dirlo.
+        """
+        spy = _ReviewSpy(status="no-change", unresolved_refusals=1)
+        _install_review(monkeypatch, spy)
+        memory.set_review_state(runs_since_review=12, stuck_runs=0)
+
+        await router.dispatch(_ctx(loop, "/dream"))
+        await _drain(loop)
+
+        content = loop.published[0].content
+        assert "1 write(s) were refused by their size budget" in content
+        assert "`/dream budget`" in content
+        # E la riga sui caratteri resta: il rifiuto la *spiega*, non la sostituisce.
+        assert "nothing was freed" in content
+
+    @pytest.mark.asyncio
+    async def test_a_review_with_no_refusal_says_nothing_about_budgets(
+        self, router, loop, memory, monkeypatch
+    ):
+        spy = _ReviewSpy(shrink_to="# Memory\n")
+        _install_review(monkeypatch, spy)
+        memory.set_review_state(runs_since_review=12, stuck_runs=0)
+
+        await router.dispatch(_ctx(loop, "/dream"))
+        await _drain(loop)
+
+        assert "refused by their size budget" not in loop.published[0].content
+
+    @pytest.mark.asyncio
+    async def test_a_really_refused_write_reaches_the_reply(
+        self, router, loop, memory, workspace
+    ):
+        """Il giro completo, senza doppio del review: rifiuto vero, frase vera.
+
+        Le altre asserzioni di questa sezione sostituiscono ``run_dream_review``,
+        quindi provano la nota contro un esito costruito a mano. Qui il review
+        gira davvero, il guard rifiuta davvero la scrittura del "modello", e
+        ``unresolved_refusals`` arriva dall'unico posto che conta —
+        ``FileStates`` — fino alla riga che l'utente legge.
+        """
+        _set_dream_config(workspace, memory_budget_chars=50)
+        memory.set_review_state(runs_since_review=12, stuck_runs=0)
+        loop.on_turn = _replace_seed(memory, "x" * 300)
+
+        await router.dispatch(_ctx(loop, "/dream"))
+        await _drain(loop)
+
+        content = loop.published[0].content
+        assert "A memory review pass ran first" in content
+        assert "write(s) were refused by their size budget" in content
+
+    @pytest.mark.asyncio
+    async def test_the_refusal_comes_before_the_demotions(
+        self, router, loop, memory, monkeypatch
+    ):
+        """Le due notizie convivono, e l'ordine non è estetico.
+
+        Il rifiuto sta attaccato alla riga dei caratteri perché la spiega — "non
+        ha liberato niente" con un rifiuto aperto non è "non c'era niente da
+        fare" — mentre le degradazioni sono un esito riuscito e vanno in coda.
+        """
+        spy = _ReviewSpy(
+            status="no-change", unresolved_refusals=2, demoted_ids=("a1b2c3d4",)
+        )
+        _install_review(monkeypatch, spy)
+        memory.set_review_state(runs_since_review=12, stuck_runs=0)
+
+        await router.dispatch(_ctx(loop, "/dream"))
+        await _drain(loop)
+
+        content = loop.published[0].content
+        assert "2 write(s) were refused" in content
+        assert "moved 1 fact(s) into `memory/archive/`" in content
+        assert content.index("refused by their size budget") < content.index(
+            "into `memory/archive/`"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_pathological_pass_does_not_become_a_wall_of_hashes(
+        self, router, loop, memory, monkeypatch
+    ):
+        """Il tetto sugli id nominati, e la coda che dice quanti sono gli altri.
+
+        Tacere il resto sarebbe la stessa bugia in piccolo; ``recall`` senza
+        argomenti li elenca tutti, e quelli di questa passata sono in testa.
+        """
+        ids = tuple(f"{i:08x}" for i in range(14))
+        spy = _ReviewSpy(demoted_ids=ids)
+        _install_review(monkeypatch, spy)
+        memory.set_review_state(runs_since_review=12, stuck_runs=0)
+
+        await router.dispatch(_ctx(loop, "/dream"))
+        await _drain(loop)
+
+        content = loop.published[0].content
+        assert "moved 14 fact(s)" in content
+        assert ids[9] in content
+        assert ids[10] not in content
+        assert "and 4 more" in content
+
+    @pytest.mark.asyncio
     async def test_the_review_is_reported_even_with_no_history_to_process(
         self, router, loop, memory, monkeypatch, workspace
     ):
@@ -456,8 +617,9 @@ class TestTheShippedDefaultsEnforce:
     ``memory_budget_chars`` e ``user_budget_chars`` sono nati a 0 — "misurato ma
     non applicato" — perché servivano le misure vere, e perché un rifiuto poteva
     ancora far avanzare il cursore di Dream buttando via il fatto rifiutato. Ora
-    valgono 2.000, il numero letto sul device, e la precondizione è chiusa
-    (``internal_run_should_commit``).
+    valgono 3.000, il numero letto sul device — la dimensione *non potata* dei
+    due file, non il pavimento che toccavano appena dopo un review — e la
+    precondizione è chiusa (``internal_run_should_commit``).
 
     ``SOUL.md`` resta l'unico a 0, e non per dimenticanza: mescola identità e
     vincoli di piattaforma, e un tetto non sa su quale delle due sta premendo.
@@ -475,7 +637,7 @@ class TestTheShippedDefaultsEnforce:
         await _drain(loop)
 
         assert turn.results and "Write refused" in turn.results[0]
-        assert "over its 2,000 char budget" in turn.results[0]
+        assert "over its 3,000 char budget" in turn.results[0]
         assert memory.memory_file.read_text(encoding="utf-8") == _MEMORY_TEXT
 
     @pytest.mark.asyncio
@@ -505,7 +667,7 @@ class TestTheShippedDefaultsEnforce:
 
         prompt = loop.prompts[0]
         assert "Long-term memory budget" in prompt
-        assert f"MEMORY.md [{len(_MEMORY_TEXT) * 100 // 2000}% — {len(_MEMORY_TEXT)}/2,000" in prompt
+        assert f"MEMORY.md [{len(_MEMORY_TEXT) * 100 // 3000}% — {len(_MEMORY_TEXT)}/3,000" in prompt
         assert "SOUL.md [7 chars — no budget]" in prompt
 
     @pytest.mark.asyncio
@@ -567,3 +729,83 @@ class TestBudgetBranchRunsNothing:
         assert not spy.ran
         # E nemmeno i contatori si muovono: non è passato nessun run.
         assert memory.get_review_state() == (99, 9)
+
+
+# ---------------------------------------------------------------------------
+# "Ha scritto" non è "il batch è atterrato", anche da `/dream`
+# ---------------------------------------------------------------------------
+
+
+class TestTheManualRunHoldsAnUnconsolidatedBatch:
+    """La stessa guardia del percorso cron, su questo percorso.
+
+    Non è simmetria per il gusto della simmetria: questo modulo esiste perché il
+    guard, il gauge e i contatori del review sono arrivati qui **tre commit dopo**
+    che erano nel cron, e ogni volta in silenzio. Una guardia cablata su un solo
+    percorso è la stessa porta di servizio di allora, con un altro nome.
+    """
+
+    @pytest.fixture()
+    def batch_with_facts(self, memory: MemoryStore) -> MemoryStore:
+        # Il seme del fixture non ha tag di ritenzione, quindi da solo non
+        # attiverebbe la guardia: serve una voce che chieda di essere salvata.
+        memory.append_history("- [permanent] Preferisce le riunioni corte del mattino")
+        return memory
+
+    @pytest.mark.asyncio
+    async def test_a_run_that_only_shrinks_does_not_advance_the_cursor(
+        self, router, loop, batch_with_facts, workspace
+    ):
+        """Il run di 12:01: una edit che accorcia, nessun fatto nuovo.
+
+        Il tetto a 23 mette ``MEMORY.md`` (21 caratteri) al 91%: è la pressione
+        senza la quale la guardia crede al modello, come deve — v.
+        ``test_no_pressure_means_the_model_is_believed`` nel percorso cron.
+        """
+        _set_dream_config(workspace, memory_budget_chars=23)
+        memory = batch_with_facts
+        before_cursor = memory.get_last_dream_cursor()
+        # Più corto del seme che sostituisce: il file rimpicciolisce, come sul
+        # device (1.999 → 1.972 caratteri).
+        loop.on_turn = _replace_seed(memory, "- seed")
+
+        await router.dispatch(_ctx(loop, "/dream"))
+        await _drain(loop)
+
+        assert memory.get_last_dream_cursor() == before_cursor
+        assert "consolidated nothing" in loop.published[0].content
+        assert "come back next run" in loop.published[0].content
+
+    @pytest.mark.asyncio
+    async def test_a_run_that_adds_something_advances(
+        self, router, loop, batch_with_facts
+    ):
+        """Controprova: lo stesso batch, ma il file cresce."""
+        memory = batch_with_facts
+        before_cursor = memory.get_last_dream_cursor()
+        loop.on_turn = _replace_seed(
+            memory, "- seed fact\n- [nuovo] preferisce le riunioni corte del mattino"
+        )
+
+        await router.dispatch(_ctx(loop, "/dream"))
+        await _drain(loop)
+
+        assert memory.get_last_dream_cursor() > before_cursor
+        assert "Dream completed" in loop.published[0].content
+        assert "consolidated nothing" not in loop.published[0].content
+
+    @pytest.mark.asyncio
+    async def test_the_entries_really_come_back(
+        self, router, loop, batch_with_facts, workspace
+    ):
+        """Il punto di tenere il cursore: il batch deve ripresentarsi."""
+        _set_dream_config(workspace, memory_budget_chars=23)
+        memory = batch_with_facts
+        loop.on_turn = _replace_seed(memory, "- seed")
+
+        await router.dispatch(_ctx(loop, "/dream"))
+        await _drain(loop)
+
+        again = memory.build_dream_prompt()
+        assert again is not None
+        assert "Preferisce le riunioni corte del mattino" in MemoryStore.dream_prompt_history(again[0])

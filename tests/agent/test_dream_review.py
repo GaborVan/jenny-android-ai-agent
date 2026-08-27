@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from jenny.agent import dream_review as dream_review_module
 from jenny.agent.dream_review import (
     STATUS_COMPLETED,
     STATUS_FAILED,
@@ -175,6 +176,14 @@ class TestTheThreeThingsItMustNotDo:
         marchierebbe come fallito ogni run che non aveva niente da potare —
         cioè il caso che il prompt dichiara esplicitamente valido.
         ``internal_run_completed`` resta l'unico helper consentito.
+
+        Le ``setattr`` da sole non bastano più. Da quando la regola vive in
+        ``jenny/agent/internal_run.py`` la si raggiunge anche con
+        ``from jenny.agent.internal_run import internal_run_should_commit``, che
+        lega il nome all'import e ignora qualunque patch — ed è proprio la forma
+        scritta in ``atlas.py`` e ``gardener.py``, cioè quella che un lettore
+        copierebbe per prima. Da qui la seconda metà del test, che guarda il
+        sorgente invece della chiamata.
         """
 
         def _boom(*_args: Any, **_kwargs: Any):
@@ -186,6 +195,18 @@ class TestTheThreeThingsItMustNotDo:
         outcome = await _run(store, _FakeAgent(effect=_shrink(store)))
 
         assert outcome.status == STATUS_COMPLETED
+
+        source = Path(dream_review_module.__file__ or "").read_text(encoding="utf-8")
+        # Il docstring di modulo *nomina* i due helper per spiegare perché non li
+        # usa, quindi si guardano le sole righe di codice.
+        code = [
+            line for line in source.splitlines()
+            if not line.lstrip().startswith("#")
+        ]
+        code_text = "\n".join(code).split('"""')
+        body = "".join(code_text[::2])  # fuori dai docstring/blocchi tripli
+        for banned in ("internal_run_should_commit", "dream_should_advance_cursor"):
+            assert banned not in body, f"{banned} è entrato in dream_review.py"
 
     async def test_it_does_not_snapshot_the_workspace(
         self, store: MemoryStore, monkeypatch: pytest.MonkeyPatch
@@ -205,16 +226,10 @@ class TestTheThreeThingsItMustNotDo:
         # una funzione da chiamare per fare il checkpoint.
         assert params["snapshotted"].annotation == "bool"
 
-        # La contabilità dei token è spenta qui perché scrive sotto la dir webui,
-        # che in un test risolve dentro il workspace: è una scrittura legittima
-        # (v. ``TestTokenAccounting``) e senza questo neutralizzatore
-        # sporcherebbe il confronto sull'albero, facendo fallire questo test per
-        # un motivo che non è il suo.
-        monkeypatch.setattr(
-            "jenny.agent.dream_review.record_response_token_usage",
-            lambda *_a, **_k: None,
-        )
-
+        # Il neutralizzatore della contabilità che stava qui non serve più: dal
+        # 25/08 ``run_dream_review`` non registra niente da sé (v.
+        # ``TestTokenAccounting``), quindi non c'è nessuna scrittura sotto la dir
+        # webui da spegnere.
         before = _tree(store.workspace)
         await _run(store, _FakeAgent(), snapshotted=True)
 
@@ -660,47 +675,57 @@ class TestTheCriteriaAreReachable:
 
 
 class TestTokenAccounting:
-    """Il turno del review pass non deve sparire dalla contabilità.
+    """Il turno del review pass non deve sparire dalla contabilità — e spariva.
 
-    La registrazione sta dentro ``run_dream_review`` e non nel dispatcher — come
-    in ``run_atlas`` — perché questa funzione è l'unico punto che vede la
-    risposta del provider: restituisce un ``ReviewOutcome`` e non rilancia,
-    quindi da fuori il ``resp`` non è raggiungibile. Senza, sarebbe un turno LLM
-    completo, su un telefono, invisibile in una feature nata per contenere i
-    costi.
+    **Questa classe provava il gesto, non l'effetto, ed è il motivo per cui il
+    difetto è vissuto invisibile.** Monkeypatchava
+    ``record_response_token_usage`` e asseriva che venisse *chiamata*; nessuna
+    asserzione toccava mai il conteggio. Il secondo test arrivava a scrivere
+    ``assert recorded == [None]`` — cioè documentava di aver passato ``None`` — e
+    si chiamava «is still charged». Verde, e su niente.
+
+    Misurato il 25/08 su ``token-usage.json`` del dispositivo: in **27 giorni** i
+    bucket ``dream`` e ``atlas`` non erano comparsi una volta. ``resp`` è un
+    ``OutboundMessage``, che un campo ``usage`` non ce l'ha e non l'ha mai avuto.
+
+    La contabilità la fa ``TokenUsageHook.after_iteration`` sul turno, che è
+    l'unico punto in cui l'``usage`` del provider esiste. La copertura sta dove sta
+    il meccanismo: ``tests/webui/test_token_usage.py`` (mappa chiave→bucket, e
+    l'opt-in del vero hook) e ``tests/agent/test_dream.py::TestEphemeralHooks``
+    (il montaggio su un turno effimero).
     """
 
-    async def test_the_review_turn_is_charged(
-        self, store: MemoryStore, monkeypatch: pytest.MonkeyPatch
+    def test_the_review_does_not_do_its_own_accounting(self) -> None:
+        """Il funnel è uno solo, e questa funzione non è quello.
+
+        Asserzione sull'**AST** e non sul comportamento, di proposito: qui il
+        comportamento corretto è *l'assenza* di una chiamata, e un test che prova
+        un'assenza monkeypatchando è esattamente l'errore che questa classe
+        documenta. Un secondo funnel non darebbe un errore, darebbe un doppio
+        conteggio silenzioso.
+
+        E sull'AST e non sul testo: il commento che in quel file spiega **perché**
+        la chiamata non c'è più nomina la funzione, quindi un `in source` fallirebbe
+        sulla prosa che documenta la correzione.
+        """
+        import ast
+
+        import jenny.agent.dream_review as module
+
+        tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+        called = {
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+
+        assert "record_response_token_usage" not in called
+        assert not hasattr(module, "record_response_token_usage")
+
+    async def test_a_turn_that_raises_still_returns_a_failed_outcome(
+        self, store: MemoryStore
     ) -> None:
-        recorded: list[dict[str, Any]] = []
-        monkeypatch.setattr(
-            "jenny.agent.dream_review.record_response_token_usage",
-            lambda response, *, source, timezone_name=None: recorded.append(
-                {"response": response, "source": source, "tz": timezone_name}
-            ),
-        )
-
-        agent = _FakeAgent()
-        await _run(store, agent)
-
-        assert len(recorded) == 1
-        # ``dream`` e non ``dream_review``: ``_SOURCE_KEYS`` in
-        # ``agent/token_usage.py`` è un elenco chiuso e ``_clean_source``
-        # riscrive in silenzio tutto il resto in ``"system"``, che non
-        # separerebbe i due run — li seppellirebbe nel secchio generico.
-        assert recorded[0]["source"] == "dream"
-        assert recorded[0]["response"] is not None
-
-    async def test_a_turn_that_raises_is_still_charged(
-        self, store: MemoryStore, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Il ``finally`` copre anche il turno che esplode: ``None`` è un no-op."""
-        recorded: list[Any] = []
-        monkeypatch.setattr(
-            "jenny.agent.dream_review.record_response_token_usage",
-            lambda response, *, source, timezone_name=None: recorded.append(response),
-        )
+        """Quel che il vecchio test provava davvero, senza la finzione sopra."""
 
         class _Exploding(_FakeAgent):
             async def process_direct(self, prompt: str, **kwargs: Any) -> Any:
@@ -709,7 +734,6 @@ class TestTokenAccounting:
         outcome = await _run(store, _Exploding())
 
         assert outcome.status == STATUS_FAILED
-        assert recorded == [None]
 
 
 class TestTheUserFileIsNotPrunedLikeTheOthers:
@@ -817,3 +841,430 @@ class TestTheRouteDownNamesWhatTheDeviceLeftBehind:
             assert fragment in agent.prompt, fragment
         # La ragione, che e' quella che rende la regola difendibile.
         assert "no reader at all" in agent.prompt
+
+
+class TestTheReviewPassKeepsTheFileTools:
+    """Il review pass ristruttura davvero, e per farlo gli servono i tool file.
+
+    Ora che esiste un tool per voci c'è una ragione per pensare di togliere gli
+    altri, e sarebbe sbagliata: il prompt del review chiede di spostare un fatto
+    da un file all'altro con **una sola** ``apply_patch``, perché quel tool è
+    tutto-o-niente. Due chiamate per voci su due file non sono atomiche, e il
+    modo in cui falliscono è il peggiore possibile — il fatto tolto dall'origine
+    e mai arrivato a destinazione, senza che niente lo dica.
+    """
+
+    def test_the_registry_still_carries_them(self, store):
+        names = set(store.build_dream_tools().tool_names)
+
+        assert {"apply_patch", "edit_file", "write_file", "read_file"} <= names
+
+    def test_the_atomic_move_instruction_has_a_tool_behind_it(self, store):
+        """Antideriva fra il prompt e il registry: se ``apply_patch`` sparisse, il
+        paragrafo sullo spostamento atomico resterebbe a chiedere una cosa
+        impossibile, e nessun test lo direbbe."""
+        prompt = prompt_templates.render_template(
+            "agent/dream_review.md", budget_gauge="", snapshotted=True,
+        )
+
+        assert "`apply_patch`" in prompt
+        assert "apply_patch" in set(store.build_dream_tools().tool_names)
+
+    def test_it_also_gets_the_entry_tool(self, store):
+        """Non è una svista: rimuovere una voce è ciò che il review pass fa di
+        mestiere, e nella fase 2 del piano ``remove`` diventerà la degradazione."""
+        assert "memory" in store.build_dream_tools().tool_names
+
+
+class TestTheTwoRegistriesDoNotShareCounters:
+    """Il review pass e il turno incrementale costruiscono due registry distinti,
+    e devono restare tali.
+
+    ``batch_was_not_consolidated`` legge i contatori di voci del **turno
+    incrementale** per decidere se il cursore avanza. Se quelli del review pass
+    ci finissero dentro, un review che aggiunge una voce — cosa che fa
+    legittimamente, spostando un fatto — farebbe passare per atterrato un batch
+    che il turno dopo non ha salvato affatto. Sarebbe il difetto di partenza,
+    reintrodotto da una porta nuova.
+    """
+
+    def test_each_build_gets_its_own_counters(self, store):
+        review_tools = store.build_dream_tools()
+        turn_tools = store.build_dream_tools()
+
+        assert review_tools.memory_entries is not turn_tools.memory_entries
+
+    async def test_a_write_through_one_does_not_show_in_the_other(self, store):
+        review_tools = store.build_dream_tools()
+        turn_tools = store.build_dream_tools()
+
+        await review_tools.execute(
+            "memory", {"action": "add", "file": "user", "text": "un fatto"},
+        )
+
+        assert review_tools.memory_entries.entries_added == 1
+        assert turn_tools.memory_entries.entries_added == 0
+
+    async def test_the_file_states_are_separate_too(self, store):
+        """Stessa proprietà, sul contatore che c'era già: ``file_states`` è
+        per-run e non condiviso fra Dream concorrenti."""
+        review_tools = store.build_dream_tools()
+        turn_tools = store.build_dream_tools()
+
+        await review_tools.execute(
+            "memory", {"action": "add", "file": "user", "text": "un fatto"},
+        )
+
+        assert review_tools.file_states.writes_ok == 1
+        assert turn_tools.file_states.writes_ok == 0
+
+
+class TestTheFloorIsNowNeverLose:
+    """6.0: il pavimento smette di essere "non togliere" e diventa "non perdere".
+
+    La riscrittura è arrivata dopo che la rete della fase 2 è stata verificata sul
+    telefono — dieci voci passate dall'archivio, nessuna persa — perché prima
+    sarebbe stata un permesso senza copertura. Misurato il 2026-08-19: il review
+    sotto pressione ha riformulato sette voci per raschiare 109 caratteri e non ne
+    ha tolta nessuna, obbedendo alla lettera a una regola scritta quando togliere
+    significava perdere.
+    """
+
+    def _dream(self) -> str:
+        return prompt_templates.render_template(
+            "agent/dream.md", strip=True, skill_creator_path="skills/skill-creator/SKILL.md",
+        )
+
+    def _review(self) -> str:
+        return prompt_templates.render_template(
+            "agent/dream_review.md", budget_gauge="", snapshotted=True,
+        )
+
+    def test_the_floor_is_named_never_lose(self):
+        assert "**Never lose**" in self._dream()
+
+    def test_it_says_removal_from_those_two_files_is_not_deletion(self):
+        prompt = self._dream()
+
+        assert "does not delete it" in prompt
+        assert "memory/archive/" in prompt
+
+    def test_soul_keeps_the_hard_floor(self):
+        """L'archivio copre i due file a voci. ``SOUL.md`` non è uno di quelli:
+        niente archivia ciò che ne esce, e una riga tolta è persa davvero."""
+        prompt = self._dream()
+
+        assert "there *never delete* still means never delete" in prompt
+        assert "nothing archives what leaves it" in prompt
+
+    def test_the_permission_is_last_not_first(self):
+        """Non è una licenza: le voci protette restano l'ultima cosa che si muove,
+        dopo che le altre categorie sono esaurite."""
+        prompt = self._dream()
+
+        assert "the **last** things to move, never the first" in prompt
+        assert "before you touch one" in prompt
+
+    def test_the_review_prompt_puts_it_after_its_route_down(self):
+        prompt = self._review()
+
+        assert "a fifth step below the four" in prompt
+        assert "when the four steps below are exhausted" in prompt
+
+    def test_the_review_prompt_names_the_cost_of_over_pruning(self):
+        """Una voce archiviata è fuori dal prompt: l'effetto osservabile non è "ho
+        perso un fatto" ma "Jenny non se lo ricorda più"."""
+        assert "made Jenny stop knowing things" in self._review()
+
+    def test_the_permission_did_not_replace_the_route_down(self):
+        """Il percorso di discesa resta il modo normale di far spazio: se sparisse,
+        il permesso diventerebbe la prima mossa invece dell'ultima."""
+        prompt = self._review()
+
+        assert "route down" in prompt
+        assert "Task specs and procedures" in prompt
+        assert "Template residue" in prompt
+
+
+class TestADestructivePassSaysSo:
+    """6.2, e ha dovuto uscire *insieme* alla 6.0.
+
+    Degradare non è gratis: una voce archiviata è recuperabile ma non è più nel
+    prompt. Allargare il permesso senza la sua visibilità è l'unico ordine, fra i
+    due, che potrebbe fare danno davvero.
+    """
+
+    def test_the_threshold_is_about_a_quarter_of_a_real_file(self):
+        from jenny.agent.dream_review import DEMOTION_IS_NOTABLE
+
+        assert DEMOTION_IS_NOTABLE == 5
+
+    @staticmethod
+    def _captured():
+        """Sink loguru: ``caplog`` non lo vede, perché loguru non passa da
+        ``logging`` a meno che qualcuno non ce lo instradi."""
+        from loguru import logger
+
+        lines: list[str] = []
+        sink = logger.add(lines.append, level="WARNING", format="{message}")
+        return lines, lambda: logger.remove(sink)
+
+    def test_a_quiet_pass_says_nothing_loud(self, store):
+        from jenny.agent.dream_review import _report_demotions
+
+        lines, done = self._captured()
+        try:
+            moved = _report_demotions(store, set())
+        finally:
+            done()
+
+        assert moved == ()
+        assert not lines
+
+    def test_it_names_what_moved_not_just_how_many(self, store):
+        """Il numero dice quanto; chi legge un avviso deve sapere *cosa*, o non
+        può decidere se andare a guardare."""
+        from datetime import date
+
+        from jenny.agent.dream_review import DEMOTION_IS_NOTABLE, _report_demotions
+        from jenny.agent.memory_archive import ArchivedEntry, archive_entry
+
+        for i in range(DEMOTION_IS_NOTABLE + 1):
+            archive_entry(
+                store.memory_dir,
+                ArchivedEntry(id=f"c{i}", text=f"- Un fatto numero {i}", source="USER.md"),
+                when=date(2026, 8, 19),
+            )
+
+        lines, done = self._captured()
+        try:
+            moved = _report_demotions(store, set())
+        finally:
+            done()
+
+        assert len(moved) == DEMOTION_IS_NOTABLE + 1
+        assert "Un fatto numero 0" in "".join(lines)
+        assert "6 entries" in "".join(lines)
+
+    def test_only_what_this_pass_moved_is_reported(self, store, caplog):
+        from datetime import date
+
+        from jenny.agent.dream_review import _report_demotions
+        from jenny.agent.memory_archive import ArchivedEntry, archive_entry, archived_ids
+
+        archive_entry(
+            store.memory_dir,
+            ArchivedEntry(id="old", text="- Roba di ieri", source="USER.md"),
+            when=date(2026, 8, 18),
+        )
+        before = archived_ids(store.memory_dir)
+        archive_entry(
+            store.memory_dir,
+            ArchivedEntry(id="new", text="- Roba di oggi", source="USER.md"),
+            when=date(2026, 8, 19),
+        )
+
+        moved = _report_demotions(store, before)
+
+        assert len(moved) == 1 and "new" in moved[0]
+
+
+
+class TestTheOutcomeSaysWhatItTookAway:
+    """"Quanto ha liberato" e "quali fatti ha spostato" sono due domande diverse.
+
+    ``demoted`` esisteva già ed era **morto**: valorizzato sui soli due rami
+    ``failed``, letto da nessuno. I due esiti normali — "ha liberato spazio" e
+    "non c'era niente da potare" — non lo portavano, cioè proprio quelli in cui
+    una degradazione è più probabile; e ``/dream`` rispondeva "nothing was freed"
+    a una passata che aveva spostato dei fatti personali dell'utente.
+
+    Il caso peggiore ha un nome e sta qui sotto: una **riformulazione**. La voce
+    vecchia parte per l'archivio, la nuova è più lunga, nessun file cala — e i
+    soli ``before``/``after`` raccontano un run che non ha fatto niente.
+    """
+
+    _FACT = "- Timezone: Europe/Rome\n"
+
+    @staticmethod
+    def _rewords_a_fact_into_a_longer_one(store: MemoryStore) -> Any:
+        """Effetto che riformula un fatto di ``USER.md`` allungandolo.
+
+        La voce vecchia se ne va (l'archiviatore al confine del file la degrada,
+        v. ``make_entry_archiver``) e il file **cresce**: nessun ``shrank``, quindi
+        l'esito è ``no-change`` — e senza ``demoted`` la risposta all'utente
+        sarebbe "nothing was freed" su un fatto che è uscito dal prompt.
+        """
+
+        async def effect(tools: Any) -> None:
+            await tools.execute("edit_file", {
+                "path": "USER.md",
+                "old_text": TestTheOutcomeSaysWhatItTookAway._FACT,
+                "new_text": "- Timezone: Europe/Rome (CEST in summer, verified 2026-08)\n",
+            })
+
+        return effect
+
+    @staticmethod
+    def _drops_a_fact(store: MemoryStore) -> Any:
+        """Effetto che toglie un fatto da ``USER.md``: degrada **e** rimpicciolisce."""
+
+        async def effect(tools: Any) -> None:
+            await tools.execute("edit_file", {
+                "path": "USER.md",
+                "old_text": TestTheOutcomeSaysWhatItTookAway._FACT,
+                "new_text": "",
+            })
+
+        return effect
+
+    async def test_a_reword_is_reported_even_though_nothing_shrank(
+        self, store: MemoryStore
+    ) -> None:
+        outcome = await _run(
+            store, _FakeAgent(effect=self._rewords_a_fact_into_a_longer_one(store))
+        )
+
+        assert outcome.status == STATUS_NO_CHANGE
+        # La prova che il solo delta non basta: non c'è niente da liberare, e un
+        # fatto è comunque uscito dai file caldi.
+        assert outcome.freed <= 0
+        assert len(outcome.demoted) == 1
+
+    async def test_a_pass_that_freed_space_also_says_what_it_moved(
+        self, store: MemoryStore
+    ) -> None:
+        """Il ramo ``completed``: quello che gira più spesso, e non lo portava."""
+        outcome = await _run(store, _FakeAgent(effect=self._drops_a_fact(store)))
+
+        assert outcome.status == STATUS_COMPLETED
+        assert len(outcome.demoted) == 1
+
+    async def test_a_quiet_pass_reports_no_demotions(self, store: MemoryStore) -> None:
+        """Il rovescio: senza degradazioni la nota non deve inventarne."""
+        outcome = await _run(store, _FakeAgent(effect=_shrink(store)))
+
+        assert outcome.status == STATUS_COMPLETED
+        assert outcome.demoted == ()
+        assert outcome.demoted_ids == ()
+
+    async def test_a_run_that_died_still_reports_what_it_had_already_moved(
+        self, store: MemoryStore
+    ) -> None:
+        """Il ramo per eccezione, l'unico dove nessun riepilogo a valle le nominerebbe.
+
+        Il turno è finito male, quindi il modello non racconta niente e i soli
+        ``before``/``after`` non distinguono "cancellato" da "spostato". Le voci
+        già degradate prima dell'errore sono precisamente quelle di cui nessuno
+        saprebbe.
+        """
+
+        async def effect(tools: Any) -> None:
+            await tools.execute("edit_file", {
+                "path": "USER.md", "old_text": self._FACT, "new_text": "",
+            })
+            raise RuntimeError("il provider è caduto a metà turno")
+
+        agent = _FakeAgent(effect=effect)
+        outcome = await _run(store, agent)
+
+        assert outcome.status == STATUS_FAILED
+        assert len(outcome.demoted) == 1
+
+    async def test_a_run_that_did_not_complete_reports_them_too(
+        self, store: MemoryStore
+    ) -> None:
+        outcome = await _run(
+            store,
+            _FakeAgent(stop_reason="max_iterations", effect=self._drops_a_fact(store)),
+        )
+
+        assert outcome.status == STATUS_FAILED
+        assert len(outcome.demoted) == 1
+
+    async def test_an_open_refusal_with_nothing_shrunk_reports_them_too(
+        self, store: MemoryStore
+    ) -> None:
+        """Il ramo che il piano aveva individuato: rifiuto aperto, nulla è calato.
+
+        Il modello riformula un fatto (degradazione, e il file cresce) e poi si
+        vede rifiutare la scrittura sulla destinazione. È l'esito che il prompt
+        del review chiede — lascia stare la fonte — e portava via con sé la
+        notizia della riformulazione.
+        """
+
+        def guard(path: Path, _text: str) -> str | None:
+            return "Write refused: over budget." if path.name == "MEMORY.md" else None
+
+        async def effect(tools: Any) -> None:
+            await self._rewords_a_fact_into_a_longer_one(store)(tools)
+            await tools.execute("edit_file", {
+                "path": "memory/MEMORY.md",
+                "old_text": "# Memory\n",
+                "new_text": "# Memory\n- contesto spostato\n",
+            })
+
+        outcome = await _run(store, _FakeAgent(effect=effect), write_size_guard=guard)
+
+        assert outcome.status == STATUS_NO_CHANGE
+        assert outcome.unresolved_refusals == 1
+        assert len(outcome.demoted) == 1
+
+    async def test_a_destructive_migration_reports_them_too(
+        self, store: MemoryStore
+    ) -> None:
+        """Il quinto ramo: rifiuto aperto **e** qualcosa è calato.
+
+        È il caso in cui il fatto potrebbe non essere in nessuno dei due file, e
+        la sola risposta utile all'utente è dove ritrovarlo.
+        """
+
+        def guard(path: Path, _text: str) -> str | None:
+            return "Write refused: over budget." if path.name == "MEMORY.md" else None
+
+        async def effect(tools: Any) -> None:
+            await self._drops_a_fact(store)(tools)
+            await tools.execute("edit_file", {
+                "path": "memory/MEMORY.md",
+                "old_text": "# Memory\n",
+                "new_text": f"# Memory\n{self._FACT}",
+            })
+
+        outcome = await _run(store, _FakeAgent(effect=effect), write_size_guard=guard)
+
+        assert outcome.status == STATUS_FAILED
+        assert outcome.unresolved_refusals == 1
+        assert len(outcome.demoted) == 1
+
+    async def test_no_return_path_forgets_them(self) -> None:
+        """L'invariante, letta dal sorgente e non da un ramo alla volta.
+
+        I sei rami qui sopra sono i sei di oggi; il difetto originale era che un
+        settimo aggiunto senza pensarci nascesse muto, e la revisione non se ne
+        accorgesse — ``demoted`` ha un default, quindi ometterlo non è un errore
+        per nessuno. Questo test rende il default un'omissione visibile.
+        """
+        import inspect
+        import re
+
+        from jenny.agent import dream_review
+
+        source = inspect.getsource(dream_review.run_dream_review)
+        constructions = re.findall(r"ReviewOutcome\((?:[^()]|\([^()]*\))*\)", source)
+
+        assert len(constructions) == 6, f"rami cambiati: {len(constructions)}"
+        mute = [c for c in constructions if "demoted" not in c]
+        assert not mute, f"uscite senza le degradazioni: {mute}"
+
+    async def test_the_ids_are_what_recall_accepts(self, store: MemoryStore) -> None:
+        """Un numero non è azionabile: ``recall`` prende id, non nomi di file."""
+        from jenny.agent.tools.memory_recall import MemoryRecallTool
+
+        outcome = await _run(store, _FakeAgent(effect=self._drops_a_fact(store)))
+
+        assert outcome.demoted_ids and outcome.demoted_ids != outcome.demoted
+        rendered = await MemoryRecallTool(store.workspace).execute(
+            ids=list(outcome.demoted_ids)
+        )
+        assert "Europe/Rome" in rendered
+        assert "No archived entry has id" not in rendered

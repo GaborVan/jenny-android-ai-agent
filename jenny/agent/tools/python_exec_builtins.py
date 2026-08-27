@@ -90,12 +90,55 @@ def _register_builtin_functions(
 
         return _active_path_base() or workspace
 
-    def _enforce_path(path: str) -> Path:
-        """Resolve path and enforce workspace boundary when restricted.
+    def _refuse_if_readonly(detail: str) -> None:
+        """Ferma una scrittura quando il turno e' in sola lettura.
+
+        Import locale come gli altri di questo modulo: a livello di modulo
+        sarebbe un ciclo.
+        """
+        from jenny.security.workspace_access import current_turn_is_readonly
+        from jenny.security.workspace_policy import ReadOnlyTurnError
+
+        if current_turn_is_readonly():
+            raise ReadOnlyTurnError(detail)
+
+    def _write_root() -> str | None:
+        """La radice entro cui una SCRITTURA deve restare, adesso.
+
+        Non la calcola: la chiede a ``ToolWorkspace.write_root()``, che e' l'unica
+        risposta a «dove posso scrivere» (passo T4.4). Qui resta solo la
+        conversione a stringa e il fallback sul workspace del costruttore, che
+        vale quando non c'e' confine da far rispettare — questa funzione e'
+        chiamata solo da ``_enforce_path`` sotto ``restrict_to_workspace``, quindi
+        un confine ci vuole comunque.
+
+        Con una sessione-progetto legata e' la cartella del progetto; senza, il
+        workspace di sempre. La *lettura* non passa di qui: resta sul workspace,
+        perche' la prigione di un progetto e' sulla scrittura (v.
+        ``_enforce_path``).
+        """
+        from jenny.security.workspace_access import current_tool_workspace
+
+        access = current_tool_workspace(
+            workspace, restrict_to_workspace=restrict_to_workspace
+        )
+        root = access.write_root()
+        return str(root) if root is not None else workspace
+
+    def _enforce_path(path: str, *, for_write: bool = False) -> Path:
+        """Resolve path and enforce the workspace boundary when restricted.
 
         Un percorso RELATIVO si misura dalla base di ``_resolution_base()``,
-        cioè dalla stessa che usa ``open()`` dentro il sandbox. Il CONFINE resta
-        la radice del workspace: la base si sposta, il confine no.
+        cioè dalla stessa che usa ``open()`` dentro il sandbox. La base si
+        sposta, il confine no — ma **il confine non e' lo stesso nei due versi**:
+
+        - in lettura e' il workspace, sempre. Dentro un progetto Jenny deve poter
+          leggere la propria skill e le altre wiki se gliele si chiede; e fuori
+          dalla cartella privata dell'app non si arriva comunque, perche' il
+          permesso di storage non ce l'abbiamo — il confine vero lo mette Android;
+        - in scrittura e' la cartella del progetto, quando ce n'e' una legata.
+          Questa e' l'isolazione che conta: e' cio' che tiene un progetto lontano
+          dai file di un altro, da ``USER.md`` e da ``SOUL.md``.
         """
         if not restrict_to_workspace:
             from jenny.security.workspace_policy import _safe_expanduser
@@ -103,6 +146,7 @@ def _register_builtin_functions(
         from jenny.agent.tools.python_exec import _path_guard_bypass
         from jenny.security.workspace_policy import resolve_allowed_path
 
+        allowed_root = _write_root() if for_write else workspace
         # La base va letta PRIMA del bypass, che la azzera. Il bypass copre la
         # sola risoluzione: `Path.resolve()` passa da `os.lstat` su ogni
         # prefisso del percorso e sotto guard quei prefissi sono fuori dal
@@ -110,7 +154,16 @@ def _register_builtin_functions(
         # rifiuti spuri (stessa ragione di `_guarded_os_path`).
         base = _resolution_base()
         with _path_guard_bypass():
-            return resolve_allowed_path(path, workspace=base, allowed_root=workspace)
+            return resolve_allowed_path(path, workspace=base, allowed_root=allowed_root)
+
+    def _write_path(path: str) -> Path:
+        """Percorso di una scrittura: confinato alla cartella del progetto."""
+        # La sola lettura si controlla qui e **non** in ``_enforce_path``: quello
+        # e' condiviso con ``_wiki_root``, da cui passano anche ``wiki_lint`` e
+        # ``wiki_audit``, che leggono. Bloccare la' avrebbe spento due letture
+        # per chiudere una scrittura.
+        _refuse_if_readonly(f"refused write to {path}")
+        return _enforce_path(path, for_write=True)
 
     # File I/O
     def read_file(path: str, encoding: str = "utf-8") -> str:
@@ -119,13 +172,13 @@ def _register_builtin_functions(
 
     def write_file(path: str, content: str, encoding: str = "utf-8") -> None:
         """Write content to a file."""
-        p = _enforce_path(path)
+        p = _write_path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding=encoding)
 
     def append_file(path: str, content: str, encoding: str = "utf-8") -> None:
         """Append content to a file."""
-        p = _enforce_path(path)
+        p = _write_path(path)
         with open(p, "a", encoding=encoding) as f:
             f.write(content)
 
@@ -146,7 +199,7 @@ def _register_builtin_functions(
 
     def write_json(path: str, data: Any, indent: int = 2) -> None:
         """Write data as JSON to a file."""
-        p = _enforce_path(path)
+        p = _write_path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(data, indent=indent, ensure_ascii=False))
 
@@ -362,32 +415,62 @@ def _register_builtin_functions(
 
     # ── LLM Wiki ──
     def _load_wiki_script(name: str):
-        """Load a script from the llm-wiki skill directory."""
+        """Load a script from the llm-wiki skill directory.
+
+        **Il caricamento gira sotto ``_path_guard_bypass()``, e la ragione è che
+        qui non c'è niente da contenere.** Il percorso è fisso —
+        ``<workspace>/skills/llm-wiki/scripts/<nome>.py`` — e *name* arriva da tre
+        call site letterali di questo file (``lint_wiki.py``, ``scaffold.py``,
+        ``audit_review.py``): il modello non lo scrive e non lo influenza. Farlo
+        passare dalla guardia non è un controllo, è un ostacolo, e il 26/08 sul
+        telefono era **l'ostacolo**: dentro un progetto la radice di lettura di un
+        subagent è la cartella del progetto, gli script della skill stanno fuori, e
+        ``wiki_lint``/``wiki_audit``/``wiki_scaffold`` erano irraggiungibili — con
+        loro il «hard gate» della skill, *esegui il lint e incolla il suo output*.
+        Sotto ``orchestratorMode`` l'agente principale non ha ``python_exec``
+        affatto, quindi non restava nessuna strada.
+
+        **Non allarga niente per il codice del modello.** La finestra copre solo
+        queste righe: quel che lo script fa dopo — leggere la wiki, scrivere il
+        proprio stato — gira fuori dal bypass e resta guardato come prima. È lo
+        stesso gesto, con la stessa motivazione, di ``_wiki_root`` qui sotto.
+
+        L'alternativa era allargare il confine di lettura del sandbox alla radice
+        dell'installazione (il gemello di ``_FsTool._installation_read_root``,
+        passo T4.5). Scartata: cambia una regola di sicurezza per tutto il codice
+        che il modello esegue, mentre il difetto è che tre builtin non riescono ad
+        aprire un file **loro**.
+        """
         import importlib.util
 
-        skill_dir = get_workspace_path() / "skills" / "llm-wiki" / "scripts"
-        script_path = skill_dir / name
-        if not script_path.exists():
-            raise FileNotFoundError(f"Script not found: {script_path}")
+        from jenny.agent.tools.python_exec import _path_guard_bypass
 
-        logger.debug("Loading wiki script via importlib: %s", script_path)
-        try:
-            spec = importlib.util.spec_from_file_location(name.removesuffix(".py"), script_path)
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            return mod
-        except Exception:
-            logger.warning("importlib failed for %s; falling back to exec()", script_path)
-            mod = types.ModuleType(name.removesuffix(".py"))
-            # `__file__` come lo metterebbe importlib: gli script delle skill
-            # ricavano da lì la propria directory
-            # (`sys.path.insert(0, dirname(abspath(__file__)))`), e su questo
-            # ramo il nome non esisteva affatto.
-            mod.__file__ = str(script_path)
-            code = script_path.read_text(encoding="utf-8")
-            # `_compile_script`, non `exec(code, ...)`: vedi lì il perché.
-            exec(_compile_script(code, str(script_path)), mod.__dict__)
-            return mod
+        with _path_guard_bypass():
+            skill_dir = get_workspace_path() / "skills" / "llm-wiki" / "scripts"
+            script_path = skill_dir / name
+            if not script_path.exists():
+                raise FileNotFoundError(f"Script not found: {script_path}")
+
+            logger.debug("Loading wiki script via importlib: %s", script_path)
+            try:
+                spec = importlib.util.spec_from_file_location(
+                    name.removesuffix(".py"), script_path
+                )
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                return mod
+            except Exception:
+                logger.warning("importlib failed for %s; falling back to exec()", script_path)
+                mod = types.ModuleType(name.removesuffix(".py"))
+                # `__file__` come lo metterebbe importlib: gli script delle skill
+                # ricavano da lì la propria directory
+                # (`sys.path.insert(0, dirname(abspath(__file__)))`), e su questo
+                # ramo il nome non esisteva affatto.
+                mod.__file__ = str(script_path)
+                code = script_path.read_text(encoding="utf-8")
+                # `_compile_script`, non `exec(code, ...)`: vedi lì il perché.
+                exec(_compile_script(code, str(script_path)), mod.__dict__)
+                return mod
 
     def _wiki_root(root: str) -> str:
         """Porta *root* alla stessa base degli altri builtin, prima di passarlo.
@@ -400,10 +483,16 @@ def _register_builtin_functions(
         e con un messaggio chiaro una root fuori dal confine invece di lasciar
         morire lo script più a valle.
         """
-        return str(_enforce_path(root))
+        # Confine di **scrittura**: da qui passano `wiki_scaffold` (che crea file)
+        # insieme a `wiki_lint`/`wiki_audit` (che leggono). Un solo helper per
+        # tre operazioni, quindi vince la piu' restrittiva: lasciar scaffoldare
+        # fuori dal progetto sarebbe una breccia, mentre non poter lintare la
+        # wiki di un altro progetto e' una scomodita'.
+        return str(_enforce_path(root, for_write=True))
 
     def wiki_scaffold(root: str, title: str) -> str:
         """Bootstrap a new LLM Wiki directory structure at root."""
+        _refuse_if_readonly(f"refused wiki_scaffold in {root}")
         import contextlib
 
         mod = _load_wiki_script("scaffold.py")
@@ -413,14 +502,63 @@ def _register_builtin_functions(
         return buf.getvalue()
 
     def wiki_lint(root: str) -> str:
-        """Run health check on an LLM Wiki. Returns issues found."""
+        """Run health check on an LLM Wiki. Returns issues found.
+
+        Cattura **solo stdout** — lo script scrive lì tutto, errori compresi — e
+        quando stdout è vuoto lo dice col codice di uscita invece del vecchio
+        "No output": quella stringa faceva passare per «nessun problema» un lint
+        che non ha girato affatto.
+
+        **Se il lint scoppia, il buffer parziale torna comunque**, con in coda una
+        riga che dice che è parziale e perché. La ragione è tutta nella differenza
+        fra i due esiti per chi chiama: lasciando salire l'eccezione, quel che il
+        modello riceve da ``python_exec`` è un traceback e **zero** risultati —
+        anche i quaranta già stampati prima del passo che è caduto. Non sono
+        risultati dubbi: sono passi conclusi, ognuno col suo conteggio.
+        Buttarli non rende nessuno più sicuro, rende solo il difetto più caro.
+
+        E il verso opposto — «torna il parziale e taci» — è il difetto che T6.6 ha
+        chiuso: un report senza la riga di riepilogo si legge come un report. Il
+        modello non conta i passi che si aspettava, quindi l'*assenza* del
+        riepilogo non è un segnale; un 🔴 che nomina l'eccezione lo è. Quindi
+        tornano entrambe le cose, in quest'ordine.
+        """
         import contextlib
+        import traceback
 
         mod = _load_wiki_script("lint_wiki.py")
+        # **Il confine si risolve fuori dal ``try``.** ``_wiki_root`` solleva
+        # ``WorkspaceBoundaryError`` su una root fuori dal workspace, e quella
+        # deve **salire**: è un rifiuto della policy, non un lint andato male, e
+        # ridurla a una stringa nel report la renderebbe indistinguibile da una
+        # wiki con dei problemi (v.
+        # ``tests/agent/tools/test_python_exec_builtins_paths.py``).
+        target = _wiki_root(root)
         buf = io.StringIO()
+        code: int | None = None
+        crash: str | None = None
+        trace: str | None = None
         with contextlib.redirect_stdout(buf):
-            mod.lint(_wiki_root(root))
-        return buf.getvalue() or "No output"
+            try:
+                code = mod.lint(target)
+            except Exception as exc:  # noqa: BLE001 — vedi il docstring
+                crash = f"{type(exc).__name__}: {exc}"
+                # Lo stack si formatta qui, dentro l'``except``, e si scrive
+                # **fuori** dal ``redirect_stdout``: un handler su stdout
+                # finirebbe dentro il buffer che poi torna al modello.
+                trace = traceback.format_exc()
+        if crash is not None:
+            # Il ritorno è per il modello; questo è per chi legge il telefono
+            # dopo, con lo stack che la stringa non porta.
+            logger.error("wiki_lint crashed on %s:\n%s", root, trace)
+            return (
+                f"{buf.getvalue()}\n"
+                f"🔴 the lint crashed before it finished: {crash}\n"
+                "   (everything above was already computed and stands. What comes\n"
+                "    after the last check printed never ran, so this is NOT a clean\n"
+                "    wiki and the count above is not the total.)"
+            )
+        return buf.getvalue() or f"(the lint printed nothing — it exited {code})"
 
     def wiki_audit(root: str, mode: str = "open") -> str:
         """List audit feedback grouped by target. Modes: open, resolved, all."""

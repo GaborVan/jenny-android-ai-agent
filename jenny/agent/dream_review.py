@@ -44,8 +44,8 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 
 from jenny.agent.memory import MemoryStore
+from jenny.agent.memory_archive import archived_ids, summarize_archived
 from jenny.agent.memory_budget import count_chars, render_gauge
-from jenny.agent.token_usage import record_response_token_usage
 from jenny.utils.prompt_templates import render_template
 
 if TYPE_CHECKING:
@@ -73,17 +73,52 @@ class ReviewOutcome:
     status: str
     before: dict[str, int]
     after: dict[str, int]
+    # I file d'archivio comparsi durante questo run: le voci che il passaggio ha
+    # **spostato** invece di cancellare. Viaggiano nell'esito perché "quanto ha
+    # liberato" e "cosa ha tolto di mezzo" sono due domande diverse, e dopo la
+    # fase 2 la seconda ha finalmente una risposta esatta invece di un delta in
+    # caratteri.
+    #
+    # Valorizzato su **ogni** uscita di :func:`run_dream_review`, compresa quella
+    # per eccezione. Per tre commit lo era solo sui due rami ``failed``: i due
+    # esiti normali — "ha liberato spazio" e "non c'era niente da potare" — non lo
+    # portavano, cioè proprio quelli in cui una degradazione è più probabile.
+    # ``/dream`` rispondeva quindi "nothing was freed" a una passata che aveva
+    # spostato sei fatti personali dell'utente, e l'unica traccia era una riga di
+    # log.
+    demoted: tuple[str, ...] = ()
     # Scritture rifiutate dal budget il cui contenuto non è mai atterrato. Se è
     # > 0 lo status non è ``completed``: ``failed`` quando qualcosa è anche calato
     # (possibile migrazione troncata), altrimenti ``no-change`` — che è l'esito
     # corretto quando il run ha lasciato stare la fonte, come il prompt gli chiede.
     # V. :func:`run_dream_review`.
+    #
+    # Lo legge la nota di ``/dream`` (``command/builtin.py::_format_dream_refusals``)
+    # perché è la sola metà azionabile dell'esito: una degradazione l'utente la
+    # ritrova con ``recall``, un rifiuto no — il fatto non è in nessun file, e
+    # l'unica mossa che lo sblocca è alzare il tetto o potare a mano. Per tre
+    # commit il campo era valorizzato su ogni percorso e letto da nessuno in
+    # ``jenny/``: una review che lasciava aperto un rifiuto riferiva "nothing was
+    # freed", che è vero come numero e muto sull'unica cosa da fare.
     unresolved_refusals: int = 0
 
     @property
     def freed(self) -> int:
         """Caratteri liberati in totale; negativo se i file sono cresciuti."""
         return sum(chars - self.after.get(label, 0) for label, chars in self.before.items())
+
+    @property
+    def demoted_ids(self) -> tuple[str, ...]:
+        """Gli id con cui il tool ``recall`` ritrova le voci di :attr:`demoted`.
+
+        Il nome del file d'archivio è ``<data>-<id>.md`` e l'id è un hash esadecimale
+        (``tools/memory_entries.py::entry_id``), quindi l'ultimo segmento dello stem
+        *è* l'id — la stessa derivazione che fa ``memory_archive.read_archived``
+        quando rilegge una voce. Sta qui perché un numero non è azionabile: chi
+        legge "sei fatti spostati" deve poter chiedere *quali*, e ``recall`` prende
+        id, non nomi di file.
+        """
+        return tuple(name.rsplit(".", 1)[0].rsplit("-", 1)[-1] for name in self.demoted)
 
 
 def review_session_key() -> str:
@@ -122,6 +157,40 @@ def _measure(report: Sequence[FileBudget]) -> dict[str, int]:
     return {item.label: count_chars(item.path) for item in report}
 
 
+# Oltre quante voci spostate in un solo passaggio la cosa va detta per nome.
+#
+# Cinque è circa un quarto di un ``USER.md`` tipico (19 voci sul Titan 2 il
+# 2026-08-19), e questa soglia esiste perché la degradazione **non è gratis**: una
+# voce archiviata è recuperabile ma non è più nel prompt, quindi l'effetto che
+# l'utente osserva non è "ho perso un fatto" ma "Jenny non se lo ricorda più".
+# Il permesso di potare più a fondo (v. la sezione *Never lose* di ``dream.md``)
+# è arrivato insieme a questa riga di proposito: allargare il permesso senza la
+# sua visibilità è l'unico ordine, fra i due, che potrebbe fare danno.
+DEMOTION_IS_NOTABLE = 5
+
+
+def _report_demotions(store: "MemoryStore", before: set[str]) -> tuple[str, ...]:
+    """Cosa il passaggio ha spostato in archivio, e lo dice se è tanto.
+
+    Ritorna i nomi dei file comparsi durante il run. Sopra
+    :data:`DEMOTION_IS_NOTABLE` il log li elenca **con il fatto dentro**, non solo
+    con il conteggio: il numero dice quanto, e chi legge un avviso deve sapere
+    *cosa*, o non può decidere se andare a guardare.
+    """
+    moved = sorted(archived_ids(store.memory_dir) - before)
+    if not moved:
+        return ()
+    if len(moved) > DEMOTION_IS_NOTABLE:
+        logger.warning(
+            "Dream review demoted {} entries to memory/archive/ in one pass: {}",
+            len(moved),
+            "; ".join(summarize_archived(store.memory_dir, name) for name in moved),
+        )
+    else:
+        logger.info("Dream review demoted {} entries to memory/archive/", len(moved))
+    return tuple(moved)
+
+
 async def run_dream_review(
     agent: Any,
     *,
@@ -156,6 +225,9 @@ async def run_dream_review(
     # criteri di cancellazione invece di ricopiarli, e quel rimando sta in piedi
     # solo perché ``ReadFileTool`` qui dentro è montato sull'intero workspace.
     tools = store.build_dream_tools(write_size_guard=write_size_guard)
+    # Fotografia dell'archivio prima del turno: la differenza dirà quali voci il
+    # passaggio ha spostato, che è una domanda diversa da "quanto ha liberato".
+    archived_before = archived_ids(store.memory_dir)
 
     resp = None
     try:
@@ -179,26 +251,24 @@ async def run_dream_review(
             before=before,
             after=_measure(report),
             unresolved_refusals=refused if isinstance(refused, int) else 0,
+            # Anche qui, e per la stessa ragione per cui si rimisurano i file: un
+            # run morto a metà può aver già spostato delle voci, e sono esattamente
+            # quelle di cui nessuno saprebbe niente — il turno è finito male,
+            # quindi non c'è nemmeno un riepilogo a valle che le nomini.
+            demoted=_report_demotions(store, archived_before),
         )
-    finally:
-        # La contabilità dei token sta qui e non nel chiamante, come in
-        # ``run_atlas``: questa funzione è l'unico punto che vede la risposta del
-        # provider — restituisce un ``ReviewOutcome`` e non rilancia, quindi da
-        # fuori il ``resp`` non è raggiungibile. Senza questa riga un turno LLM
-        # completo, su un telefono, dentro una feature nata per contenere i
-        # costi, non comparirebbe in nessun conteggio.
-        #
-        # ``source="dream"`` e non ``"dream_review"``: ``_SOURCE_KEYS``
-        # (``agent/token_usage.py``) è un elenco chiuso e ``_clean_source``
-        # riscrive in silenzio qualunque valore fuori lista in ``"system"``, che
-        # non separerebbe i due run — li seppellirebbe nel secchio generico.
-        # Separarli davvero vuol dire aggiungere la chiave lì e la sua etichetta
-        # nella WebUI; finché non si fa, i due run di Dream restano un aggregato.
-        record_response_token_usage(
-            resp, source="dream", timezone_name=_timezone_of(agent),
-        )
+    # La contabilita' dei token **non passa da qui**: la fa
+    # ``TokenUsageHook.after_iteration`` sul turno stesso, che e' l'unico punto
+    # in cui l'``usage`` del provider esiste davvero. Qui c'era una
+    # ``record_response_token_usage(resp, ...)`` con sopra il ragionamento su
+    # quale bucket usare — e quel ragionamento era senza oggetto: ``resp`` e' un
+    # ``OutboundMessage``, che un campo ``usage`` non ce l'ha, quindi la riga non
+    # ha mai registrato niente. La revisione ricade sotto ``dream`` perche' la
+    # sua chiave e' ``dream:review-...``, cioe' per la mappa delle chiavi e non
+    # per una scelta fatta qui.
 
     after = _measure(report)
+    demoted = _report_demotions(store, archived_before)
     # Rifiuti di budget il cui contenuto non è atterrato. ``unrecovered_refusals``
     # e non il contatore cumulativo: un file rifiutato e poi riscritto con dentro
     # il fatto è stato recuperato, e contarlo qui trasformerebbe in allarme il caso
@@ -222,7 +292,7 @@ async def run_dream_review(
         logger.warning("Dream review: run did not complete cleanly")
         return ReviewOutcome(
             status=STATUS_FAILED, before=before, after=after,
-            unresolved_refusals=outstanding,
+            unresolved_refusals=outstanding, demoted=demoted,
         )
 
     # Un rifiuto rimasto aperto vale come il turno interrotto, e per una ragione
@@ -266,7 +336,7 @@ async def run_dream_review(
         )
         return ReviewOutcome(
             status=STATUS_FAILED, before=before, after=after,
-            unresolved_refusals=outstanding,
+            unresolved_refusals=outstanding, demoted=demoted,
         )
 
     if outstanding > 0:
@@ -281,11 +351,19 @@ async def run_dream_review(
         )
         return ReviewOutcome(
             status=STATUS_NO_CHANGE, before=before, after=after,
-            unresolved_refusals=outstanding,
+            unresolved_refusals=outstanding, demoted=demoted,
         )
 
     if shrank:
-        outcome = ReviewOutcome(status=STATUS_COMPLETED, before=before, after=after)
+        # ``outstanding`` è 0 qui e nell'uscita finale: i due rami che lo vedono
+        # positivo sono già ritornati sopra. Passarlo comunque, invece di lasciare
+        # il default, è la differenza fra "il campo è giusto" e "il campo è giusto
+        # finché nessuno riordina i rami": è la stessa mutezza che ``demoted``
+        # aveva su quattro uscite su sei, e costava una parola evitarla.
+        outcome = ReviewOutcome(
+            status=STATUS_COMPLETED, before=before, after=after, demoted=demoted,
+            unresolved_refusals=outstanding,
+        )
         logger.info(
             "Dream review: freed {:,} chars ({})",
             outcome.freed,
@@ -304,4 +382,7 @@ async def run_dream_review(
     # collocazione meno fuorviante: nulla è stato liberato. Il delta vero resta
     # leggibile in ``before``/``after``.
     logger.info("Dream review: nothing to shrink")
-    return ReviewOutcome(status=STATUS_NO_CHANGE, before=before, after=after)
+    return ReviewOutcome(
+        status=STATUS_NO_CHANGE, before=before, after=after, demoted=demoted,
+        unresolved_refusals=outstanding,
+    )

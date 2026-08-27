@@ -679,6 +679,25 @@ def _end_list_dir(args: Mapping[str, Any], outcome: _Outcome) -> str:
     return _plural(outcome.lines, "entry") if outcome.lines else "empty directory"
 
 
+# -- journal_append ---------------------------------------------------------
+
+
+def _start_journal_append(args: Mapping[str, Any]) -> str:
+    text = _arg_text(args, "text", limit=48)
+    return f"noting “{text}”" if text else "noting a fact"
+
+
+def _end_journal_append(args: Mapping[str, Any], outcome: _Outcome) -> str:
+    head = outcome.head
+    if head.startswith("Appended to"):
+        return "noted in the journal"
+    if "not one" in head or "No journal here" in head:
+        return "no project to note it in"
+    if "read-only" in head.lower():
+        return "read-only: nothing noted"
+    return "not noted"
+
+
 # -- apply_patch -------------------------------------------------------------
 
 
@@ -1049,6 +1068,7 @@ _FORMATTERS: dict[str, tuple[_StartFn, _EndFn]] = {
     "edit_file": (_start_edit_file, _end_edit_file),
     "list_dir": (_start_list_dir, _end_list_dir),
     "apply_patch": (_start_apply_patch, _end_apply_patch),
+    "journal_append": (_start_journal_append, _end_journal_append),
     "web_search": (_start_web_search, _end_web_search),
     "web_fetch": (_start_web_fetch, _end_web_fetch),
     "download_file": (_start_download_file, _end_download_file),

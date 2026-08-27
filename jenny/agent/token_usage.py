@@ -33,7 +33,7 @@ _USAGE_KEYS = (
     "estimated_tokens",
 )
 _REQUEST_KEYS = ("requests", "provider_requests", "estimated_requests")
-_SOURCE_KEYS = ("user", "api", "cron", "dream", "atlas", "system")
+_SOURCE_KEYS = ("user", "api", "cron", "dream", "atlas", "gardener", "system")
 # Mappa *locale* kind interno -> bucket di ``_SOURCE_KEYS``. Il vocabolario dei
 # kind e' condiviso (``jenny.session.keys.internal_session_kind``), la
 # partizione in bucket no: e' una scelta di contabilita di questo modulo.
@@ -44,6 +44,13 @@ _INTERNAL_KIND_TO_SOURCE = {
     "atlas": "atlas",
     "cron": "cron",
     "heartbeat": "cron",
+    # Un bucket suo e non ``cron``, benche' sia il cron a farlo partire: il
+    # giardiniere gira **una volta per progetto**, quindi il suo costo cresce con
+    # il numero di wiki e non con il numero di job. Nel secchio del cron quella
+    # crescita e' invisibile. Senza questa riga cadrebbe nel fallthrough
+    # ``"user"``, cioe' il lavoro di manutenzione verrebbe addebitato alla chat
+    # dell'utente — peggio di un bucket generico, perche' e' plausibile.
+    "gardener": "gardener",
 }
 _WRITE_LOCK = threading.Lock()
 
@@ -347,6 +354,16 @@ class TokenUsageHook(AgentHook):
     def __init__(self, *, timezone_name: str | None = None) -> None:
         super().__init__()
         self._timezone_name = timezone_name
+
+    def runs_when_ephemeral(self) -> bool:
+        """Misurare non e' parlare: v. ``AgentHook.runs_when_ephemeral``.
+
+        E' l'unico hook che lo dichiara, e la ragione e' che il lavoro effimero —
+        Dream, Atlas, la revisione, il giardiniere — e' esattamente quello che
+        l'utente non ha chiesto e non vede arrivare, cioe' quello che conviene
+        misurare di piu'.
+        """
+        return True
 
     async def after_iteration(self, context: AgentHookContext) -> None:
         try:

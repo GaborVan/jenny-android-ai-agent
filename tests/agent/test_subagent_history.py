@@ -169,15 +169,21 @@ class TestKeys:
         assert is_internal_session_key("websocket:default") is False
 
     def test_webui_http_routes_cannot_read_a_subagent_session(self) -> None:
-        """Le route /api/ accettano solo chiavi ``websocket:*``.
+        """Le route /api/ accettano conversazioni, non lavoro interno.
 
         Test di sola lettura sul confine: se quel gate cambiasse, le storie dei
-        subagent diventerebbero leggibili come conversazioni.
+        subagent diventerebbero leggibili come conversazioni. Da quando esistono
+        le sessioni-progetto il gate accetta due forme invece di una — una chat
+        di progetto e' una conversazione — ma il lato che conta e' lo stesso:
+        nessuna chiave interna passa.
         """
-        from jenny.webui.ws_http import _is_websocket_channel_session_key
+        from jenny.webui.ws_http import _is_webui_readable_session_key
 
-        assert _is_websocket_channel_session_key(subagent_session_key("L1")) is False
-        assert _is_websocket_channel_session_key("websocket:default") is True
+        assert _is_webui_readable_session_key(subagent_session_key("L1")) is False
+        assert _is_webui_readable_session_key("cron:job-1") is False
+        assert _is_webui_readable_session_key("heartbeat") is False
+        assert _is_webui_readable_session_key("websocket:default") is True
+        assert _is_webui_readable_session_key("project:patreon") is True
 
     def test_dream_prune_glob_does_not_match_subagent_histories(
         self, tmp_path: Path

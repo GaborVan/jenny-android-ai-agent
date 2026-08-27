@@ -2,9 +2,16 @@
 
 A differenza di ``web_fetch`` (che estrae testo leggibile da una pagina),
 ``download_file`` salva il payload binario così com'è: immagini, PDF, archivi,
-qualsiasi file. La destinazione è sempre ``<workspace>/downloads/`` — mai la
-root del workspace — e il file può poi essere presentato in chat come allegato
-(``message`` con ``media``) o, per le immagini, embed markdown inline.
+qualsiasi file. La destinazione è sempre ``downloads/`` — mai la root — e il
+file può poi essere presentato in chat come allegato (``message`` con ``media``)
+o, per le immagini, embed markdown inline.
+
+**``downloads/`` di chi.** Della radice del *turno*, non dell'installazione:
+dentro un progetto è ``<progetto>/downloads/``. Fino al 22/08 era sempre quella
+dell'installazione, ed era una scrittura fuori dal progetto che il confine non
+vedeva passare — la destinazione non passa da ``resolve_allowed_path``, quindi il
+cancello non aveva niente da guardare. Il prompt di un progetto dice «scrivi solo
+dentro questa cartella», e questo lo rendeva falso.
 
 Robustezza (stesso pattern di ``webui/media_ingest``): validazione SSRF
 pre-fetch e su ogni hop di redirect, cap di dimensione in streaming, nome file
@@ -28,6 +35,11 @@ from loguru import logger
 from jenny.agent.tools.base import Tool, tool_parameters
 from jenny.agent.tools.schema import StringSchema, tool_parameters_schema
 from jenny.security.network import validate_url_target
+from jenny.security.workspace_access import (
+    READONLY_TOOL_REFUSAL,
+    current_turn_is_readonly,
+    current_workspace_scope,
+)
 from jenny.security.workspace_policy import _safe_expanduser
 from jenny.utils.helpers import detect_image_mime, ensure_dir, safe_filename
 from jenny.utils.path import atomic_write
@@ -154,7 +166,28 @@ class DownloadFileTool(Tool):
         # Client iniettabile per i test (httpx.MockTransport).
         self._client = client
 
+    def _downloads_root(self) -> Path:
+        """La radice sotto cui sta ``downloads/``: quella del turno.
+
+        Chiede a ``WorkspaceScope.write_root()`` invece di leggere
+        ``project_path``: dal passo T4.4 «dove posso scrivere» ha una sola
+        risposta, e un tool con destinazione fissa non e' un'eccezione — e' solo
+        uno che non ha un percorso da validare contro quella radice.
+
+        Senza uno scope legato — sessioni interne, test — resta il workspace del
+        costruttore, che è anche la radice del turno in quel caso.
+        """
+        scope = current_workspace_scope()
+        return scope.write_root() if scope is not None else self._workspace
+
     async def execute(self, url: str, filename: str | None = None, **kwargs: Any) -> str:
+        # Prima della rete, non dopo: scaricare 20 MB per poi rifiutare la
+        # scrittura sarebbe traffico buttato. La destinazione di questo tool e'
+        # fissa (``<installazione>/downloads/``) e non passa da
+        # ``resolve_allowed_path``, quindi il cancello non la vede: il controllo
+        # va chiesto qui.
+        if current_turn_is_readonly():
+            return READONLY_TOOL_REFUSAL
         url = url.strip(" \t\r\n`\"'")
         if not url.lower().startswith(("http://", "https://")):
             return "Error: url must be http(s)"
@@ -188,7 +221,7 @@ class DownloadFileTool(Tool):
             if ext:
                 name += ext
 
-        downloads_dir = ensure_dir(self._workspace / DOWNLOADS_SUBDIR)
+        downloads_dir = ensure_dir(self._downloads_root() / DOWNLOADS_SUBDIR)
         target = _unique_path(downloads_dir, name)
         try:
             atomic_write(target, data)

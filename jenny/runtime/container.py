@@ -153,9 +153,25 @@ class GatewayContainer:
         ``False`` e lascia proseguire il consolidamento. Qui inghiottirle
         vorrebbe dire decidere due cose in un posto solo.
         """
+        return await self._take_snapshot("pre_dream")
+
+    async def _take_snapshot(self, trigger: str) -> bool:
+        """Checkpoint del workspace con l'etichetta *trigger*.
+
+        Il **meccanismo** dietro i checkpoint pre-lavoro, uno solo. I contratti
+        che ci stanno sopra sono invece due e restano distinti, perché dicono
+        cose diverse al modello: Dream usa il booleano per scegliere un ramo di
+        prompt ("le tue modifiche sono reversibili", che serve a far potare di
+        più), il giardiniere no e non deve — aggiungere-non-riscrivere vale
+        *anche* con la rete, e prometterla sposterebbe il suo giudizio.
+
+        Ritorna ``False`` con gli snapshot spenti, e le eccezioni si propagano:
+        il fail-open sta nei chiamanti, che sono gli unici a sapere se il proprio
+        lavoro deve procedere senza rete.
+        """
         if not self.snapshot:
             return False
-        await self.snapshot.snapshot_now("pre_dream")
+        await self.snapshot.snapshot_now(trigger)
         return True
 
     # -- costruzione del grafo ----------------------------------------------
@@ -189,6 +205,7 @@ class GatewayContainer:
 
         try:
             sync_workspace_templates(self.config.workspace_path)
+            self._migrate_wikis()
             self.template_sync_error = None
         except Exception as exc:
             self.template_sync_error = exc
@@ -197,6 +214,59 @@ class GatewayContainer:
                 "potrebbero essere quelli della versione precedente e la WebUI potrebbe "
                 "essere incompleta; il gateway parte comunque",
                 self.config.workspace_path,
+            )
+
+    def _migrate_wikis(self) -> None:
+        """Porta le wiki esistenti alla forma del passo 7: ``AGENTS.md`` e un id.
+
+        Sta dentro ``_sync_templates`` e non accanto, perche' e' la stessa
+        promessa: quel che una versione nuova cambia nel workspace arriva a ogni
+        avvio, o non arriva mai su un telefono installato da mesi. Ed eredita
+        quindi anche il suo ``except``, che e' la scelta giusta per la stessa
+        ragione — il ramo non e' "wiki migrate contro wiki vecchie", e' "wiki
+        vecchie contro **nessun gateway**".
+
+        A regime costa zero scritture: la migrazione e' idempotente e a wiki
+        gia' a posto non tocca niente. V. ``utils/wiki_migration.py``.
+        """
+        from jenny.utils.wiki_migration import migrate_wikis
+
+        wiki_cfg = getattr(self.config, "wiki", None)
+        wikis_dir = getattr(wiki_cfg, "wikis_dir", "wikis") or "wikis"
+        migrate_wikis(self.config.workspace_path / wikis_dir)
+
+    def _repair_pending_renames(self) -> None:
+        """Finisce i rinomini di progetto interrotti a metà.
+
+        Sta **dopo** ``SessionManager`` e **prima** che agente e canali possano
+        aprire una sessione di progetto, perché è l'unica finestra in cui i file
+        di traccia non li sta guardando nessuno.
+
+        Perché all'avvio e non altrove: il caso che il giornale esiste per
+        rimediare è il processo ucciso fra due ``rename``, e un processo ucciso
+        **riparte**. Su Android quello non è un incidente raro, è il modo normale
+        in cui il processo finisce. A regime costa una ``read_text`` che solleva
+        ``FileNotFoundError``.
+
+        L'``except`` è largo per la stessa ragione dell'``except`` di
+        ``_migrate_wikis``: il ramo non è "rinomini finiti contro rinomini a
+        metà", è "un rinomino a metà contro **nessun gateway**". Un rinomino
+        lasciato aperto lo riprova l'avvio dopo; un gateway che non parte no.
+        """
+        from jenny.session.project_rename import repair_pending_project_renames
+
+        try:
+            for old_key, new_key in repair_pending_project_renames(
+                self.config.workspace_path
+            ):
+                logger.warning(
+                    "Rinomino di progetto ripreso e completato: {} -> {}",
+                    old_key, new_key,
+                )
+        except Exception:
+            logger.opt(exception=True).error(
+                "Ripresa dei rinomini di progetto in sospeso fallita; il gateway "
+                "parte comunque e il prossimo avvio riprova"
             )
 
     def build(self) -> None:
@@ -235,6 +305,7 @@ class GatewayContainer:
             logger.info("Gateway starting without provider - complete onboarding to configure.")
             self.provider = None
         self.session_manager = SessionManager(config.workspace_path)
+        self._repair_pending_renames()
 
         cron_store_path = config.workspace_path / "cron" / "jobs.json"
         self.cron = CronService(cron_store_path)
@@ -345,6 +416,23 @@ class GatewayContainer:
         else:
             logger.info("Atlas: disabled")
 
+        # Register the Gardener system job (idempotent on restart). Nessuno
+        # snapshot pre-run: il giardiniere **aggiunge e promuove**, non riscrive,
+        # e non tocca né il diario (il suo input) né AGENTS.md. Quel che scrive
+        # sono pagine nuove sotto wiki/, che l'utente può correggere leggendole —
+        # a differenza di Dream, che riscrive memoria irrecuperabile.
+        gardener_cfg = config.agents.defaults.gardener
+        if gardener_cfg.enabled:
+            self.cron.register_system_job(CronJob(
+                id="gardener",
+                name="gardener",
+                schedule=gardener_cfg.build_schedule(),
+                payload=CronPayload(kind="system_event"),
+            ))
+            logger.info("Gardener: {}", gardener_cfg.describe_schedule())
+        else:
+            logger.info("Gardener: disabled")
+
         # Register Heartbeat system job (idempotent on restart).
         if hb_cfg.enabled:
             self.cron.register_system_job(CronJob(
@@ -423,6 +511,9 @@ class GatewayContainer:
         # con provider mancante), e questo è il punto che entrambe le nascite
         # attraversano.
         agent.snapshot_before_dream = self._snapshot_before_dream
+        # Il checkpoint generico, per chi non ha il contratto di Dream: il
+        # giardiniere lo chiama con il proprio trigger prima di scrivere pagine.
+        agent.take_snapshot = self._take_snapshot
         return agent
 
     # -- onboarding: creazione differita dell'agent (DeferredAgentActivator) --

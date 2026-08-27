@@ -168,6 +168,25 @@ class ApiClient {
     return res.json();
   }
 
+  /** Progetti dello scope chip: un progetto e' una wiki, quindi e' l'elenco
+   *  delle wiki. Ritorna `{ dir, projects: [{ name, modified }] }`. */
+  async listProjects() {
+    const res = await this._fetch('/api/projects');
+    if (!res.ok) throw new Error(`Projects failed: ${res.status}`);
+    return res.json();
+  }
+
+  /** Cosa porterebbe via la cancellazione di un progetto:
+   *  `{ name, exists, is_project, files, conversation: {files, bytes, messages}, orphan }`.
+   *  `null` se quel nome non e' un progetto. Serve alla conferma, che di una
+   *  cancellazione e' la meta' che la rende sicura. */
+  async describeProject(name) {
+    const res = await this._fetch(`/api/project/describe?name=${encodeURIComponent(name)}`);
+    if (res.status === 404 || res.status === 400) return null;
+    if (!res.ok) throw new Error(`Project describe failed: ${res.status}`);
+    return res.json();
+  }
+
   async getTree(wiki) {
     const url = wiki ? `/api/tree?wiki=${encodeURIComponent(wiki)}` : '/api/tree';
     const res = await this._fetch(url);

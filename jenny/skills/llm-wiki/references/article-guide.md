@@ -45,6 +45,11 @@ If a concept page **would** exceed ~1200 words, do not write it as a single file
 
    - [[summaries/...]]
    ```
+   The `[[<Topic>/<aspect-1>]]` bullets resolve because a link with a `/` matches any page
+   whose path *ends* with it — the `concepts/` prefix is optional, the `<Topic>/` segment is
+   not. `[[<aspect-1>]]` alone would find a same-named page under any other topic, and
+   `[[Elsewhere/<aspect-1>]]` is dead. See the resolution rules in `SKILL.md`.
+
 3. Write each `<aspect-N>.md` as a focused 400–1200 word page.
 4. Update `wiki/index.md` to show the hierarchy with indented bullets under the folder-split entry.
 
@@ -237,7 +242,7 @@ When two sources contradict each other:
 
 1. State both claims explicitly.
 2. Note which source supports each claim.
-3. Add to the article's "Open questions" section **and** the wiki's `CLAUDE.md` research questions.
+3. Add to the article's "Open questions" section **and** the wiki's `AGENTS.md` research questions.
 4. Do NOT silently pick one — contradictions are valuable signal.
 
 Example:

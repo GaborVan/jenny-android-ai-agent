@@ -202,16 +202,19 @@ class TestWriteSizeGuard:
 class TestTheShippedCapOnTheFileItWillMeet:
     """Il tetto di spedizione contro la dimensione vera del file, non contro numeri finti.
 
-    ``DreamConfig.memory_budget_chars`` vale 2.000 e sul Titan 2 ``MEMORY.md``
-    misura 3.019 caratteri: il tetto è vincolante dal primo run, il 151% della
-    soglia. Su questa combinazione l'unica cosa che tiene la feature viva è la
-    clausola "sta rimpicciolendo" del guard — senza, il file non potrebbe più
-    essere potato e nessuna scrittura passerebbe mai più. Gli altri test di
-    questa classe la provano su numeri di comodo; qui si prova sui due che
-    esistono davvero.
+    ``DreamConfig.memory_budget_chars`` vale 3.000 e sul Titan 2 ``MEMORY.md``
+    misura 3.943 caratteri senza review: il tetto è vincolante dal primo run, il
+    131% della soglia. La misura è quella *non potata* di proposito — 3.019 era
+    il valore dopo due passaggi di review, cioè il pavimento che il file toccava
+    solo appena compresso, e tarare un tetto su quello è l'errore che ha portato
+    ``USER.md`` a vivere al 99%. Su questa combinazione l'unica cosa che tiene la
+    feature viva è la clausola "sta rimpicciolendo" del guard — senza, il file
+    non potrebbe più essere potato e nessuna scrittura passerebbe mai più. Gli
+    altri test di questa classe la provano su numeri di comodo; qui si prova sui
+    due che esistono davvero.
     """
 
-    _DEVICE_CHARS = 3019
+    _DEVICE_CHARS = 3943
 
     @pytest.fixture
     def over_budget(self, store):
@@ -219,8 +222,8 @@ class TestTheShippedCapOnTheFileItWillMeet:
         return make_write_size_guard(_report(store, memory=DreamConfig().memory_budget_chars))
 
     def test_the_shipped_cap_is_binding_on_the_measured_file(self, store, over_budget):
-        assert DreamConfig().memory_budget_chars == 2000
-        assert self._DEVICE_CHARS > 2000
+        assert DreamConfig().memory_budget_chars == 3000
+        assert self._DEVICE_CHARS > 3000
 
     def test_a_growing_write_is_refused(self, store, over_budget):
         assert over_budget(store.memory_file, "z" * (self._DEVICE_CHARS + 40)) is not None
@@ -231,11 +234,11 @@ class TestTheShippedCapOnTheFileItWillMeet:
         assert over_budget(store.memory_file, "w" * self._DEVICE_CHARS) is not None
 
     def test_a_shrinking_write_passes_while_still_over_budget(self, store, over_budget):
-        # La via d'uscita, e l'unica: 2.400 caratteri sono ancora il 120% del
+        # La via d'uscita, e l'unica: 3.600 caratteri sono ancora il 120% del
         # tetto e la scrittura passa lo stesso, perché è potatura. Questa è la
         # regola che T1.1 non ha toccato — il commit del run è cambiato, il
         # guard no — ed è ciò che impedisce al livelock di essere definitivo.
-        assert over_budget(store.memory_file, "z" * 2400) is None
+        assert over_budget(store.memory_file, "z" * 3600) is None
 
     def test_a_write_that_lands_under_the_cap_passes(self, store, over_budget):
-        assert over_budget(store.memory_file, "z" * 1999) is None
+        assert over_budget(store.memory_file, "z" * 2999) is None

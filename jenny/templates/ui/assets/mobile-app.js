@@ -2,6 +2,8 @@
 
 import { AppState } from './shared/state.js';
 import { sessionManager } from './shared/session-manager.js';
+import { scopeChip } from './shared/scope-chip.js';
+import { writeSwitch } from './shared/write-switch.js';
 import { showToast } from './shared/utils.js';
 import { i18n } from './shared/i18n.js';
 import { api } from './shared/api-client.js';
@@ -114,6 +116,11 @@ class MobileApp {
       this._updateSidebarTitles();
       this._applyStaticTranslations();
       this.header._refreshTitles();
+      // Il chip dello scope scrive il proprio testo da JS, quindi
+      // _applyStaticTranslations non lo raggiunge: senza questo resterebbe con
+      // le chiavi grezze ("scope.personal") fino al primo cambio di lingua.
+      scopeChip.render();
+      writeSwitch.render();
     });
     i18n.onLocaleChange(() => {
       this._updateSidebarTitles();
@@ -146,7 +153,16 @@ class MobileApp {
       this._navPos = typeof state.pos === 'number' ? state.pos : 0;
       if (state.wikiPage) {
         this.switchMode('wiki', false);
-        this.controllers.wiki.loadWikiPage(state.wiki, state.page || 'index.md', false);
+        // Una entry lasciata da un altro progetto non ci riporta dentro, ma un
+        // Indietro deve pur disegnare qualcosa: si atterra sull'indice del
+        // progetto aperto. Il rifiuto parlante di `loadWikiPage` è per i link,
+        // dove l'utente ha appena chiesto quella pagina; qui non l'ha chiesta.
+        const pin = this.controllers.wiki.pinnedWiki;
+        if (pin && state.wiki && state.wiki !== pin) {
+          this.controllers.wiki.loadWikiPage(pin, 'index.md', false);
+        } else {
+          this.controllers.wiki.loadWikiPage(state.wiki, state.page || 'index.md', false);
+        }
       } else if (state.mode === 'wiki') {
         this.switchMode('wiki', false);
         this.controllers.wiki.loadHome(false);
@@ -326,6 +342,12 @@ class MobileApp {
     } catch (err) {
       console.error('Failed to init sessions:', err);
     }
+    // Il chip dello scope si accende comunque: senza sessione mostra la
+    // personale, che e' lo stato giusto quando non c'e' niente da leggere.
+    scopeChip.init();
+    // Accanto al chip, e per la stessa ragione: senza sessione mostra lo stato
+    // di default (scrive), che è quello giusto quando non c'è niente da leggere.
+    writeSwitch.init();
   }
 
   _initKeyboardShortcuts() {

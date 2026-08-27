@@ -22,7 +22,7 @@ def _make_wiki(
     root = workspace / "wikis" / name
     (root / "wiki").mkdir(parents=True, exist_ok=True)
     header = f"---\nsummary: {scope}\n---\n\n# {name}\n" if scope else f"# {name}\n"
-    (root / "CLAUDE.md").write_text(header, encoding="utf-8")
+    (root / "AGENTS.md").write_text(header, encoding="utf-8")
     for group, pages in (("entities", entities), ("concepts", concepts)):
         for rel, body in (pages or {}).items():
             target = root / "wiki" / group / rel
@@ -86,7 +86,11 @@ class TestInventory:
 
         assert "**main** — Personal projects" in inventory
         assert "**loops** — AI loops" in inventory
-        assert "entities: 1" in inventory
+        # Un conteggio solo, non uno per gruppo: dal 22/08 (T3) la rubrica non
+        # nomina più `entities`/`concepts`, perché sono i gruppi del pattern di
+        # ricerca e un progetto nel formato nuovo ha le pagine piatte. Il numero
+        # vale per entrambe le forme.
+        assert "(1 pages)" in inventory
 
     def test_pages_are_listed_only_for_the_default_wiki(self, store):
         _make_wiki(store.workspace, "main", entities={"ada.md": "# Ada Lovelace"})
@@ -126,7 +130,73 @@ class TestInventory:
     def test_empty_wiki_says_so(self, store):
         _make_wiki(store.workspace, "main")
 
-        assert "no entity or concept pages yet" in store.build_inventory()
+        assert "no pages yet" in store.build_inventory()
+
+    def test_flat_pages_are_listed_too(self, store):
+        """Il difetto che T3 chiude: la rubrica elencava solo `entities/` e
+        `concepts/`, cioè i gruppi del pattern di ricerca. Su un progetto nel
+        formato nuovo — pagine piatte sotto `wiki/` — trovava zero voci e
+        dichiarava «no pages yet» a una cartella piena. Il silenzio più
+        pericoloso: una rubrica che dice "non c'è niente" viene creduta.
+        """
+        wiki = store.workspace / "wikis" / "casa" / "wiki"
+        wiki.mkdir(parents=True)
+        (wiki / "index.md").write_text("# Casa\n", encoding="utf-8")
+        (wiki / "riscaldamento.md").write_text("# Riscaldamento\n", encoding="utf-8")
+        (wiki / "proprietario.md").write_text("# Il proprietario\n", encoding="utf-8")
+
+        inventory = store.build_inventory()
+
+        assert "Riscaldamento" in inventory and "Il proprietario" in inventory
+        # L'indice **è** la mappa, non una voce di rubrica: elencarlo fra le
+        # pagine lo farebbe sembrare contenuto.
+        assert "`index.md`" not in inventory
+        assert "(2 pages)" in inventory
+
+    def test_counting_a_wiki_does_not_open_its_pages(self, store, monkeypatch):
+        """T3.16. Il conteggio per wiki e' un ``len()``, e coi titoli costava una
+        lettura per pagina di **ogni** wiki: sulle 8 wiki vere (188 pagine)
+        l'inventario passava per 248 ``read_text`` e 6,45 ms, contro 60 e 3,98 ms.
+
+        L'asserzione e' su *quali* file si aprono, non su quanti: la wiki che
+        l'inventario non elenca non deve essere letta affatto, e quella che
+        elenca — dove i titoli si stampano davvero — va letta **una volta sola**.
+        Il numero pubblicato resta quello di prima, che e' la meta' che rende
+        questa una prova e non un cronometro.
+        """
+        _make_wiki(
+            store.workspace,
+            "main",
+            entities={"ada.md": "# Ada", "grace.md": "# Grace"},
+        )
+        _make_wiki(
+            store.workspace,
+            "loops",
+            concepts={f"c{i}.md": f"# Concept {i}" for i in range(4)},
+        )
+        opened: list[Path] = []
+        real_read_text = Path.read_text
+
+        def spy(self: Path, *args, **kwargs):
+            opened.append(self)
+            return real_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", spy)
+
+        inventory = store.build_inventory()
+
+        # I conteggi sono ancora quelli: questa e' pura prestazione.
+        assert "**main** — " in inventory and "(2 pages)" in inventory
+        assert "**loops** — " in inventory and "(4 pages)" in inventory
+
+        pages = [
+            p for p in opened
+            if "/wiki/concepts/" in p.as_posix() or "/wiki/entities/" in p.as_posix()
+        ]
+        # Nessuna pagina della wiki non elencata.
+        assert not [p for p in pages if "/loops/" in p.as_posix()]
+        # E quelle elencate, una volta sola a testa.
+        assert sorted(p.name for p in pages) == ["ada.md", "grace.md"]
 
 
 class TestPrompt:

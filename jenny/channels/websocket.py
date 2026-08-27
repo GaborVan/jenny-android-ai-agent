@@ -19,6 +19,7 @@ from jenny.bus.queue import MessageBus
 from jenny.config.paths import get_uploads_dir
 from jenny.config.schema import Base
 from jenny.pydantic_compat import Field, field_validator, model_validator
+from jenny.security.workspace_access import WORKSPACE_READONLY_METADATA_KEY
 from jenny.session.webui_turns import websocket_turn_wall_started_at
 
 if TYPE_CHECKING:
@@ -58,6 +59,11 @@ from jenny.channels.ws_parsing import (
     classify_media_item,
 )
 from jenny.channels.ws_sender import OutboundSenderMixin
+from jenny.session.keys import (
+    PROJECT_SESSION_PREFIX,
+    is_project_session_key,
+    is_valid_project_name,
+)
 from jenny.utils.media_decode import (
     FileSizeExceeded,
     save_base64_data_url,
@@ -540,6 +546,86 @@ class WebSocketChannel(OutboundSenderMixin):
             paths.append(saved)
         return paths, None
 
+    # Il rifiuto di un ``chat_id`` ``project:`` il cui nome non puo' essere un
+    # progetto. Testo e motivo stanno **in un punto solo** perche' li mandano due
+    # frame diversi (``attach`` e ``message``) e devono dire la stessa cosa.
+    #
+    # Inglese e non una chiave i18n, come le risposte sul progetto sparito in
+    # ``agent/loop.py``: il client mostra ``detail`` cosi' com'e'
+    # (``mobile-jenny.js``, ``case 'error'``), e una chiave nuova nei file i18n
+    # e' un file di un altro proprietario. ``reason`` e' la parte per la
+    # macchina, sulla forma di ``image_rejected``.
+    _INVALID_PROJECT_REASON = "invalid_project_name"
+    _INVALID_PROJECT_DETAIL = (
+        "That project cannot be opened: its folder name is not a valid project name "
+        "(letters, numbers, dot, dash and underscore only, no spaces or accents). "
+        "Rename the folder — you can ask me to do it from the personal chat — then "
+        "pick it again from the chip above the message box."
+    )
+
+    @staticmethod
+    def _envelope_chat_id(envelope: dict[str, Any]) -> str | None:
+        """Il ``chat_id`` di un frame: la chat personale, quella di un progetto, o un no.
+
+        **Qui il ``chat_id`` del frame era ignorato** e sostituito dalla costante
+        ``WEBUI_DEFAULT_CHAT_ID``: era il modo in cui la collassata "una sola
+        sessione" era stata implementata, e va bene finche' di conversazioni ce
+        n'e' una. Con le sessioni-progetto diventa il punto in cui un messaggio
+        mandato a ``project:patreon`` finiva nella chat personale — e non lo
+        diceva nessuno, perche' dal lato client sembrava partito.
+
+        L'elenco delle forme accettate resta chiuso, e la verifica del nome e'
+        quella di ``jenny.session.keys``: un ``chat_id`` che non riconosciamo
+        cade sulla chat personale invece di aprire una conversazione inventata.
+        Il ``chat_id`` e' anche la chiave del *thread* su disco, quindi lasciar
+        passare una stringa arbitraria vorrebbe dire lasciar creare file.
+
+        **Ma per un ``chat_id`` che *e'* nella forma ``project:`` e sbaglia solo
+        il nome, la caduta sulla chat personale era la risposta sbagliata**, e
+        ritorna ``None`` — cioe' il frame va rifiutato. Un nome come
+        ``Ricerca ETF`` o ``citta``-con-l'accento non passa
+        ``is_valid_project_name``, e il frame che lo portava finiva sulla
+        conversazione personale: scope ``default()`` (l'installazione intera
+        scrivibile), ``session_kind`` ``personal`` (quindi il contenuto alimenta
+        ``MEMORY.md`` via Dream — la cosa precisa che le sessioni-progetto
+        esistono per impedire) e la trascrizione personale servita nella schermata
+        di un progetto. Tre guasti insieme, e nessuno dei tre visibile: l'eco
+        ``attached`` non la guarda nessuno.
+
+        La differenza fra i due esiti non e' capricciosa: davanti a spazzatura
+        (``chat_id`` assente, ``"pippo"``, un numero) la chat personale e'
+        l'unica risposta sensata — e' la conversazione, e non c'e' niente da
+        rifiutare. Davanti a ``project:<qualcosa>`` il client ha detto
+        esplicitamente *quale* conversazione vuole: dargliene un'altra in
+        silenzio e' peggio di dire no.
+        """
+        raw = envelope.get("chat_id")
+        if not isinstance(raw, str) or not is_project_session_key(raw):
+            return WEBUI_DEFAULT_CHAT_ID
+        if not is_valid_project_name(raw[len(PROJECT_SESSION_PREFIX):]):
+            return None
+        return raw
+
+    async def _refuse_invalid_project(self, connection: Any, envelope: dict[str, Any]) -> None:
+        """Dice no, ad alta voce, a un frame che nomina un progetto impossibile.
+
+        Il nome ricevuto **non** viene rimandato indietro nel frame di errore:
+        arriva da un client, quindi la sua lunghezza e il suo contenuto non sono
+        nostri, e il chip sa gia' quale progetto ha chiesto. Nel log invece ci
+        sta, troncato — e' il solo posto in cui si scopre *quale* cartella.
+        """
+        raw = envelope.get("chat_id")
+        shown = raw[:80] if isinstance(raw, str) else raw
+        self.logger.warning(
+            "frame refused: {!r} is project-shaped but not a valid project name", shown
+        )
+        await self._send_event(
+            connection,
+            "error",
+            detail=self._INVALID_PROJECT_DETAIL,
+            reason=self._INVALID_PROJECT_REASON,
+        )
+
     async def _dispatch_envelope(
         self,
         connection: Any,
@@ -549,13 +635,23 @@ class WebSocketChannel(OutboundSenderMixin):
         """Route one typed inbound envelope (``attach`` / ``message`` / ...)."""
         t = envelope.get("type")
         if t == "attach":
-            cid = WEBUI_DEFAULT_CHAT_ID
+            cid = self._envelope_chat_id(envelope)
+            if cid is None:
+                # Niente ``_attach``: agganciare la connessione a una chiave che
+                # nessun turno potra' mai usare la iscriverebbe a un canale morto.
+                await self._refuse_invalid_project(connection, envelope)
+                return
             self._attach(connection, cid)
             await self._send_event(connection, "attached", chat_id=cid)
             await self._hydrate_after_subscribe(cid)
             return
         if t == "message":
-            cid = WEBUI_DEFAULT_CHAT_ID
+            cid = self._envelope_chat_id(envelope)
+            if cid is None:
+                # Prima di leggere il contenuto e **prima** di decodificare i
+                # media: un frame rifiutato non deve scrivere niente su disco.
+                await self._refuse_invalid_project(connection, envelope)
+                return
             content = envelope.get("content")
             if not isinstance(content, str):
                 await self._send_event(connection, "error", detail="missing content")
@@ -592,6 +688,13 @@ class WebSocketChannel(OutboundSenderMixin):
             self._attach(connection, cid)
             await self._hydrate_after_subscribe(cid)
             metadata: dict[str, Any] = {"remote": getattr(connection, "remote_address", None)}
+            # Sola lettura: viaggia **nel messaggio**, come lo scope. Il server
+            # non la tiene da nessuna parte — se la tenesse potrebbe raccontare
+            # al client uno stato diverso da quello con cui il messaggio e'
+            # partito, che e' il solo guasto che conta qui. Solo ``True`` accende
+            # (v. ``readonly_from_metadata``).
+            if envelope.get(WORKSPACE_READONLY_METADATA_KEY) is True:
+                metadata[WORKSPACE_READONLY_METADATA_KEY] = True
             if envelope.get("webui") is True:
                 metadata["webui"] = True
                 metadata.update(self._transcripts.client_turn_metadata(envelope.get("turn_id")))

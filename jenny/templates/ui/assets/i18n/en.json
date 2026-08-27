@@ -25,6 +25,7 @@
     "showThinking": "Show thinking",
     "openInEditor": "Open in editor",
     "failedToLoad": "Failed to load",
+    "historyLoadFailed": "Could not load this conversation's history. It will retry on reconnect.",
     "couldNotOpen": "Could not open {path}",
     "unknown": "Unknown",
     "fullAccess": "Full access",
@@ -420,7 +421,11 @@
       "soul": "Who Jenny is and how she behaves: her character, the way she talks, what she does and what she will never do. Plus the standing rules you have given her — how to address you, what to steer clear of, where to tread carefully.\n\nDream, the consolidation pass that runs after conversations, is what maintains it: a correction you make in passing ends up here. You can read it and fix it, but you rarely need to write here by hand.\n\nNot here: facts about you (USER.md), working conventions (AGENTS.md), repeatable procedures (Skills). Nor how the app itself behaves: what a tool accepts, what the sandbox refuses, where a limit sits — that is the same on every install, and the system prompt already tells her.",
       "memory": "Long-term memory: what has to survive from one session to the next — project context, useful facts, notes worth keeping.\n\nDream, the consolidation pass that runs after conversations, is what maintains it. You can read it and correct it, but you rarely need to write here by hand.\n\nNot here: facts about you (USER.md), working conventions (AGENTS.md), repeatable procedures (Skills).",
       "heartbeat": "The recurring checks Jenny goes through on every heartbeat.\n\nWrite them under \"## Active Tasks\": that is the only section that gets read. When a task is done, delete it instead of leaving it there — a list of finished work is re-read on every beat.\n\nNot here: one-off requests (just ask in chat) and repeatable procedures (Skills)."
-    }
+    },
+    "deleteProjectConfirm": "Delete the project “{name}”? The folder goes, and so does the conversation: they are two different things on disk, and this removes both.",
+    "deleteProjectConfirmWithChat": "Delete the project “{name}”? The folder goes, and the conversation with it: {count} messages.",
+    "deleteProjectFailed": "I could not delete the project “{name}”. Nothing was changed.",
+    "deletedProject": "Project “{name}” deleted, conversation included"
   },
   "apps": {
     "jennyApps": "Jenny Apps",
@@ -492,7 +497,8 @@
     "severitySuggest": "suggest",
     "severityWarn": "warn",
     "severityError": "error",
-    "submit": "Submit"
+    "submit": "Submit",
+    "onlyThisProject": "This view only shows the {name} project."
   },
   "graph": {
     "failedToLoad": "Failed to load graph",
@@ -645,5 +651,54 @@
       "finish": "Done",
       "pairedToast": "Telegram paired!"
     }
+  },
+  "scope": {
+    "personal": "jenny",
+    "change": "Change scope",
+    "personalSection": "Personal session",
+    "projectsSection": "Projects",
+    "loading": "Loading...",
+    "noProjects": "No projects yet",
+    "loadFailed": "Could not read the project list: what you see may be incomplete",
+    "newProject": "New project...",
+    "newProjectName": "Project name:",
+    "newProjectPlaceholder": "e.g. patreon",
+    "newProjectSeed": "What is “{name}” about?",
+    "newProjectSeedPlaceholder": "one line: what belongs here and what does not",
+    "seedRequired": "One line about the project is needed — without it the chat starts on nothing.",
+    "invalidName": "Letters, numbers, dot, dash and underscore, never two dots in a row; it must start with a letter or a digit and fit in 64 characters.",
+    "unopenableSection": "Cannot be opened",
+    "unopenableInvalidName": "These folders are there, but their name cannot be a conversation name. {rule} Ask me from the personal chat to rename one.",
+    "unopenableOther": "These folders are there, but they do not open as a conversation. Ask me from the personal chat to take a look.",
+    "nameTaken": "A project called “{name}” already exists. If it was left half-built I will finish it, otherwise the creation will be refused.",
+    "nameTakenContinue": "Try anyway",
+    "createFailed": "Could not create: {error}",
+    "createRejected": "Could not create “{name}”: either it already exists, or a folder with that name is in the way and is not a project.",
+    "createSeedTooLong": "The scope line is too long: shorten it and try again.",
+    "createWikiOff": "Wikis are switched off in settings, and a project is a wiki: turn them back on and try again.",
+    "createInternal": "Creation failed on a gateway error. Try again.",
+    "created": "Project “{name}” created",
+    "askAbout": "Ask something about {name}...",
+    "ago": {
+      "now": "just now",
+      "minutes": "{n} min ago",
+      "hours": "{n} h ago",
+      "yesterday": "yesterday",
+      "days": "{n} days ago"
+    },
+    "leftoverChatTitle": "“{name}” still has a conversation",
+    "leftoverChatBody": "This name still carries the chat of a project that is gone: {count} messages. I can pick it up again — if you deleted it by mistake it is all there — or start clean and throw it away.",
+    "leftoverChatBodyNoCount": "This name still carries the chat of a project that is gone. I can pick it up again — if you deleted it by mistake it is all there — or start clean and throw it away.",
+    "leftoverChatKeep": "Pick it up",
+    "leftoverChatDiscard": "Start clean"
+  },
+  "write": {
+    "write": "Writes",
+    "readonly": "Read-only",
+    "change": "Write or read-only",
+    "writeHint": "This chat can change files. Tap to switch to read-only.",
+    "readonlyHint": "This chat changes nothing on the device. Tap to allow writing again.",
+    "askReadonly": "Ask something (read-only)…",
+    "askAboutReadonly": "Ask about {name} (read-only)…"
   }
 }

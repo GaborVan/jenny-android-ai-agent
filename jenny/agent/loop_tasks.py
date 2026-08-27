@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from jenny.agent.cron_turns import CronTurnCoordinator
     from jenny.agent.session_locks import SessionLocks
     from jenny.agent.subagent import SubagentManager
+    from jenny.agent.tools.file_state import FileStateStore
     from jenny.agent.turn_epochs import TurnEpochs, TurnToken
     from jenny.bus.queue import MessageBus
     from jenny.bus.runtime_events import RuntimeEventPublisher
@@ -44,6 +45,7 @@ class LoopTasksMixin:
         _active_tasks: dict[str, list[asyncio.Task]]
         _background_tasks: list[asyncio.Task]
         _cron_turns: CronTurnCoordinator
+        _file_state_store: FileStateStore
         _pending_queues: dict[str, asyncio.Queue]
         _running: bool
         _session_locks: SessionLocks
@@ -177,6 +179,23 @@ class LoopTasksMixin:
         ripped out from under it. This reuses the "old enough to prune"
         determination the caller already made; it does not add a second,
         independent age check.
+
+        **Quattro registri, non tre** (T2.11). ``_file_state_store`` non stava
+        qui, e ``AgentLoop`` una voce per chiave di sessione la crea **sempre**,
+        a ogni turno (``bind_file_states`` in ``loop.py``): Dream
+        (``dream:<timestamp>``) e Atlas (``atlas:<timestamp>``) coniano una
+        chiave nuova per esecuzione, quindi era una voce morta per run per la
+        vita del processo. Sono byte — 72 per un ``FileStates`` vuoto, e quelle
+        voci non vengono nemmeno usate, perche' quei run portano un
+        ``FileStates`` esplicito nella loro cassetta — ma illimitati per
+        costruzione su un processo pensato per stare su settimane. Passando da
+        qui il tetto e' quello che il chiamante ha gia' scelto (``keep=10``).
+
+        Chi conia una chiave per esecuzione **e** non puo' aspettare la potatura
+        se la dimentica da se' alla fine del run: v. ``gardener._prune_sessions``
+        e ``atlas._prune_sessions``. Il cron (``cron:<job_id>``) e l'heartbeat
+        (chiave nuda) non entrano in questo discorso: le loro chiavi sono
+        **stabili**, quindi il loro spazio e' finito da se'.
         """
         for key in keys:
             tasks = self._active_tasks.get(key)
@@ -187,6 +206,7 @@ class LoopTasksMixin:
             self._active_tasks.pop(key, None)
             self._session_locks.evict(key)
             self.sessions.invalidate(key)
+            self._file_state_store.drop(key)
 
     async def _cancel_active_goal_if_any(self, key: str) -> None:
         """Reset a hard-cancelled turn's sustained goal so it stops being ``active``.

@@ -9,6 +9,7 @@ from jenny.agent.tools.result import ToolResult
 
 if TYPE_CHECKING:
     from jenny.agent.tools.file_state import FileStates
+    from jenny.agent.tools.memory_entries import MemoryEntryTool
 
 
 class ToolRegistry:
@@ -29,6 +30,14 @@ class ToolRegistry:
         # l'annotazione di un attributo viene valutata a runtime e l'import è
         # solo TYPE_CHECKING.
         self.file_states: "FileStates | None" = None
+        # Stessa forma e stessa ragione di ``file_states``: il registry di
+        # Dream espone il tool per voci perché il chiamante possa chiedere
+        # com'è andato il run in *voci* — quante entrate, quante sostituite,
+        # quante già presenti — invece di ristimarlo dai file. Dichiarato qui
+        # e non assegnato al volo dal builder: un attributo che esiste solo
+        # dopo che qualcuno lo ha scritto è invisibile a chi legge la classe,
+        # e il type checker lo segnalava.
+        self.memory_entries: "MemoryEntryTool | None" = None
         # Contatore monotono delle tool call passate da questo registry.
         # Serve a un tool per sapere se *altri* tool hanno girato dopo la sua
         # ultima chiamata: e per-registry, non globale, perche l'informazione

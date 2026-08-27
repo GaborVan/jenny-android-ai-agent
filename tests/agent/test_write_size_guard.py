@@ -9,8 +9,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from jenny.agent.tools.apply_patch import ApplyPatchTool
+from jenny.agent.tools.context import ToolContext
 from jenny.agent.tools.file_state import FileStates
 from jenny.agent.tools.filesystem import EditFileTool, WriteFileTool, WriteSizeGuard
+from jenny.agent.tools.loader import ToolLoader
+from jenny.agent.tools.registry import ToolRegistry
+from jenny.config.schema import ToolsConfig
 
 
 def _refuse_over(limit: int, seen: list[tuple[Path, str]] | None = None) -> WriteSizeGuard:
@@ -365,3 +369,46 @@ class TestApplyPatchGuard:
         assert target.read_text(encoding="utf-8") == "original\n"
         assert seen == []
         assert states.writes_refused_budget == 0
+
+
+class TestTheCapsAreAdvisoryForTheMainAgent:
+    """I tetti dei file di memoria vincolano Dream, non l'agente principale.
+
+    Il guard viene costruito solo in ``dream_cycle`` e passato solo a
+    ``build_dream_tools``: il registry che l'agente principale riceve da
+    ``tools/loader.py`` non ne ha uno, quindi un turno di chat scrive ``USER.md``
+    oltre il budget e nessuno lo ferma. Misurato sul Titan 2: 2.399 caratteri su
+    2.400.
+
+    È una scelta, non una svista, e questo test la tiene ferma. Un rifiuto in
+    mezzo a una conversazione arriverebbe all'unico scrittore che ha l'utente lì
+    davanti, e scambierebbe un fallimento visibile con uno invisibile: il fatto
+    appena chiesto non verrebbe salvato. Il numero resta un bersaglio per il
+    review pass, non un muro — v. ``docs/using/memory.md``.
+    """
+
+    async def test_a_write_far_past_every_budget_is_not_refused(self, tmp_path):
+        ctx = ToolContext(
+            config=ToolsConfig(), workspace=str(tmp_path), file_states=FileStates(),
+        )
+        registry = ToolRegistry()
+        ToolLoader().load(ctx, registry)
+
+        # Sedici volte il budget più alto che si possa configurare di default.
+        huge = "x" * 50_000
+        result = await registry.execute("write_file", {"path": "USER.md", "content": huge})
+
+        assert "Refused" not in result
+        assert (tmp_path / "USER.md").read_text(encoding="utf-8") == huge
+
+    async def test_the_same_holds_for_the_memory_file(self, tmp_path):
+        ctx = ToolContext(
+            config=ToolsConfig(), workspace=str(tmp_path), file_states=FileStates(),
+        )
+        registry = ToolRegistry()
+        ToolLoader().load(ctx, registry)
+
+        huge = "y" * 50_000
+        await registry.execute("write_file", {"path": "memory/MEMORY.md", "content": huge})
+
+        assert (tmp_path / "memory" / "MEMORY.md").read_text(encoding="utf-8") == huge

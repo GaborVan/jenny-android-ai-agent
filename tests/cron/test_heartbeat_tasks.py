@@ -14,6 +14,7 @@ from jenny.cron.could_not_check import (
     ESCALATION_ASK_LIMIT,
     CouldNotCheckMark,
     could_not_check_reason,
+    is_only_markers,
     parse_could_not_check_marks,
     parse_delegated_marks,
     parse_ok_marks,
@@ -805,6 +806,33 @@ class TestTheSilenceInstruction:
 
         assert "Do not tell them again" in block
         assert "EXACTLY ONCE" not in block
+
+
+class TestRecognisingAMarkerFromOutside:
+    """``is_only_markers`` sta qui perché qui vive la grammatica dei marcatori,
+    ma il consumatore è il tool ``message``: deve poter riconoscere un marcatore
+    *prima* di consegnarlo all'utente come se fosse un avviso."""
+
+    def test_a_marker_line_is_recognised_with_its_markdown_noise(self) -> None:
+        assert is_only_markers("CHECK_OK 1")
+        assert is_only_markers("- CHECK_OK 1")
+        assert is_only_markers("**CHECK_OK 1**")
+        assert is_only_markers("CHECK_OK 1\nCHECK_FAILED 2: rotto")
+
+    def test_all_four_words_are_recognised(self) -> None:
+        for marker in ("CHECK_OK", "CHECK_FAILED", "CHECK_DELEGATED", "CHECK_WARNED"):
+            assert is_only_markers(f"{marker} 1"), marker
+
+    def test_a_real_sentence_is_not_a_marker(self) -> None:
+        assert not is_only_markers("Acerello è al 9%, dagli acqua")
+        assert not is_only_markers("Acerello è al 9%\nCHECK_WARNED 1")
+
+    def test_empty_is_not_a_marker(self) -> None:
+        """Vuoto è vuoto, e chi chiama lo distingue prima: un ``True`` qui
+        darebbe al modello la spiegazione sbagliata."""
+        assert not is_only_markers("")
+        assert not is_only_markers("   \n  ")
+        assert not is_only_markers(None)
 
 
 class TestThePositiveMarker:

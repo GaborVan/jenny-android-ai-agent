@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import builtins
+import contextvars
 import importlib
 import importlib.util
 import io
@@ -72,6 +73,23 @@ logger = logging.getLogger(__name__)
 # process, was an unwinnable arms-race (guarded code can reach modules via
 # `sys.modules`/`os.sys` regardless), and provided no real containment given
 # `os`/`sys` are allowed. It only added a global-state hazard. Removed.
+#
+# THE READ-ONLY TURN IS ON THIS SIDE OF THE BOUNDARY TOO, and that is the half
+# the older notes left out. The accepted open door is a raw thread reached
+# through an allowed module's internals — `asyncio.base_events.threading.Thread`,
+# `asyncio.futures.concurrent.futures.ThreadPoolExecutor` (see
+# `TestKnownRemainingDoors` and the comment above `_guard_state_snapshot`) — and
+# it bypasses BOTH halves of the turn's policy, not just the workspace path
+# boundary: `_guarded_exec_is_active()` is thread-local and reads False on a
+# thread we never patched, so `_refuse_write_if_readonly` becomes a no-op there.
+# Measured 23/08/2026 through `PythonExecTool.execute`: inside a read-only turn,
+# with `restrict_to_workspace` on and off alike, a raw thread's `open(p, 'w')`
+# writes. The asyncio hops carry both halves across
+# (`_carry_turn_across_thread`); a raw thread carries neither.
+# Consequence for anything that *describes* the switch — the prompt block in
+# `templates/agent/readonly.md`, `.agent/security.md`: the read-only turn is an
+# instruction backed by tool refusals, and it must not be written up as a
+# boundary that holds against code that goes looking for a way round it.
 
 _import_guard_state = threading.local()
 
@@ -342,6 +360,44 @@ def _path_guard_bypass() -> Iterator[None]:
         _path_guard_state.bypass = previous
 
 
+# ---------------------------------------------------------------------------
+# "C'è un exec guardato su questo thread?" — NON è "c'è un confine di path"
+# ---------------------------------------------------------------------------
+#
+# I due gate sono diversi e confonderli è stato un buco vero. Ogni wrapper di
+# path di questo file si apre su `_active_path_boundary()`, che è `None` in TRE
+# casi: codice host, finestra di bypass, **e un exec guardato senza
+# `restrict_to_workspace`**. Per il confine di path quel terzo caso è
+# giustamente un passthrough — non c'è nessuna radice da far rispettare — ma la
+# SOLA LETTURA non è una questione di dove: è una proprietà del TURNO, e con
+# `restrict_to_workspace` spento ogni rifiuto di scrittura veniva saltato
+# insieme al confine (misurato: `os.remove`, `shutil.rmtree`, `open(..., 'w')`
+# tutti riusciti durante un turno in sola lettura).
+#
+# Da qui il secondo gate. Il segnale "sta girando codice del modello su questo
+# thread" esiste già ed è `_import_guard_state.rules`: lo scrive `_enter_guard`
+# in ENTRAMBE le modalità, lo azzera `_exit_guard`, e `_carry_guard_state` lo
+# usa esattamente così (`snapshot[4] is None` ⇒ nessun guard, callable
+# invariata). Non serve un terzo pezzo di stato.
+#
+# PERCHÉ IL BYPASS SPEGNE ANCHE QUESTO. Dentro una finestra di bypass girano il
+# macchinario della policy, il rendering dei traceback e il `logging` — e un
+# handler su file apre in scrittura attraverso il `builtins.open` patchato. Se
+# il rifiuto valesse anche lì, un turno in sola lettura non riuscirebbe più a
+# *loggare* il proprio rifiuto. Le mutazioni vere sono già state controllate
+# all'ingresso del wrapper, prima del bypass.
+def _guarded_exec_is_active() -> bool:
+    """True se su QUESTO thread sta girando codice del modello, guardato.
+
+    Vale in entrambe le modalità di ``restrict_to_workspace``, al contrario di
+    ``_active_path_boundary()``. Vedi il commento qui sopra per il perché i due
+    gate non sono lo stesso gate.
+    """
+    if getattr(_path_guard_state, "bypass", False):
+        return False
+    return getattr(_import_guard_state, "rules", None) is not None
+
+
 def _active_path_boundary() -> str | None:
     """Radice di workspace da far rispettare sul thread corrente, o None.
 
@@ -355,6 +411,22 @@ def _active_path_boundary() -> str | None:
     if getattr(_path_guard_state, "bypass", False):
         return None
     return getattr(_path_guard_state, "boundary", None)
+
+
+# Caratteri di modo che rendono un ``open`` una scrittura. ``+`` incluso: ``r+``
+# apre in lettura *e* scrittura, e vale come scrittura. Un modo non-stringa (o
+# assente) e' lettura: e' il default di ``open``.
+_WRITE_MODE_CHARS = frozenset("wxa+")
+
+
+def _is_write_mode(mode: Any) -> bool:
+    """True se questo ``open`` puo' modificare il file.
+
+    Serve perche' il confine non e' lo stesso nei due versi: dentro una
+    sessione-progetto si legge in tutto il workspace e si scrive solo nella
+    cartella del progetto (v. ``_resolve_workspace_write``).
+    """
+    return isinstance(mode, str) and any(ch in _WRITE_MODE_CHARS for ch in mode)
 
 
 def _active_path_base() -> str | None:
@@ -745,15 +817,23 @@ def _with_exec_notes(stderr: str) -> str:
 # il salto: un `Path(...).read_text` non ancora chiamato, o una lambda. Che è
 # esattamente come si scrive normalmente.
 #
-# LA SCELTA: riportare il guard attraverso il salto. Le due funzioni sono
+# LA SCELTA: riportare il TURNO attraverso il salto. Le due funzioni sono
 # patchate come tutto il resto in questo file — a livello di processo, in modo
 # idempotente e GUARD-GATED: se il thread chiamante non ha un guard attivo la
 # callable viene restituita così com'è e il codice host non paga né cambia. Se
-# ce l'ha, la callable viene avvolta in un wrapper che INSTALLA lo stato del
-# guard sul worker per la sola durata della chiamata e RIPRISTINA lo stato
-# precedente in `finally` — anche in caso di eccezione, perché il worker è di
-# un pool riciclato e lasciarcelo sopra sarebbe esattamente la perdita che
-# `_enter_guard` cerca di evitare.
+# ce l'ha, la callable passa da `_carry_turn_across_thread`, che INSTALLA lo
+# stato del guard sul worker per la sola durata della chiamata e RIPRISTINA lo
+# stato precedente in `finally` — anche in caso di eccezione, perché il worker è
+# di un pool riciclato e lasciarcelo sopra sarebbe esattamente la perdita che
+# `_enter_guard` cerca di evitare — E fa girare la callable dentro una copia del
+# `contextvars.Context` del turno.
+#
+# QUELLA SECONDA METÀ MANCAVA, e per un anno il confine "teneva" mentre le due
+# politiche del TURNO non attraversavano (T4.13, misurato il 23/08): un
+# `await loop.run_in_executor(None, lambda: open(p, 'w').write(...))` scritto dal
+# modello scriveva durante un turno in sola lettura e scriveva fuori dal
+# progetto. Leggere `_carry_turn_across_thread` prima di aggiungere un salto:
+# portarne una sola è precisamente il difetto, non un dettaglio di stile.
 #
 # Le alternative scartate. TOGLIERE `asyncio` dall'allowlist chiude il buco in
 # una riga ma toglie una capability che il modello usa. ACCETTARE E DOCUMENTARE
@@ -767,6 +847,13 @@ def _with_exec_notes(stderr: str) -> str:
 #
 #     asyncio.base_events.threading.Thread(target=...)          # thread grezzo
 #     asyncio.futures.concurrent.futures.ThreadPoolExecutor()   # pool grezzo
+#
+# E su un thread grezzo mancano ENTRAMBI i segnali, non solo il confine sui
+# percorsi: `_guarded_exec_is_active()` e' thread-local, quindi la' e' False e
+# `_refuse_write_if_readonly` diventa un no-op; e un thread nuovo parte con un
+# `contextvars.Context` vuoto, quindi anche `current_turn_is_readonly()` legge
+# il default. Cioe' togliere il gate thread-local non chiuderebbe la porta —
+# misurato il 23/08 (T4.16).
 #
 # Non sono coperte qui, e non per dimenticanza: coprirle vorrebbe dire patchare
 # `threading.Thread` a livello di processo, cioè mettersi in mezzo a OGNI
@@ -816,11 +903,34 @@ def _apply_capture(state: tuple[Any, Any]) -> None:
     _stream_capture_state.stdout, _stream_capture_state.stderr = state
 
 
-def _carry_guard_state(func: Any) -> Any:
-    """Avvolge *func* perché giri col guard di QUESTO thread su un altro.
+def _carry_turn_across_thread(func: Any) -> Any:
+    """**L'unico ponte fra un thread e l'altro in questo stack.** Porta DUE metà.
 
-    Restituisce *func* invariata quando non c'è nessun guard attivo: è il gate
-    che rende il patch inerte per il codice host.
+    Un turno di ``python_exec`` tiene la propria politica in due posti, e i due
+    posti sono giusti così — v. il commento su ``_path_guard_state`` e la nota di
+    T4.2/T4.3: **non vanno unificati**, questa funzione unifica il *ponte* e non
+    la memoria.
+
+    1. **Thread-local** (``_path_guard_state`` / ``_import_guard_state``): il
+       confine di percorso, la base, i prefissi di runtime, le regole di import.
+       Sono per-thread perché i wrapper sono di processo, entrati da thread
+       arbitrari, e ``bypass`` è protezione di rientranza *del thread che
+       esegue*. Si copiano e si reinstallano, ripristinando in ``finally`` quel
+       che il worker aveva: il pool è riciclato.
+    2. **ContextVar** (il ``contextvars.Context`` del turno): la sola lettura
+       (``current_turn_is_readonly``) e lo scope di scrittura
+       (``current_tool_workspace``). Sono per-turno perché molti turni
+       concorrenti condividono un thread. ``loop.run_in_executor`` **non** copia
+       il contesto, quindi sul worker tornavano al proprio default.
+
+    **Portarne una sola è il difetto di T4.3, e si è ripresentato un salto più in
+    fuori.** Misurato il 23/08 attraverso ``await PythonExecTool.execute()``: un
+    ``await loop.run_in_executor(None, lambda: open(p, 'w').write(...))`` scritto
+    dal modello portava il thread-local (quindi il confine di percorso valeva) e
+    perdeva il ContextVar — cioè scriveva durante un turno in **sola lettura**, e
+    scriveva su ``SOUL.md`` da dentro una sessione-progetto. ``asyncio.to_thread``
+    non era bucata, ma solo perché la ``to_thread`` della stdlib si copia il
+    contesto da sé: una copertura per caso, non per costruzione.
 
     Viaggiano anche i buffer di cattura, e non è un extra: finché il redirect
     era globale, ciò che il worker stampava finiva comunque nell'output
@@ -828,26 +938,56 @@ def _carry_guard_state(func: Any) -> Any:
     ``await asyncio.to_thread(qualcosa_che_stampa)`` diventerebbe muto per il
     modello. Due thread che scrivono nello stesso ``StringIO`` è esattamente
     quel che succedeva prima.
+
+    **Va chiamata sul thread che parte, non sul worker**: è là che le due metà
+    esistono ancora. Il contesto copiato è un oggetto nuovo a ogni chiamata,
+    quindi ``Context.run`` non può trovarlo già entrato — nemmeno quando il
+    codice del modello, già dentro una copia, ne fa un altro salto.
     """
-    snapshot = _guard_state_snapshot()
-    if snapshot[4] is None:
-        return func
     # `bypass` non si trasporta mai: il worker parte con il confine acceso.
+    snapshot = _guard_state_snapshot()
     carried = (snapshot[0], snapshot[1], snapshot[2], False, snapshot[4])
     capture = _capture_snapshot()
+    context = contextvars.copy_context()
 
-    def _guarded(*args: Any, **kwargs: Any) -> Any:
+    def _carried(*args: Any, **kwargs: Any) -> Any:
         previous_guard = _guard_state_snapshot()
         previous_capture = _capture_snapshot()
         _apply_guard_state(carried)
         _apply_capture(capture)
         try:
-            return func(*args, **kwargs)
+            return context.run(func, *args, **kwargs)
         finally:
             _apply_guard_state(previous_guard)
             _apply_capture(previous_capture)
 
-    return _guarded
+    return _carried
+
+
+def _carry_guard_state(func: Any) -> Any:
+    """Il ponte, con il **gate** che rende inerti i patch globali.
+
+    ``asyncio.to_thread`` e ``BaseEventLoop.run_in_executor`` sono patchate a
+    livello di processo: le attraversa anche il gateway, non solo il codice del
+    modello. Senza questo gate ogni salto in executor dell'host si porterebbe
+    dietro il contesto del turno — un cambiamento di semantica per tutta
+    l'applicazione, chiesto da nessuno — e pagherebbe una copia per niente.
+
+    Il gate è "su QUESTO thread sta girando codice del modello, guardato", cioè
+    le regole di import: sono l'unica delle due metà che ``_enter_guard`` mette
+    in **entrambe** le modalità di ``restrict_to_workspace``, quindi è il
+    predicato che non si spegne quando il confine di percorso non c'è — la
+    stessa scelta, e per la stessa ragione, di ``_guarded_exec_is_active``.
+
+    I due ponti interni allo stack — ``run_python_async`` e
+    ``_ContextBoundNamespace`` — chiamano invece ``_carry_turn_across_thread``
+    diretta: partono dal thread dell'event loop, dove un guard non c'è per
+    definizione (lo monta il worker), e sono proprio loro a dover portare il
+    contesto.
+    """
+    if getattr(_import_guard_state, "rules", None) is None:
+        return func
+    return _carry_turn_across_thread(func)
 
 
 def _patch_asyncio_thread_hops() -> None:
@@ -876,6 +1016,46 @@ def _patch_asyncio_thread_hops() -> None:
 
     _guarded_run_in_executor._jenny_real_fn = real_run_in_executor  # type: ignore[attr-defined]
     loop_cls.run_in_executor = _guarded_run_in_executor  # type: ignore[method-assign]
+
+
+def _refuse_write_if_readonly(op: str) -> None:
+    """Chiude una mutazione quando il turno è in sola lettura.
+
+    Funzione di modulo perché la usano tutti i wrapper globali di questo file —
+    ``os.open`` (solo con flag di scrittura), i mutatori di ``os``,
+    ``os.symlink``, ``shutil.rmtree``, ``io.open``, ``io.FileIO``,
+    ``builtins.open``. Import locale: a livello di modulo ``workspace_access``
+    chiuderebbe un ciclo.
+
+    **IL GATE STA QUI DENTRO, ed è ``_guarded_exec_is_active()``.** Due
+    conseguenze, entrambe volute:
+
+    * i chiamanti la invocano PRIMA del proprio ``if boundary is None``. La sola
+      lettura non è una questione di *dove* si scrive, quindi non può stare
+      dietro al gate del confine di path — che è spento anche per un exec
+      guardato senza ``restrict_to_workspace``;
+    * per il CODICE HOST è una no-op. Sono wrapper montati sul modulo globale e
+      mai smontati: senza questo gate, un turno in sola lettura vedrebbe
+      rifiutata anche la scrittura con cui il gateway persiste la propria
+      sessione o il proprio transcript — cioè l'interruttore romperebbe la
+      conversazione che dovrebbe soltanto proteggere.
+    """
+    if not _guarded_exec_is_active():
+        return
+    from jenny.security.workspace_access import current_turn_is_readonly
+    from jenny.security.workspace_policy import ReadOnlyTurnError
+
+    if current_turn_is_readonly():
+        raise ReadOnlyTurnError(f"refused {op}")
+
+
+# Flag di ``os.open`` che significano "questa apertura può cambiare il file".
+# ``O_RDONLY`` è 0, quindi non c'è un bit da testare per la lettura: si guarda
+# l'insieme dei bit di scrittura, ed è per questo che l'espressione è una
+# maschera e non un confronto.
+_OS_OPEN_WRITE_FLAGS = (
+    os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_TRUNC
+)
 
 
 def _real_builtins_open() -> Any:
@@ -1122,8 +1302,89 @@ class PythonNamespace:
             safe["open"] = self._workspace_builtin_open
         return safe
 
+    def _project_write_boundary(self) -> str | None:
+        """La cartella entro cui questo turno puo' scrivere, se c'e' un confine.
+
+        Non la calcola: la chiede a ``ToolWorkspace.write_root()``, che dal passo
+        T4.4 e' l'unica risposta a «dove posso scrivere» (v.
+        ``WorkspaceScope.write_root``). Qui resta la conversione a stringa —
+        i wrapper di questo file ragionano su percorsi testuali — e il
+        ``None``, che vuol dire "nessun confine da imporre da parte dello scope:
+        chiamante, tieniti quello che avevi".
+
+        ``None`` in due casi: nessuno scope legato **e** questa istanza non
+        ristretta, oppure uno scope in modalita' ``full``. Con uno scope
+        ristretto e' la sua cartella; senza scope ma con questa istanza ristretta
+        e' il workspace del costruttore, che e' anche il confine che il thread ha
+        gia' — quindi il chiamante non cambia niente.
+
+        IL SECONDO ARGOMENTO ERA ``True`` FISSO, ED ERA UNA COINCIDENZA.
+        Conta solo quando NON c'e' uno scope legato (con uno scope vince il suo
+        ``restrict_to_workspace``), e reggeva su un fatto di un altro modulo:
+        ``WorkspaceScopeResolver.for_project`` costruisce sempre ``restricted``.
+        Un fatto vero e non dichiarato qui, cioe' il modo in cui un confine di
+        sicurezza si allarga in silenzio quando quell'altro modulo cambia. Ora si
+        passa la restrizione di **questa** istanza, che e' la stessa che decide se
+        i wrapper di percorso hanno un confine da applicare
+        (``_path_guard_state.boundary``) — quindi i due non possono divergere.
+
+        Letto a ogni chiamata e non memorizzato: lo scope e' un ContextVar del
+        turno, e questa istanza di tool e' condivisa fra sessioni.
+        """
+        from jenny.security.workspace_access import current_tool_workspace
+
+        access = current_tool_workspace(
+            self.workspace, restrict_to_workspace=self.restrict_to_workspace
+        )
+        root = access.write_root()
+        return str(root) if root is not None else None
+
+    def _mutation_boundary(self, boundary: str) -> str:
+        """**L'unica regola di questo file su dove una mutazione puo' atterrare.**
+
+        Stessa asimmetria di ``_resolve_workspace_write``, che qui mancava: i
+        wrapper di ``os`` validavano tutto — cancellazioni comprese — contro
+        ``self.workspace``, cioè la radice con cui il tool è stato COSTRUITO,
+        senza mai consultare lo scope del turno. Due confini di scrittura che
+        non si parlavano dentro lo stesso file: con uno scope su
+        ``wikis/patreon`` e il tool costruito sulla radice,
+        ``open('<ws>/SOUL.md', 'w')`` veniva rifiutata e
+        ``os.remove('<ws>/SOUL.md')`` passava.
+
+        **Non allarga mai.** Se il confine del tool è già più stretto dello
+        scope (un subagent costruito sulla cartella del progetto) vince il
+        confine: prendere lo scope a occhi chiusi lo riporterebbe alla radice.
+        Confronto puramente testuale, senza I/O — entrambe le radici sono
+        assolute e già risolte da chi le ha prodotte.
+
+        **T4.14: la chiama anche ``_resolve_workspace_write``**, che prima
+        prendeva la radice dello scope *senza* la clausola di non-allargamento.
+        Le due formule sono state misurate su una matrice di 40 righe (radice del
+        tool × restrizione × scope × ``boundary``): 36 identiche, e le 4 che
+        divergevano sono tutte la stessa forma — tool costruito su una cartella
+        di progetto **mentre e' legato lo scope personale**, dove questa clamp
+        tiene la cartella e l'altra tornava alla radice dell'installazione.
+        Quella forma non la produce nessuna costruzione dell'albero (v.
+        ``tests/agent/tools/test_python_exec_one_write_rule.py``), quindi il
+        cambio e' inerte oggi e vale per la terza costruzione che arrivera' —
+        che e' esattamente com'e' nato il difetto di T4.2.
+        """
+        root = self._project_write_boundary()
+        if root is None:
+            return boundary
+        current = os.path.normpath(boundary)
+        scoped = os.path.normpath(root)
+        if current == scoped or current.startswith(scoped.rstrip(os.sep) + os.sep):
+            return boundary
+        return root
+
     def _resolve_workspace_write(
-        self, file: Any, *, boundary: str | None = None, base: str | None = None
+        self,
+        file: Any,
+        *,
+        boundary: str | None = None,
+        base: str | None = None,
+        for_write: bool = False,
     ) -> Any:
         """Resolve *file* against the workspace boundary; fds passano invariati.
 
@@ -1167,9 +1428,35 @@ class PythonNamespace:
         solo igiene sui log: è ciò che impedisce al wrapper di rientrare in sé
         stesso attraverso il proprio macchinario.
         """
-        from jenny.security.workspace_policy import _resolve_logical_path, resolve_allowed_path
+        from jenny.security.workspace_access import current_turn_is_readonly
+        from jenny.security.workspace_policy import (
+            ReadOnlyTurnError,
+            _resolve_logical_path,
+            resolve_allowed_path,
+        )
 
         root = boundary or self.workspace
+        if for_write:
+            # Sola lettura: il terzo cancello. Qui passano ``open(..., 'w')``,
+            # i patch di ``io``/``os`` e ``io.FileIO`` — cioe' ogni scrittura che
+            # non usa i builtin del namespace. Il controllo sta prima della
+            # risoluzione del confine perche' non e' una questione di *dove*:
+            # non c'e' un percorso che vada bene.
+            if current_turn_is_readonly():
+                raise ReadOnlyTurnError(f"refused write to {file}")
+            # **Il confine di scrittura non e' quello di lettura.** Dentro una
+            # sessione-progetto si legge in tutto il workspace — la skill, le
+            # altre wiki se l'utente le chiede — e si scrive solo nella cartella
+            # del progetto. E' quella asimmetria a tenere un progetto lontano dai
+            # file di un altro, da ``USER.md`` e da ``SOUL.md``; il lato lettura
+            # non proteggeva niente, perche' fuori dalla directory privata
+            # dell'app non si arriva comunque (nessun permesso di storage).
+            #
+            # **La regola sta in ``_mutation_boundary`` e solo la'** (T4.14).
+            # Qui c'era una seconda copia — ``root = self._project_write_boundary()``
+            # senza la clausola di non-allargamento — cioe' di nuovo due confini
+            # di scrittura nello stesso file, che e' come e' nato T4.2.
+            root = self._mutation_boundary(root)
         if isinstance(file, int):
             # Vedi il docstring: un fd non è validabile e non è un confine.
             return file
@@ -1200,7 +1487,9 @@ class PythonNamespace:
         Installed in the guarded namespace only when ``restrict_to_workspace``
         is True; otherwise the raw builtin is used (behavior unchanged).
         """
-        resolved = self._resolve_workspace_write(file, base=_active_path_base())
+        resolved = self._resolve_workspace_write(
+            file, base=_active_path_base(), for_write=_is_write_mode(mode)
+        )
         return _real_builtins_open()(self._open_target(resolved), mode, *args, **kwargs)
 
     # ------------------------------------------------------------------
@@ -1552,6 +1841,13 @@ class PythonNamespace:
         real_open = getattr(mod.open, "_jenny_real_open", mod.open)
 
         def _workspace_open(path: str | bytes | int, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+            # In sola lettura si chiude solo l'apertura che PUÒ cambiare il
+            # file: `os.open(p, os.O_RDONLY)` deve continuare a funzionare, o
+            # l'interruttore impedirebbe anche di leggere.
+            # PRIMA del gate del confine, non dopo: vedi
+            # `_refuse_write_if_readonly`.
+            if flags & _OS_OPEN_WRITE_FLAGS:
+                _refuse_write_if_readonly("os.open for writing")
             boundary = _active_path_boundary()
             if boundary is None:
                 # Codice host (nessun exec guardato su questo thread): intatto.
@@ -1560,6 +1856,9 @@ class PythonNamespace:
                 raise OSError("os.open with file descriptor is not allowed")
             if dir_fd is not None:
                 raise OSError("os.open with dir_fd is not allowed")
+            if flags & _OS_OPEN_WRITE_FLAGS:
+                # Un'apertura in scrittura è una mutazione: confine dello scope.
+                boundary = self._mutation_boundary(boundary)
             # La base si legge PRIMA del bypass: sotto bypass
             # `_active_path_base()` ritorna None per costruzione, e leggerla
             # dentro riporterebbe la base al confine, rendendo `working_dir`
@@ -1693,6 +1992,22 @@ class PythonNamespace:
         ("link", "src", "dst"),
     )
 
+    # Chi delle due tabelle qui sopra **cambia qualcosa**, e quindi è chiuso
+    # quando il turno è in sola lettura. Non è una terza tabella: sono nomi che
+    # devono esistere in una delle due, e `tests/agent/tools/
+    # test_readonly_python_exec.py` lo verifica — un mutatore aggiunto là e non
+    # qui è un buco, e un nome qui che là non c'è è una riga morta.
+    #
+    # Le sonde e gli enumeratori (`stat`, `access`, `listdir`, `walk`, i
+    # `getxattr`/`listxattr`) restano APERTI di proposito: in sola lettura si
+    # legge, e chiuderli renderebbe l'interruttore inutilizzabile invece che
+    # sicuro. `symlink` ha un patch suo (`_patch_os_symlink`) e si chiude lì.
+    _OS_MUTATING_FUNCTIONS: frozenset[str] = frozenset({
+        "remove", "unlink", "rmdir", "mkdir", "makedirs", "truncate",
+        "chmod", "utime", "setxattr", "removexattr",
+        "rename", "replace", "link",
+    })
+
     # Un descrittore di directory scavalca del tutto la risoluzione: con
     # `dir_fd` il percorso è relativo al descrittore, quindi `../../etc` da un
     # fd legittimo esce dal workspace senza passare da `resolve_allowed_path`.
@@ -1804,6 +2119,22 @@ class PythonNamespace:
         ``_patch_os_open``, e che una finestra di ``_path_guard_bypass()``
         spegne anche qui).
         """
+        mutating = self._OS_MUTATING_FUNCTIONS
+
+        def _is_mutating(op: str) -> bool:
+            return op.removeprefix("os.") in mutating
+
+        def _refuse_os_if_readonly(op: str) -> None:
+            """Chiude i soli mutatori quando il turno è in sola lettura.
+
+            Dentro il wrapper e non prima: la tabella si installa una volta per
+            processo, mentre la scrivibilità è del *turno*. Chiamata prima del
+            gate del confine di path (vedi ``_refuse_write_if_readonly``), che
+            per un exec senza ``restrict_to_workspace`` la saltava del tutto.
+            """
+            if _is_mutating(op):
+                _refuse_write_if_readonly(op)
+
         for name, param, default in self._OS_SINGLE_PATH_FUNCTIONS:
             real = self._real_os_fn(mod, name)
             if real is None:
@@ -1817,9 +2148,12 @@ class PythonNamespace:
                 _default: str | None = default,
                 **kwargs: Any,
             ) -> Any:
+                _refuse_os_if_readonly(_op)
                 boundary = _active_path_boundary()
                 if boundary is None:
                     return _real(*args, **kwargs)
+                if _is_mutating(_op):
+                    boundary = self._mutation_boundary(boundary)
                 self._reject_fd_kwargs(_op, kwargs)
                 if args:
                     raw, rest = args[0], args[1:]
@@ -1848,9 +2182,15 @@ class PythonNamespace:
                 _dst: str = dst_param,
                 **kwargs: Any,
             ) -> Any:
+                _refuse_os_if_readonly(_op)
                 boundary = _active_path_boundary()
                 if boundary is None:
                     return _real(*args, **kwargs)
+                # `rename`/`replace`/`link` mutano tutte: entrambi gli estremi
+                # vanno validati contro il confine dello scope, non contro la
+                # radice con cui il tool è stato costruito.
+                if _is_mutating(_op):
+                    boundary = self._mutation_boundary(boundary)
                 self._reject_fd_kwargs(_op, kwargs)
                 rest = list(args)
                 raw_src = rest.pop(0) if rest else kwargs.pop(_src, None)
@@ -1881,9 +2221,11 @@ class PythonNamespace:
             return
 
         def _symlink(*args: Any, **kwargs: Any) -> Any:
+            _refuse_write_if_readonly("os.symlink")
             boundary = _active_path_boundary()
             if boundary is None:
                 return real(*args, **kwargs)
+            boundary = self._mutation_boundary(boundary)
             self._reject_fd_kwargs("os.symlink", kwargs)
             rest = list(args)
             raw_src = rest.pop(0) if rest else kwargs.pop("src", None)
@@ -1958,9 +2300,11 @@ class PythonNamespace:
         real = getattr(shutil.rmtree, "_jenny_real_fn", shutil.rmtree)
 
         def _guarded_rmtree(path: Any = None, *args: Any, **kwargs: Any) -> Any:
+            _refuse_write_if_readonly("shutil.rmtree")
             boundary = _active_path_boundary()
             if boundary is None:
                 return real(path, *args, **kwargs)
+            boundary = self._mutation_boundary(boundary)
             self._reject_fd_kwargs("shutil.rmtree", kwargs)
             self._reject_rmtree_callbacks(args, kwargs)
             target = self._guarded_os_path(path, op="shutil.rmtree", boundary=boundary)
@@ -2016,12 +2360,20 @@ class PythonNamespace:
         real_open = getattr(io.open, "_jenny_real_open", io.open)
 
         def _workspace_io_open(file: Any, mode: str = "r", *args: Any, **kwargs: Any):
+            # Sola lettura prima del gate: senza `restrict_to_workspace` il ramo
+            # di passthrough qui sotto salta anche il rifiuto (vedi
+            # `_refuse_write_if_readonly`).
+            if _is_write_mode(mode):
+                _refuse_write_if_readonly("io.open for writing")
             boundary = _active_path_boundary()
             if boundary is None:
                 # Host code (no guarded exec active on this thread): untouched.
                 return real_open(file, mode, *args, **kwargs)
             resolved = self._resolve_workspace_write(
-                file, boundary=boundary, base=_active_path_base()
+                file,
+                boundary=boundary,
+                base=_active_path_base(),
+                for_write=_is_write_mode(mode),
             )
             return real_open(self._open_target(resolved), mode, *args, **kwargs)
 
@@ -2076,6 +2428,10 @@ class PythonNamespace:
                 closefd: bool = True,
                 opener: Any = None,
             ) -> None:
+                # Vedi `_workspace_io_open`: il rifiuto della sola lettura non
+                # può stare dietro al gate del confine.
+                if _is_write_mode(mode):
+                    _refuse_write_if_readonly("io.FileIO for writing")
                 boundary = _active_path_boundary()
                 if boundary is not None:
                     # `_resolve_workspace_write` lascia passare i descrittori
@@ -2083,7 +2439,10 @@ class PythonNamespace:
                     # legittima e stringere l'int aprirebbe un file di nome "5".
                     file = namespace._open_target(
                         namespace._resolve_workspace_write(
-                            file, boundary=boundary, base=_active_path_base()
+                            file,
+                            boundary=boundary,
+                            base=_active_path_base(),
+                            for_write=_is_write_mode(mode),
                         )
                     )
                 super().__init__(file, mode, closefd=closefd, opener=opener)
@@ -2136,12 +2495,21 @@ class PythonNamespace:
         real_open = _real_builtins_open()
 
         def _workspace_builtins_open(file: Any, mode: str = "r", *args: Any, **kwargs: Any):
+            # Vedi `_workspace_io_open`. Qui il gate di
+            # `_refuse_write_if_readonly` pesa più che altrove: `builtins.open`
+            # è attraversato da TUTTO l'interprete, e il rifiuto deve valere per
+            # il codice del modello e per nessun altro.
+            if _is_write_mode(mode):
+                _refuse_write_if_readonly("open for writing")
             boundary = _active_path_boundary()
             if boundary is None:
                 # Codice host (nessun exec guardato su questo thread): intatto.
                 return real_open(file, mode, *args, **kwargs)
             resolved = self._resolve_workspace_write(
-                file, boundary=boundary, base=_active_path_base()
+                file,
+                boundary=boundary,
+                base=_active_path_base(),
+                for_write=_is_write_mode(mode),
             )
             return real_open(self._open_target(resolved), mode, *args, **kwargs)
 
@@ -2324,7 +2692,23 @@ class PythonNamespace:
         # `rules` (stub di evasione di `os`, filtro di `sys.modules`), non solo
         # il confine di path. Vedi `_patch_asyncio_thread_hops`.
         _patch_asyncio_thread_hops()
-        if self.restrict_to_workspace:
+        # I wrapper di path servono in DUE casi, non in uno solo. Il confine di
+        # workspace è il primo; il secondo è un turno in **sola lettura**, che
+        # non è una questione di *dove* si scrive e vale quindi anche senza
+        # `restrict_to_workspace`. Finché la condizione era il solo confine,
+        # `restrict_to_workspace=False` non installava nessun wrapper e la sola
+        # lettura non aveva dove essere applicata: `os.remove`, `shutil.rmtree`,
+        # `open(..., 'w')` arrivavano tutti al filesystem (misurato).
+        #
+        # Il flag si legge QUI, dentro il worker, e ci arriva perché
+        # `run_python_async` porta con sé il contesto del turno (vedi lì): è la
+        # stessa lettura che faranno i wrapper, quindi non possono divergere.
+        # Condizionale e non incondizionato: un'installazione che non serve a
+        # nessuno lascerebbe `builtins.open` patchato a vita anche su un
+        # deployment che non usa né il confine né l'interruttore.
+        from jenny.security.workspace_access import current_turn_is_readonly
+
+        if self.restrict_to_workspace or current_turn_is_readonly():
             # Il confine NON può dipendere da un `import os` del codice
             # guardato: `import shutil` / `glob` / `pathlib` arrivano alle
             # stesse funzioni attraverso il riferimento a `os` che quei moduli
@@ -2548,6 +2932,50 @@ def _interrupt_thread(ident: int | None) -> None:
         logger.debug("Could not interrupt python_exec thread %s", ident, exc_info=True)
 
 
+class _ContextBoundNamespace:
+    """Il namespace, portato oltre il thread grezzo della sessione.
+
+    Il ramo ``yield_time_ms`` non passa dall'executor: ``ExecSessionManager``
+    lancia un ``threading.Thread`` grezzo, che non è patchato e porta con sé
+    **niente** — né ContextVar né thread-local — e da dentro ``exec_session``
+    non c'è modo di rimediare, perché là il turno non c'è più. Il rimedio sta
+    qui, sul thread dell'event loop dove le due metà esistono ancora: si
+    costruisce il ponte una volta, alla nascita dell'involucro, e le due sole
+    chiamate che ``_PythonSession`` fa lo attraversano.
+
+    Vale la stessa ragione elencata su ``run_python_async``: senza questo,
+    ``python_exec(code=..., yield_time_ms=...)`` era la strada che ignorava sia
+    la sola lettura sia il confine di scrittura del progetto — misurata, non
+    ipotizzata. Tutto il resto delega per attributo.
+
+    **Il ponte è ``_carry_turn_across_thread``, lo stesso dei due salti in
+    executor** (T4.13). Prima questa classe copiava il ``Context`` da sé e non
+    toccava il thread-local: tre punti dello stack sapevano che un salto esiste
+    e ognuno se ne ricordava una metà diversa. Ognuno dei due wrapper ha la
+    **propria** copia del contesto, quindi non esiste il caso "già entrato".
+    """
+
+    def __init__(self, namespace: Any) -> None:
+        self._namespace = namespace
+        self._execute = _carry_turn_across_thread(namespace.execute)
+        self._call_function = _carry_turn_across_thread(namespace.call_function)
+
+    def execute(self, code: str, working_dir: str | None = None) -> tuple[str, str, Any]:
+        return self._execute(code, working_dir)
+
+    def call_function(
+        self,
+        function: str,
+        args: list | None = None,
+        kwargs: dict | None = None,
+        working_dir: str | None = None,
+    ) -> tuple[str, str, Any]:
+        return self._call_function(function, args, kwargs, working_dir)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._namespace, name)
+
+
 async def run_python_async(
     code: str | None,
     function: str | None,
@@ -2564,6 +2992,34 @@ async def run_python_async(
     ``PythonNamespace._enter_guard``): passata esplicitamente, non letta dal
     namespace, così due chiamate concorrenti sullo stesso tool non si
     sovrascrivono la base a vicenda.
+
+    IL CONTESTO DEL TURNO VIAGGIA CON L'ESECUZIONE, e non è un dettaglio: è la
+    differenza fra un cancello che tiene e un cancello che sembra tenere.
+    ``loop.run_in_executor`` NON copia il ``contextvars.Context`` (al contrario
+    di ``asyncio.to_thread``), quindi sul worker ogni ContextVar tornava al
+    proprio default — e le due politiche del turno sono ContextVar:
+
+    * ``current_turn_is_readonly()`` → ``False``: **ogni** scrittura passava
+      durante un turno in sola lettura (``os.remove``, ``shutil.rmtree``,
+      ``open(..., 'w')``, ``Path.write_text``, ``io.FileIO``, i builtin
+      registrati). Misurato attraverso ``PythonExecTool.execute()``, non dedotto;
+    * ``current_tool_workspace()`` → nessuno scope: il confine di scrittura di
+      una sessione-progetto tornava alla radice del workspace, quindi da dentro
+      un progetto si scriveva su ``SOUL.md`` e nella cartella di un altro.
+
+    Non si vedeva nei test perché un test chiama ``PythonNamespace.execute()``
+    dal proprio thread, dove il ContextVar c'è: il difetto vive esattamente nel
+    salto che il test non fa. Da qui la regola — **ogni prova di questi cancelli
+    passa da ``await PythonExecTool.execute()``**.
+
+    Lo stato del guard di path resta invece thread-local e continua a essere
+    montato dal worker (``_enter_guard``): vedi il commento su
+    ``_path_guard_state`` per il perché non può stare in una closure.
+
+    **Il salto lo fa ``_carry_turn_across_thread``, non questa funzione** (T4.13):
+    la copia del contesto viveva qui, il trasporto del thread-local viveva in
+    ``_carry_guard_state`` e il thread grezzo delle sessioni in un terzo posto —
+    tre punti, due metà, e un salto nuovo che ne indovina una sola.
     """
     loop = asyncio.get_running_loop()
     ident_cell: list[int | None] = [None]
@@ -2593,6 +3049,11 @@ async def run_python_async(
         finally:
             done_cell[0] = True
 
+    # Costruito QUI, sul thread dell'event loop, dove le due metà del turno
+    # esistono ancora. Il contesto è copiato per questa singola esecuzione, e
+    # non lo usa nessun altro.
+    _run_carried = _carry_turn_across_thread(_run)
+
     def _interrupt_if_running() -> None:
         # Se il thread ha già finito, l'interrupt colpirebbe il worker del
         # pool sul lavoro successivo: fire solo se ancora dentro _run.
@@ -2604,11 +3065,13 @@ async def run_python_async(
     try:
         if timeout and timeout > 0:
             stdout, stderr, result = await asyncio.wait_for(
-                loop.run_in_executor(executor, _run),
+                loop.run_in_executor(executor, _run_carried),
                 timeout=timeout,
             )
         else:
-            stdout, stderr, result = await loop.run_in_executor(executor, _run)
+            stdout, stderr, result = await loop.run_in_executor(
+                executor, _run_carried
+            )
     except asyncio.TimeoutError:
         _interrupt_if_running()
         return f"Error: Python execution timed out after {timeout} seconds"
@@ -2860,7 +3323,10 @@ class PythonExecTool(Tool):
                 function=function,
                 args=args,
                 kwargs=kwargs,
-                namespace=self.namespace,
+                # Il turno non attraversa il thread grezzo della sessione:
+                # l'involucro costruisce il ponte qui, sul thread dell'event
+                # loop. Vedi `_ContextBoundNamespace`.
+                namespace=_ContextBoundNamespace(self.namespace),
                 timeout=timeout,
                 yield_time_ms=clamp_session_int(yield_time_ms, DEFAULT_YIELD_MS, 0, MAX_YIELD_MS),
                 owner_session_key=current_request_session_key(),

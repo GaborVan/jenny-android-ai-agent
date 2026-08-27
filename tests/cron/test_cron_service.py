@@ -6,6 +6,7 @@ import pytest
 
 from jenny.cron.service import CronJobSkippedError, CronService
 from jenny.cron.types import CronJob, CronJobSilencedError, CronPayload, CronSchedule
+from jenny.session.keys import UNIFIED_SESSION_KEY
 
 
 async def _wait_until(predicate, *, timeout: float = 1.0, interval: float = 0.01) -> None:
@@ -145,7 +146,20 @@ def test_add_job_preserves_origin_delivery_context(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_session_key_and_origin_survive_store_reload(tmp_path) -> None:
+async def test_origin_survives_reload_and_a_legacy_key_is_migrated(tmp_path) -> None:
+    """Lo store conserva quel che il chiamante ha scritto; il caricamento lo aggiorna.
+
+    ``websocket:C123:...`` era una chiave *thread-scoped*: una sessione a sé,
+    quando le sessioni erano molte. Oggi ``bound_runner`` la usa come chiave del
+    turno, quindi un job che se la porta dietro girerebbe per sempre in un file
+    di sessione fantasma invece che nella conversazione. Il caricamento la
+    riporta alla conversazione unica; il file no, perché un caricamento non deve
+    scrivere — si riallinea da sé alla prima modifica dello store.
+
+    Quel che regge la consegna resta intatto, ed è la metà da provare qui:
+    ``origin_channel`` / ``origin_chat_id`` / ``origin_metadata`` sono
+    l'attaccamento alla chat e non c'entrano con la sessione.
+    """
     store_path = tmp_path / "cron" / "jobs.json"
     service = CronService(store_path)
     await service.start()
@@ -172,7 +186,7 @@ async def test_session_key_and_origin_survive_store_reload(tmp_path) -> None:
 
     reloaded = CronService(store_path).get_job(job.id)
     assert reloaded is not None
-    assert reloaded.payload.session_key == "websocket:C123:1234567890.123456"
+    assert reloaded.payload.session_key == UNIFIED_SESSION_KEY
     assert reloaded.payload.origin_channel == "websocket"
     assert reloaded.payload.origin_chat_id == "C123"
     assert reloaded.payload.origin_metadata == meta
@@ -207,7 +221,8 @@ async def test_legacy_payload_with_channel_meta_key_still_loads(tmp_path) -> Non
     reloaded = CronService(store_path).get_job("legacy01")
     assert reloaded is not None
     assert reloaded.payload.message == "hello"
-    assert reloaded.payload.session_key == "websocket:C1:42"
+    # Migrata al caricamento, come ogni chiave utente della forma vecchia.
+    assert reloaded.payload.session_key == UNIFIED_SESSION_KEY
     assert not hasattr(reloaded.payload, "channel_meta")
 
 

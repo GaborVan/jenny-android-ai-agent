@@ -8,7 +8,7 @@ import functools
 import time
 from contextlib import nullcontext
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, NamedTuple
 
 from loguru import logger
 
@@ -77,8 +77,18 @@ from jenny.session.goal_state import (
     runner_wall_llm_timeout_s,
     sustained_goal_active,
 )
-from jenny.session.keys import UNIFIED_SESSION_KEY, session_key_for_channel
+from jenny.session.keys import (
+    PROJECT_SESSION_PREFIX,
+    is_project_session_key,
+    is_valid_project_name,
+    session_key_for_channel,
+)
 from jenny.session.manager import Session, SessionManager
+from jenny.session.project_rename import (
+    follow_renamed_project,
+    pending_project_renames,
+)
+from jenny.session.project_traces import PROJECT_WIKI_ID_KEY
 from jenny.session.turn_visibility import (
     TurnVisibility,
     is_silent_turn,
@@ -87,6 +97,8 @@ from jenny.session.turn_visibility import (
 )
 from jenny.utils.helpers import CONTEXT_BUDGET_SAFETY_BUFFER, reserved_output_tokens
 from jenny.utils.llm_runtime import LLMRuntime
+from jenny.utils.prompt_templates import render_template
+from jenny.utils.wiki_paths import find_wiki_by_id, wiki_id, wiki_schema_file
 
 if TYPE_CHECKING:
     from jenny.config.schema import (
@@ -107,6 +119,39 @@ def _load_current_tools_config() -> "ToolsConfig":
     return load_config().tools
 
 
+class ProjectFollowOutcome(NamedTuple):
+    """L'esito dell'inseguimento di una cartella di progetto rinominata.
+
+    ``moved_to`` valorizzato = spostato, e allora gli altri due sono ``None``.
+    Altrimenti ``why_not`` dice il perche' in una forma da mostrare, e
+    ``unopenable`` e' valorizzato **solo** nel caso in cui la cartella e' stata
+    ritrovata ma il suo nome nuovo non puo' essere una conversazione.
+
+    Quel caso ha un campo suo e non solo una frase perche' e' il solo rifiuto in
+    cui si sa **esattamente** dove e' finita la cartella e cosa fare: infilarlo
+    nel «I could not find where it went» degli altri quattro direbbe il falso
+    proprio nella riga da cui l'utente capisce se il suo storico c'e' ancora.
+    """
+
+    moved_to: str | None = None
+    why_not: str | None = None
+    unopenable: str | None = None
+
+
+def _shown_folder_name(name: str) -> str:
+    """Un nome di cartella letto dal disco, reso mostrabile in una frase.
+
+    Per definizione **non** passa ``is_valid_project_name`` — e' il nome che
+    questo rifiuto esiste per raccontare — quindi puo' contenere qualunque cosa
+    che un filesystem accetti: una riga nuova che spezza il paragrafo, un
+    backtick che chiude il codice inline a meta', duecentocinquanta caratteri.
+    Su una riga e con un tetto, come il ``chat_id`` che
+    ``WebSocketChannel._refuse_invalid_project`` tronca per la stessa ragione.
+    """
+    flat = " ".join(name.split()).replace("`", "'")
+    return flat if len(flat) <= 80 else flat[:79] + "…"
+
+
 def _new_turn_id(session_key: str) -> str:
     """Identita di un turno: session key + istante d'avvio in nanosecondi.
 
@@ -124,6 +169,19 @@ def _new_turn_id(session_key: str) -> str:
 # rimetterebbe la CPU a dormire proprio dove serve; e comunque finita, perche'
 # un wakelock eterno scarica la batteria senza dare spiegazioni.
 _TURN_WAKELOCK_TIMEOUT_S = 1800.0
+
+# ``/init`` non e' nel router (v. ``_expand_project_init``): il letterale sta
+# qui, e la voce che lo fa comparire in ``/help`` sta in
+# ``command/builtin.py::BUILTIN_COMMAND_SPECS``. Sono due posti, ma il secondo
+# e' solo una riga di documentazione — l'unico che decide e' questo.
+PROJECT_INIT_COMMAND = "/init"
+
+# Stessa forma e stessa ragione: `/tidy` **espande**, non risponde. Il valore di
+# questa operazione è tutto nel contesto del turno — le pagine iniettate, la
+# giornata di conversazione, l'utente presente — quindi lanciarla come passata
+# interna (la strada di `/gardener`) sarebbe buttare via esattamente quel che la
+# rende migliore di una passata. V. ``_expand_project_tidy``.
+PROJECT_TIDY_COMMAND = "/tidy"
 
 
 class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, LoopTasksMixin):
@@ -190,11 +248,13 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
         session_manager: SessionManager | None = None,
         timezone: str | None = None,
         session_ttl_minutes: int = 0,
+        compact_projects_when_idle: bool = False,
         consolidation_ratio: float = 0.5,
         max_messages: int = 120,
         hooks: list[AgentHook] | None = None,
         disabled_skills: list[str] | None = None,
         wiki_directory_max_tokens: int | None = None,
+        projects_subdir: str = "wikis",
         tools_config: ToolsConfig | None = None,
         runtime_events: RuntimeEventBus | None = None,
         model_presets_config: dict[str, Any] | None = None,
@@ -257,11 +317,20 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
         # senza gateway: ``dream_cycle.take_dream_snapshot`` lo traduce in
         # ``snapshotted=False``, cioè nel ramo conservativo del prompt.
         self.snapshot_before_dream: Callable[[], Awaitable[bool]] | None = None
+        # Checkpoint del workspace con un trigger a scelta, per chi non ha il
+        # contratto di Dream. Lo collega il container; ``None`` fuori dal
+        # gateway, e chi lo usa deve trattarlo come rete assente e proseguire.
+        self.take_snapshot: Callable[[str], Awaitable[bool]] | None = None
         self.restrict_to_workspace = restrict_to_workspace
         self.extract_document_text = extract_document_text
         self.workspace_scopes = WorkspaceScopeResolver(
             default_workspace=workspace,
             default_restrict_to_workspace=restrict_to_workspace,
+            # Deve essere la stessa cartella che il picker elenca
+            # (``config.wiki.wikis_dir``): se le due divergono, il chip mostra i
+            # progetti di un posto e lo scope li cerca in un altro — cioe' ogni
+            # progetto legato punterebbe a una cartella che non c'e'.
+            projects_subdir=projects_subdir,
         )
         self._start_time = time.time()
         self._last_usage: dict[str, int] = {}
@@ -351,11 +420,14 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             max_completion_tokens=provider.generation.max_tokens,
             consolidation_ratio=consolidation_ratio,
             session_locks=self._session_locks,
+            projects_subdir=projects_subdir,
         )
         self.auto_compact = AutoCompact(
             sessions=self.sessions,
             consolidator=self.consolidator,
             session_ttl_minutes=session_ttl_minutes,
+            compact_projects=compact_projects_when_idle,
+            projects_subdir=projects_subdir,
         )
         self.model_presets: dict[str, Any] = dict(model_presets_config) if model_presets_config else {}
         self._active_preset: str | None = None
@@ -415,7 +487,9 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             timezone=defaults.timezone,
             disabled_skills=defaults.disabled_skills,
             wiki_directory_max_tokens=defaults.atlas.max_context_tokens,
+            projects_subdir=config.wiki.wikis_dir,
             session_ttl_minutes=defaults.session_ttl_minutes,
+            compact_projects_when_idle=defaults.compact_projects_when_idle,
             consolidation_ratio=defaults.consolidation_ratio,
             max_messages=defaults.max_messages,
             tools_config=config.tools,
@@ -648,9 +722,506 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             logger.warning("Command '{}' matched but dispatch returned None", raw)
 
 
+    async def _refuse_reincarnated_project(self, msg: InboundMessage, key: str) -> bool:
+        """Rifiuta il turno se la cartella al nome di *key* non e' la sua cartella.
+
+        ``True`` = gia' risposto, il turno non deve partire.
+
+        **Il gemello di :meth:`_refuse_missing_project`, per il caso opposto.**
+        Quello scopre che la cartella legata e' *sparita*; questo scopre che ce
+        n'e' una, con il nome giusto, e un'anima diversa.
+
+        L'indirizzo di una conversazione di progetto e' il nome della cartella;
+        il legame vero e' l'id della wiki, che ogni sessione si annota al primo
+        turno (:meth:`_remember_project_id`). Fino al 24/08/2026 quell'id si
+        interrogava **solo quando la cartella mancava**: finche' al suo nome
+        c'era *una* cartella, nessuno chiedeva se fosse *quella*. Cancellando la
+        cartella dal file manager e ricreando un progetto con lo stesso nome, la
+        conversazione vecchia riappariva intera nel progetto nuovo — i due id
+        erano gia' su disco, diversi, e nessuno li confrontava.
+
+        Le due porte da cui ci si arrivava sono chiuse (la delete generica
+        rifiuta una radice di progetto, la creazione chiede cosa fare di una
+        conversazione rimasta). Questo controllo resta perche' e' l'unico che
+        copre le strade che non passano dalla UI — ``adb``, un ripristino, una
+        sincronizzazione, un difetto futuro — e gli stati gia' su disco.
+
+        **Non si indovina quale delle due storie l'utente voglia**, come non lo
+        indovina ``find_wiki_by_id`` davanti a due cartelle con lo stesso id:
+        si rifiuta, si dice cos'e' successo e si danno le due strade.
+
+        Costa la lettura di una frontmatter, e solo per le chat di progetto la
+        cui sessione ha gia' un id annotato. Una wiki **senza** id non fa
+        scattare niente: un id assente non e' un errore (v. ``wiki_paths.wiki_id``),
+        e trattarlo come discordanza rifiuterebbe ogni wiki fatta a mano.
+        """
+        if not is_project_session_key(key):
+            return False
+        try:
+            session = self.sessions.get_or_create(key)
+            recorded = session.metadata.get(PROJECT_WIKI_ID_KEY)
+            if not recorded:
+                return False
+            root = self.workspace_scopes.for_project(key).project_path
+            if not root.is_dir():
+                # Non e' il nostro caso: la cartella che manca ha gia' il suo
+                # rifiuto, ed e' quello che sa anche inseguire un rinomino.
+                return False
+            current = wiki_id(root)
+            if current is None or current == str(recorded):
+                return False
+        except Exception:
+            # Un controllo che non si puo' fare non deve fermare una chat: il
+            # difetto che copre e' raro, e bloccare tutto per non saper guardare
+            # sarebbe peggio del difetto.
+            logger.opt(exception=True).warning(
+                "Controllo dell'identita' del progetto non riuscito per {}", key
+            )
+            return False
+
+        name = key[len(PROJECT_SESSION_PREFIX):]
+        logger.warning(
+            "Progetto reincarnato: la sessione {} appartiene alla wiki {}, la cartella "
+            "ora e' {}; turno rifiutato", key, recorded, current,
+        )
+        await self.bus.publish_outbound(OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=(
+                f"This conversation belongs to a different `{name}` from the one that "
+                "is there now.\n\nThe folder was replaced — deleted and created again, "
+                "or restored from somewhere else — so what I remember here is another "
+                "project's. I have not read your message and I have changed nothing, "
+                "because answering out of the wrong history is the one mistake you "
+                "could not check.\n\nTwo ways out. If the folder now at `"
+                f"{name}` is the one you want, delete that project from the workspace "
+                "file browser — hold it and pick Delete — and create it again: that "
+                "clears this history too, and tells you what it is removing first. If "
+                "instead the old folder should come back, put it back and this chat is "
+                "exactly where you left it."
+            ),
+            metadata={**dict(msg.metadata or {}), "render_as": "text"},
+        ))
+        return True
+
+    async def _refuse_missing_project(self, msg: InboundMessage, key: str) -> bool:
+        """Rifiuta il turno se la cartella del progetto non esiste piu'.
+
+        ``True`` = gia' risposto, il turno non deve partire.
+
+        Fino al passo 6 lo scope veniva costruito comunque e puntava al posto che
+        manca: le scritture fallivano tutte, il che era scomodo ma onesto — e
+        soprattutto **non era un fallback sulla radice personale**, che avrebbe
+        messo il lavoro di un progetto fra i file personali. Qui quel
+        comportamento diventa una frase: meglio dirlo prima che scoprirlo a meta'
+        turno, dopo che il modello ha letto il contesto e pianificato.
+
+        La causa piu' probabile e' un rinomino della cartella: fino al passo 7
+        l'indirizzo di un progetto **e' il nome della sua cartella**, quindi
+        rinominarla lascia la chat indietro. Il rifiuto lo dice, perche' e'
+        anche il modo di recuperare — rimettere il nome di prima.
+
+        Non tocca la conversazione personale ne' le sessioni interne: senza una
+        chiave ``project:`` non c'e' niente da controllare, e la radice
+        dell'installazione esiste per definizione (se non esistesse, non
+        saremmo qui).
+        """
+        if not is_project_session_key(key):
+            return False
+        try:
+            root = self.workspace_scopes.for_project(key).project_path
+        except Exception:  # pragma: no cover - uno scope irrisolvibile e' gia' un rifiuto
+            root = None
+        if root is not None and root.is_dir():
+            return False
+        name = key[len(PROJECT_SESSION_PREFIX):]
+        if key in self._pending_queues:
+            # Un turno di questa chat e' **in volo**, e la riparazione gli
+            # sposterebbe i file sotto le mani: quando quel turno finisce, il suo
+            # ``sessions.save()`` ricrea il file col nome vecchio — la storia di
+            # prima del rinomino piu' lo scambio appena concluso — e quello
+            # scambio finisce **fuori** dal progetto rinominato. Cioe' la
+            # riparazione, girando adesso, perderebbe esattamente quel che
+            # esiste per non perdere.
+            #
+            # **Rinviata, non messa in coda.** Non c'e' un lavoro da ricordarsi:
+            # il rinomino l'ha fatto l'utente fuori da Jenny, quindi non e' un
+            # evento che passa da qui una volta sola, e' uno *stato* che si
+            # riscontra guardando — il prossimo messaggio di questa chat lo
+            # riscontra di nuovo, e il prossimo avvio lo riscontra dal giornale.
+            # Una coda aggiungerebbe un compito differito da annullare se la
+            # cartella torna al suo nome, e da rieseguire se il processo muore
+            # prima di svuotarla: due strade in piu' per lo stesso esito.
+            #
+            # Il turno non parte comunque (``True``): la cartella manca, quindi
+            # iniettare questo messaggio nel turno in volo vorrebbe dire darlo a
+            # un turno che non puo' scrivere da nessuna parte.
+            logger.info(
+                "Riparazione del rinomino rinviata: {} ha un turno in volo", key
+            )
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=(
+                    f"The folder for project `{name}` is not there any more, and I am "
+                    "still finishing the previous message in this chat, so I have not "
+                    "read this one.\n\nI will look for where the folder went as soon as "
+                    "that is done — send this again then. If you renamed the folder, "
+                    f"renaming it back to `{name}` also fixes it. Or pick another "
+                    "project, or the personal chat, from the chip above the message box."
+                ),
+                metadata={**dict(msg.metadata or {}), "render_as": "text"},
+            ))
+            return True
+        # **Prima di dire di no, si prova a ritrovarla** (passo 7): se la
+        # sessione si e' annotata l'id della sua wiki e quella wiki esiste sotto
+        # un altro nome, le tracce della chat prendono il nome nuovo. Il rifiuto
+        # del passo 6 era il solo punto che scopre che una cartella legata e'
+        # sparita, ed e' quindi anche il posto giusto per la riparazione.
+        outcome = self._follow_renamed_project(key)
+        if outcome.moved_to is not None:
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=(
+                    f"The folder `{name}` was renamed to `{outcome.moved_to}`, so I moved "
+                    "this conversation's history there — nothing was lost, and I have not "
+                    f"read your message.\n\nOpen `{outcome.moved_to}` from the chip above "
+                    "the message box and it is all where you left it."
+                ),
+                metadata={**dict(msg.metadata or {}), "render_as": "text"},
+            ))
+            return True
+        detail = f" ({outcome.why_not})" if outcome.why_not else ""
+        # «Nothing is lost» va detto solo quando e' vero. Dei motivi che
+        # ``follow_renamed_project`` puo' dare, quattro descrivono un rifiuto a
+        # cose ferme — non c'era niente sotto il nome vecchio, la destinazione ha
+        # gia' una conversazione sua, il giornale non si scrive, lo spostamento
+        # e' tornato indietro del tutto — e per quelli la frase e' esatta, come
+        # per il nome impossibile che il ramo qui sotto racconta a parte. Il
+        # quinto, «stopped halfway», dice il contrario: una parte delle tracce e'
+        # sotto il nome nuovo. Prometterci sopra «nothing is lost» sarebbe la
+        # bugia piu' costosa del passo 7, perche' arriva proprio nel momento in
+        # cui l'utente decide se fidarsi o copiarsi la chat a mano.
+        if outcome.unopenable is not None:
+            # Il solo rifiuto che sa dove e' finita la cartella. Non passa da
+            # ``detail``: la si nomina, e si dice la regola invece di rimandare
+            # l'utente al chip, che quella cartella non la elenca (T4.1).
+            content = (
+                f"The folder for project `{name}` is not there any more, so this "
+                "conversation has nothing to work on and I have not read your message.\n\n"
+                f"I found where it went — it is now called `{outcome.unopenable}` — but "
+                "that cannot be the name of a conversation, so I left this chat's history "
+                f"under `{name}` rather than moving it somewhere nothing could open it. "
+                "Nothing is lost.\n\nRename the folder using letters, numbers, dot, dash "
+                "and underscore only, no spaces and no accents, and this chat follows it "
+                f"— renaming it back to `{name}` works too. Then pick the project from the "
+                "chip above the message box."
+            )
+        elif self._project_history_is_split(key):
+            content = (
+                f"The folder for project `{name}` is not there any more, so this "
+                "conversation has nothing to work on and I have not read your message.\n\n"
+                f"I could not move this conversation to where the folder went{detail}. So "
+                "part of its history is under a new name and part is still under the old "
+                "one — nothing has been deleted, but the chat is not all in one place "
+                "until those two halves are joined. Restart me and that happens on the "
+                "way up; then open the project from the chip above the message box."
+            )
+        else:
+            content = (
+                f"The folder for project `{name}` is not there any more, so this "
+                "conversation has nothing to work on and I have not read your message.\n\n"
+                f"I could not find where it went{detail}. Nothing is lost: the chat is still "
+                "here, and it comes back as soon as the folder does. If you renamed it, "
+                f"renaming it back to `{name}` is the fix — a project's address is its folder "
+                "name. Otherwise pick another project, or the personal chat, from the chip "
+                "above the message box."
+            )
+        await self.bus.publish_outbound(OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=content,
+            metadata={**dict(msg.metadata or {}), "render_as": "text"},
+        ))
+        return True
+
+    def _project_history_is_split(self, key: str) -> bool:
+        """La storia di *key* e' per meta' sotto un altro nome?
+
+        Si guarda il **giornale**, non il testo del motivo: il motivo e' una
+        frase da mostrare, e legarci una decisione vorrebbe dire che riscriverla
+        cambia in silenzio quel che l'utente si sente promettere. Il giornale
+        invece *e'* il fatto — una voce ancora aperta con questo nome a sinistra
+        vuol dire tracce in due posti, e vale anche per una voce lasciata da un
+        tentativo precedente, che descrive lo stesso stato.
+        """
+        try:
+            return any(old == key for old, _ in pending_project_renames(self.workspace))
+        except Exception:  # pragma: no cover - il giornale illeggibile lo logga da se'
+            return False
+
+    def _remember_project_id(self, key: str) -> None:
+        """Annota nella sessione l'id della wiki a cui appartiene.
+
+        Una volta sola: se il metadato c'e' gia' non si rilegge niente, quindi il
+        costo e' una lettura di frontmatter al primo turno di ogni chat di
+        progetto — e quel file il prompt lo legge comunque.
+
+        Una wiki **senza** id non e' un errore: quella chat si comporta come
+        prima del passo 7, cioe' un rinomino la lascia indietro. Le wiki create
+        dallo scaffolder l'id ce l'hanno dalla nascita, le sette vere lo prendono
+        dalla migrazione.
+        """
+        if not is_project_session_key(key):
+            return
+        try:
+            session = self.sessions.get_or_create(key)
+            if session.metadata.get(PROJECT_WIKI_ID_KEY):
+                return
+            root = self.workspace_scopes.for_project(key).project_path
+            found = wiki_id(root)
+            if not found:
+                return
+            session.metadata[PROJECT_WIKI_ID_KEY] = found
+            self.sessions.save(session)
+        except Exception:
+            # WARNING e non DEBUG: senza questo metadato quella chat non sa a
+            # quale wiki appartiene, quindi un rinomino della cartella la
+            # lascera' indietro. Non e' fatale, ma e' una capacita' persa in
+            # silenzio — ed e' esattamente il tipo di silenzio per cui il
+            # 22/08 questa riga e' stata alzata di livello: a DEBUG non si
+            # vedeva sul telefono, e il difetto e' stato cercato a mano.
+            logger.opt(exception=True).warning(
+                "Impossibile annotare l'id della wiki per {}: un rinomino della cartella "
+                "lascera' indietro questa conversazione",
+                key,
+            )
+
+    def _follow_renamed_project(self, key: str) -> ProjectFollowOutcome:
+        """Cerca la wiki della sessione *key* col suo id e le porta dietro la chat.
+
+        Vedi :class:`ProjectFollowOutcome` per la forma dell'esito.
+
+        **Un nome che non puo' essere una conversazione ferma l'inseguimento**, e
+        lo ferma *prima* di ``invalidate`` e prima del giornale. Il rinomino lo fa
+        l'utente fuori da Jenny, quindi il nome nuovo non e' passato da nessun
+        controllo: portare la chat su ``project:Ricerca ETF`` la consegnerebbe a
+        una chiave che il canale rifiuta (``session_key_for_channel``) e che il
+        chip non elenca — cioe' uno spostamento riuscito verso il nulla, mentre
+        sotto il nome vecchio la chat funziona ancora. Il rifiuto e' anche il modo
+        di recuperare: si dice quale nome e' e quali caratteri servono.
+        """
+        try:
+            session = self.sessions.get_or_create(key)
+            recorded = session.metadata.get(PROJECT_WIKI_ID_KEY)
+            if not recorded:
+                return ProjectFollowOutcome(
+                    why_not="this conversation never recorded which wiki it belongs to"
+                )
+            wikis_dir = self.workspace_scopes.for_project(key).project_path.parent
+            target = find_wiki_by_id(wikis_dir, str(recorded))
+            if target is None:
+                return ProjectFollowOutcome(why_not="no folder here claims that wiki's id")
+            if not is_valid_project_name(target.name):
+                shown = _shown_folder_name(target.name)
+                logger.warning(
+                    "Rinomino non inseguito: {} e' ora {!r}, che non puo' essere il nome "
+                    "di un progetto; le tracce restano sotto il nome vecchio",
+                    key, shown,
+                )
+                return ProjectFollowOutcome(
+                    why_not=f"the folder is now called `{shown}`, which cannot be the "
+                            "name of a conversation",
+                    unopenable=shown,
+                )
+            new_key = f"{PROJECT_SESSION_PREFIX}{target.name}"
+            # La sessione e' in cache e i suoi file stanno per cambiare nome:
+            # tenerla vorrebbe dire riscriverla al vecchio nome al primo salvataggio.
+            self.sessions.invalidate(key)
+            moved, why_not = follow_renamed_project(self.workspace, key, new_key)
+            if not moved:
+                return ProjectFollowOutcome(why_not=why_not)
+            return ProjectFollowOutcome(moved_to=target.name)
+        except Exception:
+            logger.opt(exception=True).error("Inseguimento del rinomino fallito per {}", key)
+            return ProjectFollowOutcome(why_not="looking for it failed")
+
+    async def _expand_project_init(
+        self, msg: InboundMessage, key: str
+    ) -> InboundMessage | None:
+        """``/init`` diventa un turno normale, o un rifiuto. ``None`` = gia' risposto.
+
+        **Espansione e non comando del router.** Un handler del router
+        *risponde* e basta: non fa girare l'agente, che qui e' tutto il punto —
+        leggere la wiki e scrivere il suo ``AGENTS.md``. Espandendo il messaggio
+        prima del dispatch, il turno eredita dal passo 1 lo scope e il confine di
+        scrittura e dal 2.1 il blocco, senza una seconda strada da tenere
+        allineata.
+
+        Quel che si *vede* in chat resta ``/init``: la trascrizione la scrive il
+        canale (``channels/websocket.py``) prima del bus, e questa sostituzione
+        avviene dopo. Nella sessione — quel che Jenny rilegge — resta invece
+        l'espansione, che e' giusto: e' quello che ha davvero visto.
+        """
+        if not is_project_session_key(key):
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=(
+                    "`/init` only works inside a project — it writes that project's "
+                    "AGENTS.md. Pick one from the chip above the message box first."
+                ),
+                metadata={**dict(msg.metadata or {}), "render_as": "text"},
+            ))
+            return None
+        try:
+            # Il nome del file **si calcola**, non si spera: su una wiki che ha
+            # ancora `CLAUDE.md` il modello, lasciato a se stesso, constata che
+            # `AGENTS.md` non c'e' e ne crea un secondo accanto — visto sul
+            # telefono il 22/08, e con due file alla radice il lettore puo' solo
+            # sceglierne uno e avvisare. Qui invece la destinazione arriva
+            # decisa dallo stesso codice che poi la legge.
+            root = self.workspace_scopes.for_project(key).project_path
+            existing = wiki_schema_file(root)
+            prompt = render_template(
+                "agent/project_init.md",
+                instructions_path=str(existing or root / "AGENTS.md"),
+            )
+        except Exception as exc:
+            # Workspace sincronizzato da una versione precedente, o template
+            # illeggibile. Meglio dirlo che mandare "/init" al modello come
+            # testo: lo interpreterebbe a caso, e scriverebbe comunque un file.
+            logger.warning("could not render agent/project_init.md: {}", exc)
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="`/init` is unavailable: its prompt template could not be loaded.",
+                metadata={**dict(msg.metadata or {}), "render_as": "text"},
+            ))
+            return None
+        return dataclasses.replace(msg, content=prompt)
+
+    async def _expand_project_tidy(
+        self, msg: InboundMessage, key: str
+    ) -> InboundMessage | None:
+        """``/tidy`` diventa un turno normale, o un rifiuto. ``None`` = gia' risposto.
+
+        **Espansione come ``/init``, e non una passata come ``/gardener``.** La
+        differenza decide tutto: ``/gardener`` lancia un run interno, con sessione,
+        cassetta e contesto suoi — e il 26/08 quel che ha reso buono un riordino
+        *chiesto in conversazione* era proprio il contesto: le pagine iniettate nel
+        turno, la giornata di discussione, e l'utente presente a decidere una
+        contraddizione invece di parcheggiarla. Lanciato come passata, questo
+        comando sarebbe un giardiniere con un altro nome.
+
+        **Le misure le porta il codice.** L'unica cosa che il turno non ha già è
+        *quanto* misurano mappa e pagine contro i tetti che le governano, e a occhio
+        non si indovina: il 26/08 la passata a mano ha spezzato una pagina da 5.870
+        caratteri — buon giudizio, e **sotto** il tetto. Le due misure escono dagli
+        stessi lettori del giardiniere (``GardenerStore.map_chars``,
+        ``page_chars_if_over``), perché due conti della stessa cosa sarebbero due
+        risposte a «questa pagina entra in un turno?».
+        """
+        from jenny.agent.gardener import MAP_TARGET_CHARS, GardenerStore, page_ceiling
+        from jenny.utils.wiki_paths import iter_wiki_pages, page_chars_if_over
+
+        if not is_project_session_key(key):
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=(
+                    "`/tidy` only works inside a project — it restructures that project's "
+                    "wiki. Pick one from the chip above the message box first."
+                ),
+                metadata={**dict(msg.metadata or {}), "render_as": "text"},
+            ))
+            return None
+        try:
+            root = self.workspace_scopes.for_project(key).project_path
+            # Costruito diretto e non con ``for_project``: la radice arriva dallo
+            # scope, che l'ha gia' validata, e il nome del progetto qui non serve.
+            store = GardenerStore(root, Path(self.workspace))
+            ceiling = page_ceiling()
+            entries = iter_wiki_pages(root / "wiki")
+            over = [
+                (rel, chars)
+                for rel, _title in entries
+                if (chars := page_chars_if_over(root / "wiki" / rel, ceiling)) is not None
+            ]
+            map_chars = store.map_chars()
+            # Il layout **si legge dalle pagine**, come fa il lint
+            # (``lint_wiki.research_pages``): una wiki di ricerca le tiene sotto
+            # ``concepts/``/``entities/``/``summaries/``, un taccuino piatte. Copia
+            # dichiarata e non import, perché quello è uno script della skill che
+            # gira anche fuori dall'app. Serve perché la ricetta è **un'altra** nei
+            # due casi — su una wiki di ricerca un ``sources:`` a lista è la forma
+            # giusta e una fusione è permessa dopo conferma — e mandare il turno
+            # alla metà sbagliata del manuale è il difetto che questo comando
+            # esiste per chiudere, ripetuto un livello più in su.
+            #
+            # **Non si legge da ``entries``**, e un test lo impone: quella lista è
+            # fatta con ``is_wiki_page_rel``, che salta ``summaries/`` — quindi una
+            # wiki di ricerca con le sole sintesi risultava un taccuino. E sono le
+            # **pagine** a dichiarare, non le cartelle: finché bastava la cartella,
+            # il top-up dello scaffold creava le tre directory su un taccuino e lo
+            # trasformava in una biblioteca in silenzio.
+            notebook = not any(
+                (root / "wiki" / folder).is_dir()
+                and any((root / "wiki" / folder).rglob("*.md"))
+                for folder in ("concepts", "entities", "summaries")
+            )
+            prompt = render_template(
+                "agent/tidy.md",
+                project_path=str(root.relative_to(Path(self.workspace).resolve(strict=False))),
+                # Assoluto solo per il ``lint``: ``python_exec`` gira dentro la
+                # cartella degli script della skill, e da là la forma relativa al
+                # workspace — quella che il progetto insegna per tutto il resto —
+                # non risolve.
+                project_abs=str(root),
+                map_chars=f"{map_chars:,}",
+                map_target=f"{MAP_TARGET_CHARS:,}",
+                map_over_budget=map_chars > MAP_TARGET_CHARS,
+                page_count=len(entries),
+                page_max=f"{ceiling:,}",
+                notebook=notebook,
+                pages_over="\n".join(
+                    f"  - `{rel}` — **{chars:,} characters, over the {ceiling:,} budget**"
+                    for rel, chars in over
+                ),
+            )
+        except Exception as exc:
+            # Stessa scelta di ``/init``: dirlo, invece di mandare "/tidy" al
+            # modello come testo — lo interpreterebbe a caso e ristrutturerebbe
+            # comunque, senza nessuna delle misure che sono il senso del comando.
+            logger.warning("could not render agent/tidy.md: {}", exc)
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="`/tidy` is unavailable: its prompt template could not be loaded.",
+                metadata={**dict(msg.metadata or {}), "render_as": "text"},
+            ))
+            return None
+        return dataclasses.replace(msg, content=prompt)
+
     def _effective_session_key(self, msg: InboundMessage) -> str:
-        """Return the session key used for task routing and mid-turn injections."""
-        return msg.session_key_override or UNIFIED_SESSION_KEY
+        """Return the session key used for task routing and mid-turn injections.
+
+        Delega a ``InboundMessage.session_key``, che e' l'unico posto dove la
+        regola vive: override esplicito, altrimenti il canale e il ``chat_id``
+        (``jenny.session.keys.session_key_for_channel``).
+
+        **Qui c'era ``UNIFIED_SESSION_KEY`` cablato**, ed era il gemello del
+        difetto della sessione fantasma chiuso il 21/08 — con il verso invertito.
+        Il chiamante subito sotto confronta questo valore con ``msg.session_key``
+        e, se differiscono, *riscrive il messaggio* con un override: una costante
+        qui non ignorava la chiave del messaggio, la sovrascriveva. Un messaggio
+        mandato a ``project:patreon`` finiva percio' nella conversazione
+        personale, e sul telefono si vedeva solo guardando quale file di sessione
+        cresceva. Nessun test lo prendeva, perche' tutti provavano gli anelli e
+        non la catena.
+        """
+        return msg.session_key
 
     def _replay_token_budget(self) -> int:
         """Derive a token budget for session history replay from the context window."""
@@ -730,8 +1301,20 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             on_iteration=lambda iteration: setattr(self, "_current_iteration", iteration),
         )
         hook: AgentHook = loop_hook
-        if not ephemeral and self._extra_hooks:
-            hook = CompositeHook([loop_hook] + self._extra_hooks)
+        # **Su un turno effimero non cadono tutti gli hook extra: cadono quelli
+        # che parlano.** La condizione era ``not ephemeral`` secca, e l'unico hook
+        # extra che questa installazione monta e' la contabilita' dei token — cioe'
+        # «effimero» voleva dire «non misurato». Misurato il 25/08 su
+        # ``token-usage.json``: in 27 giorni i bucket ``dream`` e ``atlas`` non
+        # erano comparsi **una volta**, mentre Dream gira ogni due ore, Atlas su
+        # cron e il giardiniere su otto wiki. Non un errore di categoria: lavoro
+        # non contato affatto, e proprio quello che l'utente non ha chiesto.
+        #
+        # Chi vuole restare dichiara ``runs_when_ephemeral()``; il default e' ``False``,
+        # quindi un hook che parla continua a non essere montato senza fare niente.
+        extra = [h for h in self._extra_hooks if not ephemeral or h.runs_when_ephemeral()]
+        if extra:
+            hook = CompositeHook([loop_hook] + extra)
 
         async def _checkpoint(payload: dict[str, Any]) -> None:
             if session is None:
@@ -798,6 +1381,7 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             channel=channel,
             message_metadata=metadata,
             session_metadata=session.metadata if session is not None else None,
+            session_key=active_session_key,
         )
         request_ctx = RequestContext(
             channel=channel,
@@ -989,6 +1573,28 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
 
             raw = msg.content.strip()
             effective_key = self._effective_session_key(msg)
+            # Prima di tutto il resto, ``/init`` compreso: se la cartella legata
+            # non c'e' piu', il turno non parte.
+            if await self._refuse_missing_project(msg, effective_key):
+                continue
+            # La cartella c'e' — ma e' **quella**? Il nome non basta a dirlo.
+            if await self._refuse_reincarnated_project(msg, effective_key):
+                continue
+            # La cartella c'e': la sessione si annota di chi e', cosi' il giorno
+            # che la cartella cambia nome c'e' da dove ripartire (passo 7).
+            self._remember_project_id(effective_key)
+            if raw == PROJECT_INIT_COMMAND or raw.startswith(f"{PROJECT_INIT_COMMAND} "):
+                expanded = await self._expand_project_init(msg, effective_key)
+                if expanded is None:
+                    continue
+                msg = expanded
+                raw = msg.content.strip()
+            if raw == PROJECT_TIDY_COMMAND or raw.startswith(f"{PROJECT_TIDY_COMMAND} "):
+                expanded = await self._expand_project_tidy(msg, effective_key)
+                if expanded is None:
+                    continue
+                msg = expanded
+                raw = msg.content.strip()
             if self.commands.is_priority(raw):
                 await self._dispatch_command_inline(
                     msg, effective_key, raw,
@@ -1120,6 +1726,21 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
                             return f"{stream_base_id}:{stream_segment}"
 
                         async def on_stream(delta: str) -> None:
+                            # Secondo gate, sullo stesso asse del primo: là si
+                            # decideva se streammare un turno, qui se streammare
+                            # ancora. Da quando il tool ``message`` ha consegnato
+                            # nella conversazione corrente, il testo finale del
+                            # turno viene soppresso (v. ``_assemble_outbound``) —
+                            # e ciò che il modello scrive dopo è una nota di
+                            # servizio rivolta a se stesso, non all'utente.
+                            # Streammarla comunque rendeva la WebUI l'unica
+                            # superficie che la vedeva, e — finché
+                            # ``_handleMessage`` riusava la bolla — la vedeva *al
+                            # posto* dell'avviso. Misurato il 27/08/2026 sul cron
+                            # delle 20:00: in chat "L'ho chiamato, aspetto la sua
+                            # risposta", su notifica e transcript l'avviso vero.
+                            if self._message_tool_spoke():
+                                return
                             meta = dict(msg.metadata or {})
                             meta["_stream_delta"] = True
                             meta["_stream_id"] = _current_stream_id()
@@ -1401,10 +2022,7 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             ephemeral=False,
             clear_pending=False,
         )
-        message_tool = self.tools.get("message")
-        spoke_via_tool = bool(
-            isinstance(message_tool, MessageTool) and message_tool._sent_in_turn
-        )
+        spoke_via_tool = self._message_tool_spoke()
         if silent:
             # Un turno di sistema silenzioso non ha un outbound: ne il contenuto
             # ne il fallback. Il vecchio contratto ("restituisce SEMPRE una
@@ -1580,6 +2198,23 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             final_text=ctx.final_content or "",
         )
 
+    def _message_tool_spoke(self, tools: ToolRegistry | None = None) -> bool:
+        """Il tool ``message`` ha già consegnato verso il target d'origine in questo turno.
+
+        Lettore unico del flag, e non è un accorpamento estetico: da questo booleano
+        pendono tre decisioni che devono restare la stessa decisione — il gate dello
+        stream in :meth:`_dispatch`, la soppressione della risposta finale qui sotto e
+        il ``_streamed`` con cui il dispatcher decide se ri-consegnarla. Se divergessero
+        di un caso, la WebUI mostrerebbe di nuovo qualcosa che gli altri canali non
+        hanno (o, nel verso opposto, non mostrerebbe niente).
+
+        *tools* esiste perché il flag vive in una ContextVar **per istanza**: con un
+        registry sostituito (l'idioma di Dream/Atlas) leggere l'istanza di default
+        darebbe sempre ``False``. Chi ha il registry del turno lo passa.
+        """
+        mt = (tools or self.tools).get("message")
+        return isinstance(mt, MessageTool) and mt._sent_in_turn
+
     def _assemble_outbound(
         self,
         msg: InboundMessage,
@@ -1593,7 +2228,8 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
     ) -> OutboundMessage | None:
         """Assemble the final outbound message from turn results."""
         # MessageTool suppression
-        if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
+        tool_spoke = self._message_tool_spoke()
+        if tool_spoke:
             if not had_injections or stop_reason == "empty_final_response":
                 return None
 
@@ -1601,7 +2237,13 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
 
         meta = dict(msg.metadata or {})
-        if on_stream is not None and stop_reason not in {"error", "tool_error"}:
+        # ``_streamed`` dice al dispatcher "i client l'hanno già visto arrivare a
+        # pezzi, non ri-spedirlo" (``dispatcher.py``). Non basta che un canale di
+        # stream *esistesse*: se il tool ha parlato, il gate in ``_dispatch`` ha
+        # scartato i delta, e siamo qui solo nell'unico caso in cui la soppressione
+        # non scatta — tool + injection utente a metà turno. Segnarlo streammato
+        # farebbe scartare al dispatcher un testo che nessuno ha mai visto.
+        if on_stream is not None and not tool_spoke and stop_reason not in {"error", "tool_error"}:
             meta["_streamed"] = True
         if turn_latency_ms is not None:
             meta["latency_ms"] = int(turn_latency_ms)
@@ -1684,6 +2326,28 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
         self._schedule_background(
             self._record_channel_delivery_locked(session_key, content, media)
         )
+
+    def forget_file_reads(self, session_key: str) -> None:
+        """Dichiara che *session_key* non contiene piu' il contenuto di nessun file.
+
+        La chiama chi svuota una conversazione (``/new``). Senza, la prima
+        lettura della conversazione nuova torna come stub «invariato dall'ultima
+        lettura» — vero per il file, falso per chi legge: quella conversazione non
+        l'ha mai visto.
+        """
+        self._file_state_store.drop(session_key)
+
+    def active_session_keys(self) -> tuple[str, ...]:
+        """Le sessioni con un turno in volo **adesso**.
+
+        Lo stesso segnale che l'autocompact riceve per non archiviare una
+        sessione mentre lavora (v. ``run``), esposto perche' serve a un secondo
+        lettore: il giardiniere (T4.3) gira su una chiave sua e non condivide il
+        lock della conversazione di un progetto, quindi l'unico modo che ha di
+        non riscrivere la mappa sotto le mani di chi la sta usando e' chiedere se
+        quella conversazione e' in volo.
+        """
+        return tuple(self._pending_queues)
 
     async def process_direct(
         self,

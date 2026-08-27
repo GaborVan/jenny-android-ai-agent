@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from port_alloc import free_port
 
 from jenny.channels.websocket import WebSocketChannel, WebSocketConfig
 from jenny.session.manager import SessionManager
@@ -214,19 +215,20 @@ async def test_media_route_serves_signed_file(
     bus: MagicMock, tmp_path: Path
 ) -> None:
     """Valid signature + existing file => 200 with correct bytes + MIME."""
+    port = free_port()
     media = tmp_path / "media"
     media.mkdir()
     target = media / "round-trip.png"
     target.write_bytes(_PNG_BYTES)
 
-    channel = _ch(bus, port=29920)
+    channel = _ch(bus, port=port)
     with patch("jenny.webui.media_gateway.get_media_dir", return_value=media):
         url_path = channel.gateway.media.sign_media_path(target)
         assert url_path is not None
         server_task = asyncio.create_task(channel.start())
         await asyncio.sleep(0.3)
         try:
-            resp = await _http_get(f"http://127.0.0.1:29920{url_path}")
+            resp = await _http_get(f"http://127.0.0.1:{port}{url_path}")
         finally:
             await channel.stop()
             await server_task
@@ -247,12 +249,13 @@ async def test_media_route_serves_video_byte_ranges(
     bus: MagicMock, tmp_path: Path
 ) -> None:
     """MP4 playback needs HTTP Range support for mid-stream reads and seeking."""
+    port = free_port()
     media = tmp_path / "media"
     media.mkdir()
     target = media / "clip.mp4"
     target.write_bytes(b"0123456789")
 
-    channel = _ch(bus, port=29927)
+    channel = _ch(bus, port=port)
     with patch("jenny.webui.media_gateway.get_media_dir", return_value=media):
         url_path = channel.gateway.media.sign_media_path(target)
         assert url_path is not None
@@ -260,7 +263,7 @@ async def test_media_route_serves_video_byte_ranges(
         await asyncio.sleep(0.3)
         try:
             resp = await _http_get(
-                f"http://127.0.0.1:29927{url_path}",
+                f"http://127.0.0.1:{port}{url_path}",
                 headers={"Range": "bytes=2-5"},
             )
         finally:
@@ -279,12 +282,13 @@ async def test_media_route_serves_video_byte_ranges(
 async def test_media_route_serves_suffix_video_byte_ranges(
     bus: MagicMock, tmp_path: Path
 ) -> None:
+    port = free_port()
     media = tmp_path / "media"
     media.mkdir()
     target = media / "clip.mp4"
     target.write_bytes(b"0123456789")
 
-    channel = _ch(bus, port=29928)
+    channel = _ch(bus, port=port)
     with patch("jenny.webui.media_gateway.get_media_dir", return_value=media):
         url_path = channel.gateway.media.sign_media_path(target)
         assert url_path is not None
@@ -292,7 +296,7 @@ async def test_media_route_serves_suffix_video_byte_ranges(
         await asyncio.sleep(0.3)
         try:
             resp = await _http_get(
-                f"http://127.0.0.1:29928{url_path}",
+                f"http://127.0.0.1:{port}{url_path}",
                 headers={"Range": "bytes=-3"},
             )
         finally:
@@ -308,12 +312,13 @@ async def test_media_route_serves_suffix_video_byte_ranges(
 async def test_media_route_rejects_unsatisfiable_byte_range(
     bus: MagicMock, tmp_path: Path
 ) -> None:
+    port = free_port()
     media = tmp_path / "media"
     media.mkdir()
     target = media / "clip.mp4"
     target.write_bytes(b"0123456789")
 
-    channel = _ch(bus, port=29929)
+    channel = _ch(bus, port=port)
     with patch("jenny.webui.media_gateway.get_media_dir", return_value=media):
         url_path = channel.gateway.media.sign_media_path(target)
         assert url_path is not None
@@ -321,7 +326,7 @@ async def test_media_route_rejects_unsatisfiable_byte_range(
         await asyncio.sleep(0.3)
         try:
             resp = await _http_get(
-                f"http://127.0.0.1:29929{url_path}",
+                f"http://127.0.0.1:{port}{url_path}",
                 headers={"Range": "bytes=100-200"},
             )
         finally:
@@ -342,11 +347,12 @@ async def test_media_route_rejects_bad_signature(
     Protects against a restart: old URLs baked into a stale tab become
     un-forgeable once ``gateway.media.secret`` regenerates.
     """
+    port = free_port()
     media = tmp_path / "media"
     media.mkdir()
     (media / "f.png").write_bytes(_PNG_BYTES)
 
-    channel = _ch(bus, port=29921)
+    channel = _ch(bus, port=port)
     with patch("jenny.webui.media_gateway.get_media_dir", return_value=media):
         good = channel.gateway.media.sign_media_path(media / "f.png")
         assert good is not None
@@ -360,7 +366,7 @@ async def test_media_route_rejects_bad_signature(
         server_task = asyncio.create_task(channel.start())
         await asyncio.sleep(0.3)
         try:
-            resp = await _http_get(f"http://127.0.0.1:29921{forged}")
+            resp = await _http_get(f"http://127.0.0.1:{port}{forged}")
         finally:
             await channel.stop()
             await server_task
@@ -377,12 +383,13 @@ async def test_media_route_rejects_path_traversal_payload(
     obtained the secret (or the channel was misconfigured) must still be
     stopped by the resolve()+relative_to() guard in the serving path.
     """
+    port = free_port()
     media = tmp_path / "media"
     media.mkdir()
     secret_file = tmp_path / "secret.txt"
     secret_file.write_text("classified")
 
-    channel = _ch(bus, port=29922)
+    channel = _ch(bus, port=port)
     # Hand-craft a traversal payload the legit signer would refuse to mint.
     payload = b64url_encode(b"../secret.txt")
     mac = hmac.new(
@@ -394,7 +401,7 @@ async def test_media_route_rejects_path_traversal_payload(
         server_task = asyncio.create_task(channel.start())
         await asyncio.sleep(0.3)
         try:
-            resp = await _http_get(f"http://127.0.0.1:29922{url}")
+            resp = await _http_get(f"http://127.0.0.1:{port}{url}")
         finally:
             await channel.stop()
             await server_task
@@ -408,12 +415,13 @@ async def test_media_route_404s_missing_file(
 ) -> None:
     """A signed URL for a file that no longer exists degrades to 404 so the
     client can fall back to the placeholder tile instead of breaking."""
+    port = free_port()
     media = tmp_path / "media"
     media.mkdir()
     target = media / "gone.png"
     target.write_bytes(_PNG_BYTES)
 
-    channel = _ch(bus, port=29923)
+    channel = _ch(bus, port=port)
     with patch("jenny.webui.media_gateway.get_media_dir", return_value=media):
         url_path = channel.gateway.media.sign_media_path(target)
         assert url_path is not None
@@ -421,7 +429,7 @@ async def test_media_route_404s_missing_file(
         server_task = asyncio.create_task(channel.start())
         await asyncio.sleep(0.3)
         try:
-            resp = await _http_get(f"http://127.0.0.1:29923{url_path}")
+            resp = await _http_get(f"http://127.0.0.1:{port}{url_path}")
         finally:
             await channel.stop()
             await server_task
@@ -437,11 +445,12 @@ async def test_media_route_degrades_non_image_to_octet_stream(
     Defence-in-depth: if media_dir ever contained (say) an HTML file, we
     do not want the browser to render it as HTML via the signed route.
     """
+    port = free_port()
     media = tmp_path / "media"
     media.mkdir()
     (media / "scary.html").write_bytes(b"<script>alert(1)</script>")
 
-    channel = _ch(bus, port=29924)
+    channel = _ch(bus, port=port)
     with patch("jenny.webui.media_gateway.get_media_dir", return_value=media):
         payload = b64url_encode(b"scary.html")
         mac = hmac.new(
@@ -451,7 +460,7 @@ async def test_media_route_degrades_non_image_to_octet_stream(
         server_task = asyncio.create_task(channel.start())
         await asyncio.sleep(0.3)
         try:
-            resp = await _http_get(f"http://127.0.0.1:29924{url}")
+            resp = await _http_get(f"http://127.0.0.1:{port}{url}")
         finally:
             await channel.stop()
             await server_task
@@ -467,19 +476,20 @@ async def test_media_route_serves_svg_with_strict_csp(
     bus: MagicMock, tmp_path: Path
 ) -> None:
     """Generated SVG can preview as an image without becoming executable HTML."""
+    port = free_port()
     media = tmp_path / "media"
     media.mkdir()
     target = media / "chart.svg"
     target.write_text("<svg xmlns='http://www.w3.org/2000/svg'><script>alert(1)</script></svg>")
 
-    channel = _ch(bus, port=29928)
+    channel = _ch(bus, port=port)
     with patch("jenny.webui.media_gateway.get_media_dir", return_value=media):
         url_path = channel.gateway.media.sign_media_path(target)
         assert url_path is not None
         server_task = asyncio.create_task(channel.start())
         await asyncio.sleep(0.3)
         try:
-            resp = await _http_get(f"http://127.0.0.1:29928{url_path}")
+            resp = await _http_get(f"http://127.0.0.1:{port}{url_path}")
         finally:
             await channel.stop()
             await server_task

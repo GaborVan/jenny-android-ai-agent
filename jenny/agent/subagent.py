@@ -63,6 +63,7 @@ from jenny.providers.base import LLMProvider
 from jenny.runtime.context import get_android_context
 from jenny.security.workspace_access import (
     WorkspaceScope,
+    current_workspace_scope,
     enter_workspace_scope,
     workspace_sandbox_status,
 )
@@ -1222,7 +1223,13 @@ class SubagentManager:
                 cfg.restrict_to_workspace = workspace_scope.restrict_to_workspace
             atype = get_agent_type(spec.agent_type)
             tools = self._build_tools(workspace=root, tools_config=cfg, agent_type=atype)
-            system_prompt = self._build_subagent_prompt(workspace=root, agent_type=atype)
+            system_prompt = self._build_subagent_prompt(
+                workspace=root,
+                agent_type=atype,
+                # Lo scope della spec, non l'ambiente: il prompt si costruisce
+                # qui fuori, il ``with`` che lega e' piu' sotto.
+                workspace_scope=workspace_scope,
+            )
             messages: list[dict[str, Any]]
             if resume_messages:
                 messages = list(resume_messages)
@@ -1571,19 +1578,35 @@ class SubagentManager:
         self,
         workspace: Path | None = None,
         agent_type: AgentType | None = None,
+        *,
+        workspace_scope: WorkspaceScope | None = None,
     ) -> str:
         """Build a focused system prompt for the subagent.
 
         Il prompt di ruolo del tipo viene *composto* dentro il template base, non
         duplicato: la parte condivisa (contenuto non fidato, workspace, skills)
         resta in un solo file.
+
+        ``workspace_scope`` e' lo scope della **spec**, cioe' quello che il run
+        legherà davvero (v. ``_run_subagent``). Va passato, non dedotto
+        dall'ambiente: questo metodo viene chiamato FUORI dal blocco
+        ``enter_workspace_scope``, e su ``restart`` / ``send`` /
+        ``_resume_lineage`` l'ambiente e' il turno del chiamante, non la spec —
+        cosi' rilanciare una spec scrivibile da dentro un turno in sola lettura
+        dava un prompt che diceva "non puoi scrivere" a un subagent che poteva.
         """
         from jenny.agent.context import ContextBuilder
         from jenny.agent.skills import SkillsLoader
         from jenny.config.paths import get_output_path
+        from jenny.utils.wiki_paths import is_wiki_root
 
         time_ctx = ContextBuilder._build_runtime_context(None, None)
         root = workspace or self.workspace
+        # Lo scope che il run legherà. Vedi la docstring per il perche' il
+        # fallback all'ambiente e' corretto e non un ripiego.
+        bound_scope = (
+            workspace_scope if workspace_scope is not None else current_workspace_scope()
+        )
         skills_summary = SkillsLoader(
             root,
             disabled_skills=self.disabled_skills,
@@ -1598,6 +1621,55 @@ class SubagentManager:
             # ``create=False``: qui il prompt la nomina soltanto, la directory
             # la crea ``sync_workspace_templates`` una volta per avvio.
             output_dir=str(get_output_path(root)),
+            # Un subagent lanciato dentro un progetto riceve la radice del
+            # progetto, e il paragrafo qui sopra gli dava le regole del
+            # workspace applicate a una cartella che non e' il workspace: e'
+            # cosi' che il 21/08 il file di prova e' finito in
+            # ``wikis/<nome>/output/``, cartella che nello scaffold non esiste
+            # nemmeno. La domanda si fa sulla cartella perche' qui la chiave di
+            # sessione non arriva; ``agent/project.md`` e' lo stesso file che
+            # legge l'agente principale, incluso e non ricopiato.
+            project=is_wiki_root(root),
+            project_path=str(root.resolve()),
+            # La pianta della cartella gli serve — e' dove scrive. La politica di
+            # cattura no: non ha un utente che gli dica fatti stabili, e quel che
+            # scoprisse va in ``raw/research/`` e in una pagina, non nel diario.
+            capture=False,
+            # **T3.9 — la mappa e le pagine, o niente sezione.** Fino a qui le
+            # due sezioni di ``agent/project.md`` si rendevano vuote, e in
+            # silenzio: Jinja valuta falso un ``{% if %}`` su una variabile
+            # assente. Il costo non era teorico — il subagent e' l'attore che
+            # scrive le pagine e cura la mappa, e lo faceva senza averle davanti.
+            #
+            # **I lettori sono quelli del prompt principale, non una copia.** Un
+            # ``ContextBuilder`` costruito qui e' l'unica strada: questa classe
+            # non ne riceve uno (``AgentLoop`` tiene il suo e non lo passa al
+            # manager), e i due lettori sono metodi suoi. Costruirlo costa un
+            # ``MemoryStore`` e uno ``SkillsLoader`` — nessuna lettura, un
+            # ``mkdir(exist_ok=True)`` su ``memory/`` che esiste gia' — cioe'
+            # meno di quel che costa lo ``SkillsLoader`` che questo metodo
+            # istanzia qualche riga piu' su. La radice passata e' quella
+            # dell'installazione, come in produzione: la cartella del progetto e'
+            # l'**argomento** dei lettori, non lo stato del builder.
+            #
+            # Senza guardia su ``project``: fuori da una wiki i due lettori non
+            # trovano ne' ``wiki/index.md`` ne' pagine e tornano vuoti, e il
+            # template la sezione non la rende comunque. Una guardia in piu' qui
+            # sarebbe un secondo posto in cui sbagliare la stessa domanda.
+            **ContextBuilder(self.workspace)._project_block_vars(root),
+            # **L'esecuzione eredita lo scope, la conoscenza no.** Visto sul
+            # telefono il 22/08: in sola lettura l'agente principale sapeva di
+            # non poter scrivere, ha delegato, e il subagent ha pianificato e
+            # scritto sei file — tutti rifiutati dal cancello. Il confine ha
+            # tenuto, il lavoro e' stato buttato. Lo stesso file che legge
+            # l'agente principale, incluso e non ricopiato.
+            #
+            # Lo scope della spec vince sull'ambiente perche' e' quello che il
+            # run lega (``enter_workspace_scope(spec.workspace_scope)``). Il
+            # fallback all'ambiente non e' un ripiego: con ``workspace_scope``
+            # a ``None`` quel ``with`` e' un no-op, quindi lo scope legato *e'*
+            # l'ambiente — e allora e' l'ambiente a dover parlare.
+            readonly=not (bound_scope is None or bound_scope.writable),
             skills_summary=skills_summary or "",
             role_section=self._render_role_section(agent_type),
         )

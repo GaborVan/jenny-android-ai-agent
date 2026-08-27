@@ -274,20 +274,66 @@ def test_tapping_the_alert_closes_what_is_above_and_lands_in_chat() -> None:
     assert "this._navPos = 0" in open_chat, "la chat diventa la radice, non una entry sopra"
 
 
-def test_pending_alerts_are_cleared_only_where_the_chat_really_opens() -> None:
-    """``clearAlerts`` stava in ``onResume``. Questa app è la home del telefono:
-    ``onResume`` scatta a ogni ritorno alla schermata iniziale e su qualunque
-    vista, quindi l'alert veniva cancellato comunque — letto o no. Sommato al
-    ``contentIntent`` muto, il messaggio proattivo perdeva ogni segnale.
+def test_pending_alerts_are_cleared_where_the_chat_reaches_the_screen() -> None:
+    """La regola è "la chat è a schermo", e i tre chiamanti sono i tre modi in cui
+    ci arriva: il tap sull'alert (``onNewIntent`` + il gemello in ``onCreate``
+    per l'activity morta), il cambio vista dentro la SPA (``chatOpened``) e il
+    rientro in primo piano a chat già attiva (``onResume``).
 
-    Ora si cancella solo dove la chat viene davvero aperta: il ramo
-    ``ACTION_OPEN_CHAT`` di ``onNewIntent`` (e solo se la SPA ha confermato) e il
-    suo gemello in ``onCreate``, per il tap arrivato ad activity morta.
+    È stata sbagliata in due modi opposti, e questo test tiene entrambe le
+    sponde. In ``onResume`` liscio: questa app è la home del telefono, quindi
+    l'alert veniva cancellato a ogni pressione di Home, letto o no. Solo sul tap
+    dell'alert: chi apriva la chat da sé restava con in coda notifiche di
+    messaggi che aveva davanti agli occhi.
     """
     kotlin = _main_activity()
-    assert "clearAlerts" not in _code_only(_fun_body(kotlin, "onResume"))
     assert "clearAlerts" in _code_only(_fun_body(kotlin, "onNewIntent"))
     assert "clearAlerts" in _code_only(_fun_body(kotlin, "onCreate"))
+    assert "clearAlerts" in _code_only(_fun_body(kotlin, "chatOpened"))
+    assert "clearAlerts" in _code_only(_fun_body(kotlin, "onResume"))
+
+
+def test_the_resume_branch_asks_what_is_on_screen_before_clearing() -> None:
+    """La metà che impedisce il ritorno del difetto: in ``onResume`` la cancellazione
+    dipende dalla risposta della SPA, non dal resume.
+
+    Senza la domanda questo ramo *è* l'``onResume`` liscio di prima. Il confronto
+    con ``"true"`` è la forma esatta che serve: ``evaluateJavascript`` restituisce
+    ``"null"`` quando la SPA non c'è, e ``"null"`` è una stringa — un test di
+    verità qualunque la prenderebbe per un sì.
+    """
+    body = _code_only(_fun_body(_main_activity(), "onResume"))
+    assert "CHAT_ON_SCREEN_JS" in body
+    clear_line = next(line for line in body.splitlines() if "clearAlerts" in line)
+    assert '== "true"' in clear_line, clear_line
+
+
+def test_the_chat_visible_question_reads_the_spa_view_that_exists() -> None:
+    """``CHAT_ON_SCREEN_JS`` interroga ``mobileApp.currentMode``: se quel campo o il
+    nome della vista cambiassero, la domanda risponderebbe sempre no — e gli
+    alert resterebbero in coda per sempre, senza che niente fallisca."""
+    kotlin = _main_activity()
+    question = re.search(r"CHAT_ON_SCREEN_JS = \"\"\"(.*?)\"\"\"", kotlin, re.S)
+    assert question, "CHAT_ON_SCREEN_JS non trovato"
+    assert "currentMode === 'chat'" in question.group(1)
+    app_js = _app_js()
+    assert "this.currentMode = mode" in app_js
+    assert "switchMode('chat'" in app_js
+
+
+def test_entering_the_chat_view_notifies_the_native_shell() -> None:
+    """L'unico modo in cui la chat arriva a schermo che il guscio nativo non può
+    vedere da sé: un cambio vista dentro la WebView non produce callback
+    d'activity. La chiamata sta in ``ChatController.activate``, che è il punto in
+    cui la sezione diventa attiva, ed è difesa perché fuori dal guscio
+    ``JennyNative`` non esiste."""
+    chat_js = (UI_ASSETS / "mobile-chat.js").read_text(encoding="utf-8")
+    activate = re.search(r"\n  activate\(\)\s*\{(.*?)\n  \}", chat_js, re.S)
+    assert activate, "activate() non trovato in mobile-chat.js"
+    body = activate.group(1)
+    assert "JennyNative?.chatOpened?.()" in body
+    assert "try {" in body
+    assert '@JavascriptInterface' in _main_activity().split("fun chatOpened")[0][-200:]
 
 
 def test_a_cold_start_from_the_alert_still_lands_in_chat() -> None:

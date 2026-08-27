@@ -1,0 +1,319 @@
+"""«Nessun progetto ancora» non si dice quando non lo si sa.
+
+`_loadProjects` legge `/api/projects` e il suo `catch` faceva una cosa sola:
+`this._projects = []`. Cioè trasformava *qualunque* guasto — 401, 500, gateway a
+metà avvio, telefono offline — nella frase «Nessun progetto ancora», e nel farlo
+buttava via l'elenco buono letto un minuto prima. La risposta ovvia a quello
+schermo è ricreare il progetto: è così che nasce un doppione, due wiki con lo
+stesso scopo e la storia divisa fra le due, che nessuna delle due poi contiene.
+E un doppione non si ritira: quel che il gardener ha già promosso in pagina resta
+dove è finito.
+
+Quindi: la cache non si tocca su un fallimento, e la tendina lo dichiara con una
+nota sua (`scope.loadFailed`) distinta dall'elenco vuoto — sopra le righe, perché
+quelle possono essere vecchie e questa nota è l'unica cosa che lo dice.
+
+I metodi si estraggono dal sorgente e si eseguono in node, come in
+``test_chat_switch_race_client.py``. Serve un DOM finto perché `_renderMenu`
+costruisce nodi veri: qui un elemento è un oggetto che sa fare `appendChild`,
+`className`, `textContent`, e niente più — quanto basta a leggere cosa la tendina
+ha scritto.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+ASSETS = Path(__file__).resolve().parents[2] / "jenny" / "templates" / "ui" / "assets"
+CHIP_JS = ASSETS / "shared" / "scope-chip.js"
+CSS = ASSETS / "mobile-style.css"
+I18N_DIR = ASSETS / "i18n"
+
+_NODE = shutil.which("node")
+
+pytestmark = pytest.mark.skipif(_NODE is None, reason="node non disponibile")
+
+
+def _chip() -> str:
+    return CHIP_JS.read_text(encoding="utf-8")
+
+
+def _member(source: str, name: str) -> str:
+    m = re.search(
+        rf"\n  ((?:async |get )?{re.escape(name)}\([^)]*\)\s*\{{.*?)\n  \}}",
+        source,
+        re.S,
+    )
+    assert m, f"{name} non trovato"
+    return m.group(1) + "\n  }"
+
+
+_HARNESS = """
+import assert from 'node:assert/strict';
+
+const DEFAULT_DIR = 'wikis';
+const i18n = { t: (key) => 'i18n:' + key };
+
+/* Un elemento è quel poco che `_renderMenu` e i suoi aiutanti toccano. */
+function makeEl(tag) {
+  const el = {
+    tag,
+    className: '',
+    textContent: '',
+    children: [],
+    dataset: {},
+    appendChild(child) { el.children.push(child); return child; },
+    setAttribute() {},
+    addEventListener() {},
+    scrollIntoView() {},
+    querySelector() { return makeEl('span'); },
+  };
+  el.classList = {
+    add(c) { el.className = (el.className + ' ' + c).trim(); },
+  };
+  Object.defineProperty(el, 'innerHTML', {
+    get() { return ''; },
+    set(v) { if (v === '') el.children.length = 0; },
+  });
+  return el;
+}
+const document = { createElement: (tag) => makeEl(tag) };
+
+// Tutto il testo scritto nella tendina, in ordine di comparsa.
+function texts(el) {
+  const out = [];
+  for (const child of el.children) {
+    if (child.textContent) out.push(child.textContent);
+    out.push(...texts(child));
+  }
+  return out;
+}
+// I nodi che portano una classe, a qualunque profondità.
+function byClass(el, cls) {
+  const out = [];
+  for (const child of el.children) {
+    if (String(child.className).split(/\\s+/).includes(cls)) out.push(child);
+    out.push(...byClass(child, cls));
+  }
+  return out;
+}
+
+// La rete a mano: la lettura dell'elenco può risolvere o fallire a comando.
+let nextProjects = null;
+const api = {
+  listProjects() {
+    if (nextProjects === 'fail') return Promise.reject(new Error('401'));
+    return Promise.resolve(nextProjects);
+  },
+};
+
+class Chip {
+  constructor() {
+    this.scope = { kind: 'personal', name: null };
+    this._projects = null;
+    this._loadFailed = false;
+    this._dir = DEFAULT_DIR;
+    this.menu = makeEl('div');
+    this.rendered = 0;
+  }
+  render() { this.rendered++; }   // il chip in sé non è oggetto di questi test
+  get personalLabel() { return i18n.t('scope.personal'); }
+  select() {}
+  __LOAD_PROJECTS__
+  __RENDER_MENU__
+  __LABEL__
+  __SEP__
+  __NOTE__
+  __ITEM__
+  __AGO__
+}
+"""
+
+
+def _harness() -> str:
+    src = _chip()
+    return (
+        _HARNESS.replace("__LOAD_PROJECTS__", _member(src, "_loadProjects"))
+        .replace("__RENDER_MENU__", _member(src, "_renderMenu"))
+        .replace("__LABEL__", _member(src, "_label"))
+        .replace("__SEP__", _member(src, "_sep"))
+        .replace("__NOTE__", _member(src, "_note"))
+        .replace("__ITEM__", _member(src, "_item"))
+        .replace("__AGO__", _member(src, "_ago"))
+    )
+
+
+def _run_js(script: str) -> None:
+    source = _harness() + "\n" + script
+    proc = subprocess.run(
+        [str(_NODE), "--input-type=module", "-e", source],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+
+
+# ── 1. La cache sopravvive al guasto ────────────────────────────────────────
+
+
+def test_a_failed_read_does_not_erase_a_list_that_was_good() -> None:
+    """Il cuore del difetto: l'elenco letto prima non deve sparire."""
+    _run_js("""
+      const chip = new Chip();
+      nextProjects = { dir: 'wikis', projects: [
+        { name: 'bordi', modified: 200 }, { name: 'patreon', modified: 100 },
+      ] };
+      await chip._loadProjects();
+      assert.deepEqual(chip._projects.map((p) => p.name), ['bordi', 'patreon']);
+      assert.equal(chip._loadFailed, false);
+
+      // Seconda apertura, gateway caduto.
+      nextProjects = 'fail';
+      await chip._loadProjects();
+      assert.deepEqual(chip._projects.map((p) => p.name), ['bordi', 'patreon'],
+                       'un 401 ha cancellato i progetti dell\\'utente');
+      assert.equal(chip._loadFailed, true);
+      assert.equal(chip._dir, 'wikis',
+                   'il nome della cartella letto dal backend è stato riportato al default');
+
+      // E torna a posto quando la lettura riesce di nuovo.
+      nextProjects = { dir: 'wikis', projects: [{ name: 'bordi', modified: 200 }] };
+      await chip._loadProjects();
+      assert.equal(chip._loadFailed, false);
+    """)
+
+
+def test_a_first_read_that_fails_leaves_the_list_unknown_not_empty() -> None:
+    """Senza cache il fallimento resta *non lo so* (`null`), non *vuoto* (`[]`).
+
+    È la differenza fra le due frasi che la tendina può scrivere.
+    """
+    _run_js("""
+      const chip = new Chip();
+      nextProjects = 'fail';
+      await chip._loadProjects();
+      assert.equal(chip._projects, null,
+                   'un fallimento si è dichiarato "elenco vuoto"');
+      assert.equal(chip._loadFailed, true);
+    """)
+
+
+# ── 2. Quel che la tendina scrive ───────────────────────────────────────────
+
+
+def test_the_menu_says_load_failed_and_never_no_projects() -> None:
+    """Con la cache vuota: la nota del guasto prende il posto delle altre due."""
+    _run_js("""
+      const chip = new Chip();
+      nextProjects = 'fail';
+      await chip._loadProjects();
+      chip._renderMenu();
+
+      const written = texts(chip.menu);
+      assert.equal(written.includes('i18n:scope.loadFailed'), true,
+                   'la tendina non dice che la lettura è fallita');
+      assert.equal(written.includes('i18n:scope.noProjects'), false,
+                   'la tendina afferma che l\\'utente non ha progetti');
+      assert.equal(written.includes('i18n:scope.loading'), false,
+                   'un caricamento finito male resta "Caricamento..."');
+      // Il guasto si distingue a occhio da uno stato vuoto.
+      const notes = byClass(chip.menu, 'scope-menu-note');
+      assert.equal(notes.length, 1);
+      assert.equal(notes[0].className.split(/\\s+/).includes('is-error'), true);
+      // E "Nuovo progetto..." resta raggiungibile: è l'unica via d'uscita se
+      // davvero non ce n'è nessuno.
+      assert.equal(written.includes('i18n:scope.newProject'), true);
+    """)
+
+
+def test_the_cached_list_is_still_offered_with_a_note_on_top() -> None:
+    """Con la cache piena: le righe restano, e la nota dice che sono vecchie."""
+    _run_js("""
+      const chip = new Chip();
+      nextProjects = { dir: 'wikis', projects: [
+        { name: 'bordi', modified: 200 }, { name: 'patreon', modified: 100 },
+      ] };
+      await chip._loadProjects();
+      nextProjects = 'fail';
+      await chip._loadProjects();
+      chip._renderMenu();
+
+      const written = texts(chip.menu);
+      assert.equal(written.includes('bordi'), true, 'i progetti in cache sono spariti');
+      assert.equal(written.includes('patreon'), true);
+      assert.equal(written.includes('i18n:scope.loadFailed'), true);
+      assert.equal(written.includes('i18n:scope.noProjects'), false);
+      // La nota sta *sopra* le righe che mette in dubbio.
+      assert.ok(written.indexOf('i18n:scope.loadFailed') < written.indexOf('bordi'),
+                'la nota compare dopo le righe che dovrebbe qualificare');
+    """)
+
+
+def test_an_empty_list_that_was_read_successfully_still_says_no_projects() -> None:
+    """Il rovescio: quando lo sappiamo, lo stato vuoto resta quello di prima."""
+    _run_js("""
+      const chip = new Chip();
+      nextProjects = { dir: 'wikis', projects: [] };
+      await chip._loadProjects();
+      chip._renderMenu();
+
+      const written = texts(chip.menu);
+      assert.equal(written.includes('i18n:scope.noProjects'), true);
+      assert.equal(written.includes('i18n:scope.loadFailed'), false);
+    """)
+
+
+def test_the_menu_still_says_loading_before_the_first_answer() -> None:
+    """Prima di qualunque risposta la nota è ancora "Caricamento...".
+
+    `_projects === null` significava due cose diverse e adesso ne significa una
+    sola: il flag decide quale.
+    """
+    _run_js("""
+      const chip = new Chip();
+      chip._renderMenu();
+      const written = texts(chip.menu);
+      assert.equal(written.includes('i18n:scope.loading'), true);
+      assert.equal(written.includes('i18n:scope.loadFailed'), false);
+    """)
+
+
+# ── 3. Chiave e stile ───────────────────────────────────────────────────────
+
+
+def test_the_note_string_is_translated_in_both_locales() -> None:
+    for locale in ("it", "en"):
+        data = json.loads((I18N_DIR / f"{locale}.json").read_text(encoding="utf-8"))
+        assert "loadFailed" in data["scope"], f"chiave mancante in {locale}.json"
+        assert data["scope"]["loadFailed"].strip()
+        # Non deve dire "nessun progetto" con altre parole.
+        assert data["scope"]["loadFailed"] != data["scope"]["noProjects"]
+
+
+def test_the_error_note_has_a_rule_of_its_own() -> None:
+    """Grep, non comportamento: che la classe `is-error` sia colorata."""
+    css = CSS.read_text(encoding="utf-8")
+    assert re.search(r"\.scope-menu-note\.is-error\s*\{[^}]*var\(--error\)", css), (
+        "la nota del guasto non si distingue da una nota qualsiasi"
+    )
+
+
+def test_the_catch_no_longer_empties_the_cache() -> None:
+    """Grep, non comportamento: la riga che causava il doppione non torni."""
+    src = _member(_chip(), "_loadProjects")
+    catch = src[src.index("} catch"):]
+    # Senza i commenti: il commento accanto *cita* la riga rimossa per dire
+    # perché è stata rimossa, e un grep ingenuo la ritroverebbe lì.
+    catch = re.sub(r"/\*.*?\*/", "", catch, flags=re.S)
+    catch = re.sub(r"^\s*//.*$", "", catch, flags=re.M)
+    assert "this._projects = []" not in catch, (
+        "un guasto torna a dichiarare che l'utente non ha progetti"
+    )
+    assert "this._loadFailed = true" in catch

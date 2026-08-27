@@ -25,6 +25,7 @@
     "showThinking": "Mostra ragionamento",
     "openInEditor": "Apri nell'editor",
     "failedToLoad": "Caricamento fallito",
+    "historyLoadFailed": "Storia della conversazione non caricata. Nuovo tentativo alla riconnessione.",
     "couldNotOpen": "Impossibile aprire {path}",
     "unknown": "Sconosciuto",
     "fullAccess": "Accesso completo",
@@ -420,7 +421,11 @@
       "soul": "Chi è Jenny e come si comporta: il carattere, il modo di parlare, quello che fa e quello che non fa mai. E le regole fisse che le hai dato tu — come rivolgersi a te, cosa evitare, dove andarci piano.\n\nLo mantiene Dream, la consolidazione che gira dopo le conversazioni: una correzione che le fai a voce finisce qui. Puoi leggerlo e sistemarlo, ma di solito non serve scriverci a mano.\n\nNon qui: i fatti su di te (USER.md), le convenzioni di lavoro (AGENTS.md), le procedure ripetibili (le Skill). E nemmeno come si comporta l'app: cosa accetta uno strumento, cosa rifiuta la sandbox, dov'è un limite — è uguale su ogni installazione e glielo dice già il prompt di sistema.",
       "memory": "La memoria a lungo termine: quello che deve restare da una sessione all'altra — contesto dei progetti, fatti utili, note da ricordare.\n\nLa mantiene Dream, la consolidazione che gira dopo le conversazioni. Puoi leggerla e correggerla, ma di solito non serve scriverci a mano.\n\nNon qui: i fatti su di te (USER.md), le convenzioni di lavoro (AGENTS.md), le procedure ripetibili (le Skill).",
       "heartbeat": "I controlli ricorrenti che Jenny ripassa a ogni battito.\n\nVanno scritti sotto «## Active Tasks»: è l'unica sezione che viene letta. Quando un'attività è finita, cancellala invece di lasciarla lì — un elenco di cose già fatte viene riletto a ogni battito.\n\nNon qui: le richieste una tantum (basta chiederle in chat) e le procedure ripetibili (le Skill)."
-    }
+    },
+    "deleteProjectConfirm": "Eliminare il progetto “{name}”? Sparisce la cartella e sparisce anche la conversazione: sono due cose diverse su disco, e questa le toglie tutte e due.",
+    "deleteProjectConfirmWithChat": "Eliminare il progetto “{name}”? Sparisce la cartella e con lei la conversazione: {count} messaggi.",
+    "deleteProjectFailed": "Non ho potuto eliminare il progetto “{name}”. Non ho toccato niente.",
+    "deletedProject": "Progetto “{name}” eliminato, conversazione compresa"
   },
   "apps": {
     "jennyApps": "Jenny Apps",
@@ -492,7 +497,8 @@
     "severitySuggest": "suggerimento",
     "severityWarn": "avviso",
     "severityError": "errore",
-    "submit": "Invia"
+    "submit": "Invia",
+    "onlyThisProject": "Questa vista mostra solo il progetto {name}."
   },
   "graph": {
     "failedToLoad": "Caricamento grafo fallito",
@@ -645,5 +651,54 @@
       "finish": "Fine",
       "pairedToast": "Telegram collegato!"
     }
+  },
+  "scope": {
+    "personal": "jenny",
+    "change": "Cambia scope",
+    "personalSection": "Sessione personale",
+    "projectsSection": "Progetti",
+    "loading": "Caricamento...",
+    "noProjects": "Nessun progetto ancora",
+    "loadFailed": "Elenco progetti non letto: quel che vedi può essere incompleto",
+    "newProject": "Nuovo progetto...",
+    "newProjectName": "Nome del progetto:",
+    "newProjectPlaceholder": "es. patreon",
+    "newProjectSeed": "Di cosa si occupa “{name}”?",
+    "newProjectSeedPlaceholder": "una riga: cosa ci va e cosa no",
+    "seedRequired": "Serve una riga su cosa e' il progetto: senza, la chat parte a vuoto.",
+    "invalidName": "Lettere, numeri, punto, trattino e underscore, mai due punti di fila; deve iniziare con una lettera o un numero e stare in 64 caratteri.",
+    "unopenableSection": "Non apribili",
+    "unopenableInvalidName": "Queste cartelle ci sono, ma il loro nome non può essere il nome di una conversazione. {rule} Chiedimi dalla chat personale di rinominarne una.",
+    "unopenableOther": "Queste cartelle ci sono, ma non si aprono come conversazione. Chiedimi dalla chat personale di dargli un'occhiata.",
+    "nameTaken": "Un progetto “{name}” c'è già. Se era rimasto a metà lo completo, altrimenti la creazione verrà rifiutata.",
+    "nameTakenContinue": "Prova comunque",
+    "createFailed": "Creazione fallita: {error}",
+    "createRejected": "Non ho potuto creare “{name}”: o esiste già, o una cartella con quel nome è di mezzo e non è un progetto.",
+    "createSeedTooLong": "La riga di scope è troppo lunga: accorciala e riprova.",
+    "createWikiOff": "Le wiki sono spente nelle impostazioni, e un progetto è una wiki: riaccendile e riprova.",
+    "createInternal": "Creazione non riuscita per un errore del gateway. Riprova.",
+    "created": "Progetto “{name}” creato",
+    "askAbout": "Chiedi qualcosa su {name}...",
+    "ago": {
+      "now": "adesso",
+      "minutes": "{n} min fa",
+      "hours": "{n} ore fa",
+      "yesterday": "ieri",
+      "days": "{n} giorni fa"
+    },
+    "leftoverChatTitle": "“{name}” ha ancora una conversazione",
+    "leftoverChatBody": "Sotto questo nome c'è ancora la chat di un progetto che non c'è più: {count} messaggi. Posso riprenderla — se l'avevi cancellato per sbaglio è tutta lì — oppure partire pulito e buttarla.",
+    "leftoverChatBodyNoCount": "Sotto questo nome c'è ancora la chat di un progetto che non c'è più. Posso riprenderla — se l'avevi cancellato per sbaglio è tutta lì — oppure partire pulito e buttarla.",
+    "leftoverChatKeep": "Riprendila",
+    "leftoverChatDiscard": "Parti pulito"
+  },
+  "write": {
+    "write": "Scrive",
+    "readonly": "Sola lettura",
+    "change": "Scrittura o sola lettura",
+    "writeHint": "Questa chat può modificare i file. Tocca per passare in sola lettura.",
+    "readonlyHint": "Questa chat non cambia niente sul telefono. Tocca per riattivare la scrittura.",
+    "askReadonly": "Chiedi qualcosa (sola lettura)…",
+    "askAboutReadonly": "Chiedi qualcosa su {name} (sola lettura)…"
   }
 }

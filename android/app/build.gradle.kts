@@ -50,8 +50,8 @@ android {
         // versionCode must increase monotonically on every published build.
         // versionName tracks the Python package version in pyproject.toml —
         // keep the two in sync when releasing.
-        versionCode = 11
-        versionName = "0.8.0"
+        versionCode = 12
+        versionName = "0.9.0"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
@@ -150,6 +150,20 @@ chaquopy {
     }
 }
 
+// Lo stato del working tree, per l'avviso qui sotto. Stringa vuota = pulito;
+// null = non lo sappiamo (fuori da un repo, o `git` non c'è), che è un caso
+// diverso e non va raccontato come "pulito".
+val workingTreeDirt: String? = try {
+    val proc = ProcessBuilder("git", "status", "--porcelain")
+        .directory(rootDir.parentFile)
+        .redirectErrorStream(true)
+        .start()
+    val output = proc.inputStream.bufferedReader().readText()
+    if (proc.waitFor() == 0) output.trim() else null
+} catch (_: Exception) {
+    null
+}
+
 // Warn about an unsigned release only when a release build was actually
 // requested — a configuration-time warning would fire on every debug build too.
 gradle.taskGraph.whenReady {
@@ -161,6 +175,31 @@ gradle.taskGraph.whenReady {
                 "[jenny] Set JENNY_KEYSTORE_PATH / JENNY_KEYSTORE_PASSWORD / " +
                 "JENNY_KEY_ALIAS / JENNY_KEY_PASSWORD, or create " +
                 "android/keystore.properties (see app/build.gradle.kts).\n"
+        )
+    }
+    // Chaquopy impacchetta il **working tree**, non HEAD: `srcDir("../../")` qui
+    // sopra e `copyPackageSourceAssets` leggono i file da disco. Su un albero
+    // sporco l'APK corrisponde quindi a **nessun commit**, mentre chi guarda il
+    // telefono attribuisce il comportamento a commit precisi — e `versionName`
+    // non può distinguere due build dallo stesso albero modificato.
+    //
+    // La pratica decisa è buildare da un worktree staccato su uno SHA. Ma era una
+    // cosa da ricordarsi, e il 25/08 sono uscite tre release diverse tutte
+    // `0.9.0 / versionCode 12` proprio perché nessuno la ricordava. Un avviso la
+    // rende meccanica, come già è per la firma.
+    //
+    // Avviso e non errore, di proposito: buildare da un albero sporco è il modo
+    // giusto di **verificare una modifica** prima di committarla, ed è quel che si
+    // fa tutto il giorno. Quel che non deve succedere è farlo *senza saperlo*.
+    if (buildingRelease && !workingTreeDirt.isNullOrEmpty()) {
+        val files = workingTreeDirt.lines().size
+        logger.warn(
+            "\n[jenny] WARNING: release build from a DIRTY working tree " +
+                "($files file(s) modified or untracked).\n" +
+                "[jenny] Chaquopy packages the working tree, not HEAD, so this APK " +
+                "corresponds to no commit and cannot be reproduced from git.\n" +
+                "[jenny] Fine for verifying a change; for anything you install and " +
+                "keep, commit first and build from a detached worktree at that SHA.\n"
         )
     }
 }

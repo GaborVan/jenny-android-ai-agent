@@ -148,6 +148,80 @@ class TestBuildTree:
             assert safe_wiki_page_path(p) == p
 
 
+class TestUnAlberoOstileCostaUnaRisposta:
+    """T9.4/G9. ``_walk`` è **l'unica** camminata della wiki che usa ``iterdir``
+    e non ``rglob``, e ``rglob`` non segue i link simbolici: era quindi la sola
+    esposta a un ciclo. I tool filesystem dell'agente sanno creare un link, e
+    l'agente scrive dentro ``wiki/``.
+
+    Le pagine sotto un symlink erano comunque una bugia dell'albero: grafo,
+    ricerca e iniettore non le vedono, e ``/api/page`` risponde 403 se il
+    bersaglio esce da ``wiki/``.
+    """
+
+    @staticmethod
+    def _paths(node) -> list[str]:
+        out: list[str] = []
+        if node.kind == "file":
+            out.append(node.path)
+        for child in node.children or ():
+            out.extend(TestUnAlberoOstileCostaUnaRisposta._paths(child))
+        return out
+
+    def test_un_ciclo_di_link_non_e_un_recursionerror(self, wikis_dir: Path):
+        """Prima: ``RecursionError`` dentro l'executor, cioè drawer file rotto
+        per tutta la wiki finché qualcuno non trova il link dal telefono."""
+        wiki_root = _make_wiki(wikis_dir, "main", {"index.md": "# Home"})
+        pages = wiki_root / "wiki"
+        (pages / "concepts").mkdir()
+        (pages / "concepts" / "loop").symlink_to(pages, target_is_directory=True)
+
+        tree = build_tree(wiki_root)
+
+        assert self._paths(tree) == ["index.md"]
+
+    def test_una_cartella_vera_e_profonda_arriva_fino_al_tetto(self, wikis_dir: Path):
+        """Il tetto non è un rifiuto: quel che sta sopra la profondità massima
+        non compare, il resto sì. Una wiki reale sta a tre livelli.
+        """
+        from jenny.webui.wiki import _TREE_MAX_DEPTH
+
+        deep = "/".join(f"d{i}" for i in range(_TREE_MAX_DEPTH + 2))
+        wiki_root = _make_wiki(wikis_dir, "main", {
+            "index.md": "# Home",
+            f"{deep}/troppo-giu.md": "# Giù",
+            "d0/vicina.md": "# Vicina",
+        })
+
+        paths = self._paths(build_tree(wiki_root))
+
+        assert "index.md" in paths
+        assert "d0/vicina.md" in paths
+        assert not any(p.endswith("troppo-giu.md") for p in paths)
+
+    def test_il_numero_di_voci_e_finito(self, wikis_dir: Path, monkeypatch):
+        """Il secondo tetto, e serve per una cartella che *esiste* — un unzip
+        finito nel posto sbagliato — dove la profondità non aiuta.
+        """
+        monkeypatch.setattr("jenny.webui.wiki._TREE_MAX_ENTRIES", 5)
+        wiki_root = _make_wiki(wikis_dir, "main", {
+            f"p{i:02d}.md": f"# {i}" for i in range(20)
+        })
+
+        assert len(self._paths(build_tree(wiki_root))) == 5
+
+    def test_una_cartella_che_non_si_apre_non_rompe_il_drawer(self, wikis_dir: Path):
+        wiki_root = _make_wiki(wikis_dir, "main", {"index.md": "# Home"})
+        chiusa = wiki_root / "wiki" / "chiusa"
+        chiusa.mkdir()
+        (chiusa / "dentro.md").write_text("# Dentro")
+        chiusa.chmod(0o000)
+        try:
+            assert self._paths(build_tree(wiki_root)) == ["index.md"]
+        finally:
+            chiusa.chmod(0o755)
+
+
 class TestBuildHomeTree:
     def test_home_tree_with_index(self, wikis_dir: Path):
         (wikis_dir / "_index.md").write_text("# Home")
@@ -566,6 +640,60 @@ class TestResolveWikilink:
         result = resolve_wikilink(wiki_root, "concepts/page")
         assert result is not None
         assert result.name == "index.md"
+
+    def test_folder_relative_link_from_a_split_index(self, wikis_dir: Path):
+        """La forma che `references/article-guide.md` raccomanda dentro un
+        `index.md` diviso in cartella: `[[<Topic>/<aspect>]]`, senza il prefisso
+        `concepts/`. Era morta nell'app — nessuno stem contiene una barra — e
+        viva nel lint, quindi la guida raccomandava un link che il telefono non
+        apriva e l'unico strumento che poteva accorgersene taceva.
+        """
+        wiki_root = _make_wiki(wikis_dir, "main", {
+            "concepts/Transformers/index.md": "# Transformers",
+            "concepts/Transformers/attention.md": "# Attention",
+        })
+        result = resolve_wikilink(wiki_root, "Transformers/attention")
+        assert result is not None
+        assert result.relative_to(wiki_root / "wiki").as_posix() == (
+            "concepts/Transformers/attention.md"
+        )
+
+    def test_folder_relative_link_to_a_nested_split(self, wikis_dir: Path):
+        wiki_root = _make_wiki(wikis_dir, "main", {
+            "concepts/Transformers/training/index.md": "# Training",
+        })
+        result = resolve_wikilink(wiki_root, "Transformers/training")
+        assert result is not None
+        assert result.relative_to(wiki_root / "wiki").as_posix() == (
+            "concepts/Transformers/training/index.md"
+        )
+
+    def test_a_multi_segment_link_is_not_resolved_by_its_last_name(self, wikis_dir: Path):
+        """**Il confine.** Il ramo per suffisso chiede che il path della pagina
+        *finisca* per il link: `[[Altro/attention]]` non deve trovare
+        `concepts/Transformers/attention.md` solo perché il nome finale esiste
+        da qualche parte. È la differenza fra risolvere un link più preciso e
+        buttare via i segmenti che lo rendono preciso.
+        """
+        wiki_root = _make_wiki(wikis_dir, "main", {
+            "concepts/Transformers/attention.md": "# Attention",
+        })
+        assert resolve_wikilink(wiki_root, "Altro/attention") is None
+        assert resolve_wikilink(wiki_root, "Transformers/nessuna") is None
+
+    def test_two_pages_with_the_same_name_resolve_deterministically(self, wikis_dir: Path):
+        """Due `nota.md` in cartelle diverse esistono davvero. Vinceva quella che
+        `rglob` restituiva per prima — l'ordine della directory — quindi lo stesso
+        `[[nota]]` poteva aprire pagine diverse su due telefoni, e il lint non
+        poteva concordare con nessuna delle due. Vince la più vicina alla radice.
+        """
+        wiki_root = _make_wiki(wikis_dir, "main", {
+            "concepts/deep/nota.md": "# Deep",
+            "concepts/nota.md": "# Vicina",
+        })
+        result = resolve_wikilink(wiki_root, "nota")
+        assert result is not None
+        assert result.relative_to(wiki_root / "wiki").as_posix() == "concepts/nota.md"
 
 
 # ── Wikilink Splitting ─────────────────────────────────────────────────────

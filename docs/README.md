@@ -24,6 +24,8 @@ Start here if you just want to install and use the app.
 | [Chat basics](using/chat.md) | Sending messages, streaming replies, tool call pills, the reasoning block, the changed-files pill, and inline file previews. |
 | [Files and attachments](using/attachments.md) | Sending images, files, and camera captures from chat; the exact size limits and what the model actually gets to see. |
 | [Memory, Dream and Atlas](using/memory.md) | How session history, idle compaction, and the two-phase Dream consolidation build Jenny's long-term memory — and how Atlas compiles your wikis into a directory she always has to hand. |
+| [Projects](using/projects.md) | Project conversations: a chat bound to one folder that remembers by writing pages instead of by feeding Jenny's personal memory — the scope chip, the Writes/Read-only switch, capture, and the map. |
+| [The gardener](using/gardener.md) | The background pass that turns a project's journal lines into pages and keeps its map true: when it runs, what it refuses to touch, and how to turn it off. |
 | [Scheduling and proactivity](using/scheduling.md) | Reminders (one-shot, recurring, cron), the heartbeat loop, goals/long tasks, and subagents — and what silently breaks when the app is killed. |
 | [Mini-apps (Jenny Apps)](using/mini-apps.md) | Chat-authored mini web apps backed by native tools, how they differ from skills, and their sandboxing limits. |
 | [Skills](using/skills.md) | Markdown-based skill folders that extend agent behavior in chat, and why built-in skill edits don't survive a restart. |

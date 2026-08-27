@@ -13,12 +13,12 @@ python_exec(
 )
 ```
 
-- `scaffold.scaffold('<workspace>/wikis/<name>', '<Title>')` — create a wiki and register it in `wikis/_index.md`.
+- `scaffold.scaffold('<workspace>/wikis/<name>', '<Title>')` — create a wiki and register it in `wikis/_index.md`. Safe on an existing wiki: it writes only the files that are missing and returns the list of what it added.
 - `reindex_wikis.regenerate_index('<workspace>/wikis')` — rebuild the `_index.md` registry block; `reindex_wikis.check_index(...)` returns drift problems instead. Run after renaming/deleting a wiki.
 - `lint_wiki.lint('<workspace>/wikis/<name>')` / `lint_wiki.lint_workspace('<workspace>/wikis', fix=False)` — health check one wiki, or all of them plus the registry; `fix=True` repairs registry drift.
 - `audit_review.main('<workspace>/wikis/<name>', 'open')` (modes `open`/`resolved`/`all`) / `audit_review.run_workspace('<workspace>/wikis', 'open')` — group audits.
 
-Each wiki's one-line scope in the registry comes from a `summary:` field in its `CLAUDE.md` frontmatter (fallback: the first `## Scope` bullet). Set `summary:` for a clean registry.
+Each wiki's one-line scope in the registry comes from a `summary:` field in its `AGENTS.md` frontmatter (fallback: the first `## Scope` bullet). Set `summary:` for a clean registry.
 
 ## Obsidian setup
 

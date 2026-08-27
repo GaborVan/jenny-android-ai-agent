@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import websockets
+from port_alloc import free_port
 from ws_test_client import WsTestClient
 
 from jenny.bus.events import OutboundMessage
@@ -54,11 +55,12 @@ def bus() -> MagicMock:
 
 @pytest.mark.asyncio
 async def test_ready_event_fields(bus: MagicMock) -> None:
-    ch = _ch(bus, 29901)
+    port = free_port()
+    ch = _ch(bus, port)
     t = asyncio.create_task(ch.start())
     await asyncio.sleep(0.3)
     try:
-        async with WsTestClient("ws://127.0.0.1:29901/", client_id="c1") as c:
+        async with WsTestClient(f"ws://127.0.0.1:{port}/", client_id="c1") as c:
             r = await c.recv_ready()
             assert r.event == "ready"
             assert r.chat_id == "default"
@@ -70,11 +72,12 @@ async def test_ready_event_fields(bus: MagicMock) -> None:
 
 @pytest.mark.asyncio
 async def test_anonymous_client_gets_generated_id(bus: MagicMock) -> None:
-    ch = _ch(bus, 29902)
+    port = free_port()
+    ch = _ch(bus, port)
     t = asyncio.create_task(ch.start())
     await asyncio.sleep(0.3)
     try:
-        async with WsTestClient("ws://127.0.0.1:29902/", client_id="") as c:
+        async with WsTestClient(f"ws://127.0.0.1:{port}/", client_id="") as c:
             r = await c.recv_ready()
             assert r.client_id.startswith("anon-")
     finally:
@@ -84,12 +87,13 @@ async def test_anonymous_client_gets_generated_id(bus: MagicMock) -> None:
 
 @pytest.mark.asyncio
 async def test_each_connection_shares_unified_chat_id(bus: MagicMock) -> None:
-    ch = _ch(bus, 29903)
+    port = free_port()
+    ch = _ch(bus, port)
     t = asyncio.create_task(ch.start())
     await asyncio.sleep(0.3)
     try:
-        async with WsTestClient("ws://127.0.0.1:29903/", client_id="a") as c1:
-            async with WsTestClient("ws://127.0.0.1:29903/", client_id="b") as c2:
+        async with WsTestClient(f"ws://127.0.0.1:{port}/", client_id="a") as c1:
+            async with WsTestClient(f"ws://127.0.0.1:{port}/", client_id="b") as c2:
                 r1, r2 = await c1.recv_ready(), await c2.recv_ready()
                 assert r1.chat_id == r2.chat_id == "default"
     finally:
@@ -102,11 +106,12 @@ async def test_each_connection_shares_unified_chat_id(bus: MagicMock) -> None:
 
 @pytest.mark.asyncio
 async def test_plain_text(bus: MagicMock) -> None:
-    ch = _ch(bus, 29904)
+    port = free_port()
+    ch = _ch(bus, port)
     t = asyncio.create_task(ch.start())
     await asyncio.sleep(0.3)
     try:
-        async with WsTestClient("ws://127.0.0.1:29904/", client_id="p") as c:
+        async with WsTestClient(f"ws://127.0.0.1:{port}/", client_id="p") as c:
             await c.recv_ready()
             await c.send_text("hello world")
             await asyncio.sleep(0.1)
@@ -120,11 +125,12 @@ async def test_plain_text(bus: MagicMock) -> None:
 
 @pytest.mark.asyncio
 async def test_json_content_field(bus: MagicMock) -> None:
-    ch = _ch(bus, 29905)
+    port = free_port()
+    ch = _ch(bus, port)
     t = asyncio.create_task(ch.start())
     await asyncio.sleep(0.3)
     try:
-        async with WsTestClient("ws://127.0.0.1:29905/", client_id="j") as c:
+        async with WsTestClient(f"ws://127.0.0.1:{port}/", client_id="j") as c:
             await c.recv_ready()
             await c.send_json({"content": "structured"})
             await asyncio.sleep(0.1)
@@ -136,11 +142,12 @@ async def test_json_content_field(bus: MagicMock) -> None:
 
 @pytest.mark.asyncio
 async def test_json_text_and_message_fields(bus: MagicMock) -> None:
-    ch = _ch(bus, 29906)
+    port = free_port()
+    ch = _ch(bus, port)
     t = asyncio.create_task(ch.start())
     await asyncio.sleep(0.3)
     try:
-        async with WsTestClient("ws://127.0.0.1:29906/", client_id="x") as c:
+        async with WsTestClient(f"ws://127.0.0.1:{port}/", client_id="x") as c:
             await c.recv_ready()
             await c.send_json({"text": "via text"})
             await asyncio.sleep(0.1)
@@ -155,11 +162,12 @@ async def test_json_text_and_message_fields(bus: MagicMock) -> None:
 
 @pytest.mark.asyncio
 async def test_empty_payload_ignored(bus: MagicMock) -> None:
-    ch = _ch(bus, 29907)
+    port = free_port()
+    ch = _ch(bus, port)
     t = asyncio.create_task(ch.start())
     await asyncio.sleep(0.3)
     try:
-        async with WsTestClient("ws://127.0.0.1:29907/", client_id="e") as c:
+        async with WsTestClient(f"ws://127.0.0.1:{port}/", client_id="e") as c:
             await c.recv_ready()
             await c.send_text("   ")
             await c.send_json({})
@@ -172,11 +180,12 @@ async def test_empty_payload_ignored(bus: MagicMock) -> None:
 
 @pytest.mark.asyncio
 async def test_messages_preserve_order(bus: MagicMock) -> None:
-    ch = _ch(bus, 29908)
+    port = free_port()
+    ch = _ch(bus, port)
     t = asyncio.create_task(ch.start())
     await asyncio.sleep(0.3)
     try:
-        async with WsTestClient("ws://127.0.0.1:29908/", client_id="o") as c:
+        async with WsTestClient(f"ws://127.0.0.1:{port}/", client_id="o") as c:
             await c.recv_ready()
             for i in range(5):
                 await c.send_text(f"msg-{i}")
@@ -193,11 +202,12 @@ async def test_messages_preserve_order(bus: MagicMock) -> None:
 
 @pytest.mark.asyncio
 async def test_server_send_message(bus: MagicMock) -> None:
-    ch = _ch(bus, 29909)
+    port = free_port()
+    ch = _ch(bus, port)
     t = asyncio.create_task(ch.start())
     await asyncio.sleep(0.3)
     try:
-        async with WsTestClient("ws://127.0.0.1:29909/", client_id="r") as c:
+        async with WsTestClient(f"ws://127.0.0.1:{port}/", client_id="r") as c:
             ready = await c.recv_ready()
             await ch.send(OutboundMessage(
                 channel="websocket", chat_id=ready.chat_id, content="reply",
@@ -213,11 +223,12 @@ async def test_server_send_message(bus: MagicMock) -> None:
 async def test_server_send_tags_tool_hint_with_kind(bus: MagicMock) -> None:
     """``_tool_hint`` metadata must surface as ``kind: "tool_hint"`` so WS
     clients render breadcrumbs separately from conversational replies."""
-    ch = _ch(bus, 29919)
+    port = free_port()
+    ch = _ch(bus, port)
     t = asyncio.create_task(ch.start())
     await asyncio.sleep(0.3)
     try:
-        async with WsTestClient("ws://127.0.0.1:29919/", client_id="h") as c:
+        async with WsTestClient(f"ws://127.0.0.1:{port}/", client_id="h") as c:
             ready = await c.recv_ready()
             # Plain reply: no "kind" field.
             await ch.send(OutboundMessage(
@@ -251,11 +262,12 @@ async def test_server_send_tags_tool_hint_with_kind(bus: MagicMock) -> None:
 
 @pytest.mark.asyncio
 async def test_server_send_with_media_and_reply(bus: MagicMock) -> None:
-    ch = _ch(bus, 29910)
+    port = free_port()
+    ch = _ch(bus, port)
     t = asyncio.create_task(ch.start())
     await asyncio.sleep(0.3)
     try:
-        async with WsTestClient("ws://127.0.0.1:29910/", client_id="m") as c:
+        async with WsTestClient(f"ws://127.0.0.1:{port}/", client_id="m") as c:
             ready = await c.recv_ready()
             await ch.send(OutboundMessage(
                 channel="websocket", chat_id=ready.chat_id, content="img",
@@ -274,11 +286,12 @@ async def test_server_send_with_media_and_reply(bus: MagicMock) -> None:
 
 @pytest.mark.asyncio
 async def test_streaming_deltas_and_end(bus: MagicMock) -> None:
-    ch = _ch(bus, 29911, streaming=True)
+    port = free_port()
+    ch = _ch(bus, port, streaming=True)
     t = asyncio.create_task(ch.start())
     await asyncio.sleep(0.3)
     try:
-        async with WsTestClient("ws://127.0.0.1:29911/", client_id="s") as c:
+        async with WsTestClient(f"ws://127.0.0.1:{port}/", client_id="s") as c:
             cid = (await c.recv_ready()).chat_id
             for part in ("Hello", " ", "world", "!"):
                 await ch.send_delta(cid, part, {"_stream_delta": True, "_stream_id": "s1"})
@@ -296,11 +309,12 @@ async def test_streaming_deltas_and_end(bus: MagicMock) -> None:
 
 @pytest.mark.asyncio
 async def test_interleaved_streams(bus: MagicMock) -> None:
-    ch = _ch(bus, 29912, streaming=True)
+    port = free_port()
+    ch = _ch(bus, port, streaming=True)
     t = asyncio.create_task(ch.start())
     await asyncio.sleep(0.3)
     try:
-        async with WsTestClient("ws://127.0.0.1:29912/", client_id="i") as c:
+        async with WsTestClient(f"ws://127.0.0.1:{port}/", client_id="i") as c:
             cid = (await c.recv_ready()).chat_id
             await ch.send_delta(cid, "A1", {"_stream_delta": True, "_stream_id": "sa"})
             await ch.send_delta(cid, "B1", {"_stream_delta": True, "_stream_id": "sb"})
@@ -324,12 +338,13 @@ async def test_interleaved_streams(bus: MagicMock) -> None:
 
 @pytest.mark.asyncio
 async def test_unified_chat_fans_out_to_all_clients(bus: MagicMock) -> None:
-    ch = _ch(bus, 29913)
+    port = free_port()
+    ch = _ch(bus, port)
     t = asyncio.create_task(ch.start())
     await asyncio.sleep(0.3)
     try:
-        async with WsTestClient("ws://127.0.0.1:29913/", client_id="u1") as c1:
-            async with WsTestClient("ws://127.0.0.1:29913/", client_id="u2") as c2:
+        async with WsTestClient(f"ws://127.0.0.1:{port}/", client_id="u1") as c1:
+            async with WsTestClient(f"ws://127.0.0.1:{port}/", client_id="u2") as c2:
                 await c1.recv_ready()
                 await c2.recv_ready()
                 await ch.send(OutboundMessage(
@@ -344,11 +359,12 @@ async def test_unified_chat_fans_out_to_all_clients(bus: MagicMock) -> None:
 
 @pytest.mark.asyncio
 async def test_disconnected_client_cleanup(bus: MagicMock) -> None:
-    ch = _ch(bus, 29914)
+    port = free_port()
+    ch = _ch(bus, port)
     t = asyncio.create_task(ch.start())
     await asyncio.sleep(0.3)
     try:
-        async with WsTestClient("ws://127.0.0.1:29914/", client_id="tmp") as c:
+        async with WsTestClient(f"ws://127.0.0.1:{port}/", client_id="tmp") as c:
             chat_id = (await c.recv_ready()).chat_id
         # disconnected
         await asyncio.sleep(0.1)
@@ -366,11 +382,12 @@ async def test_disconnected_client_cleanup(bus: MagicMock) -> None:
 
 @pytest.mark.asyncio
 async def test_secret_accepted(bus: MagicMock) -> None:
-    ch = _ch(bus, 29915, tokenIssueSecret="secret", websocketRequiresToken=True)
+    port = free_port()
+    ch = _ch(bus, port, tokenIssueSecret="secret", websocketRequiresToken=True)
     t = asyncio.create_task(ch.start())
     await asyncio.sleep(0.3)
     try:
-        async with WsTestClient("ws://127.0.0.1:29915/", client_id="a", token="secret") as c:
+        async with WsTestClient(f"ws://127.0.0.1:{port}/", client_id="a", token="secret") as c:
             assert (await c.recv_ready()).client_id == "a"
     finally:
         await ch.stop()
@@ -379,12 +396,13 @@ async def test_secret_accepted(bus: MagicMock) -> None:
 
 @pytest.mark.asyncio
 async def test_secret_rejected(bus: MagicMock) -> None:
-    ch = _ch(bus, 29916, tokenIssueSecret="correct", websocketRequiresToken=True)
+    port = free_port()
+    ch = _ch(bus, port, tokenIssueSecret="correct", websocketRequiresToken=True)
     t = asyncio.create_task(ch.start())
     await asyncio.sleep(0.3)
     try:
         with pytest.raises(websockets.exceptions.InvalidStatus) as exc:
-            async with WsTestClient("ws://127.0.0.1:29916/", client_id="b", token="wrong"):
+            async with WsTestClient(f"ws://127.0.0.1:{port}/", client_id="b", token="wrong"):
                 pass
         assert exc.value.response.status_code == 401
     finally:
@@ -394,8 +412,10 @@ async def test_secret_rejected(bus: MagicMock) -> None:
 
 @pytest.mark.asyncio
 async def test_secret_required_for_websocket(bus: MagicMock) -> None:
+    port = free_port()
+    port2 = free_port()
     secret = "s"
-    ch = _ch(bus, 29917, path="/ws",
+    ch = _ch(bus, port, path="/ws",
              tokenIssueSecret=secret,
              websocketRequiresToken=True)
     t = asyncio.create_task(ch.start())
@@ -403,33 +423,33 @@ async def test_secret_required_for_websocket(bus: MagicMock) -> None:
     try:
         # no token -> 401
         with pytest.raises(websockets.exceptions.InvalidStatus) as exc:
-            async with WsTestClient("ws://127.0.0.1:29917/ws", client_id="x"):
+            async with WsTestClient(f"ws://127.0.0.1:{port}/ws", client_id="x"):
                 pass
         assert exc.value.response.status_code == 401
 
         # valid secret -> ok
-        async with WsTestClient("ws://127.0.0.1:29917/ws", client_id="ok", token=secret) as c:
+        async with WsTestClient(f"ws://127.0.0.1:{port}/ws", client_id="ok", token=secret) as c:
             assert (await c.recv_ready()).client_id == "ok"
 
         # reconnect with the SAME secret (simulating the client replaying it
         # after a dropped connection) -> still ok
-        async with WsTestClient("ws://127.0.0.1:29917/ws", client_id="r", token=secret) as c:
+        async with WsTestClient(f"ws://127.0.0.1:{port}/ws", client_id="r", token=secret) as c:
             assert (await c.recv_ready()).client_id == "r"
 
         # wrong secret -> 401
         with pytest.raises(websockets.exceptions.InvalidStatus) as exc:
             async with WsTestClient(
-                "ws://127.0.0.1:29917/ws", client_id="n", token="wrong-secret"
+                f"ws://127.0.0.1:{port}/ws", client_id="n", token="wrong-secret"
             ):
                 pass
         assert exc.value.response.status_code == 401
 
         # no secret configured on a channel that does not require auth -> ok
-        open_ch = _ch(bus, 29920, path="/ws", websocketRequiresToken=False)
+        open_ch = _ch(bus, port2, path="/ws", websocketRequiresToken=False)
         open_t = asyncio.create_task(open_ch.start())
         await asyncio.sleep(0.3)
         try:
-            async with WsTestClient("ws://127.0.0.1:29920/ws", client_id="open") as c:
+            async with WsTestClient(f"ws://127.0.0.1:{port2}/ws", client_id="open") as c:
                 assert (await c.recv_ready()).client_id == "open"
         finally:
             await open_ch.stop()
@@ -444,11 +464,12 @@ async def test_secret_required_for_websocket(bus: MagicMock) -> None:
 
 @pytest.mark.asyncio
 async def test_custom_path(bus: MagicMock) -> None:
-    ch = _ch(bus, 29918, path="/my-chat")
+    port = free_port()
+    ch = _ch(bus, port, path="/my-chat")
     t = asyncio.create_task(ch.start())
     await asyncio.sleep(0.3)
     try:
-        async with WsTestClient("ws://127.0.0.1:29918/my-chat", client_id="p") as c:
+        async with WsTestClient(f"ws://127.0.0.1:{port}/my-chat", client_id="p") as c:
             assert (await c.recv_ready()).event == "ready"
     finally:
         await ch.stop()
@@ -458,12 +479,13 @@ async def test_custom_path(bus: MagicMock) -> None:
 @pytest.mark.asyncio
 async def test_wrong_path_serves_webui(bus: MagicMock) -> None:
     """Non-WebSocket paths serve the WebUI HTML instead of returning 404."""
-    ch = _ch(bus, 29919, path="/ws")
+    port = free_port()
+    ch = _ch(bus, port, path="/ws")
     t = asyncio.create_task(ch.start())
     await asyncio.sleep(0.3)
     try:
         with pytest.raises(websockets.exceptions.InvalidStatus) as exc:
-            async with WsTestClient("ws://127.0.0.1:29919/wrong", client_id="x"):
+            async with WsTestClient(f"ws://127.0.0.1:{port}/wrong", client_id="x"):
                 pass
         assert exc.value.response.status_code == 200
     finally:
@@ -473,11 +495,12 @@ async def test_wrong_path_serves_webui(bus: MagicMock) -> None:
 
 @pytest.mark.asyncio
 async def test_trailing_slash_normalized(bus: MagicMock) -> None:
-    ch = _ch(bus, 29920, path="/ws")
+    port = free_port()
+    ch = _ch(bus, port, path="/ws")
     t = asyncio.create_task(ch.start())
     await asyncio.sleep(0.3)
     try:
-        async with WsTestClient("ws://127.0.0.1:29920/ws/", client_id="s") as c:
+        async with WsTestClient(f"ws://127.0.0.1:{port}/ws/", client_id="s") as c:
             assert (await c.recv_ready()).event == "ready"
     finally:
         await ch.stop()
@@ -489,11 +512,12 @@ async def test_trailing_slash_normalized(bus: MagicMock) -> None:
 
 @pytest.mark.asyncio
 async def test_large_message(bus: MagicMock) -> None:
-    ch = _ch(bus, 29921)
+    port = free_port()
+    ch = _ch(bus, port)
     t = asyncio.create_task(ch.start())
     await asyncio.sleep(0.3)
     try:
-        async with WsTestClient("ws://127.0.0.1:29921/", client_id="big") as c:
+        async with WsTestClient(f"ws://127.0.0.1:{port}/", client_id="big") as c:
             await c.recv_ready()
             big = "x" * 100_000
             await c.send_text(big)
@@ -506,11 +530,12 @@ async def test_large_message(bus: MagicMock) -> None:
 
 @pytest.mark.asyncio
 async def test_unicode_roundtrip(bus: MagicMock) -> None:
-    ch = _ch(bus, 29922)
+    port = free_port()
+    ch = _ch(bus, port)
     t = asyncio.create_task(ch.start())
     await asyncio.sleep(0.3)
     try:
-        async with WsTestClient("ws://127.0.0.1:29922/", client_id="u") as c:
+        async with WsTestClient(f"ws://127.0.0.1:{port}/", client_id="u") as c:
             ready = await c.recv_ready()
             text = "你好世界 🌍 日本語テスト"
             await c.send_text(text)
@@ -527,11 +552,12 @@ async def test_unicode_roundtrip(bus: MagicMock) -> None:
 
 @pytest.mark.asyncio
 async def test_rapid_fire(bus: MagicMock) -> None:
-    ch = _ch(bus, 29923)
+    port = free_port()
+    ch = _ch(bus, port)
     t = asyncio.create_task(ch.start())
     await asyncio.sleep(0.3)
     try:
-        async with WsTestClient("ws://127.0.0.1:29923/", client_id="r") as c:
+        async with WsTestClient(f"ws://127.0.0.1:{port}/", client_id="r") as c:
             ready = await c.recv_ready()
             for i in range(50):
                 await c.send_text(f"in-{i}")
@@ -550,11 +576,12 @@ async def test_rapid_fire(bus: MagicMock) -> None:
 
 @pytest.mark.asyncio
 async def test_invalid_json_as_plain_text(bus: MagicMock) -> None:
-    ch = _ch(bus, 29924)
+    port = free_port()
+    ch = _ch(bus, port)
     t = asyncio.create_task(ch.start())
     await asyncio.sleep(0.3)
     try:
-        async with WsTestClient("ws://127.0.0.1:29924/", client_id="j") as c:
+        async with WsTestClient(f"ws://127.0.0.1:{port}/", client_id="j") as c:
             await c.recv_ready()
             await c.send_text("{broken json")
             await asyncio.sleep(0.1)

@@ -266,10 +266,20 @@ class ApplyPatchTool(_FsTool):
             # parta la prima scrittura. Il rollback qui sotto esiste perché una
             # patch applicata a metà è peggio di una rifiutata, e un rifiuto a
             # metà ciclo la produrrebbe senza nemmeno un'eccezione a innescarlo.
+            notes: list[str] = []
             for target, pending_text in writes.items():
                 refusal = self._check_write_size(target, pending_text)
                 if refusal is not None:
                     return refusal
+                # Nello stesso ciclo del gancio, cioe' **prima della prima
+                # scrittura**: l'avviso confronta col "prima" letto da disco, e
+                # una patch che tocca due volte lo stesso file lo tocca una volta
+                # sola qui (``writes`` e' per percorso). Se un file piu' avanti
+                # viene rifiutato non si scrive niente e l'avviso non parte, che
+                # e' giusto: non e' successo niente da annunciare. T9.12.
+                note = self._wiki_page_ceiling_note(target, pending_text)
+                if note is not None:
+                    notes.append(note)
 
             backups: dict[Path, bytes | None] = {}
             for path in writes:
@@ -277,8 +287,18 @@ class ApplyPatchTool(_FsTool):
 
             try:
                 for path, content in writes.items():
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text(content, encoding="utf-8", newline="")
+                    # Dentro il ciclo di scrittura e non insieme al controllo del
+                    # budget qui sopra: quello si pronuncia su tutti i file prima
+                    # che parta la prima scrittura, e degradare li' vorrebbe dire
+                    # archiviare le voci di una patch poi rifiutata. Se il
+                    # rollback scatta dopo resta una voce archiviata che non se
+                    # n'e' andata: dei due versi, quello riparabile.
+                    self._archive_departing(path, content)
+                    # ``_commit_write`` fa la mkdir e sceglie se la scrittura va
+                    # in posto o via ``atomic_write`` (v. il suo docstring); il
+                    # testo qui è già byte-per-byte quello che deve finire su
+                    # disco, come con il vecchio ``newline=""``.
+                    self._commit_write(path, content)
             except Exception:
                 for path, data in backups.items():
                     if data is None:
@@ -291,9 +311,12 @@ class ApplyPatchTool(_FsTool):
 
             for path in writes:
                 self._file_states.record_write(path)
-            return "Patch applied:\n" + "\n".join(
+            applied = "Patch applied:\n" + "\n".join(
                 _format_summary(summary) for summary in summaries
             )
+            # Il riepilogo di questo tool e' un **delta di righe**, mai una
+            # dimensione: da solo non dice a cosa la patch ha portato il file.
+            return applied if not notes else applied + "\n" + "\n".join(notes)
         except PermissionError as exc:
             return f"Error: {exc}"
         except _PatchError as exc:

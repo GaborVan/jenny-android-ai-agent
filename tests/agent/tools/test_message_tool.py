@@ -616,3 +616,213 @@ async def test_a_visible_turn_is_not_capped() -> None:
 
     assert "Message sent" in result
     assert len(sent) == 2
+
+
+# --- un avviso è una frase, non un marcatore -----------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "CHECK_OK 1",
+        "CHECK_OK",
+        "CHECK_FAILED 2: hps non raggiungibile",
+        "CHECK_DELEGATED 1",
+        "CHECK_WARNED 3",
+        "- CHECK_OK 1",
+        "**CHECK_OK 1**",
+        "CHECK_OK 1\nCHECK_FAILED 2: rotto",
+    ],
+)
+async def test_a_protocol_marker_never_reaches_the_user(marker: str) -> None:
+    """Misurato il 2026-08-24 sul transcript del dispositivo: ``CHECK_OK 1``
+    consegnato in chat il 16, 17 e 23 agosto, ``CHECK_OK`` il 23. Sbaglia due
+    volte — l'utente riceve una parola d'ordine interna e il verdetto non viene
+    registrato, perché ``parse_ok_marks`` legge il testo finale del turno e non
+    l'argomento di un tool."""
+    sent: list[OutboundMessage] = []
+    tool = _silent_tool(sent)
+
+    result = await tool.execute(content=marker)
+
+    assert result.startswith("Error: not delivered")
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_the_marker_refusal_says_where_the_line_goes() -> None:
+    sent: list[OutboundMessage] = []
+    tool = _silent_tool(sent)
+
+    result = await tool.execute(content="CHECK_OK 1")
+
+    assert "belong in your answer text" in result
+
+
+@pytest.mark.asyncio
+async def test_a_marker_inside_a_real_alert_is_still_delivered() -> None:
+    """Il rifiuto guarda il messaggio, non le sue righe: un avviso vero che si
+    porta dietro il proprio marcatore resta un avviso, e perderlo sarebbe
+    peggio del marcatore di troppo."""
+    sent: list[OutboundMessage] = []
+    tool = _silent_tool(sent)
+
+    result = await tool.execute(content="Acerello è al 9%, dagli acqua\nCHECK_WARNED 1")
+
+    assert "Message sent" in result
+    assert len(sent) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("junk", ["silent", "x", "boh", "test", "🙄", ".", "  ", ""])
+async def test_a_bare_token_is_not_an_alert(junk: str) -> None:
+    """Le altre due forme misurate il 2026-08-24: la parola nuda (``silent`` il
+    24, ``x`` il 17 e il 22, ``boh`` il 16, ``test`` il 17) e il testo vuoto
+    (il 16, il 18, due volte il 23 — in chat una bolla vuota)."""
+    sent: list[OutboundMessage] = []
+    tool = _silent_tool(sent)
+
+    result = await tool.execute(content=junk)
+
+    assert result.startswith("Error:")
+    assert sent == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["primo", "Innaffia", "acqua!", "Acerello 9%"])
+async def test_a_short_alert_is_still_an_alert(text: str) -> None:
+    """Il filtro della parola nuda è una lista chiusa, non una regola di forma.
+    Il primo tentativo ("una parola e nessuna cifra") rifiutava ``"primo"``: una
+    parola nuda che passa è rumore, un avviso vero rifiutato è l'heartbeat che
+    tace quando aveva qualcosa da dire — e i due errori non si pagano allo
+    stesso prezzo."""
+    sent: list[OutboundMessage] = []
+    tool = _silent_tool(sent)
+
+    result = await tool.execute(content=text)
+
+    assert "Message sent" in result
+    assert [m.content for m in sent] == [text]
+
+
+@pytest.mark.asyncio
+async def test_an_attachment_needs_no_caption() -> None:
+    """Testo vuoto + allegato è un invio legittimo: il file È il messaggio."""
+    sent: list[OutboundMessage] = []
+    tool = _silent_tool(sent)
+
+    result = await tool.execute(content="", media=["output/grafico.png"])
+
+    assert "Message sent" in result
+    assert sent[0].media == [str(get_workspace_path() / "output/grafico.png")]
+
+
+@pytest.mark.asyncio
+async def test_a_visible_turn_may_say_whatever_it_wants() -> None:
+    """Il filtro è una proprietà del contratto silenzioso, non del tool: in una
+    conversazione vera il testo è affare dell'utente e del modello."""
+    sent: list[OutboundMessage] = []
+    tool = _visible_tool(sent)
+
+    result = await tool.execute(content="CHECK_OK 1")
+
+    assert "Message sent" in result
+    assert [m.content for m in sent] == ["CHECK_OK 1"]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_alert_does_not_burn_the_run_budget() -> None:
+    """Il rifiuto deve lasciare al modello un altro tentativo: se consumasse la
+    quota, un marcatore mandato per sbaglio zittirebbe l'avviso vero."""
+    sent: list[OutboundMessage] = []
+    tool = _silent_tool(sent)
+
+    await tool.execute(content="CHECK_OK 1")
+    result = await tool.execute(content="Acerello è al 9%, dagli acqua")
+
+    assert "Message sent" in result
+    assert [m.content for m in sent] == ["Acerello è al 9%, dagli acqua"]
+
+
+# --- macchina del template: niente da consegnare -------------------------------
+
+_TEMPLATE_LEAK = (
+    "<｜end▁of▁thinking｜>\n\n"
+    "<｜｜DSML｜｜tool_calls>\n"
+    '<｜｜DSML｜｜invoke name="complete_goal">\n'
+    '<｜｜DSML｜｜parameter name="recap" string="true">no'
+)
+
+
+@pytest.mark.asyncio
+async def test_a_template_leak_never_reaches_the_user() -> None:
+    """Misurato il 2026-08-26 alle 23:13:29 sul dispositivo: un turno heartbeat
+    ha consegnato in chat questo blocco come avviso proattivo — deepseek-v4 ha
+    scritto la propria markup di tool call (DSML) nel canale del contenuto
+    invece che in ``tool_calls``. Passava di qui: il tool chiamava già
+    ``strip_think``, che però non conosceva quei delimitatori."""
+    sent: list[OutboundMessage] = []
+    tool = _silent_tool(sent)
+
+    result = await tool.execute(content=_TEMPLATE_LEAK)
+
+    assert result.startswith("Error: nothing was delivered")
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_a_visible_turn_does_not_get_an_empty_bubble_either() -> None:
+    """Il rifiuto vale anche fuori dal contratto silenzioso: qui non si giudica
+    *cosa* dice il messaggio — dopo lo strip non è rimasto nulla da dire, e
+    consegnarlo sarebbe una bolla vuota."""
+    sent: list[OutboundMessage] = []
+    tool = _visible_tool(sent)
+
+    result = await tool.execute(content=_TEMPLATE_LEAK)
+
+    assert result.startswith("Error: nothing was delivered")
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_the_leak_refusal_does_not_burn_the_run_budget() -> None:
+    """Stessa asimmetria del rifiuto dei marcatori: il modello ha un altro
+    tentativo, altrimenti un leak zittirebbe l'avviso vero del ciclo."""
+    sent: list[OutboundMessage] = []
+    tool = _silent_tool(sent)
+
+    await tool.execute(content=_TEMPLATE_LEAK)
+    result = await tool.execute(content="Acerello è al 9%, dagli acqua")
+
+    assert "Message sent" in result
+    assert [m.content for m in sent] == ["Acerello è al 9%, dagli acqua"]
+
+
+@pytest.mark.asyncio
+async def test_a_leaked_marker_before_a_real_alert_is_only_trimmed() -> None:
+    """Il marcatore in testa è la forma più comune del leak (esce sul confine
+    fra ragionamento e risposta): l'avviso sotto va consegnato, pulito."""
+    sent: list[OutboundMessage] = []
+    tool = _silent_tool(sent)
+
+    result = await tool.execute(
+        content="<｜end▁of▁thinking｜>\n\nAcerello è al 9%, dagli acqua"
+    )
+
+    assert "Message sent" in result
+    assert [m.content for m in sent] == ["Acerello è al 9%, dagli acqua"]
+
+
+@pytest.mark.asyncio
+async def test_an_alert_that_quotes_the_markers_is_still_delivered() -> None:
+    """Il rovescio: parlare di quei token è un messaggio legittimo, e questo
+    tool consegna anche le spiegazioni che Jenny scrive all'utente."""
+    sent: list[OutboundMessage] = []
+    tool = _silent_tool(sent)
+    text = "papi, ieri sera è uscito un `<｜｜DSML｜｜tool_calls>` in chat: era il modello."
+
+    result = await tool.execute(content=text)
+
+    assert "Message sent" in result
+    assert [m.content for m in sent] == [text]

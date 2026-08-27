@@ -170,10 +170,14 @@ class TestCmdNewUnifiedSession:
         # _schedule_background is a *sync* method that schedules a coroutine via
         # asyncio.create_task().  Mirror that exactly so the coroutine is consumed
         # and no RuntimeWarning is emitted.
+        forgotten: list[str] = []
         loop = SimpleNamespace(
             sessions=sessions,
             consolidator=SimpleNamespace(archive=AsyncMock(return_value=True)),
             _cancel_active_tasks=AsyncMock(return_value=0),
+            # Svuotare la conversazione svuota anche il dedup delle letture: il
+            # contenuto dei file stava nei messaggi che non ci sono piu'.
+            forget_file_reads=forgotten.append,
         )
         loop._schedule_background = lambda coro: asyncio.ensure_future(coro)
 
@@ -190,6 +194,10 @@ class TestCmdNewUnifiedSession:
         sessions.invalidate("unified:default")
         reloaded = sessions.get_or_create("unified:default")
         assert reloaded.messages == []
+        # E il dedup delle letture e' stato dimenticato con loro: senza, la prima
+        # lettura della sessione nuova torna «invariato dall'ultima lettura» a una
+        # conversazione che non ha mai letto niente (visto sul telefono il 23/08).
+        assert forgotten == ["unified:default"]
 
     @pytest.mark.asyncio
     async def test_cmd_new_in_unified_mode_does_not_affect_other_sessions(self, tmp_path: Path):
@@ -204,10 +212,14 @@ class TestCmdNewUnifiedSession:
         shared.add_message("user", "shared message")
         sessions.save(shared)
 
+        forgotten: list[str] = []
         loop = SimpleNamespace(
             sessions=sessions,
             consolidator=SimpleNamespace(archive=AsyncMock(return_value=True)),
             _cancel_active_tasks=AsyncMock(return_value=0),
+            # Svuotare la conversazione svuota anche il dedup delle letture: il
+            # contenuto dei file stava nei messaggi che non ci sono piu'.
+            forget_file_reads=forgotten.append,
         )
         loop._schedule_background = lambda coro: asyncio.ensure_future(coro)
 

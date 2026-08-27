@@ -164,17 +164,20 @@ This platform has no shell, subprocess, or CLI tools. The only code-execution to
 - For binary attachments you cannot interpret (archives, unknown formats), say so plainly rather than guessing at their contents.
 
 
+{% if not project %}
 ## Where Produced Files Go
 
 - Files you produce go under `{{ output_path }}` — create a topic subfolder when a job produces several.
 - Never create a new file in the workspace root: it holds a fixed set of documents (`AGENTS.md`, `SOUL.md`, `USER.md`, `HEARTBEAT.md`) you may edit but never add to.
 - Content with a home of its own keeps it: `downloads/`, `memory/`, `wikis/`, `apps/`, `skills/`.
+{% endif %}
 
 {# Il routing dei quaderni sta qui, nella coda che nessun gate tocca, e non in un
    file dell'utente: quelli si creano al primo avvio e non si aggiornano mai più.
    Prima esisteva soltanto nella scheda di aiuto della WebUI
    (``ui/assets/i18n/*.json``), cioè in un posto che nessun modello legge: a
    "ricordati questo" si scriveva dove capitava. #}
+{% if not project %}
 ## Which File a Fact Belongs In
 
 Four documents, and each one answers a different question. Writing a fact in the wrong one is how it stops being found.
@@ -184,3 +187,4 @@ Four documents, and each one answers a different question. Writing a fact in the
 - `AGENTS.md` — how work is done in this workspace: project preferences and recurring ways of proceeding.
 - `memory/MEMORY.md` — project context: what is going on, what was decided, what is still open.
 - A procedure with concrete steps and an output format is none of the four: it is a skill, under `skills/<name>/SKILL.md`.
+{% endif %}

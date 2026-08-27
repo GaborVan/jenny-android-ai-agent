@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+from port_alloc import free_port
 from websockets.exceptions import ConnectionClosed
 from websockets.frames import Close
 
@@ -40,7 +41,6 @@ from jenny.channels.subagent_activity_wire import (
 from jenny.channels.websocket import WebSocketChannel, WebSocketConfig
 from jenny.webui.gateway_services import build_gateway_services
 
-_PORT = 29893
 _TASK = "d2ee4342"
 
 
@@ -56,7 +56,7 @@ def _channel(*, manager: Any = None) -> WebSocketChannel:
         "enabled": True,
         "allowFrom": ["*"],
         "host": "127.0.0.1",
-        "port": _PORT,
+        "port": free_port(),
         "path": "/ws",
         "websocketRequiresToken": False,
     }

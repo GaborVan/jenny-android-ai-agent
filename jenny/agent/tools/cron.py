@@ -15,13 +15,34 @@ from jenny.agent.tools.schema import (
 )
 from jenny.cron.service import CronService
 from jenny.cron.types import CronJob, CronJobState, CronSchedule
-from jenny.session.keys import UNIFIED_SESSION_KEY
+from jenny.security.workspace_access import (
+    READONLY_TOOL_REFUSAL,
+    current_turn_is_readonly,
+)
+from jenny.session.keys import is_project_session_key
 from jenny.utils.helpers import safe_zoneinfo, validate_timezone_name
 
 # Modi accettati da action='add'. Vive qui e non in cron/types.py perché è la
 # lista che il tool valida e mostra all'LLM; il tipo canonico resta CronPayload.
 _JOB_MODES = ("reminder", "monitor")
 _DEFAULT_JOB_MODE = "reminder"
+
+# Dentro un progetto non si programma niente, e questo e' l'unico posto in cui
+# Jenny lo viene a sapere: nessuna riga lo dice nel prompt (deciso il 22/08 —
+# v. ``roadmap/progetti-passi.md``, passo 3). Il blocco di sistema si paga a
+# ogni turno di ogni progetto, un promemoria capita una volta al mese, e
+# scoprirlo cosi' costa una chiamata e niente da ripianificare.
+#
+# Il testo dice **dove si fa**, non solo che qui non si fa: e' la parte che
+# Jenny ridice all'utente, ed e' la differenza fra "chiedimelo nella chat
+# personale" e un "non posso" che manderebbe via a mani vuote.
+_PROJECT_REFUSAL = (
+    "Not here: this is a project conversation, and a project cannot schedule anything — "
+    "not add, not list, not remove. Reminders, monitors and recurring checks all live in "
+    "the personal chat, which is also the only place they are delivered where you will "
+    "actually see them. Tell the user to switch to the personal chat (the chip at the top "
+    "of the screen) and ask for it there; do not try another way of scheduling it from here."
+)
 
 _CRON_PARAMETERS = tool_parameters_schema(
     action=StringSchema("Action to perform", enum=["add", "list", "remove"]),
@@ -92,11 +113,22 @@ class CronTool(Tool, ContextAware):
         return cls(cron_service=ctx.cron_service, default_timezone=ctx.timezone)
 
     def set_context(self, ctx: RequestContext) -> None:
-        """Set the current session context for scheduled cron job ownership."""
-        raw_key = f"{ctx.channel}:{ctx.chat_id}" if ctx.channel and ctx.chat_id else ""
-        self._session_key.set(
-            raw_key if ctx.session_key == UNIFIED_SESSION_KEY else (ctx.session_key or "")
-        )
+        """Set the current session context for scheduled cron job ownership.
+
+        La chiave registrata e' **quella del turno**, senza eccezioni. Fino al
+        2026-08-21 un turno sulla conversazione unica veniva registrato come
+        ``f"{channel}:{chat_id}"``: il job restava "attaccato alla chat che lo
+        ha creato", ma quella forma non e' una sessione — ``bound_runner`` la usa
+        come chiave del turno, quindi un promemoria creato dalla WebUI girava in
+        ``websocket:default``, un secondo file di sessione accanto alla
+        conversazione a cui il promemoria appartiene. L'attaccamento alla chat
+        vive dove e' sempre vissuto e dove serve alla consegna:
+        ``origin_channel`` / ``origin_chat_id``, qui sotto.
+
+        Una chiave di sessione esplicita del canale (thread) resta invece
+        l'owner del job, come prima: quella *e'* una sessione.
+        """
+        self._session_key.set(ctx.session_key or "")
         self._origin_channel.set(ctx.channel or "")
         self._origin_chat_id.set(ctx.chat_id or "")
         self._origin_metadata.set(dict(ctx.metadata or {}))
@@ -169,6 +201,19 @@ class CronTool(Tool, ContextAware):
         mode: str | None = None,
         **kwargs: Any,
     ) -> str:
+        # Prima di ogni azione, ``add`` compresa: dentro un progetto il tool e'
+        # chiuso in tutte e tre le direzioni. ``list`` mostrerebbe la sveglia
+        # personale a una conversazione di lavoro ("chi sei viaggia, dove altro
+        # lavori no"), e ``remove`` la cancellerebbe da li' dentro.
+        if is_project_session_key(self._session_key.get()):
+            return _PROJECT_REFUSAL
+        # Seconda chiusura, e regola diversa: quella sopra dice *dove* si
+        # programma, questa dice *se questo turno* puo' cambiare qualcosa. Vale
+        # anche nella chat personale, ed e' la sola lettura del passo 4. Un job
+        # e' fra le cose piu' durature che Jenny possa creare: sopravvive al
+        # turno, alla conversazione e al riavvio.
+        if current_turn_is_readonly():
+            return READONLY_TOOL_REFUSAL
         if action == "add":
             if self._in_cron_context.get():
                 return "Error: cannot schedule new jobs from within a cron job execution"

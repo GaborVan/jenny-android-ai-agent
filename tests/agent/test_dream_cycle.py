@@ -103,6 +103,7 @@ class _FakeMemory:
 
         self._review_state = review_state
         self._forced_at_stuck = 0
+        self._nothing_new = 0
         self._has_work = has_work
         self._file_states = file_states
 
@@ -111,14 +112,22 @@ class _FakeMemory:
         self.guards: list[Any] = []
         self.cursor: int | None = None
 
+    @staticmethod
+    def _review_counter(value: int | None) -> int:
+        return 0 if value is None or value < 0 else value
+
     def get_review_state(self) -> tuple[int, int]:
         return self._review_state
+
+    def get_nothing_new_runs(self) -> int:
+        return self._nothing_new
 
     def get_review_forced_at_stuck(self) -> int:
         return self._forced_at_stuck
 
     def set_review_state(
-        self, *, runs_since_review: int, stuck_runs: int, forced_at_stuck: int | None = None,
+        self, *, runs_since_review: int, stuck_runs: int,
+        forced_at_stuck: int | None = None, nothing_new_runs: int | None = None,
     ) -> None:
         self._review_state = (runs_since_review, stuck_runs)
         # ``None`` conserva il valore su disco, come il vero ``MemoryStore``: un
@@ -126,6 +135,14 @@ class _FakeMemory:
         # ``forced_at_stuck`` esiste per chiudere.
         if forced_at_stuck is not None:
             self._forced_at_stuck = forced_at_stuck
+        # E ``stuck_runs=0`` lo azzera comunque, sempre come il vero store: quel
+        # campo vale solo dentro la salita di ``stuck`` che lo ha prodotto. Un doppio
+        # che se lo tenesse renderebbe verde il difetto opposto — il review che non
+        # riparte più alla salita dopo.
+        if self._review_counter(stuck_runs) == 0:
+            self._forced_at_stuck = 0
+        if nothing_new_runs is not None:
+            self._nothing_new = nothing_new_runs
         self.events.append(f"review_state:{runs_since_review},{stuck_runs}")
 
     def build_dream_prompt(self, *, max_entries: int = 20, gauge: str = ""):
@@ -225,6 +242,10 @@ class _ReviewSpy:
             before=before,
             after=after,
             freed=sum(before[label] - after[label] for label in before),
+            # Come il vero ``ReviewOutcome``: `/dream` lo legge per dire *quali*
+            # fatti la passata ha spostato in archivio, non solo quanti caratteri
+            # ha liberato.
+            demoted_ids=(),
         )
 
     @property
@@ -436,6 +457,79 @@ class TestTheForcedReviewDoesNotRepeatOnAFrozenCounter:
         assert memory.get_review_forced_at_stuck() == STUCK_FORCES_REVIEW
 
 
+class TestTheForcedReviewRearmsAfterTheCursorMoves:
+    """Il freno del livelock non deve diventare un blocco.
+
+    ``forced_at_stuck`` impedisce di riforzare il review sullo stesso valore di
+    ``stuck``, ed è giusto finché quella salita dura. Se sopravvive all'episodio,
+    la salita dopo ritrova ``stuck == forced_at`` e la condizione
+    ``stuck != forced_at`` è falsa proprio al run in cui il review servirebbe: la
+    via d'uscita dal livelock si arma una volta per installazione. Misurato sul
+    Titan 2 il 2026-08-18 — ``forced_at_stuck: 2`` avanzato da un episodio già
+    chiuso, ``stuck`` di nuovo a 2, nessun review; è arrivato solo a 4, cioè con
+    ``STUCK_IS_ALARMING``, quando il danno era già fatto.
+    """
+
+    @staticmethod
+    async def _cycle(agent, memory, cfg, *, advanced: bool) -> None:
+        """Un run intero, nell'ordine del chiamante vero (v. ``cron_dispatch``)."""
+        prologue = await begin_dream_cycle(agent, store=memory, cfg=cfg)
+        finish_dream_cycle(
+            memory,
+            advanced=advanced,
+            runs_since_review=prologue.runs_since_review,
+            stuck=prologue.stuck,
+            nothing_new=prologue.nothing_new,
+            # Il ramo del tetto: è quello che fa salire ``stuck`` e quindi l'unico
+            # che porta al review forzato di cui parla questa classe (fase 5).
+            refused=0 if advanced else 1,
+        )
+
+    async def test_a_second_climb_forces_a_second_review(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        memory = _FakeMemory(tmp_path / "ws")
+        spy = _ReviewSpy(memory)
+        monkeypatch.setattr(_REVIEW_TARGET, spy)
+        agent = _FakeAgent(tmp_path, memory)
+        # Cadenza periodica fuori portata: qui deve parlare solo il livelock.
+        cfg = _dream_cfg(review_every_runs=99)
+
+        # ``STUCK_FORCES_REVIEW`` run bloccati portano il contatore sulla soglia; il
+        # review parte al run successivo, che è quello che la legge.
+        for _ in range(STUCK_FORCES_REVIEW + 1):
+            await self._cycle(agent, memory, cfg, advanced=False)
+        assert len(spy.calls) == 1
+
+        # Il cursore avanza: l'episodio è chiuso e ``stuck`` riparte da zero.
+        await self._cycle(agent, memory, cfg, advanced=True)
+        assert memory.get_review_state()[1] == 0
+
+        for _ in range(STUCK_FORCES_REVIEW + 1):
+            await self._cycle(agent, memory, cfg, advanced=False)
+        assert len(spy.calls) == 2
+
+    async def test_the_run_that_advances_does_not_itself_force_one(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """L'azzeramento non riapre la porta a metà episodio: il memo vale finché
+        ``stuck`` non si muove, e un review appena forzato non si ripete."""
+        memory = _FakeMemory(tmp_path / "ws", review_state=(0, STUCK_FORCES_REVIEW))
+        memory.set_review_state(
+            runs_since_review=0,
+            stuck_runs=STUCK_FORCES_REVIEW,
+            forced_at_stuck=STUCK_FORCES_REVIEW,
+        )
+        spy = _ReviewSpy(memory)
+        monkeypatch.setattr(_REVIEW_TARGET, spy)
+        agent = _FakeAgent(tmp_path, memory)
+
+        await self._cycle(agent, memory, _dream_cfg(review_every_runs=99), advanced=True)
+
+        assert spy.calls == []
+        assert memory.get_review_forced_at_stuck() == 0
+
+
 class TestAFailedReviewDoesNotBuyAFullCadence:
     """Un review che ha fallito non ha fatto la manutenzione.
 
@@ -607,7 +701,7 @@ class TestFinishArithmetic:
         memory = _FakeMemory(tmp_path / "ws")
 
         assert finish_dream_cycle(
-            memory, advanced=False, runs_since_review=3, stuck=1
+            memory, advanced=False, runs_since_review=3, stuck=1, refused=1
         ) == (4, 2)
         assert memory.get_review_state() == (4, 2)
 
@@ -623,7 +717,8 @@ class TestFinishArithmetic:
 
         with _cycle_logs() as messages:
             finish_dream_cycle(
-                memory, advanced=False, runs_since_review=9, stuck=STUCK_IS_ALARMING - 1
+                memory, advanced=False, runs_since_review=9,
+                stuck=STUCK_IS_ALARMING - 1, refused=1,
             )
 
         assert any(m.startswith("ERROR: Dream has not advanced") for m in messages)
@@ -633,7 +728,8 @@ class TestFinishArithmetic:
 
         with _cycle_logs() as messages:
             finish_dream_cycle(
-                memory, advanced=False, runs_since_review=1, stuck=STUCK_IS_ALARMING - 2
+                memory, advanced=False, runs_since_review=1,
+                stuck=STUCK_IS_ALARMING - 2, refused=1,
             )
 
         assert not [m for m in messages if m.startswith("ERROR")]
@@ -655,12 +751,12 @@ class TestBudgetLogLine:
                 _FakeAgent(tmp_path, memory), store=memory, cfg=_dream_cfg(memory_budget=50)
             )
 
-        # ``USER.md`` porta il proprio tetto di spedizione (2.000) perché
+        # ``USER.md`` porta il proprio tetto di spedizione (3.000) perché
         # ``_dream_cfg`` sovrascrive solo quello di MEMORY.md; SOUL.md resta
         # l'unico dei tre senza enforcement, ed è la controprova che la riga
         # distingue i due stati invece di renderli uguali.
         assert messages == [
-            "INFO: Dream memory budget: MEMORY.md 200/50 (400%), USER.md 1/2000 (0%), "
+            "INFO: Dream memory budget: MEMORY.md 200/50 (400%), USER.md 1/3000 (0%), "
             "SOUL.md 1 (no budget) | runs since review: 3, stuck runs: 1"
         ]
 
@@ -992,6 +1088,7 @@ class TestTheAlarmCanActuallySound:
                 _, stuck = finish_dream_cycle(
                     memory,
                     advanced=False,
+                    refused=1,
                     runs_since_review=prologue.runs_since_review + 1,
                     stuck=prologue.stuck,
                 )
@@ -1039,7 +1136,8 @@ class TestTheAlarmLeavesTheLog:
         memory = _FakeMemory(tmp_path / "ws")
 
         finish_dream_cycle(
-            memory, advanced=False, runs_since_review=9, stuck=STUCK_IS_ALARMING - 1
+            memory, advanced=False, runs_since_review=9,
+            stuck=STUCK_IS_ALARMING - 1, refused=1,
         )
 
         assert len(sent) == 1
@@ -1058,7 +1156,8 @@ class TestTheAlarmLeavesTheLog:
         memory = _FakeMemory(tmp_path / "ws")
 
         finish_dream_cycle(
-            memory, advanced=False, runs_since_review=1, stuck=STUCK_IS_ALARMING - 2
+            memory, advanced=False, runs_since_review=1,
+            stuck=STUCK_IS_ALARMING - 2, refused=1,
         )
 
         assert sent == []
@@ -1079,7 +1178,9 @@ class TestTheAlarmLeavesTheLog:
 
         for _ in range(3):
             runs, stuck = memory.get_review_state()
-            finish_dream_cycle(memory, advanced=False, runs_since_review=runs, stuck=stuck)
+            finish_dream_cycle(
+                memory, advanced=False, runs_since_review=runs, stuck=stuck, refused=1,
+            )
 
         tags = {alert_fields(content, metadata)[2] for content, metadata in sent}
         assert len(sent) == 3

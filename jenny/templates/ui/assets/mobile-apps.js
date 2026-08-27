@@ -46,7 +46,16 @@ export class AppsController {
     // Bridge from sandboxed app iframes (opaque origin → origin check is
     // meaningless; we validate the source window instead).
     window.addEventListener('message', e => this._onAppMessage(e));
-    // Agent-side storage mutations → refresh the open app iframe.
+    /* Agent-side storage mutations → refresh the open app iframe.
+
+       Stream non filtrato per `chat_id`, **e deve restare così**: questi due
+       frame sono broadcast a ogni connessione e non portano `chat_id` affatto
+       (`ws_sender.send_app_data_changed` / `send_apps_list_changed`), quindi
+       l'evento per-chat (`chat:<id>:message`) non scatterebbe mai per loro. Non
+       sono nemmeno per-conversazione: i dati di una app sono gli stessi
+       qualunque chat li abbia cambiati, e una app aperta va aggiornata comunque.
+       Il filtro sul `chat_id` riguarda i frame che *dipingono una
+       conversazione*, che stanno in `mobile-chat.js`. */
     wsManager.addEventListener('chat:message', e => {
       if (e.detail?.event === 'app_data_changed') this.notifyAppDataChanged(e.detail.slug);
       if (e.detail?.event === 'apps_list_changed') this._reloadJennyApps();

@@ -34,6 +34,10 @@ from loguru import logger
 # messaggio, non come un troncamento silenzioso del trasporto.
 MAX_WRITE_BYTES = 1_000_000
 
+# La riga di scope sta nel frontmatter dell'`AGENTS.md`, che e' YAML: una riga
+# sola, e corta abbastanza da stare nel registro accanto al nome della wiki.
+MAX_PROJECT_SEED_CHARS = 500
+
 
 class CommandError(Exception):
     """Errore di un comando, con un codice che il trasporto sa tradurre.
@@ -60,6 +64,12 @@ class CommandContext:
     """
 
     get_workspace_root: Callable[[], Path]
+    # Sgombera dalla cache in memoria una sessione i cui file stanno per sparire
+    # (``project.delete``). E' un campo **obbligatorio** e non un default a
+    # no-op: un sito di costruzione che se lo dimenticasse lascerebbe la
+    # sessione viva, e il primo salvataggio riscriverebbe il file appena tolto —
+    # cioe' l'orfano, di nuovo. Meglio un TypeError all'avvio.
+    invalidate_session: Callable[[str], None]
 
 
 Command = Callable[[CommandContext, Mapping[str, Any]], Awaitable[dict[str, Any]]]
@@ -104,6 +114,11 @@ def _require_wiki_enabled() -> None:
         return
     if not enabled:
         raise CommandError("unavailable", "wiki is disabled")
+
+
+def _skill_scripts_dir(ctx: CommandContext) -> Path:
+    """Il checkout della skill `llm-wiki` nel workspace, dove sta lo scaffolder."""
+    return ctx.get_workspace_root() / "skills" / "llm-wiki" / "scripts"
 
 
 def _wikis_dir(ctx: CommandContext) -> Path:
@@ -177,9 +192,119 @@ async def audit_resolve(ctx: CommandContext, params: Mapping[str, Any]) -> dict[
         raise CommandError("bad_request", str(exc)) from exc
 
 
+
+_CONVERSATION_CHOICES = frozenset({"refuse", "keep", "discard"})
+
+
+def _conversation_choice(params: Mapping[str, Any]) -> str:
+    """La scelta dell'utente su una conversazione rimasta, validata.
+
+    Insieme chiuso e default ``refuse``: un valore sconosciuto non deve poter
+    valere «vai avanti comunque» su un'operazione che puo' scartare una chat.
+    """
+    value = params.get("conversation")
+    if value is None:
+        return "refuse"
+    if not isinstance(value, str) or value not in _CONVERSATION_CHOICES:
+        raise CommandError("bad_request", "invalid conversation choice")
+    return value
+
+
+async def project_create(ctx: CommandContext, params: Mapping[str, Any]) -> dict[str, Any]:
+    """Crea un progetto: una wiki nuova, completa e vuota, piu' la riga dell'utente.
+
+    Sta qui e non su ``/api/`` perche' porta contenuto: la riga di scope e'
+    testo libero dell'utente, in italiano e con le emoji che vuole, e la
+    superficie ``/api/`` non sa trasportarlo (v. la docstring del modulo).
+    """
+    from jenny.session.keys import is_valid_project_name
+    from jenny.webui.project_create import ProjectCreateError, create_project
+
+    # La forma del nome la decide ``jenny.session.keys``, che e' anche chi la
+    # applica a ogni ``chat_id`` in arrivo: un nome che qui passasse e li' no
+    # creerebbe un progetto che non si puo' aprire.
+    name = _require_str(params, "name").strip()
+    if not is_valid_project_name(name):
+        raise CommandError("bad_request", "invalid project name")
+
+    # Una riga: gli a-capo vengono richiusi invece di far fallire il comando, che
+    # su una tastiera mobile e' quel che l'utente si aspetta.
+    seed = " ".join(_require_str(params, "seed").split())
+    if not seed:
+        raise CommandError("bad_request", "seed required")
+    if len(seed) > MAX_PROJECT_SEED_CHARS:
+        raise CommandError(
+            "too_large",
+            f"scope line too long ({len(seed)} > {MAX_PROJECT_SEED_CHARS} characters)",
+        )
+
+    _require_wiki_enabled()
+
+    try:
+        # Su disco: albero, template, registro. Fuori dall'event loop come le
+        # altre scritture di questo modulo.
+        return await asyncio.to_thread(
+            create_project,
+            wikis_dir=_wikis_dir(ctx),
+            scripts_dir=_skill_scripts_dir(ctx),
+            workspace=ctx.get_workspace_root(),
+            name=name,
+            seed=seed,
+            # Cosa fare di una conversazione rimasta sotto questo nome. Il
+            # default **chiede** invece di scegliere: la risposta torna come
+            # ``status: conversation_exists`` e il client la trasforma in due
+            # bottoni. V. la docstring di ``project_create``.
+            conversation=_conversation_choice(params),
+        )
+    except ProjectCreateError as exc:
+        raise CommandError("bad_request", str(exc)) from exc
+    except OSError as exc:
+        raise CommandError("bad_request", str(exc)) from exc
+
+
+async def project_delete(ctx: CommandContext, params: Mapping[str, Any]) -> dict[str, Any]:
+    """Cancella un progetto: l'albero della wiki **e** la sua conversazione.
+
+    L'inverso di :func:`project_create`, e sta qui accanto a lui di proposito: le
+    due meta' del ciclo di vita di un progetto devono essere leggibili insieme.
+    Fino al 24/08/2026 questa meta' non esisteva, e l'unico modo di cancellare un
+    progetto era la ``delete`` generica del file manager — che toglie una
+    cartella e non sa cosa sia un progetto, quindi lasciava la conversazione
+    sotto un nome ormai libero.
+
+    Non porta contenuto e potrebbe stare su ``/api/``; sta fra i comandi perche'
+    e' **distruttiva**, e questa e' la superficie autenticata all'handshake che
+    la WebView usa per le operazioni che cambiano il disco.
+    """
+    from jenny.session.keys import is_valid_project_name
+    from jenny.webui.project_delete import ProjectDeleteError, delete_project
+
+    name = _require_str(params, "name").strip()
+    if not is_valid_project_name(name):
+        raise CommandError("bad_request", "invalid project name")
+
+    _require_wiki_enabled()
+
+    try:
+        return await asyncio.to_thread(
+            delete_project,
+            wikis_dir=_wikis_dir(ctx),
+            scripts_dir=_skill_scripts_dir(ctx),
+            workspace=ctx.get_workspace_root(),
+            name=name,
+            invalidate_session=ctx.invalidate_session,
+        )
+    except ProjectDeleteError as exc:
+        raise CommandError("bad_request", str(exc)) from exc
+    except OSError as exc:
+        raise CommandError("bad_request", str(exc)) from exc
+
+
 COMMANDS: dict[str, Command] = {
     "workspace.write": workspace_write,
     "audit.resolve": audit_resolve,
+    "project.create": project_create,
+    "project.delete": project_delete,
 }
 
 

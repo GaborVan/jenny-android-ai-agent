@@ -18,18 +18,22 @@ from jenny.config.schema import DreamConfig
 from jenny.pydantic_compat import ValidationError
 
 
-def test_memory_and_user_ship_enforced_at_two_thousand() -> None:
-    """I due tetti veri, scelti dalle misure del device.
+def test_memory_and_user_ship_enforced_at_three_thousand() -> None:
+    """I due tetti veri, scelti dalle misure del device — quelle giuste.
 
-    ``MEMORY.md`` stava a 3.019 caratteri e ``USER.md`` a 1.626 dopo due
-    passaggi di review: 2.000 morde subito il primo e tiene il secondo. Sono
-    numeri misurati, non arrotondamenti — se cambiano, che sia perché è cambiata
-    una misura.
+    Erano 2.000, letti *dopo due passaggi di review* (``MEMORY.md`` 3.019,
+    ``USER.md`` 1.626): il pavimento post-compressione, non la dimensione a cui
+    i file lavorano. Senza review gli stessi due misurano 3.943 e 3.524, e con
+    un tetto sotto quella soglia ``USER.md`` è finito a 1.999/2.000 — 99% — in
+    un run che ha letto tutti e tre i file e non ha scritto niente. 3.000 morde
+    ancora su entrambi, ma lascia margine a chi pota invece di chiudere la porta
+    a chi aggiunge. Sono numeri misurati, non arrotondamenti — se cambiano, che
+    sia perché è cambiata una misura.
     """
     cfg = DreamConfig()
 
-    assert cfg.memory_budget_chars == 2000
-    assert cfg.user_budget_chars == 2000
+    assert cfg.memory_budget_chars == 3000
+    assert cfg.user_budget_chars == 3000
     assert cfg.review_every_runs == 12
 
 
@@ -126,8 +130,8 @@ def test_config_written_before_the_budgets_existed_still_loads(tmp_path) -> None
     assert dream.interval_h == 2
     # Non avendo le chiavi, prende i default nuovi: è l'unica installazione
     # esistente che il cambio di default raggiunge davvero.
-    assert dream.memory_budget_chars == 2000
-    assert dream.user_budget_chars == 2000
+    assert dream.memory_budget_chars == 3000
+    assert dream.user_budget_chars == 3000
     assert dream.soul_budget_chars == 0
     assert dream.review_every_runs == 12
 
@@ -137,11 +141,15 @@ def test_a_zero_already_on_disk_wins_over_the_new_default(tmp_path) -> None:
 
     ``config/loader.py`` serializza con ``by_alias=True`` e senza
     ``exclude_defaults``: ogni ``config.json`` scritto da quando questi campi
-    esistono porta dentro il valore di allora. Sul Titan 2 quel valore è ``0``,
-    e continuerà a vincere su qualunque default in Python finché non lo si
-    riscrive — con ``/dream budget memory 2000``, che è il motivo per cui quel
-    comando esiste. Un'installazione nuova e il device divergono, e questo test
-    è il posto in cui la divergenza è dichiarata invece che scoperta.
+    esistono porta dentro il valore di allora, e continuerà a vincere su
+    qualunque default in Python finché non lo si riscrive — con
+    ``/dream budget <file> <chars>``, che è il motivo per cui quel comando
+    esiste. Lo ``0`` di questo test è il valore con cui i campi sono nati; sul
+    Titan 2 oggi c'è ``2.000`` per ``USER.md``, cioè il default *precedente*
+    congelato su disco, che è esattamente perché portare questa riga a 3.000 non
+    raggiunge quel telefono. Il meccanismo è lo stesso a qualunque valore: vince
+    il file. Un'installazione nuova e il device divergono, e questo test è il
+    posto in cui la divergenza è dichiarata invece che scoperta.
     """
     existing = tmp_path / "config.json"
     existing.write_text(

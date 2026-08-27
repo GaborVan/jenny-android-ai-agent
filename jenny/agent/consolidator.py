@@ -10,7 +10,10 @@ in coda per preservare l'API (``from jenny.agent.memory import Consolidator``).
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from loguru import logger
@@ -19,7 +22,10 @@ from jenny.agent.memory import (
     _ARCHIVE_SUMMARY_MAX_CHARS,
     _RAW_ARCHIVE_MAX_CHARS,
     MemoryStore,
+    iter_fact_lines,
 )
+from jenny.security.workspace_access import WorkspaceScopeResolver
+from jenny.session.keys import PROJECT_SESSION_PREFIX, is_project_session_key
 from jenny.session.manager import Session
 from jenny.utils.helpers import (
     channel_delivery_aware_user_start,
@@ -31,11 +37,50 @@ from jenny.utils.helpers import (
     truncate_text_to_tokens,
 )
 from jenny.utils.prompt_templates import render_template
+from jenny.utils.wiki_paths import discover_wiki_roots
 
 if TYPE_CHECKING:
     from jenny.agent.session_locks import ReentrantSessionLock, SessionLocks
     from jenny.providers.base import LLMProvider
     from jenny.session.manager import SessionManager
+
+
+# Dove un progetto tiene la copia grezza di quel che la compattazione gli
+# rimuove dalla sessione. Sotto ``raw/`` e **accanto** a ``raw/journal/``:
+#
+# - ``raw/`` perché una conversazione è materiale grezzo per definizione — è la
+#   stessa ragione per cui il diario sta lì (v. ``wiki_paths.JOURNAL_DIRNAME``) —
+#   e perché è il ramo che nessun sottosistema cammina: albero, grafo, ricerca e
+#   impronta guardano solo ``wiki/``, quindi una cartella qui non chiede a
+#   nessuno di imparare a non trattarla da pagina.
+# - **Accanto** e non *dentro* il diario, che è la scelta vera: una pagina di
+#   diario è un fatto per riga, append-only, con un cursore di righe che il
+#   giardiniere avanza. Rovesciarci dentro una conversazione intera gli farebbe
+#   promuovere un dump a pagina, cioè romperebbe l'unico consumatore del diario
+#   per salvare dei byte che non gli servono.
+#
+# Il lint della wiki non ci passa: chiede un riassunto solo a
+# ``raw/articles|papers|notes`` e controlla la forma solo di ``raw/journal/``.
+_PROJECT_COMPACTED_SUBDIR = "raw/compacted"
+
+# Il default della sottocartella dei progetti. Letto dal risolutore del turno
+# invece di riscritto, perché è la stessa cartella: due letterali ``"wikis"``
+# sarebbero due cose da tenere allineate, e la conseguenza di disallinearle è
+# che questa copia finisce dove nessuno la cerca. Resta solo un default: chi
+# costruisce il Consolidator passa la ``wikis_dir`` configurata, perché su
+# un'installazione che l'ha cambiata cercare qui non troverebbe il progetto.
+_PROJECTS_SUBDIR = WorkspaceScopeResolver.projects_subdir
+
+
+def _estimate_tokens(text: str) -> int:
+    """Stima in token, con la stessa convenzione di ``truncate_text_to_tokens``.
+
+    Quattro caratteri per token, e conta che sia la *stessa* convenzione del
+    troncatore: se qui si stimasse più fine, il budget sottratto e il budget
+    applicato divergerebbero, e la differenza si manifesterebbe come una
+    richiesta fuori finestra invece che come un troncamento.
+    """
+    return len(text) // 4
 
 
 class Consolidator:
@@ -57,6 +102,7 @@ class Consolidator:
         max_completion_tokens: int = 4096,
         consolidation_ratio: float = 0.5,
         session_locks: "SessionLocks | None" = None,
+        projects_subdir: str = _PROJECTS_SUBDIR,
     ):
         self.store = store
         self.provider = provider
@@ -67,6 +113,11 @@ class Consolidator:
         self.consolidation_ratio = consolidation_ratio
         self._build_messages = build_messages
         self._get_tool_definitions = get_tool_definitions
+        # La ``config.wiki.wikis_dir`` viva, non il default: la copia della coda
+        # di un progetto si scrive dentro la cartella del progetto, e su
+        # un'installazione che ha spostato i progetti il default cercherebbe
+        # dove non c'è niente — cioè rifiuterebbe di compattare per sempre.
+        self._projects_subdir = projects_subdir
         # Dominio di lock condiviso col turno (AgentLoop). Se non iniettato (es.
         # costruzione diretta nei test) ne crea uno privato: la consolidation
         # resta serializzata con sé stessa, ma perde la mutua esclusione col
@@ -208,6 +259,7 @@ class Consolidator:
             session_summary=summary,
             session_metadata=session.metadata,
             session_key=session.key,
+            workspace=self._probe_workspace(session.key),
         )
         return estimate_prompt_tokens_chain(
             self.provider,
@@ -217,13 +269,79 @@ class Consolidator:
         )
 
     @property
+    def _workspace_scopes(self) -> WorkspaceScopeResolver:
+        """**Il risolutore del turno, non una seconda aritmetica di percorsi.**
+
+        "Quale cartella" ha un solo proprietario:
+        ``WorkspaceScopeResolver.for_project``, la stessa chiamata che
+        ``AgentLoop`` fa per le sessioni di progetto. Comporre qui un
+        ``workspace / wikis_dir / nome`` a mano vorrebbe dire una seconda
+        risposta alla stessa domanda, con la sua guardia sui ``..`` da riscrivere
+        e da tenere allineata (la lezione di ``WorkspaceScope.write_root``).
+
+        Gli ingressi sono i due che questa classe ha gia', e sono gli **unici
+        due** che ``for_project`` legge: la radice dello store e la ``wikis_dir``
+        configurata. ``default_restrict_to_workspace`` non entra in quel percorso
+        — dentro un progetto lo scope e' ``restricted`` per definizione — quindi
+        non c'e' un terzo dato da tenere allineato.
+
+        Proprieta' e non attributo del costruttore, per la stessa ragione per cui
+        ``_project_dump_dir`` legge ``self.store.workspace`` al momento dell'uso:
+        ``store`` puo' essere un doppio, e costringerlo a esporre ``workspace``
+        solo per costruire questo oggetto trasformerebbe una dipendenza di una
+        funzione in una dipendenza di **tutta** la classe.
+        """
+        return WorkspaceScopeResolver(
+            default_workspace=self.store.workspace,
+            default_restrict_to_workspace=True,
+            projects_subdir=self._projects_subdir,
+        )
+
+    def _probe_workspace(self, session_key: str) -> Path | None:
+        """La radice su cui la sonda costruisce il prompt. **T3.8.**
+
+        Fino a T3.8 la sonda non passava ``workspace``, quindi per una sessione
+        ``project:*`` costruiva il prompt sulla radice dell'installazione: il
+        blocco di progetto — mappa, pagine, ``AGENTS.md`` del progetto — restava
+        **fuori dalla stima**. La conseguenza non era un numero curioso: la
+        decisione di autocompattazione e ``/status`` leggevano un valore
+        sistematicamente basso proprio sulle sessioni il cui prompt e' cresciuto
+        di piu', cioe' la compattazione arrivava tardi dove serviva prima.
+
+        La cartella si chiede al **risolutore del turno**, con la stessa chiamata
+        che ``AgentLoop`` usa per le sessioni di progetto
+        (``workspace_scopes.for_project``): la sonda deve misurare il prompt che
+        il turno costruira', e due strade per la stessa cartella divergono.
+
+        ``for_turn`` non serve e sarebbe sbagliato: vuole il *canale* del
+        messaggio, e qui non c'e' un messaggio — il canale che questa classe
+        ricava dalla chiave (``"project"``) non e' quello scoped, quindi
+        ``for_turn`` ricadrebbe sulla radice di default, cioe' sul difetto.
+
+        ``None`` fuori dai progetti, che e' il default di ``build_messages``:
+        sessione personale e sessioni interne (cron, Dream, heartbeat) sono
+        misurate esattamente come prima.
+        """
+        if not is_project_session_key(session_key):
+            return None
+        return self._workspace_scopes.for_project(session_key).project_path
+
+    @property
     def _input_token_budget(self) -> int:
         """Available input token budget for consolidation LLM."""
         return self.context_window_tokens - self.max_completion_tokens - self._SAFETY_BUFFER
 
-    def _truncate_to_token_budget(self, text: str) -> str:
-        """Truncate text so it fits within the consolidation LLM's token budget."""
-        budget = self._input_token_budget
+    def _truncate_to_token_budget(self, text: str, *, reserved_tokens: int = 0) -> str:
+        """Truncate text so it fits within the consolidation LLM's token budget.
+
+        *reserved_tokens* è lo spazio già speso nel system prompt da qualcosa
+        che non è la conversazione — oggi il blocco "già registrato" della
+        fase 4. Va sottratto qui e non altrove: il budget è la finestra del
+        modello meno la risposta, e un blocco aggiunto al system senza toglierlo
+        da questo conto è una richiesta che sfora la finestra, cioè una
+        consolidation che fallisce e raw-dumpa la conversazione in history.
+        """
+        budget = self._input_token_budget - max(0, reserved_tokens)
         if budget <= 0:
             return truncate_text(text, _RAW_ARCHIVE_MAX_CHARS)
         return truncate_text_to_tokens(text, budget)
@@ -249,17 +367,20 @@ class Consolidator:
         messages_to_summarize = summary_messages if summary_messages is not None else messages
         try:
             formatted = MemoryStore._format_messages(messages_to_summarize)
-            formatted = self._truncate_to_token_budget(formatted)
+            # Il blocco sta nel system e non in coda alla conversazione: è
+            # istruzione, non materiale da riassumere, e in fondo al messaggio
+            # utente si leggerebbe come l'ultima cosa detta nella chat.
+            known = self.store.get_known_facts_context(session_key=session_key)
+            system = render_template("agent/consolidator_archive.md", strip=True)
+            if known:
+                system = f"{system}\n\n{known}"
+            formatted = self._truncate_to_token_budget(
+                formatted, reserved_tokens=_estimate_tokens(known),
+            )
             response = await self.provider.chat_with_retry(
                 model=self.model,
                 messages=[
-                    {
-                        "role": "system",
-                        "content": render_template(
-                            "agent/consolidator_archive.md",
-                            strip=True,
-                        ),
-                    },
+                    {"role": "system", "content": system},
                     {"role": "user", "content": formatted},
                 ],
                 tools=None,
@@ -268,6 +389,7 @@ class Consolidator:
             if response.finish_reason == "error":
                 raise RuntimeError(f"LLM returned error: {response.content}")
             summary = response.content or "[no summary]"
+            self._log_extraction(summary, known, session_key)
             # L'I/O di MemoryStore è bloccante-by-design (open+write+fsync sotto
             # threading.Lock): girando qui in un metodo async, lo spostiamo fuori
             # dall'event loop con to_thread per non bloccare il loop sul fsync.
@@ -284,6 +406,32 @@ class Consolidator:
                 self.store.raw_archive, messages, session_key=session_key
             )
             return None
+
+    @staticmethod
+    def _log_extraction(summary: str, known: str, session_key: str | None) -> None:
+        """La misura della fase 4: quanto di ciò che esce era già dentro.
+
+        ``repeats`` conta le ripetizioni **verbatim**, ed è quindi un limite
+        inferiore: un fatto riestratto con altre parole non lo tocca. È scritto
+        così di proposito — l'alternativa sarebbe un confronto approssimato, che
+        darebbe un numero più alto e meno vero. Serve come segnale, non come
+        percentuale: sopra zero vuol dire che il blocco è nel prompt e il
+        modello lo sta ignorando, che è l'unico esito di questa fase che nessun
+        test locale può vedere.
+        """
+        from jenny.agent.tools.memory_entries import entry_id, parse_entries
+
+        facts = [fact for mark, fact in iter_fact_lines(summary) if mark != "skip"]
+        known_ids = {entry.id for entry in parse_entries(known)} if known else set()
+        repeats = sum(1 for fact in facts if entry_id(f"- {fact}") in known_ids)
+        logger.info(
+            "Consolidation for {}: {} facts extracted, {} already recorded shown, "
+            "{} verbatim repeats",
+            session_key or "-",
+            len(facts),
+            len(known_ids),
+            repeats,
+        )
 
     async def maybe_consolidate_by_tokens(
         self,
@@ -445,6 +593,38 @@ class Consolidator:
                     summary_messages=messages_to_summarize,
                 )
 
+            if messages_to_remove and summary is None and is_project_session_key(session_key):
+                # ``archive()`` ha fallito la chiamata LLM e ha raw-dumpato in
+                # ``history.jsonl``; per una sessione-progetto quel dump **non è
+                # stato scritto** — ``append_history`` non scrive per un progetto,
+                # ed è giusto così (v. la sua docstring: l'isolamento di un
+                # progetto è un'assenza, non un filtro replicato). Quindi qui, e
+                # solo qui, la copia va fatta prima di troncare: senza, la
+                # troncatura di sotto butterebbe i messaggi e basta.
+                copy = await asyncio.to_thread(
+                    self._copy_removed_into_project, session_key, messages_to_remove
+                )
+                if copy is None:
+                    # **Non si tronca.** Una compattazione mancata costa contesto
+                    # alla prossima finestra di inattività, che riprova; una
+                    # troncatura senza copia costa la conversazione. La sessione
+                    # non viene nemmeno salvata: ``updated_at`` resta vecchio,
+                    # quindi resta scaduta e AutoCompact la ripesca.
+                    logger.warning(
+                        "Idle-session compact for {} aborted: the LLM failed and no copy "
+                        "could be written into the project, so the {} messages stay in the "
+                        "session; retrying at the next idle window",
+                        session_key,
+                        len(messages_to_remove),
+                    )
+                    return None
+                logger.info(
+                    "Idle-session compact for {}: {} messages copied to {} before truncating",
+                    session_key,
+                    len(messages_to_remove),
+                    copy,
+                )
+
             if summary and summary != "(nothing)":
                 session.metadata["_last_summary"] = {
                     "text": summary,
@@ -466,3 +646,71 @@ class Consolidator:
                 )
 
             return summary
+
+    def _project_dump_dir(self, session_key: str) -> Path | None:
+        """La cartella delle copie del progetto di *session_key*, o ``None``.
+
+        Il nome del progetto si **cerca** fra le cartelle che esistono davvero
+        invece di comporre un percorso: arriva da una chiave di sessione, cioè in
+        ultima analisi da un client, e una ricerca per chiave in un dizionario non
+        ha nessun ``..`` da validare — non c'è aritmetica di percorsi da
+        sbagliare. Che la cartella sia una wiki vera viene gratis dalla stessa
+        funzione, e serve: se il progetto è stato cancellato o rinominato non c'è
+        posto dove scrivere, e il chiamante deve saperlo invece di inventarne uno
+        (la lezione del passo 6, la stessa di ``for_project``).
+
+        La sottocartella dei progetti arriva iniettata (``config.wiki.wikis_dir``),
+        non dal default della classe: se la si leggesse dal default, su
+        un'installazione che ha spostato i progetti questa ricerca non troverebbe
+        mai niente e la compattazione di un progetto verrebbe rifiutata per
+        sempre — un difetto silenzioso travestito da prudenza.
+        """
+        name = session_key[len(PROJECT_SESSION_PREFIX):]
+        roots = discover_wiki_roots(self.store.workspace / self._projects_subdir)
+        root = roots.get(name)
+        return None if root is None else root / _PROJECT_COMPACTED_SUBDIR
+
+    def _copy_removed_into_project(
+        self,
+        session_key: str,
+        messages: list[dict],
+    ) -> Path | None:
+        """Copia *messages* dentro il progetto. Il percorso scritto, o ``None``.
+
+        **JSONL, un messaggio per riga, e non il testo formattato** di
+        ``raw_archive``: questa non è una briciola da rileggere, è la copia che
+        rende reversibile la troncatura che le segue. Il formato è quello delle
+        righe di un file di sessione (v. ``SessionManager.save``), quindi
+        rimetterle dentro è un innesto e non una ricostruzione a mano; e non
+        perde i messaggi senza ``content`` — un giro di tool — che
+        ``_format_messages`` scarta perché a lui servono da riassumere.
+
+        Niente tetto di lunghezza, per la stessa ragione: i tetti di
+        ``raw_archive`` proteggono un prompt, e questo file in nessun prompt
+        entra. Mezza copia non renderebbe reversibile mezza troncatura.
+
+        In append e con ``fsync``: append perché due passate nello stesso secondo
+        cadono sullo stesso nome e appendere non ne perde nessuna, ``fsync``
+        perché subito dopo il chiamante butta gli originali — la copia deve
+        essere su disco *prima*, non nella page cache.
+        """
+        directory = self._project_dump_dir(session_key)
+        if directory is None:
+            return None
+        page = directory / f"{datetime.now():%Y%m%d-%H%M%S}.jsonl"
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            with page.open("a", encoding="utf-8") as fh:
+                for message in messages:
+                    fh.write(json.dumps(message, ensure_ascii=False) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+        except (OSError, TypeError, ValueError) as exc:
+            # ``TypeError``/``ValueError``: un messaggio non serializzabile in
+            # JSON. Non è mai capitato — le sessioni si salvano con lo stesso
+            # ``json.dumps`` — ma qui un'eccezione non gestita passerebbe per un
+            # fallimento di ``compact_idle_session``, e la conversazione
+            # resterebbe intera senza che nessuno dica perché.
+            logger.warning("Project copy of the compacted tail failed ({}): {}", page, exc)
+            return None
+        return page

@@ -52,7 +52,9 @@ A platform line with **no** twin above is not dropped, it is **moved** — to `s
 
 `USER.md` is the one file where the budget and the criteria can pull against each other, and when they do **the criteria win**. Its weight is facts about a person, and *Never delete* covers those: preferences and personality traits stay, however old they are. Being over budget does not promote a personal fact to deletable.
 
-The runtime duplicates of the section above are not an exception being carved into that rule, and reading them as one would be a mistake. *Never delete* protects a fact this file is the only place to remember; a copied-down location or timezone is the opposite case — the next prompt states it again, measured and dated, so removing it here loses nothing and the user ends up better informed than before. Nothing else in `USER.md` has that property.
+The runtime duplicates of the section above are not an exception being carved into that rule, and reading them as one would be a mistake. *Never lose* protects a fact that would otherwise be gone; a copied-down location or timezone is the opposite case — the next prompt states it again, measured and dated, so removing it here loses nothing and the user ends up better informed than before.
+
+`USER.md` and `memory/MEMORY.md` now have a fifth step below the four, and it is genuinely last. An entry taken out of either is filed in `memory/archive/` by the runtime and stays readable, so **when the four steps below are exhausted and the file is still over its cap, moving a protected personal fact is allowed.** It is a relocation, not a deletion. Reach for it only in that order, and only that far: a fact in the archive is out of the prompt until someone goes looking, so a pass that empties the working set has not tidied anything — it has made Jenny stop knowing things. The route down is still the point; this is the floor under it, not a shortcut past it.
 
 So there is a route down for this file, and every step of it moves a fact somewhere better rather than dropping it. In order:
 

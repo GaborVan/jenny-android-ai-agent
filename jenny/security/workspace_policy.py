@@ -36,6 +36,27 @@ class WorkspaceBoundaryError(PermissionError):
     """Raised when a requested path escapes an allowed workspace boundary."""
 
 
+class ReadOnlyTurnError(PermissionError):
+    """Sollevata quando un turno in sola lettura prova a scrivere.
+
+    Distinta da :class:`WorkspaceBoundaryError` perche' la risposta giusta e'
+    diversa: un confine si aggira scrivendo *altrove*, la sola lettura no, e
+    dire "outside allowed directory" manderebbe il modello a cercare un percorso
+    consentito che non esiste. Qui la strada e' descrivere la modifica invece di
+    eseguirla.
+    """
+
+    def __init__(self, detail: str = "") -> None:
+        super().__init__(
+            "This conversation is read-only: nothing on the device can be changed "
+            "(files, downloads, app data, memory, scheduled jobs, app updates). "
+            "Do not look for another path or another tool — describe the change you "
+            "would make instead, and tell the user to turn writing back on if they "
+            "want it applied."
+            + (f" ({detail})" if detail else "")
+        )
+
+
 class _Unrestricted:
     """Sentinella per l'opt-out ESPLICITO dal confine di workspace.
 

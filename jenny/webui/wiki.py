@@ -24,7 +24,7 @@ from markdown.extensions import Extension
 from markdown.preprocessors import Preprocessor
 
 from jenny.utils.path import atomic_write
-from jenny.utils.wiki_paths import discover_wikis
+from jenny.utils.wiki_paths import WIKI_PAGES_SKIP_DIRS, discover_wikis, is_wiki_page_rel
 from jenny.utils.wiki_paths import extract_title as _extract_title
 from jenny.utils.wiki_paths import strip_frontmatter as _strip_frontmatter
 from jenny.webui.audit import (
@@ -43,7 +43,22 @@ _WIKILINK_RE = re.compile(r"\[\[(.+?)\]\]")
 # Cartelle di primo livello nascoste da grafo e albero file: i summaries sono il
 # livello di *citazione* (digest delle fonti), non contenuto da navigare. Le
 # pagine restano servibili da /api/page (i link "Sources" continuano a funzionare).
-_HIDDEN_TOP_GROUPS = frozenset({"summaries"})
+#
+# **La costante e' quella del package** (T9.5): era una seconda
+# ``frozenset({"summaries"})`` scritta qui, cioe' la stessa regola in due posti,
+# e la regola e' una — quel che non e' contenuto per l'iniettore non e'
+# contenuto neanche per il grafo.
+_HIDDEN_TOP_GROUPS = WIKI_PAGES_SKIP_DIRS
+
+
+# Tetti dell'albero dei file (:func:`_walk`). **Non sono numeri di stile**: sono
+# il limite oltre il quale una cartella ostile costa una risposta invece di un
+# errore. Le otto wiki vere hanno 188 pagine in tutto e la più profonda arriva a
+# tre livelli (``concepts/<Topic>/<aspect>.md``), quindi 12 e 4.000 sono ordini
+# di grandezza sopra qualunque wiki reale: chi li incontra non è un utente con
+# molte pagine, è un ciclo.
+_TREE_MAX_DEPTH = 12
+_TREE_MAX_ENTRIES = 4000
 
 
 def _top_group(rel: str) -> str:
@@ -149,23 +164,55 @@ def _walk(
     rel: str,
     top_name: str | None = None,
     skip_names: frozenset[str] | None = None,
+    *,
+    depth: int = 0,
+    budget: list[int] | None = None,
 ) -> TreeNode:
     # ``skip_names`` si applica solo a questo livello (non alla ricorsione): serve
-    # a nascondere cartelle di primo livello come summaries/ dall'albero.
+    # a nascondere cartelle di primo livello come summaries/ dall'albero. Il
+    # filtro sui nascosti invece vale a **ogni** livello, ed è la stessa regola
+    # di ``wiki_paths.is_wiki_page_rel`` espressa per-voce: qui si cammina una
+    # cartella alla volta, quindi non entrare in una ``.qualcosa/`` è
+    # letteralmente non generarne i figli (T9.5).
     skip = skip_names or frozenset()
+    # Il tetto di voci è condiviso da tutta la discesa: una lista di un elemento
+    # perché la ricorsione deve poterlo consumare (T9.4/G9).
+    if budget is None:
+        budget = [_TREE_MAX_ENTRIES]
+    try:
+        listing = list(dir_path.iterdir())
+    except OSError:
+        # Una cartella che non si apre è una cartella vuota nell'albero, non un
+        # 500 su tutto il drawer.
+        listing = []
     entries = sorted(
-        [e for e in dir_path.iterdir() if not e.name.startswith(".") and e.name not in skip],
+        [e for e in listing if not e.name.startswith(".") and e.name not in skip],
         key=lambda e: (not e.is_dir(), e.name.lower()),
     )
     children: list[TreeNode] = []
     for e in entries:
+        if budget[0] <= 0:
+            break
         # Non anteporre lo slash quando ``rel`` è vuoto (radice della wiki): un
         # path come ``/concepts/x.md`` verrebbe scartato come assoluto da
         # ``safe_wiki_page_path`` (os.path.isabs) → 404/400 nel drawer file.
         node_rel = f"{rel}/{e.name}" if rel else e.name
         if e.is_dir():
-            children.append(_walk(e, node_rel))
+            # **Nei link simbolici non si entra, e la profondità è finita.**
+            # Questa è l'unica camminata della wiki che usa ``iterdir`` e non
+            # ``rglob``, e ``rglob`` non segue i symlink: un link a una cartella
+            # antenata — che i tool filesystem dell'agente sanno creare — ci
+            # faceva ricorrere fino a ``RecursionError``, cioè un drawer file
+            # rotto per tutta la wiki. E le pagine sotto un symlink erano
+            # comunque una bugia dell'albero: grafo, ricerca e iniettore non le
+            # vedono (``rglob``), e ``/api/page`` le rifiuta con 403 se il
+            # bersaglio esce da ``wiki/``.
+            if e.is_symlink() or depth >= _TREE_MAX_DEPTH:
+                continue
+            budget[0] -= 1
+            children.append(_walk(e, node_rel, depth=depth + 1, budget=budget))
         elif e.name.endswith(".md"):
+            budget[0] -= 1
             children.append(
                 TreeNode(
                     name=e.name.removesuffix(".md"),
@@ -220,17 +267,26 @@ def iter_page_files(pages_dir: Path) -> list[tuple[str, Path]]:
     L'ordine è per rel-path perché quello di ``rglob`` dipende dal filesystem:
     da questa lista discende l'indice numerico dei nodi, che è la chiave delle
     postings dell'indice full-text.
+
+    **Quali file** lo decide :func:`jenny.utils.wiki_paths.is_wiki_page_rel`,
+    la stessa regola dell'iniettore e dell'albero (T9.5): fuori i
+    ``summaries/``, fuori i nascosti a ogni livello. I nascosti prima entravano
+    — un ``.bozza.md`` sotto ``wiki/`` non arrivava al modello e non compariva
+    nell'albero, ma era un nodo del grafo e un risultato di ricerca.
+
+    L'indice invece **e' una pagina**, qui, e la differenza e' voluta: per il
+    prompt ``wiki/index.md`` e' la mappa e ha un blocco suo, per chi navighera'
+    e' il nodo centrale, e cercare dentro la mappa e' la cosa piu' ovvia del
+    mondo.
     """
     if not pages_dir.exists():
         return []
-    # I summaries sono esclusi (livello di citazione, non contenuto): niente
-    # nodi, archi né hit di ricerca. Le pagine restano comunque servibili.
     out: list[tuple[str, Path]] = []
     for f in pages_dir.rglob("*.md"):
-        rel = f.relative_to(pages_dir).as_posix()
-        if _top_group(rel) in _HIDDEN_TOP_GROUPS:
+        rel = f.relative_to(pages_dir)
+        if not is_wiki_page_rel(rel):
             continue
-        out.append((rel, f))
+        out.append((rel.as_posix(), f))
     out.sort(key=lambda item: item[0])
     return out
 
@@ -366,11 +422,31 @@ def _strip_wiki_prefix(page_ref: str) -> str:
     return page_ref
 
 
+def _suffix_rank(path: Path) -> tuple[int, str]:
+    """Ordine di preferenza fra più pagine che finiscono per lo stesso path.
+
+    Vince la più vicina alla radice, a pari profondità la prima in ordine
+    alfabetico. Serve solo a rendere la scelta **deterministica**: senza una
+    regola, l'ordine di ``rglob`` è quello del filesystem, quindi lo stesso link
+    poteva aprire due pagine diverse su due telefoni. La stessa regola è copiata
+    in ``jenny/skills/llm-wiki/scripts/lint_wiki.py::page_for_link`` — il lint
+    non può importare il package — e i due test la confrontano.
+    """
+    return (len(path.parts), path.as_posix())
+
+
 def resolve_wikilink(wiki_root: Path, target: str) -> Path | None:
     """Resolve a wikilink target to a file path.
 
-    Tries: exact path, with .md, case-insensitive, slug, stem.
+    Tries: exact path, with .md, case-insensitive, slug, path suffix, stem.
     wiki_root is the wiki root directory (contains wiki/ and audit/).
+
+    Il ramo *path suffix* vale solo per un bersaglio a più segmenti, ed è la
+    generalizzazione di quello per stem: ``[[<aspect>]]`` trovava una pagina
+    ovunque sotto ``wiki/``, mentre ``[[<Topic>/<aspect>]]`` — più specifico, e
+    la forma che ``references/article-guide.md`` raccomanda dentro un
+    ``index.md`` diviso in cartella — non trovava niente, perché nessuno stem
+    contiene una barra. Il link più preciso moriva dove quello più vago apriva.
     """
     pages_dir = wiki_root / "wiki"
     target = _strip_wiki_prefix(target)
@@ -389,23 +465,58 @@ def resolve_wikilink(wiki_root: Path, target: str) -> Path | None:
         return p
     # Case-insensitive on relative path
     target_norm = _normalize_page_path(target)
+    # I candidati del ramo per suffisso si raccolgono nello stesso passaggio di
+    # ``rglob``: su una wiki vera sono centinaia di file su flash, e leggere due
+    # volte la stessa directory è l'unica parte davvero cara.
+    suffixes: tuple[str, ...] = ()
+    if "/" in target:
+        low = target.lower()
+        suffixes = (
+            f"/{target_norm.lower()}",  # <Topic>/<aspect>  → …/<topic>/<aspect>.md
+            f"/{low}/index.md",  # <Topic>/<sub>     → …/<topic>/<sub>/index.md
+            f"/{target_norm.lower().removesuffix('.md')}/index.md",
+        )
+    candidates: list[Path] = []
     for f in pages_dir.rglob("*.md"):
         rel = f.relative_to(pages_dir).as_posix()
         if rel.lower() == target_norm.lower():
             return f
         if rel.lower().removesuffix(".md") == target.lower():
             return f
+        if suffixes:
+            rel_low = rel.lower()
+            if rel_low.endswith(suffixes) or rel_low.removesuffix(".md").endswith(f"/{low}"):
+                candidates.append(f)
+    if candidates:
+        return min(candidates, key=_suffix_rank)
     # Stem search
     return _find_by_stem(pages_dir, target)
 
 
 def _find_by_stem(dir_path: Path, target: str) -> Path | None:
-    for f in dir_path.rglob("*.md"):
-        if f.stem == target or f.name == target:
-            return f
-        if f.stem.lower() == target.lower():
-            return f
-    return None
+    """La pagina con questo stem, **scelta in modo deterministico**.
+
+    Due pagine con lo stesso nome in cartelle diverse (`a/nota.md`, `b/nota.md`)
+    esistono davvero, e qui vinceva quella che ``rglob`` restituiva per prima —
+    cioè l'ordine della directory sul filesystem. Lo stesso `[[nota]]` poteva
+    aprire due pagine diverse, e il lint (che indicizza per chiave, non per
+    ordine di lettura) non poteva concordare con nessuna delle due. Ora la regola
+    è scritta: ``_suffix_rank``, la stessa del ramo per suffisso.
+
+    Un solo livello, insensibile alle maiuscole. Prima ce n'erano due — prima i
+    nomi identici carattere per carattere, poi quelli uguali a meno di
+    maiuscole — e il primo livello il lint non può esprimerlo, perché indicizza
+    per chiave minuscola. Serviva soltanto per due pagine che differiscono *solo*
+    per maiuscole nella stessa wiki, e in quel caso la regola di ordine sceglie
+    comunque la stessa delle due.
+    """
+    lowered = target.lower()
+    matches = [
+        f
+        for f in dir_path.rglob("*.md")
+        if f.stem.lower() in (lowered, lowered.removesuffix(".md"))
+    ]
+    return min(matches, key=_suffix_rank) if matches else None
 
 
 # ── Renderer ─────────────────────────────────────────────────────────────────

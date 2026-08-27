@@ -113,3 +113,87 @@ async def test_token_usage_hook_classifies_source_from_session_key(tmp_path, mon
     payload = token_usage_payload(now=datetime(2026, 6, 3, tzinfo=timezone.utc))
 
     assert payload["total_tokens_30d"] == 15
+
+
+from jenny.session.keys import HEARTBEAT_SESSION_KEY, UNIFIED_SESSION_KEY  # noqa: E402
+
+# ── A chi si addebita il lavoro interno ─────────────────────────────────────
+#
+# Misurato sul dispositivo il 25/08, su 27 giorni di `token-usage.json`: i bucket
+# `dream` e `atlas` non erano comparsi **una volta**, con Dream che gira ogni due
+# ore, Atlas su cron e il giardiniere su otto wiki. La causa non era la mappa qui
+# sotto ma il cancello degli hook (`AgentLoop`, `runs_when_ephemeral`); questa
+# mappa è la seconda metà, e da sola avrebbe mandato il giardiniere nel posto
+# peggiore possibile.
+
+
+@pytest.mark.parametrize(
+    ("session_key", "expected"),
+    [
+        ("dream:20260825-120537", "dream"),
+        ("dream:review-20260825-060415", "dream"),
+        ("atlas:20260824-215737", "atlas"),
+        ("gardener:viaggio-pazzo-20260824-195702", "gardener"),
+        ("cron:update_check", "cron"),
+        # Le due chiavi senza suffisso vengono dalle **costanti**, non da un
+        # letterale: sono confronti per uguaglianza (v. ``_INTERNAL_KIND_BY_KEY``),
+        # quindi una scritta a mano resterebbe verde il giorno in cui la costante
+        # cambia, provando una cosa su una chiave che non esiste più. È anche la
+        # regola che ``tests/session/test_internal_key_vocabulary.py`` fa
+        # rispettare — e che questo file aveva violato.
+        (HEARTBEAT_SESSION_KEY, "cron"),
+        (UNIFIED_SESSION_KEY, "user"),
+    ],
+)
+def test_internal_work_is_billed_to_itself(session_key, expected) -> None:
+    """Le chiavi sono quelle **vere**, lette dai file di sessione del dispositivo.
+
+    `gardener:` è la riga che questo test esiste per tenere ferma: senza la sua
+    voce nella mappa cade nel fallthrough `"user"` — cioè la manutenzione viene
+    addebitata alla chat dell'utente. È peggio di un secchio generico, perché è
+    **plausibile**: un totale gonfiato che nessuno mette in dubbio.
+
+    E un bucket suo invece di `cron`, benché sia il cron a farlo partire: il
+    giardiniere gira una volta **per progetto**, quindi il suo costo cresce col
+    numero di wiki e non col numero di job — dentro `cron` quella crescita non si
+    vede.
+    """
+    from jenny.agent.token_usage import _source_from_session_key
+
+    assert _source_from_session_key(session_key) == expected
+
+
+def test_every_bucket_the_map_names_is_a_declared_source() -> None:
+    """Un valore fuori da `_SOURCE_KEYS` viene riscritto in `"system"` **in
+    silenzio** da `_clean_source`: una voce nuova nella mappa senza la sua chiave
+    non darebbe un errore, darebbe un seppellimento."""
+    from jenny.agent.token_usage import _INTERNAL_KIND_TO_SOURCE, _SOURCE_KEYS
+
+    assert set(_INTERNAL_KIND_TO_SOURCE.values()) <= set(_SOURCE_KEYS)
+
+
+def test_the_real_hook_declares_that_it_survives_an_ephemeral_turn() -> None:
+    """Il contratto dell'oggetto **vero**, e senza questo si disfa in silenzio.
+
+    Una mutazione che toglie `runs_when_ephemeral` da `TokenUsageHook` è
+    sopravvissuta a tutto il resto del file: la mappa era provata, e il cancello
+    era provato con uno *spy*. Nessuno chiedeva niente all'hook reale — cioè
+    l'unico che, smettendo di dichiararsi, riporterebbe l'installazione a non
+    misurare il lavoro interno, in silenzio. È il difetto che questa correzione
+    chiude, riprodotto dentro la suite.
+
+    **Cosa questo test non fa**, per non spacciarlo: non gira un turno vero con un
+    `SessionManager` vero. Provato e scartato — in questo ambiente `SessionManager`
+    è patchato, quindi la chiave che arriva all'hook è un `MagicMock` e
+    `startswith("api:")` è *truthy*: l'asserzione sul bucket misurerebbe il mock.
+    La catena hook→bucket è coperta da `test_internal_work_is_billed_to_itself`,
+    il montaggio da `TestEphemeralHooks`, e questa riga è la giunzione fra le due.
+    """
+    assert TokenUsageHook().runs_when_ephemeral() is True
+
+
+def test_a_plain_hook_does_not_survive_one() -> None:
+    """Il default, che è quel che rende la riga sopra una *scelta*."""
+    from jenny.agent.hook import AgentHook
+
+    assert AgentHook().runs_when_ephemeral() is False

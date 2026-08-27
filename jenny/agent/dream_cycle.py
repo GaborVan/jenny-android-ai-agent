@@ -13,7 +13,10 @@ arrivata un'altra.
 
 Qui stanno il prologo — misura, riga di log, trigger del review, checkpoint,
 ricostruzione delle misure dopo il review — e l'epilogo, cioè l'aritmetica dei
-contatori: la parte che per costruzione deve essere la stessa. Ai chiamanti
+contatori: la parte che per costruzione deve essere la stessa. Più la presa che
+tiene i due percorsi a **un ciclo per volta** (:func:`claim_dream_cycle`), che sta
+qui per la stessa ragione: duplicarla nei due chiamanti sarebbe due copie da
+tenere d'accordo. Ai chiamanti
 resta ciò che è davvero loro: costruire il prompt, il turno incrementale, lo
 snapshot pre-turno, la contabilità token, ``compact_history`` più il pruning, e
 la traduzione dell'esito — una riga di log per il cron, una frase in chat per il
@@ -28,6 +31,7 @@ pacchetti importa l'altro.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -35,7 +39,7 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 
 from jenny.agent import dream_review
-from jenny.agent.memory_budget import budget_report, make_write_size_guard
+from jenny.agent.memory_budget import budget_report, count_chars, make_write_size_guard
 
 if TYPE_CHECKING:
     from jenny.agent.memory import MemoryStore
@@ -48,6 +52,13 @@ if TYPE_CHECKING:
 # pagare un review pass ogni volta costerebbe più del problema. Due di fila
 # invece è una configurazione che si ripete, ed è quella che si autoalimenta.
 STUCK_FORCES_REVIEW = 2
+
+# Oltre quanti run consecutivi senza consolidamento **e senza rifiuti** vale la
+# pena dirlo. Stessa scala di ``STUCK_IS_ALARMING`` di proposito: sono lo stesso
+# fenomeno visto da due cause, e due numeri diversi chiederebbero di ricordare
+# quale vale per quale. La differenza sta nel rimedio, non nella soglia — qui non
+# si forza niente e non si avvisa l'utente, perché non c'è niente che possa fare.
+NOTHING_NEW_IS_NOTABLE = 4
 
 # Oltre questa soglia il livelock non è più un'ipotesi: il review è già stato
 # forzato (a 2) e non è bastato. Log a ERROR, perché da qui in poi ogni run è
@@ -76,6 +87,259 @@ STUCK_IS_ALARMING = 4
 REVIEW_RETRY_AFTER_RUNS = 2
 
 
+# ---------------------------------------------------------------------------
+# Un ciclo di Dream per volta
+# ---------------------------------------------------------------------------
+
+# Chi tiene la presa, o vuoto se nessuno: l'``AbstractEventLoop`` su cui il ciclo
+# in volo sta girando. Vuoto = libero.
+#
+# **Perché serve.** I due percorsi di Dream — il job cron e ``/dream`` — non si
+# escludono per costruzione. I job cron sono serializzati fra loro, quindi il caso
+# raggiungibile è ``/dream`` battuto mentre il job delle due ore gira, oppure
+# ``/dream`` due volte: ``cmd_dream`` faceva ``asyncio.create_task`` senza chiedere
+# niente a nessuno. E il lock per sessione non li separa, perché
+# ``MemoryStore.dream_session_key()`` è ``dream:%Y%m%d-%H%M%S``, cioè una chiave
+# diversa a ogni run — di proposito, v. la decisione lì.
+#
+# Cosa costano due cicli sovrapposti, nell'ordine in cui pesano: entrambi leggono
+# ``runs_since_review`` e, se è dovuto, entrambi chiamano ``run_dream_review``, cioè
+# due passate di review consecutive sugli stessi file; entrambi prendono lo stesso
+# batch dallo stesso ``.dream_cursor``; e il read-modify-write dei contatori in
+# ``finish_dream_cycle`` perde un tick.
+#
+# **Quanto costano, misurato.** Non fatti irrecuperabili: da T2.4b
+# ``make_entry_archiver`` è montato al confine del file su tutti e quattro i tool di
+# Dream e archivia in ``memory/archive/`` ogni voce che esce da ``USER.md`` /
+# ``MEMORY.md`` / ``SOUL.md`` prima che la scrittura atterri — verificato sul device
+# con ``reviewEveryRuns: 1``, dieci voci archiviate e nessuna persa (piano memoria,
+# fase 2, defect D4). Due review di fila costano quindi **token e rumore**, non
+# informazione. Che è un motivo sufficiente per una presa, e non per una paura.
+#
+# **Un registro di processo e non un ``asyncio.Lock``**, per la stessa ragione del
+# giardiniere (``agent/gardener.py::_PASSES_IN_FLIGHT``): il secondo ciclo non deve
+# mettersi in coda, deve essere **rifiutato**. Mettersi in coda vorrebbe dire che
+# ``/dream`` risponde fra un minuto con il lavoro di qualcun altro già fatto, e che
+# il tick del cron dopo trova la coda ancora piena. Non serve un lock intorno:
+# controllo e inserimento stanno nella stessa istruzione sincrona, senza ``await`` in
+# mezzo, e l'event loop è uno.
+#
+# **Perché memorizzare l'event loop e non solo un booleano.** Una presa che resta
+# presa è peggio di nessuna presa: Dream sarebbe spento fino al riavvio del processo,
+# in silenzio. I ``try``/``finally`` dei due chiamanti coprono ogni uscita del
+# lavoro — ritorno, eccezione, ``CancelledError`` — ma non l'unico caso in cui il
+# ``finally`` non gira affatto: un task cancellato *prima* del suo primo passo, cioè
+# lo smontaggio dell'event loop. Un loop che non c'è più non può avere un ciclo in
+# volo, quindi una presa che non appartiene al loop corrente è morta e si recupera.
+_CYCLE_IN_FLIGHT: list[Any] = []
+
+
+def claim_dream_cycle() -> bool:
+    """Prende la presa sul ciclo di Dream, o ritorna ``False`` se è già presa.
+
+    Chi ottiene ``True`` **deve** chiamare :func:`release_dream_cycle` in un
+    ``finally``. Non è un context manager perché in ``cmd_dream`` i due momenti
+    stanno in due frame diversi: la presa si prende nell'handler, prima di
+    ``create_task``, o due ``/dream`` di fila passerebbero entrambi il controllo
+    prima che il primo task inizi; il rilascio sta nel task.
+    """
+    try:
+        running: Any = asyncio.get_running_loop()
+    except RuntimeError:  # pragma: no cover — entrambi i chiamanti sono async
+        running = None
+    if _CYCLE_IN_FLIGHT:
+        if _CYCLE_IN_FLIGHT[0] is running:
+            logger.warning("Dream: un ciclo è già in volo; questo non parte")
+            return False
+        # La presa appartiene a un event loop che non è più quello corrente: il
+        # ciclo che l'aveva non può riprendere, e il suo ``finally`` non girerà
+        # mai. Recuperarla qui è la sola cosa che impedisce a Dream di restare
+        # spento per sempre dietro un guasto invisibile.
+        logger.warning(
+            "Dream: presa lasciata da un event loop che non c'è più; recuperata"
+        )
+    _CYCLE_IN_FLIGHT[:] = [running]
+    return True
+
+
+def release_dream_cycle() -> None:
+    """Rilascia la presa. Idempotente: chiamarla senza averla non è un errore."""
+    _CYCLE_IN_FLIGHT.clear()
+
+
+# La frase che legge chi ha battuto ``/dream`` mentre un ciclo era già in volo.
+# Dice il costo vero — token spesi due volte — e non quello di prima di T2.4b:
+# l'archivio al confine del file rende la seconda passata di review costosa, non
+# distruttiva, e un rifiuto che spaventa più del dovuto è un rifiuto che mente.
+DREAM_ALREADY_RUNNING = (
+    "A Dream cycle is already running, so this one did not start — Dream runs one cycle "
+    "at a time, or both take the same batch off the same cursor and each pays for its own "
+    "review pass. Nothing would be lost, only spent twice. Try again once it has finished."
+)
+
+
+# I tag con cui il Consolidator marca un fatto destinato a **restare**. Sono la
+# firma di un batch che vale consolidare, e servono a distinguerlo da uno che non
+# chiede niente: le voci `(nothing)` e quelle di soli `[skip]` esistono davvero —
+# sul Titan 2 i cursori 97 e 98 sono letteralmente `(nothing)` — e su quelle un
+# run che non scrive nulla ha fatto la cosa giusta.
+#
+# Senza questa distinzione il controllo qui sotto terrebbe fermo il cursore su
+# un'installazione tranquilla, replayando per sempre un batch che non ha niente
+# da dire: lo specchio del livelock che questo modulo esiste per chiudere.
+_RETAINED_TAGS = ("[durable]", "[permanent]", "[correction]")
+
+class _NoEntries:
+    """Esito in voci di un run che non aveva il tool per voci.
+
+    Zero su tutti e tre, che è la lettura giusta: nessuna voce è entrata,
+    nessuna sostituita, nessuna trovata già presente. Esiste perche i doppi di
+    ``build_dream_tools`` nei test non espongono ``memory_entries``, e un
+    ``getattr`` che tornasse ``None`` costringerebbe ogni chiamante a un ramo.
+    """
+
+    entries_added = 0
+    entries_replaced = 0
+    entries_already_present = 0
+
+
+NO_ENTRIES = _NoEntries()
+
+
+def batch_carries_retained_facts(history_text: str) -> bool:
+    """True se il batch porta almeno un fatto che il Consolidator vuole conservare.
+
+    *history_text* è la **sola** parte di storia del prompt, quella che
+    ``MemoryStore.dream_prompt_history`` ritaglia. Passare il prompt intero è un
+    errore che non si vede: il template nomina tutti e tre i tag nella sua
+    sezione "History attribute tags", quindi risponderebbe sempre True.
+    """
+    return any(tag in history_text for tag in _RETAINED_TAGS)
+
+
+def consolidation_landed(before: Sequence["FileBudget"]) -> bool:
+    """True se almeno uno dei file misurati è **cresciuto** dall'inizio del run.
+
+    La crescita è il solo indizio a costo zero che un fatto nuovo sia arrivato su
+    disco: i path e le dimensioni di partenza stanno già in *before*, il report
+    che il prologo ha costruito, e rileggere tre file corti alla fine del turno
+    non costa niente.
+
+    Il limite è dichiarato, non nascosto: una scrittura che *sostituisce* una
+    riga con una più corta portandosi dentro il fatto nuovo è un consolidamento
+    riuscito che questa misura legge come mancato. Non è distinguibile dalla
+    dimensione, e nemmeno da un hash — un hash dice "il file è cambiato", non
+    "è cambiato in meglio". Il costo del falso positivo è limitato per
+    costruzione (v. :func:`batch_was_not_consolidated`): qualche run in più sullo
+    stesso batch, e poi si avanza. Il costo del falso *negativo* — che è lo stato
+    di oggi — è un fatto perso per sempre.
+    """
+    return any(count_chars(item.path) > item.chars for item in before)
+
+
+def batch_was_not_consolidated(
+    *,
+    before: Sequence["FileBudget"],
+    history_text: str,
+    stuck: int,
+    added: int = 0,
+    replaced: int = 0,
+    already_present: int = 0,
+    attempted: int = 0,
+) -> bool:
+    """True quando il cursore **non** va avanzato pur avendo il run scritto qualcosa.
+
+    Il buco che chiude è stato misurato sul Titan 2 il 2026-08-18 alle 12:01, con
+    ``USER.md`` a 1.999/2.000 caratteri. In coda c'era un batch di dieci fatti —
+    una conversazione lunga della sera prima, incluso un ``[permanent]``. Dream ha
+    fatto **una** ``edit_file``: ha riscritto una riga già presente 27 caratteri
+    più corta, e si è fermato. Ha fatto esattamente la prima metà di quel che il
+    messaggio di rifiuto chiede — liberare spazio — e poi non ha usato lo spazio.
+
+    Quel run è passato per sano da ogni controllo esistente, e non per una
+    dimenticanza: ``writes_ok == 1``, nessun rifiuto rimasto aperto, ``stuck``
+    fermo a 0. ``internal_run_should_commit`` chiede "hai scritto?", che è la
+    domanda sbagliata quando l'unità di scrittura è il *file* e non il *fatto*: il
+    cursore è avanzato a 101 e quelle dieci voci non torneranno in nessun batch.
+    Hermes non ha questo problema perché il suo tool è indirizzato per entry
+    (``memory add <testo>``), quindi "il fatto è atterrato?" ha una risposta; qui
+    la si deve stimare, e la stima è la crescita dei file.
+
+    Da qui in poi la domanda ha una **risposta**, e non più una stima. I tre
+    contatori arrivano da ``MemoryEntryTool`` (fase 1 del piano):
+
+    ``added`` è il segnale positivo che mancava: una voce è entrata, quindi il
+    batch è atterrato. Niente da dedurre dalle dimensioni.
+
+    ``already_present`` è quello che ha permesso di **cancellare la soglia di
+    pressione**. Prima, un batch di soli duplicati — la maggioranza, perché la
+    Consolidator ri-estrae gli stessi fatti a ogni giro — era indistinguibile da
+    un batch mancato, e l'unico modo di non trattenerlo era escluderlo per
+    statistica: "sotto il 90% di riempimento credo al modello". Quella soglia
+    stava su tre osservazioni di un modello solo. Ora il tool dice che il fatto è
+    già su disco, che è la stessa conclusione ottenuta guardando invece che
+    indovinando, e il numero magico se n'è andato con lei.
+
+    ``replaced`` conta **solo se il batch porta una** ``[correction]``, e la
+    condizione è il punto: il fallimento misurato è una riscrittura cosmetica —
+    una riga esistente accorciata, senza il fatto nuovo — che è una ``replace``
+    a tutti gli effetti. Contarla sempre riammetterebbe dalla finestra proprio
+    ciò che questa funzione esiste per prendere. Ma quando il batch *chiede* una
+    correzione, sostituire in place è la mossa giusta e il prompt la chiede
+    esplicitamente, quindi lì la ``replace`` è il consolidamento.
+
+    ``batch_carries_retained_facts`` resta: un batch che non chiede niente non è
+    stato mancato.
+
+    ``consolidation_landed`` resta anch'essa, come rete: i tool file sono ancora
+    montati e un fatto può ancora arrivare da lì.
+
+``attempted`` è l'ultimo freno, e ce l'ha messo il telefono. Il piano dava per
+    scontato che un batch di duplicati si sarebbe dichiarato con un
+    ``already_present``; misurato il 2026-08-18 alle 18:10, non succede, e non
+    perché il modello preferisca ``list``: **non guarda affatto**. ``USER.md`` è
+    iniettato nel suo prompt, quindi risponde dal contesto — "entrambi i fatti nel
+    batch sono già presenti, non c'è nulla da scrivere" — con *zero* chiamate a
+    tool e una sola iterazione. Nessuna evidenza per voce può esistere in un run
+    così, per quanto si renda economica la ``add``.
+
+    Il che indica il freno giusto: questa funzione esiste per prendere il run che
+    **ha scritto** qualcosa di cosmetico e ha tirato dritto — il caso delle 12:01,
+    una ``edit_file`` che accorciava una riga. Quel run un tentativo lo fa. Un run
+    che non tenta nessuna scrittura non ha *mancato* un consolidamento: ha deciso
+    che non ce n'era da fare, ed è la stessa lettura che ``dream_should_advance_cursor``
+    dà già a ``writes_attempted == 0``. Trattenerlo significherebbe rigiocare un
+    batch davanti allo stesso modello con lo stesso contesto, che risponderà lo
+    stesso — quattro volte, più un review forzato su file che non hanno niente da
+    liberare. Esattamente il costo osservato.
+
+    Resta scoperto il run che *avrebbe dovuto* salvare e ha deciso di no senza
+    toccare niente. Non è distinguibile da un "niente di nuovo" legittimo, e il
+    giudizio su quello è ciò che al modello si delega per progetto; la fase 5 gli
+    dà visibilità con ``nothing_new_runs`` invece di trattenerlo.
+
+    E resta ``stuck``, che riusa la scala che c'è già: oltre
+    ``STUCK_IS_ALARMING`` si rinuncia al batch e si avanza. Perché un freno serve:
+    se il modello *non vuole* aggiungere, tenere il cursore fermo replaya lo stesso
+    batch nello stesso file pieno davanti allo stesso modello, e nessun review
+    pass lo convince. Bounded quindi: al massimo quattro run — circa otto ore con
+    ``interval_h`` al default — durante i quali il review forzato a 2 ha la sua
+    occasione di liberare spazio davvero. Poi si molla, e l'allarme di
+    :func:`_alert_stuck` è già partito: l'utente lo sa.
+    """
+    if stuck >= STUCK_IS_ALARMING:
+        return False
+    if not batch_carries_retained_facts(history_text):
+        return False
+    if not attempted:
+        return False
+    if added or already_present:
+        return False
+    if replaced and "[correction]" in history_text:
+        return False
+    return not consolidation_landed(before)
+
+
 def format_stuck_alarm(stuck: int) -> str:
     """La frase che descrive il livelock, condivisa dalle superfici che lo dicono.
 
@@ -89,17 +353,26 @@ def format_stuck_alarm(stuck: int) -> str:
     vorrebbe dire rileggere tre file per comporre una frase. Chi ha bisogno dei
     numeri li trova nella vista che questa frase gli dice di aprire.
     """
-    # Nessuna causa nominata, e non è vaghezza. ``stuck`` conta i run in cui
-    # nessuna scrittura è andata a segno, e i modi di non andare a segno sono due:
-    # il tetto in caratteri, e il rifiuto di *path* — un file fuori dalla
-    # allowlist del registry di Dream. Sul Titan 2 si è visto il secondo con tutti
-    # i file all'81% o meno, cioè il caso in cui questa frase, nominando il
-    # budget, mandava chi la legge a controllare l'unica cosa che stava a posto.
-    # La vista che la frase indica distingue: mostra le misure, e se sono sotto
-    # soglia la causa è l'altra.
+    # Nessuna causa nominata, e non è vaghezza. ``stuck`` conta i run in cui il
+    # consolidamento non è arrivato su disco, e i modi sono **tre**: il tetto in
+    # caratteri; il rifiuto di *path* — un file fuori dalla allowlist del registry
+    # di Dream, visto sul Titan 2 con tutti i file all'81% o meno; e un run che
+    # scrive soltanto potature senza aggiungere il fatto nuovo
+    # (``batch_was_not_consolidated``, misurato il 2026-08-18 alle 12:01).
+    #
+    # La stesura precedente diceva "keep being refused"; poi, con il terzo caso,
+    # è diventata il "non stanno atterrando" che copriva tutti e tre senza dirne
+    # nessuno — una frase vera e inutile, che è il modo in cui una diagnosi muore.
+    #
+    # Con la fase 5 la copertura non serve più: questo allarme parte **solo** dal
+    # contatore dei rifiuti di budget (``finish_dream_cycle`` manda le altre
+    # cause su ``nothing_new_runs``, che logga e non allarma). Quindi la frase
+    # può tornare a nominare la causa, e indicare il rimedio che esiste davvero:
+    # c'è spazio da liberare, e chi legge può alzare un tetto.
     return (
-        f"Dream has not consolidated anything for {stuck} runs in a row: its writes "
-        "to long-term memory keep being refused."
+        f"Dream has not consolidated anything for {stuck} runs in a row: the size cap "
+        "is refusing its writes to long-term memory and the review pass is not "
+        "freeing enough room."
     )
 
 
@@ -218,6 +491,11 @@ class DreamPrologue:
     runs_since_review: int
     stuck: int
     review: "dream_review.ReviewOutcome | None"
+    # Il gemello di ``stuck``: run senza consolidamento e **senza** rifiuti. Non
+    # forza niente — nessun review può liberare spazio che nessuno ha chiesto —
+    # ma viaggia fino all'epilogo, che è l'unico posto che sa come è andata.
+    # In coda perché ha un default e ``review`` no.
+    nothing_new: int = 0
 
 
 async def begin_dream_cycle(
@@ -240,6 +518,7 @@ async def begin_dream_cycle(
     report = _measure(store, cfg)
     guard = make_write_size_guard(report)
     runs_since_review, stuck = store.get_review_state()
+    nothing_new = store.get_nothing_new_runs()
     # Loggato a OGNI run, non solo quando qualcosa scatta. Con i tre
     # budget a 0 — il default di spedizione — questa riga è letteralmente
     # l'unica cosa che la feature produce, e sono i numeri da cui si
@@ -300,6 +579,7 @@ async def begin_dream_cycle(
             guard=guard,
             runs_since_review=runs_since_review,
             stuck=stuck,
+            nothing_new=nothing_new,
             review=None,
         )
 
@@ -363,6 +643,7 @@ async def begin_dream_cycle(
         guard=make_write_size_guard(report),
         runs_since_review=0,
         stuck=stuck,
+        nothing_new=nothing_new,
         review=outcome,
     )
 
@@ -373,6 +654,8 @@ def finish_dream_cycle(
     advanced: bool | None,
     runs_since_review: int,
     stuck: int,
+    nothing_new: int = 0,
+    refused: int = 0,
 ) -> tuple[int, int]:
     """Aggiorna i contatori del review dopo il turno incrementale.
 
@@ -421,10 +704,41 @@ def finish_dream_cycle(
     # SENZA guardare il cursore (``agent/memory.py``): un livelock abbastanza
     # lungo non spreca soltanto chiamate, perde storia che non è mai stata
     # consolidata.
+    #
+    # Fase 5 del piano: il contatore si è **spaccato in due**, perché contava due
+    # cose con rimedi opposti. ``refused > 0`` vuol dire che il tetto ha bloccato
+    # una scrittura: c'è spazio da liberare, un review pass ha una leva, e
+    # ``stuck`` — che è il ramo che lo forza — sale. ``refused == 0`` con niente
+    # atterrato è un'altra bestia: nessuna scrittura è stata negata, quindi non
+    # c'è spazio da liberare e forzare un review significa potare file che non
+    # hanno niente da dare. Misurato il 2026-08-18: un review forzato su file al
+    # 77% e 79%, a vuoto, più quattro run di replay.
+    #
+    # Si azzerano insieme, perché a azzerarli è lo stesso evento: il cursore che
+    # avanza.
     if advanced is not None:
-        stuck = 0 if advanced else stuck + 1
+        if advanced:
+            stuck = nothing_new = 0
+        elif refused:
+            stuck += 1
+        else:
+            nothing_new += 1
     runs_since_review += 1
-    store.set_review_state(runs_since_review=runs_since_review, stuck_runs=stuck)
+    store.set_review_state(
+        runs_since_review=runs_since_review,
+        stuck_runs=stuck,
+        nothing_new_runs=nothing_new,
+    )
+    if nothing_new >= NOTHING_NEW_IS_NOTABLE:
+        # Si logga e basta: un review non è il rimedio, e farlo partire qui
+        # sarebbe il livelock che questa separazione esiste per chiudere. Non c'è
+        # nemmeno l'avviso all'utente di ``_alert_stuck``, perché non c'è niente
+        # che possa farci — nessun tetto da alzare, nessun file da sfoltire.
+        logger.warning(
+            "Dream has not consolidated for {} consecutive runs, with nothing refused: "
+            "the batch is not landing and no review pass can help (cursor still at {})",
+            nothing_new, store.get_last_dream_cursor(),
+        )
     if stuck >= STUCK_IS_ALARMING:
         logger.error(
             "Dream has not advanced its cursor for {} consecutive runs; the forced "

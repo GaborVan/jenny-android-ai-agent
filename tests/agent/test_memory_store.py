@@ -31,6 +31,33 @@ class TestMemoryStoreCore:
         assert "Long-term Memory" in ctx
         assert "important fact" in ctx
 
+    def test_get_memory_context_is_not_capped(self, store):
+        """Il blocco entra **intero**, e l'assenza di un tetto in lettura è una scelta.
+
+        Non è una dimenticanza da chiudere aggiungendo un
+        ``truncate_text_to_tokens`` come quello di
+        :meth:`MemoryStore.get_wiki_memory_context`. Le due cose non sono
+        simmetriche:
+
+        - Il tetto in scrittura ha dietro **la review pass**, che legge il file
+          prima di decidere e *sposta* quel che non gli appartiene. Un taglio al
+          momento dell'iniezione non ha nessuno dietro: non distingue l'identità
+          da una nota stantia, taglia quel che capita in coda, e lo fa a ogni
+          turno senza dirlo a nessuno che possa rimediare.
+        - La rubrica di Atlas è un **indice**: quel che il tetto le toglie è un
+          link, e la pagina resta a un ``read_file`` di distanza. La coda di
+          ``MEMORY.md`` non è scritta in nessun altro posto, quindi un avviso
+          "il resto è là" non avrebbe dove puntare.
+
+        La decisione e l'argomento stanno in ``docs/using/memory.md``
+        ("The budgets bound what Dream writes, not what a turn pays"). Se un
+        giorno un tetto serve davvero, questo test va cambiato di proposito — e
+        insieme a lui quella sezione.
+        """
+        body = "\n".join(f"- fact number {i}" for i in range(2000))
+        store.memory_file.write_text(body, encoding="utf-8")
+        assert store.get_memory_context() == f"## Long-term Memory\n{body}"
+
 
 class TestHistoryWithCursor:
     def test_append_history_returns_cursor(self, store):

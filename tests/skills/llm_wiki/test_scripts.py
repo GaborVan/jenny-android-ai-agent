@@ -1,23 +1,29 @@
-#!/usr/bin/env python3
-"""
-Tests for the llm-wiki scripts. Stdlib only — no pip install.
+"""Test degli script della skill llm-wiki: scaffold, registry, lint, audit.
 
-Run (paths relative to the skill's scripts/ dir):
-    python3 scripts/tests/test_scripts.py
-    python3 -m unittest discover -s scripts/tests -t scripts
+Veniva da ``jenny/skills/llm-wiki/scripts/tests/test_scripts.py``, e da la'
+**non lo eseguiva nessuno**: ``pyproject.toml`` fissa ``testpaths = ["tests"]``,
+quindi ``pytest -q`` restava verde con tre test rossi dentro. Spostarlo qui,
+accanto a ``test_lint_wiki.py`` e ``test_scaffold_topup.py`` che provano gli
+stessi script, e' la strada che non chiede niente a ``pyproject.toml`` (file
+condiviso) e che ha un secondo effetto concreto: solo ``jenny/`` finisce
+nell'APK, quindi il codice di test non viaggia piu' sul telefono.
+
+Gli script della skill non fanno parte del package ``jenny`` importabile, quindi
+la dir ``scripts/`` viene aggiunta a ``sys.path`` — e va aggiunta comunque,
+perche' i tre script si importano ``reindex_wikis`` a vicenda.
 """
 
 import contextlib
 import io
-import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-# Make the scripts importable (this file lives in scripts/tests/).
-SCRIPTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, SCRIPTS_DIR)
+_SCRIPTS_DIR = (
+    Path(__file__).resolve().parents[3] / "jenny" / "skills" / "llm-wiki" / "scripts"
+)
+sys.path.insert(0, str(_SCRIPTS_DIR))
 
 import audit_review  # noqa: E402
 import lint_wiki  # noqa: E402
@@ -38,11 +44,22 @@ def registry_block(wikis_dir: Path) -> str:
     return m.group(1) if m else ""
 
 
-def make_wiki(wikis_dir: Path, name: str, claude_md: str) -> Path:
-    """Minimal wiki (CLAUDE.md + wiki/index.md) without going through scaffold."""
+def make_wiki(wikis_dir: Path, name: str, agents_md: str) -> Path:
+    """Wiki minima (``AGENTS.md`` + ``wiki/index.md``) senza passare da scaffold.
+
+    Il nome del file di istruzioni e' quello di **oggi**. Fino al 7.5 questa
+    fixture scriveva ``CLAUDE.md`` e diceva che leggerlo era «esattamente quel
+    che deve continuare a funzionare»: non lo e' piu'. Il nome vecchio resta
+    noto a due posti, e a nessun lettore — la migrazione dell'avvio, che lo
+    rinomina, e ``wiki_paths.wiki_id``, che deve poter leggere l'identita' di una
+    wiki non ancora migrata. Per lo scope il ripiego e' stato tolto: due nomi per
+    lo stesso file sono due nomi da tenere allineati in ogni lettore, e i lettori
+    sono quattro. Cosa legge una cartella col solo nome vecchio lo fissa
+    :meth:`ScopeExtraction.test_legacy_name_is_not_read`.
+    """
     root = wikis_dir / name
     (root / "wiki").mkdir(parents=True, exist_ok=True)
-    (root / "CLAUDE.md").write_text(claude_md, encoding="utf-8")
+    (root / "AGENTS.md").write_text(agents_md, encoding="utf-8")
     (root / "wiki" / "index.md").write_text(f"# Index — {name}\n", encoding="utf-8")
     return root
 
@@ -97,7 +114,7 @@ class ScaffoldAndRegistry(unittest.TestCase):
             quiet(scaffold_mod.scaffold, str(wikis / "loops"), "Loops")
 
             self.assertTrue((wikis / "main" / "wiki" / "index.md").is_file())
-            self.assertTrue((wikis / "main" / "CLAUDE.md").is_file())
+            self.assertTrue((wikis / "main" / "AGENTS.md").is_file())
             self.assertTrue((wikis / "_index.md").is_file())
 
             block = registry_block(wikis)
@@ -120,7 +137,7 @@ class ScopeExtraction(unittest.TestCase):
             wikis = Path(tmp) / "wikis"
             make_wiki(wikis, "w", "---\nsummary: The explicit summary line\n---\n\n# W\n")
             self.assertEqual(
-                reindex_wikis.read_wiki_scope(wikis / "w", "w"),
+                reindex_wikis.read_wiki_scope(wikis / "w"),
                 "The explicit summary line",
             )
 
@@ -130,7 +147,7 @@ class ScopeExtraction(unittest.TestCase):
             md = "# W\n\n## Scope\n\nWhat this wiki covers:\n- Bullet scope text\n"
             make_wiki(wikis, "w", md)
             self.assertEqual(
-                reindex_wikis.read_wiki_scope(wikis / "w", "w"),
+                reindex_wikis.read_wiki_scope(wikis / "w"),
                 "Bullet scope text",
             )
 
@@ -140,9 +157,27 @@ class ScopeExtraction(unittest.TestCase):
             md = "---\nsummary: <one-line scope>\n---\n\n# W\n\n## Scope\n\nWhat this wiki covers:\n- <describe>\n"
             make_wiki(wikis, "w", md)
             self.assertEqual(
-                reindex_wikis.read_wiki_scope(wikis / "w", "w"),
+                reindex_wikis.read_wiki_scope(wikis / "w"),
                 "(no scope set)",
             )
+
+    def test_legacy_name_is_not_read(self):
+        """Una cartella col solo ``CLAUDE.md`` non ha un file di istruzioni.
+
+        E' il prezzo dichiarato del 7.5, e questo script deve pagarlo come lo
+        paga il package: ``utils/wiki_paths.read_wiki_scope`` risponde
+        «(no AGENTS.md)» sulla stessa cartella (v.
+        ``tests/utils/test_wiki_paths.py``), e due copie della stessa logica che
+        rispondono diverso sono la cosa peggiore delle due. La finestra si chiude
+        da se': la migrazione rinomina al prossimo avvio.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "wikis" / "w"
+            (root / "wiki").mkdir(parents=True)
+            (root / "CLAUDE.md").write_text(
+                "---\nsummary: Lo scope vecchio\n---\n", encoding="utf-8"
+            )
+            self.assertEqual(reindex_wikis.read_wiki_scope(root), "(no AGENTS.md)")
 
 
 class ReindexDriftAndHeal(unittest.TestCase):
@@ -322,7 +357,3 @@ class AuditReview(unittest.TestCase):
             quiet(scaffold_mod.scaffold, str(wikis / "main"), "Main")
             quiet(scaffold_mod.scaffold, str(wikis / "loops"), "Loops")
             self.assertEqual(quiet(audit_review.run_workspace, str(wikis), "open"), 0)
-
-
-if __name__ == "__main__":
-    unittest.main(verbosity=2)

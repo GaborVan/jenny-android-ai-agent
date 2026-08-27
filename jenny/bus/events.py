@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from jenny.session.keys import session_key_for_channel
+
 # Optional ``OutboundMessage.metadata`` key for structured, channel-agnostic UI
 # payloads. Value is JSON-serializable with at least ``kind``; rich clients may
 # render it and other channels may ignore unknown keys.
@@ -63,8 +65,22 @@ class InboundMessage:
 
     @property
     def session_key(self) -> str:
-        """Unique key for session identification."""
-        return self.session_key_override or f"{self.channel}:{self.chat_id}"
+        """La sessione in cui questo messaggio viene lavorato.
+
+        Senza override e' **la** conversazione dell'utente, qualunque canale
+        l'abbia portato: e' la regola di :func:`~jenny.session.keys.session_key_for_channel`,
+        letta qui dal suo unico posto invece di essere ricostruita.
+
+        Prima questa property fabbricava ``f"{channel}:{chat_id}"``, una chiave
+        che nessun file di sessione porta piu'. Non era innocua: ``CronTool``
+        la persisteva nei payload dei job, e un promemoria creato dalla WebUI
+        girava poi in ``websocket:default`` — un secondo file di sessione
+        accanto alla conversazione a cui appartiene, con il suo consolidamento
+        e il suo riassunto.
+        """
+        return self.session_key_override or session_key_for_channel(
+            self.channel, self.chat_id
+        )
 
 
 @dataclass

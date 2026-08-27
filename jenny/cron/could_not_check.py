@@ -121,6 +121,10 @@ _MARKER_DECORATION = "*_`#>-+ \t"
 # Separatori ammessi fra il marcatore (o il riferimento) e il motivo.
 _SEPARATORS = ": -–—"
 
+# I quattro, insieme: nessuno è prefisso di un altro, quindi un unico
+# ``startswith`` li riconosce tutti (v. :func:`is_only_markers`).
+_ALL_MARKERS = (COULD_NOT_CHECK_MARKER, DELEGATED_MARKER, OK_MARKER, WARNED_MARKER)
+
 # ``CHECK_FAILED 2: motivo`` — e le varianti che un modello scrive senza
 # pensarci: ``#2``, ``[2]``, ``2)``, ``2.``, o il solo numero senza motivo.
 _REF_RE = re.compile(r"^\[?\s*#?(\d{1,3})\s*[\])\.]?\s*[:\.\-–—]?\s*(.*)$")
@@ -180,6 +184,25 @@ def parse_warned_marks(final_text: str | None) -> list[CouldNotCheckMark]:
     conta la sola presenza di una riga.
     """
     return _parse_marks(final_text, WARNED_MARKER)
+
+
+def is_only_markers(text: str | None) -> bool:
+    """Vero se *text* non contiene niente oltre a righe di marcatore.
+
+    Serve fuori da qui — al tool ``message``, che deve poter riconoscere un
+    marcatore *prima* di consegnarlo all'utente come se fosse un avviso — e sta
+    qui perché qui vive la grammatica: le quattro parole e il rumore markdown
+    che il modello ci mette attorno. Un testo vuoto non è "solo marcatori": è
+    vuoto, e chi chiama lo distingue prima.
+    """
+    lines = [
+        stripped
+        for stripped in (
+            line.strip().lstrip(_MARKER_DECORATION) for line in (text or "").splitlines()
+        )
+        if stripped
+    ]
+    return bool(lines) and all(line.startswith(_ALL_MARKERS) for line in lines)
 
 
 def _parse_marks(final_text: str | None, marker: str) -> list[CouldNotCheckMark]:

@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 import websockets
+from port_alloc import free_port
 from websockets.exceptions import ConnectionClosed
 from websockets.frames import Close
 
@@ -43,15 +44,13 @@ from jenny.webui.transcript import append_transcript_object, read_transcript_lin
 
 # -- Shared helpers (aligned with test_websocket_integration.py) ---------------
 
-_PORT = 29876
-
-
 def _ch(bus: Any, **kw: Any) -> WebSocketChannel:
     cfg: dict[str, Any] = {
         "enabled": True,
         "allowFrom": ["*"],
         "host": "127.0.0.1",
-        "port": _PORT,
+        # Porta libera per default: le sessioni pytest concorrenti non si pestano.
+        "port": free_port(),
         "path": "/ws",
         "websocketRequiresToken": False,
     }
@@ -71,7 +70,7 @@ def _ch(bus: Any, **kw: Any) -> WebSocketChannel:
 def _basic_handler(bus: Any, **kw: Any) -> GatewayServices:
     cfg = WebSocketConfig.model_validate({
         "enabled": True, "allowFrom": ["*"],
-        "host": "127.0.0.1", "port": _PORT,
+        "host": "127.0.0.1", "port": free_port(),
         "path": "/ws", "websocketRequiresToken": False,
     })
     return build_gateway_services(
@@ -1219,7 +1218,7 @@ async def test_stop_is_idempotent() -> None:
 
 @pytest.mark.asyncio
 async def test_end_to_end_client_receives_ready_and_agent_sees_inbound(bus: MagicMock) -> None:
-    port = 29876
+    port = free_port()
     channel = _ch(bus, port=port)
 
     server_task = asyncio.create_task(channel.start())
@@ -1255,7 +1254,7 @@ async def test_end_to_end_client_receives_ready_and_agent_sees_inbound(bus: Magi
 
 @pytest.mark.asyncio
 async def test_token_rejects_handshake_when_mismatch(bus: MagicMock) -> None:
-    port = 29877
+    port = free_port()
     channel = _ch(bus, port=port, path="/", tokenIssueSecret="secret", websocketRequiresToken=True)
 
     server_task = asyncio.create_task(channel.start())
@@ -1274,7 +1273,7 @@ async def test_token_rejects_handshake_when_mismatch(bus: MagicMock) -> None:
 @pytest.mark.asyncio
 async def test_wrong_path_returns_webui_html(bus: MagicMock) -> None:
     """Non-WebSocket paths serve the WebUI HTML instead of returning 404."""
-    port = 29878
+    port = free_port()
     channel = _ch(bus, port=port)
 
     server_task = asyncio.create_task(channel.start())
@@ -1292,7 +1291,7 @@ async def test_wrong_path_returns_webui_html(bus: MagicMock) -> None:
 
 @pytest.mark.asyncio
 async def test_secret_required_for_websocket_handshake(bus: MagicMock) -> None:
-    port = 29879
+    port = free_port()
     secret = "route-secret"
     channel = _ch(
         bus, port=port,
@@ -1402,7 +1401,7 @@ async def test_update_provider_ignores_api_type_for_non_openai(monkeypatch, tmp_
 
 @pytest.mark.asyncio
 async def test_end_to_end_server_pushes_streaming_deltas_to_client(bus: MagicMock) -> None:
-    port = 29880
+    port = free_port()
     channel = _ch(bus, port=port, streaming=True)
 
     server_task = asyncio.create_task(channel.start())
@@ -1455,7 +1454,7 @@ async def test_end_to_end_server_pushes_streaming_deltas_to_client(bus: MagicMoc
 
 @pytest.mark.asyncio
 async def test_allow_from_rejects_unauthorized_client_id(bus: MagicMock) -> None:
-    port = 29882
+    port = free_port()
     channel = _ch(bus, port=port, allowFrom=["alice", "bob"])
 
     server_task = asyncio.create_task(channel.start())
@@ -1473,7 +1472,7 @@ async def test_allow_from_rejects_unauthorized_client_id(bus: MagicMock) -> None
 
 @pytest.mark.asyncio
 async def test_client_id_truncation(bus: MagicMock) -> None:
-    port = 29883
+    port = free_port()
     channel = _ch(bus, port=port)
 
     server_task = asyncio.create_task(channel.start())
@@ -1492,7 +1491,7 @@ async def test_client_id_truncation(bus: MagicMock) -> None:
 
 @pytest.mark.asyncio
 async def test_non_utf8_binary_frame_ignored(bus: MagicMock) -> None:
-    port = 29884
+    port = free_port()
     channel = _ch(bus, port=port)
 
     server_task = asyncio.create_task(channel.start())
@@ -1513,7 +1512,7 @@ async def test_non_utf8_binary_frame_ignored(bus: MagicMock) -> None:
 
 @pytest.mark.asyncio
 async def test_allow_from_empty_list_denies_all(bus: MagicMock) -> None:
-    port = 29886
+    port = free_port()
     channel = _ch(bus, port=port, allowFrom=[])
 
     server_task = asyncio.create_task(channel.start())
@@ -1532,7 +1531,7 @@ async def test_allow_from_empty_list_denies_all(bus: MagicMock) -> None:
 @pytest.mark.asyncio
 async def test_websocket_requires_token_without_issue_path(bus: MagicMock) -> None:
     """When websocket_requires_token is True but no token or issue path configured, all connections are rejected."""
-    port = 29887
+    port = free_port()
     channel = _ch(bus, port=port, websocketRequiresToken=True)
 
     server_task = asyncio.create_task(channel.start())
@@ -1564,7 +1563,7 @@ async def test_websocket_requires_token_without_issue_path(bus: MagicMock) -> No
 
 @pytest.mark.asyncio
 async def test_multiplex_legacy_still_works(bus: MagicMock) -> None:
-    port = 29930
+    port = free_port()
     channel = _ch(bus, port=port)
     server_task = asyncio.create_task(channel.start())
     await asyncio.sleep(0.3)
@@ -1644,7 +1643,7 @@ async def test_webui_message_envelope_appends_user_transcript(
 
 @pytest.mark.asyncio
 async def test_multiplex_invalid_frames_return_error(bus: MagicMock) -> None:
-    port = 29933
+    port = free_port()
     channel = _ch(bus, port=port)
     server_task = asyncio.create_task(channel.start())
     await asyncio.sleep(0.3)
@@ -1681,7 +1680,7 @@ async def test_multiplex_invalid_frames_return_error(bus: MagicMock) -> None:
 
 @pytest.mark.asyncio
 async def test_multiplex_cleanup_on_disconnect(bus: MagicMock) -> None:
-    port = 29934
+    port = free_port()
     channel = _ch(bus, port=port)
     server_task = asyncio.create_task(channel.start())
     await asyncio.sleep(0.3)

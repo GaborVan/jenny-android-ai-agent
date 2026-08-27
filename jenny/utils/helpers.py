@@ -16,6 +16,15 @@ from loguru import logger
 
 from jenny.utils.path import atomic_write
 
+# DeepSeek-family special tokens are delimited by FULLWIDTH VERTICAL LINE
+# (U+FF5C), not the ASCII pipe, and separate words with U+2581: e.g.
+# `<｜end▁of▁thinking｜>`, `<｜Assistant｜>`, `<｜tool▁calls▁begin｜>`.
+_DEEPSEEK_TOKEN = r"<｜{1,2}[^<>\n]{0,48}?｜{1,2}>"
+# DSML (DeepSeek Markup Language) is the tool-call markup of the deepseek-v4
+# template: `<｜｜DSML｜｜tool_calls>`, `<｜｜DSML｜｜invoke name="...">`. Unlike the
+# markers above it OPENS a block, so what follows it is machinery, not prose.
+_DSML_BLOCK_OPENER = r"<｜｜DSML｜｜"
+
 
 def strip_think(text: str) -> str:
     """Remove thinking blocks, unclosed trailing tags, and tokenizer-level
@@ -35,11 +44,18 @@ def strip_think(text: str) -> str:
          or end of the text** only, for the same reason.
       6. Trailing partial control tags split across stream chunks, such as
          `<thi`, `<thin`, or `<tho`.
+      7. DeepSeek-family special tokens (`<｜end▁of▁thinking｜>`,
+         `<｜Assistant｜>`, `<｜tool▁calls▁begin｜>`) **at the edges** of the
+         text, same conservatism as (4)/(5).
+      8. A DSML tool-call block (`<｜｜DSML｜｜tool_calls>`) opened **at the
+         start**: everything from the opener to the end of the text goes,
+         because an opened block is machinery all the way down — leaving it
+         half-stripped would surface `invoke name="..."` to the user.
 
     Since this is also applied before persisting to history (memory.py),
-    the edge-only stripping of (4) and (5) is deliberate: stripping those
-    tokens mid-text would silently rewrite any message where a user or the
-    assistant discusses the tokens themselves.
+    the edge-only stripping of (4), (5) and (7)/(8) is deliberate: stripping
+    those tokens mid-text would silently rewrite any message where a user or
+    the assistant discusses the tokens themselves.
     """
     # Well-formed blocks first.
     text = re.sub(r"<think>[\s\S]*?</think>", "", text)
@@ -69,6 +85,23 @@ def strip_think(text: str) -> str:
     )
     text = re.sub(rf"(?:{partial_control_tag})$", "", text)
     text = re.sub(r"^\s*<\|?$", "", text)
+    # DeepSeek template leaks. Measured on the device 2026-08-26 23:13: a
+    # heartbeat turn delivered `<｜end▁of▁thinking｜>\n\n<｜｜DSML｜｜tool_calls>\n
+    # <｜｜DSML｜｜invoke name="complete_goal">…` as a proactive alert — the model
+    # wrote its own tool-call markup as plain text (truncated mid-parameter, so
+    # the endpoint's DSML parser never recognised it) and it reached the chat.
+    # The leading marker comes first, so the loop peels markers until the DSML
+    # opener (if any) is the head of the text and can be cut to the end.
+    while True:
+        cleaned = re.sub(rf"^\s*(?:{_DEEPSEEK_TOKEN})", "", text)
+        cleaned = re.sub(rf"^\s*{_DSML_BLOCK_OPENER}[\s\S]*$", "", cleaned)
+        if cleaned == text:
+            break
+        text = cleaned
+    # Tail end: a complete marker after real text, or one cut in half by a
+    # stream boundary (`answer <｜end▁of`), same shape as the ASCII rule above.
+    text = re.sub(rf"\s*(?:{_DEEPSEEK_TOKEN})\s*$", "", text)
+    text = re.sub(r"\s*<｜{1,2}[^<>\n]{0,48}$", "", text)
     return text.strip()
 
 

@@ -12,6 +12,7 @@ from jenny.agent.tools.path_utils import resolve_workspace_path
 from jenny.agent.tools.schema import ArraySchema, StringSchema, tool_parameters_schema
 from jenny.bus.events import OutboundMessage
 from jenny.config.paths import get_workspace_path
+from jenny.cron.could_not_check import is_only_markers
 from jenny.security.workspace_access import current_tool_workspace
 from jenny.security.workspace_policy import _safe_expanduser
 from jenny.session.turn_visibility import is_silent_turn, mark_silent_turn
@@ -19,6 +20,87 @@ from jenny.session.turn_visibility import is_silent_turn, mark_silent_turn
 # Sentinel di default per i flag per-turno: condiviso, mai mutato. Un turno vero
 # riceve il suo dict fresco da ``start_turn()``.
 _NO_TURN_FLAGS: dict[str, bool] = {}
+
+
+# Parole che non sono un avviso in nessuna lingua e in nessun contesto: sono
+# meta, parlano del turno e non di quello che è successo. La lista è corta e
+# chiusa di proposito — v. :func:`_unusable_silent_alert` sul perché qui NON ci
+# va un'euristica.
+_NOT_AN_ALERT = frozenset(
+    {"silent", "test", "ok", "boh", "nothing", "none", "null", "n/a", "na", "nulla"}
+)
+
+
+def _unusable_silent_alert(content: str, *, has_media: bool) -> str | None:
+    """Dice perché *content* non è un avviso, o ``None`` se lo è.
+
+    Un turno silenzioso non consegna una risposta: consegna un **avviso**, e un
+    avviso è una frase rivolta a una persona. Tre forme che non lo sono hanno
+    raggiunto la chat davvero, tutte da qui — misurate il 2026-08-24 sul
+    transcript del dispositivo, 11 consegne su 32 fra il 16 e il 24 agosto:
+
+    - il **marcatore di protocollo** (``CHECK_OK 1`` il 16, 17 e 23 agosto,
+      ``CHECK_OK`` il 23). È il caso peggiore dei tre, perché sbaglia due volte:
+      l'utente riceve una parola d'ordine interna, e il verdetto non viene
+      registrato — ``parse_ok_marks`` legge il testo finale del turno, non
+      l'argomento di un tool, quindi la voce del task resta in sospeso come se
+      il modello non si fosse pronunciato;
+    - la **parola nuda** (``silent`` il 24, ``x`` il 17 e il 22, ``boh`` il 16,
+      ``test`` il 17). Il modello usa la chat come blocco note;
+    - il **testo vuoto** (il 16, il 18, due volte il 23), che in chat è una
+      bolla vuota.
+
+    Perché il prompt non basta: il contratto dell'annuncio di un subagent dice
+    "l'unico modo di raggiungere l'utente è il tool ``message``" e quello
+    dell'heartbeat dice "chiudi la risposta con ``CHECK_OK <n>``". Le due
+    istruzioni collidono, e un modello che vuole far *contare* il proprio
+    verdetto lo manda col tool. Stessa scelta del tetto di un avviso per ciclo
+    qui sotto: il prompt lo vieta, questo lo rende impossibile.
+
+    **Il terzo criterio è una lista, non un'euristica, e la scelta è
+    asimmetrica.** Il primo tentativo era "una parola sola e nessuna cifra": una
+    regola che sembra ragionevole e che il test del tetto per ciclo ha bocciato
+    subito, perché rifiutava ``"primo"``. Il punto non è quel test — è che una
+    forma è un indizio pessimo di ciò che una parola *dice*, e i due errori non
+    si pagano allo stesso prezzo: una parola nuda che passa è rumore in chat,
+    un avviso vero che viene rifiutato è l'heartbeat che tace proprio quando
+    aveva qualcosa da dire. Quindi qui si blocca solo ciò che non può essere un
+    avviso in nessun caso — un carattere solo (``x``, ``.``, ``🙄``) e le parole
+    meta di :data:`_NOT_AN_ALERT` — e tutto il resto passa. Copre le cinque
+    forme osservate; una sesta le sfuggirà, ed è il prezzo giusto.
+
+    Rifiutare — invece di riscrivere il testo — è la forma giusta perché la
+    quota del ciclo non viene consumata (``_sent_in_turn`` si alza solo su una
+    consegna riuscita): il modello ha un altro tentativo, e la stringa di
+    ritorno gli dice dove va davvero il marcatore. Riscrivere sarebbe peggio:
+    consegnerebbe all'utente un testo che il modello non ha scritto.
+    """
+    text = content.strip()
+    if not text:
+        if has_media:
+            # Un allegato senza didascalia è un invio legittimo: il file È il
+            # messaggio.
+            return None
+        return (
+            "Error: nothing was delivered — the message text was empty. "
+            "A silent check reaches the user only with real user-facing text. "
+            "If there is nothing to report, send nothing and end the turn instead."
+        )
+    if is_only_markers(text):
+        return (
+            "Error: not delivered — CHECK_OK / CHECK_FAILED / CHECK_DELEGATED / "
+            "CHECK_WARNED are not messages. Those lines belong in your answer text, "
+            "which is where they are read and recorded; sending one here reaches the "
+            "user with an internal marker and records nothing. Write the line in your "
+            "answer instead, and call this tool only with user-facing text."
+        )
+    if len(text) == 1 or text.casefold() in _NOT_AN_ALERT:
+        return (
+            f"Error: {text!r} was not delivered. A silent check sends an alert, and an "
+            "alert is a sentence naming what happened and what the user should do. "
+            "Either write that text, or send nothing and end the turn."
+        )
+    return None
 
 
 @tool_parameters(
@@ -201,7 +283,26 @@ class MessageTool(Tool, ContextAware):
     ) -> str:
         from jenny.utils.helpers import strip_think
 
+        raw_content = content
         content = strip_think(content)
+        # Se lo strip ha svuotato un testo che c'era, quel testo era SOLO
+        # macchina del template — marker di thinking o un blocco di tool call
+        # scritto come prosa (v. ``strip_think``, punti 7-8). Consegnarlo
+        # comunque vuol dire una bolla vuota in chat; rifiutare lascia al
+        # modello un altro tentativo, ed è la stessa asimmetria di
+        # ``_unusable_silent_alert``: un invio perso è recuperabile al giro
+        # dopo, un invio di macchina all'utente no. Vale su qualunque turno,
+        # silenzioso o visibile, perché qui non si giudica *cosa* dice il
+        # messaggio: non è rimasto nulla da dire.
+        if raw_content.strip() and not content.strip() and not media:
+            logger.info(
+                "MessageTool: template-leak-only content suppressed: {!r}", raw_content[:80]
+            )
+            return (
+                "Error: nothing was delivered — after removing template markers "
+                "(thinking tokens, tool-call markup) your message had no text left. "
+                "Write it as plain user-facing text and send it again."
+            )
 
         if buttons is not None:
             if not isinstance(buttons, list) or any(
@@ -256,6 +357,17 @@ class MessageTool(Tool, ContextAware):
                 "if something is missing, it belongs in that single message — say it in "
                 "the next run instead."
             )
+
+        # Stesso posto, stessa ragione del tetto qui sopra, su un asse diverso:
+        # quello contava i messaggi, questo guarda se ce n'è uno. Dopo il tetto e
+        # non prima perché un secondo invio va spiegato come secondo invio.
+        if is_silent_turn(self._default_metadata.get()):
+            refusal = _unusable_silent_alert(content, has_media=bool(media))
+            if refusal is not None:
+                logger.info(
+                    "MessageTool: unusable silent alert suppressed: {!r}", content[:80]
+                )
+                return refusal
 
         if not self._send_callback:
             return "Error: Message sending not configured"

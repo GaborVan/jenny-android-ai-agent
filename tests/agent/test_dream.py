@@ -110,24 +110,23 @@ class TestBuildDreamPrompt:
         assert cursor == 2
         assert "usable memory" in prompt
 
-    def test_dream_prompt_consumes_consolidator_attribute_tags(self, tmp_path, monkeypatch):
-        from jenny.utils.helpers import sync_workspace_templates
-        from jenny.utils.prompt_templates import _environment
+    def test_a_correction_to_the_dream_prompt_reaches_an_installation(self):
+        """Cosa il template *dice* sta in ``_DREAM_MD_RULES``; qui sta il fatto che
+        una correzione arrivi.
 
-        workspace = tmp_path / "workspace"
-        workspace.mkdir(parents=True)
-        sync_workspace_templates(workspace, silent=True)
-        _environment.cache_clear()
-        prompt = render_template(
-            "agent/dream.md",
-            strip=True,
-            skill_creator_path="skills/skill-creator/SKILL.md",
-        )
+        ``agent/**`` si riscrive a ogni avvio, un file dell'utente una volta sola:
+        fuori da questo elenco, ogni riga scritta in ``agent/dream.md`` per riparare
+        un comportamento misurato sul telefono resterebbe nel repo e non sul
+        telefono. È la sola metà di questo contratto che una riscrittura del prompt
+        non può rompere — e la sola che nessun'altra asserzione di questo file
+        copriva: il test che stava qui prima sincronizzava un workspace di prova
+        senza reindirizzarci ``get_workspace_path``, quindi renderizzava il template
+        dell'installazione come tutti gli altri e la sincronizzazione non
+        partecipava a niente.
+        """
+        from jenny.utils.android_assets import _SYSTEM_PROMPT_TEMPLATES
 
-        assert "History attribute tags" in prompt
-        assert "[skip]: audit-only" in prompt
-        assert "[correction]: replace the older conflicting fact" in prompt
-        assert "Always strip these bracketed tags from saved memory content" in prompt
+        assert "agent/dream.md" in _SYSTEM_PROMPT_TEMPLATES
 
 
 class TestDreamPromptBudgetGauge:
@@ -186,6 +185,156 @@ class TestDreamPromptBudgetGauge:
         default = store.build_dream_prompt()
         assert explicit is not None and default is not None
         assert explicit[0] == default[0]
+
+
+# **Le regole che ``agent/dream.md`` deve dire, e la frase con cui oggi le dice.**
+#
+# Ogni riga è (nome della regola, perché esiste, come è scritta oggi). La colonna
+# di destra è l'unica che cambia quando si riscrive il template: prima stava
+# sparsa in sei test e una riscrittura costava sei modifiche, con fallimenti che
+# dicevano «la stringa non c'è» invece di «la regola non c'è» (T8.7, I13).
+#
+# Il perché non è decorazione. Quasi tutte queste frasi sono la **riparazione di
+# un comportamento misurato sul Titan 2**, e senza la ragione accanto la riga
+# successiva che «semplifica il prompt» le toglie una per una.
+_DREAM_MD_RULES: tuple[tuple[str, str, str], ...] = (
+    (
+        "proponi voci, non riscrivere file",
+        "il difetto d'origine: finché il prompt dice «modifica il file», il modello "
+        "modifica il file, e sotto pressione pota una riga e si ferma",
+        "Propose entries, do not rewrite files",
+    ),
+    (
+        "tutto il lotto in una chiamata",
+        "rimedio a D10: il modello sceglie la chiamata che costa meno, quindi la "
+        "chiamata che costa meno deve essere quella che produce l'evidenza. Con "
+        "``add`` un fatto per volta faceva ``list`` e filtrava da sé, e un lotto di "
+        "soli duplicati restava senza evidenza per voce — trattenuto pur essendo "
+        "consolidato",
+        "Propose the whole batch in one call",
+    ),
+    (
+        "e il parametro che lo permette",
+        "l'altra metà: «tutto in una chiamata» senza dire *come* lascia il modello "
+        "a inventarsi la forma",
+        "`add` takes `texts`",
+    ),
+    (
+        "non leggere il file per decidere",
+        "filtrare da sé è il comportamento da chiudere: il tool sa già cosa è nuovo",
+        "Do not read the file first to work out what is new",
+    ),
+    (
+        "a cosa serve davvero list",
+        "togliergli ``list`` di mano senza dire a cosa serve lo lascerebbe senza "
+        "modo di trovare un id da sostituire",
+        "the id of an entry you intend to `replace` or `remove`",
+    ),
+    (
+        "proporre un duplicato è gratis",
+        "se proporre un duplicato sembrasse costoso, il modello tornerebbe a "
+        "filtrare da sé",
+        "costs nothing to propose",
+    ),
+    (
+        "SOUL.md resta a scrittura-file",
+        "prosa con una struttura, non un elenco: le voci non c'entrano, e un "
+        "``add`` su SOUL.md non ha dove atterrare",
+        "SOUL.md and `skills/<name>/SKILL.md` have no entry tool",
+    ),
+    (
+        "le etichette del Consolidator si dichiarano",
+        "il diario porta ``[skip]`` e ``[correction]``: se il prompt non le spiega, "
+        "il modello le tratta come testo del fatto",
+        "History attribute tags",
+    ),
+    (
+        "e si dice cosa vuol dire skip",
+        "«audit-only» è la ragione per cui una riga marcata così non deve entrare in "
+        "memoria: senza, il modello la salva comunque",
+        "[skip]: audit-only",
+    ),
+    (
+        "e cosa vuol dire correction",
+        "una correzione non è un fatto in più: è un fatto che ne **sostituisce** uno",
+        "[correction]: replace the older conflicting fact",
+    ),
+    (
+        "le etichette non finiscono nei file",
+        "un'etichetta salvata dentro il fatto lo rende illeggibile per sempre, e "
+        "nessuno la va a togliere a mano",
+        "Always strip these bracketed tags from saved memory content",
+    ),
+)
+
+# La frase **ritirata**, tenuta separata perché è l'unica che deve *non* esserci:
+# metterla nella tabella sopra la trasformerebbe in una regola da rispettare.
+_RETIRED_BLESSING = "a run that only prunes is a run well spent"
+
+
+class TestThePromptTeachesTheEntryTool:
+    """Il tool da solo non basta: finché il prompt dice "modifica il file", il
+    modello modifica il file.
+
+    Misurato sul Titan 2 il 2026-08-18, sei run su sei sotto pressione: il
+    modello pota una riga esistente e si ferma senza aggiungere il fatto nuovo.
+    Il prompt chiedeva due passi e lui faceva il primo, quindi il testo che
+    descrive i due passi è parte del difetto, non un contorno.
+    """
+
+    def _prompt(self) -> str:
+        return render_template(
+            "agent/dream.md", strip=True, skill_creator_path="skills/skill-creator/SKILL.md",
+        )
+
+    def test_it_names_the_tool_and_its_three_verbs(self):
+        prompt = self._prompt()
+
+        assert "`memory` tool" in prompt
+        for verb in ("`add`", "`replace`", "`remove`"):
+            assert verb in prompt
+
+    def test_every_verb_it_names_exists_in_the_tool(self):
+        """Antideriva: il prompt e lo schema non devono raccontare due tool
+        diversi. Un verbo inventato qui diventa una chiamata rifiutata là."""
+        from pathlib import Path
+
+        from jenny.agent.tools.memory_entries import MemoryEntryTool
+
+        actions = set(
+            MemoryEntryTool(Path("/tmp")).parameters["properties"]["action"]["enum"]
+        )
+        prompt = self._prompt()
+
+        named = {v for v in ("add", "replace", "remove", "list") if f"`{v}`" in prompt}
+        assert named
+        assert named <= actions
+
+    @pytest.mark.parametrize(
+        ("rule", "why", "phrase"), _DREAM_MD_RULES, ids=[r[0] for r in _DREAM_MD_RULES]
+    )
+    def test_it_states_every_rule_it_has_to_state(self, rule, why, phrase):
+        assert phrase in self._prompt(), f"{rule}: {why}"
+
+    def test_the_budget_rule_no_longer_blesses_stopping(self, store):
+        """La riga vecchia — "a run that only prunes is a run well spent" — diceva
+        esattamente quello che il modello poi faceva. Potare resta utile, ma è
+        metà del lavoro, e la frase ora finisce sull'``add``.
+
+        Resta un test suo e non una riga di ``_DREAM_MD_RULES`` perché **non è
+        un'asserzione sul testo del template**: il prompt qui è quello costruito
+        da ``build_dream_prompt`` *con il gauge acceso*, cioè il ramo in cui la
+        regola di budget compare. La tabella sopra guarda il template renderizzato
+        da solo, e lì questa regola non c'è.
+        """
+        store.append_history("hello")
+        result = store.build_dream_prompt(gauge="USER.md [96%]")
+        assert result is not None
+        prompt, _ = result
+
+        assert _RETIRED_BLESSING not in prompt
+        assert "prunes and then stops has saved nothing" in prompt
+        assert "Finish with the `add`." in prompt
 
 
 class TestDreamReviewState:
@@ -256,13 +405,58 @@ class TestDreamReviewState:
         assert store.get_review_state() == (9, 0)
 
 
+class TestForcedAtStuckDoesNotOutliveItsClimb:
+    """``forced_at_stuck`` indicizza una salita di ``stuck``, non l'installazione.
+
+    Serve a non riforzare il review sullo stesso valore. Ma azzerato ``stuck`` —
+    cioè quando il cursore è avanzato — quel valore diventa una mina: alla salita
+    successiva ``dream_cycle`` ritrova ``stuck == forced_at`` e salta il review
+    proprio al run in cui servirebbe. Misurato sul Titan 2 il 2026-08-18: il
+    review è arrivato solo a ``stuck == 4``, sulla soglia d'allarme, due run oltre
+    il suo scopo.
+    """
+
+    def test_advancing_the_cursor_clears_it(self, store):
+        store.set_review_state(runs_since_review=0, stuck_runs=2, forced_at_stuck=2)
+
+        store.set_review_state(runs_since_review=1, stuck_runs=0)
+
+        assert store.get_review_forced_at_stuck() == 0
+
+    def test_a_climb_that_continues_still_preserves_it(self, store):
+        """L'omissione conserva ancora: è "la salita è finita", non "azzera sempre"."""
+        store.set_review_state(runs_since_review=0, stuck_runs=2, forced_at_stuck=2)
+
+        store.set_review_state(runs_since_review=1, stuck_runs=3)
+
+        assert store.get_review_forced_at_stuck() == 2
+
+    def test_a_negative_stuck_counts_as_a_reset(self, store):
+        """Uno ``stuck`` negativo finisce a 0 su disco, e i due campi non devono
+        raccontare stati diversi."""
+        store.set_review_state(runs_since_review=0, stuck_runs=2, forced_at_stuck=2)
+
+        store.set_review_state(runs_since_review=1, stuck_runs=-1)
+
+        assert store.get_review_state() == (1, 0)
+        assert store.get_review_forced_at_stuck() == 0
+
+
 class TestDreamTools:
-    def test_dream_tools_are_restricted_to_file_edits(self, store):
+    def test_dream_tools_are_restricted_to_memory_writing(self, store):
+        """L'elenco è chiuso di proposito: Dream non naviga, non cerca, non esegue.
+
+        ``memory`` si è aggiunto il 2026-08-18 e non ha allargato il perimetro —
+        scrive gli stessi due file che ``edit_file`` già poteva scrivere, per voce
+        invece che per file. Se un giorno qui comparisse un tool di rete o di
+        shell, questo test è il posto in cui accorgersene.
+        """
         tools = store.build_dream_tools()
 
         assert set(tools.tool_names) == {
             "apply_patch",
             "edit_file",
+            "memory",
             "read_file",
             "write_file",
         }
@@ -471,6 +665,140 @@ class TestDreamTools:
         assert "Ludovico" in store.user_file.read_text(encoding="utf-8")
 
 
+class TestWriteFileSaysWhatThePromptSays:
+    """``write_file`` e ``dream.md`` devono raccontare lo stesso registry.
+
+    ``dream.md`` dichiara al modello che il suo registry consente esattamente
+    quattro percorsi. ``write_file`` ne accettava uno — la cartella delle skill —
+    e sui tre file di memoria rispondeva ``WorkspaceBoundaryError`` con in coda
+    "do not retry with alternative tools": un vicolo chiuso proprio per
+    ``SOUL.md``, che non ha un tool per voci e che il review pass deve accorciare
+    come prosa. Il tentativo rifiutato resta contato (``record_write_attempt``
+    sta prima della risoluzione), quindi il cursore non avanza e ``stuck``
+    sale — il "rifiuto di *path*" che il commento di ``format_stuck_alarm``
+    dice di aver visto sul Titan 2.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "path",
+        ["SOUL.md", "USER.md", "memory/MEMORY.md"],
+    )
+    async def test_write_file_lands_on_each_of_the_three(self, store, path):
+        tools = store.build_dream_tools()
+
+        result = await tools.execute(
+            "write_file", {"path": path, "content": "# Rewritten\n- Un fatto\n"},
+        )
+
+        assert "Successfully wrote" in result, result
+        # La trappola vera del messaggio di rifiuto: diceva al modello di non
+        # riprovare con un altro tool, cioè di fermarsi.
+        assert "do not retry with alternative tools" not in result
+        assert (store.workspace / path).read_text(encoding="utf-8") == (
+            "# Rewritten\n- Un fatto\n"
+        )
+
+    @pytest.mark.asyncio
+    async def test_every_path_the_prompt_claims_is_writable_really_is(self, store):
+        """Il test che legge tutti e due i lati.
+
+        La frase del prompt non è decorativa: è ciò su cui il modello decide di
+        chiamare o non chiamare. Se qui divergono, chi paga è un run notturno.
+        """
+        import re
+
+        prompt = render_template(
+            "agent/dream.md", strip=True, skill_creator_path="skills/skill-creator/SKILL.md",
+        )
+        claim = re.search(
+            r"your registry allows exactly (.+?), so a write there is refused", prompt,
+        )
+        assert claim is not None, "la frase del registry è cambiata: riallinea il test"
+        claimed = re.findall(r"`([^`]+)`", claim.group(1))
+        assert claimed == ["SOUL.md", "USER.md", "memory/MEMORY.md", "skills/<name>/SKILL.md"]
+
+        tools = store.build_dream_tools()
+        for claimed_path in claimed:
+            path = claimed_path.replace("<name>", "pinned")
+            result = await tools.execute(
+                "write_file", {"path": path, "content": f"# {path}\n"},
+            )
+            assert "Successfully wrote" in result, f"{path}: {result}"
+
+    @pytest.mark.asyncio
+    async def test_those_writes_are_atomic_like_the_other_two_tools(self, store, monkeypatch):
+        """Conseguenza voluta dell'allowlist, non effetto collaterale.
+
+        ``_commit_write`` decide su ``_is_exact_allowed_file``: dare l'allowlist a
+        ``write_file`` manda anche le sue scritture su quei tre file da
+        ``atomic_write``, come già ``edit_file`` e ``apply_patch``. È lo stato che
+        Jenny rilegge da sé, e su Android un processo ucciso a metà lascerebbe un
+        file troncato che si legge come integro.
+        """
+        from jenny.agent.tools import filesystem as fs_module
+
+        seen: list[str] = []
+        real = fs_module.atomic_write
+
+        def spy(path, data, *args, **kwargs):
+            seen.append(str(path))
+            return real(path, data, *args, **kwargs)
+
+        monkeypatch.setattr(fs_module, "atomic_write", spy)
+        tools = store.build_dream_tools()
+
+        await tools.execute("write_file", {"path": "USER.md", "content": "- Un fatto\n"})
+        await tools.execute(
+            "write_file", {"path": "skills/plain/SKILL.md", "content": "---\nname: plain\n---\n"},
+        )
+
+        assert seen == [str(store.user_file.resolve())]
+
+    @pytest.mark.asyncio
+    async def test_a_whole_file_rewrite_still_pays_the_entry_archiver(self, store):
+        """L'argomento contrario all'allowlist, verificato e caduto.
+
+        ``entry_archiver`` è per-tool ma ``build_dream_tools`` lo passa a tutti e
+        quattro, e ``WriteFileTool.execute`` chiama ``_archive_departing`` prima di
+        scrivere esattamente come ``edit_file``. Una riscrittura intera di
+        ``MEMORY.md`` non scavalca la degradazione.
+        """
+        from jenny.agent.memory_archive import archive_dir
+
+        store.memory_file.write_text(
+            "# Memory\n- Fatto che sta per sparire\n", encoding="utf-8",
+        )
+        tools = store.build_dream_tools()
+
+        await tools.execute(
+            "write_file", {"path": "memory/MEMORY.md", "content": "# Memory\n- Altro\n"},
+        )
+
+        archived = [
+            p.read_text(encoding="utf-8")
+            for p in archive_dir(store.memory_dir).glob("*.md")
+        ]
+        assert any("Fatto che sta per sparire" in text for text in archived), archived
+
+    @pytest.mark.asyncio
+    async def test_the_allowlist_does_not_open_children_or_siblings(self, store):
+        """L'allowlist è di file esatti: non diventa una directory scrivibile."""
+        tools = store.build_dream_tools()
+
+        child = await tools.execute(
+            "write_file", {"path": "USER.md/evil.txt", "content": "owned"},
+        )
+        sibling = await tools.execute(
+            "write_file", {"path": "memory/history.jsonl", "content": "owned"},
+        )
+
+        assert "outside allowed directory" in child
+        assert "outside allowed directory" in sibling
+        assert not (store.user_file / "evil.txt").exists()
+        assert not store.history_file.exists()
+
+
 def _completed_resp() -> SimpleNamespace:
     return SimpleNamespace(metadata={"_stop_reason": "completed"})
 
@@ -569,6 +897,7 @@ class TestDreamToolsWriteTracking:
         assert set(tools.tool_names) == {
             "apply_patch",
             "edit_file",
+            "memory",
             "read_file",
             "write_file",
         }
@@ -842,7 +1171,16 @@ class TestEphemeralDirect:
 
 
 class TestEphemeralHooks:
-    """When ephemeral=True, extra hooks must not fire."""
+    """Su un turno effimero cadono gli hook che **parlano**, non tutti.
+
+    Fino al 25/08 la condizione era ``not ephemeral`` secca, e l'unico hook extra
+    che l'installazione monta è la contabilità dei token: «effimero» voleva quindi
+    dire «non misurato». Misurato su ``token-usage.json``: in 27 giorni i bucket
+    ``dream`` e ``atlas`` non erano comparsi **una volta**, con Dream che gira ogni
+    due ore. Ora la scelta la dichiara l'hook (``runs_when_ephemeral()``), e il
+    default resta ``False`` — cioè il contratto qui sotto non è cambiato per chi
+    non dice niente.
+    """
 
     @pytest.fixture
     def _make_loop_with_spy(self, tmp_path):
@@ -866,6 +1204,12 @@ class TestEphemeralHooks:
 
         spy = MagicMock(spec=AgentHook)
         spy.wants_streaming.return_value = False
+        # **Esplicito, e non per pignoleria**: con ``spec=AgentHook`` un metodo non
+        # configurato torna un ``MagicMock``, che è *truthy* — quindi lo spy
+        # dichiarerebbe di voler restare sui turni effimeri senza che nessuno
+        # l'abbia deciso, e il test qui sotto proverebbe il contrario di quel che
+        # dice il suo nome.
+        spy.runs_when_ephemeral.return_value = False
         spy.before_iteration = AsyncMock()
         spy.after_iteration = AsyncMock()
 
@@ -895,6 +1239,23 @@ class TestEphemeralHooks:
         )
         spy.before_iteration.assert_not_called()
         spy.after_iteration.assert_not_called()
+
+    async def test_a_hook_that_opts_in_fires_on_an_ephemeral_turn(
+        self, tmp_path, _make_loop_with_spy
+    ):
+        """L'eccezione, ed è quella che vale il cambio: misurare non è parlare.
+
+        Il lavoro effimero — Dream, Atlas, la revisione, il giardiniere — è
+        esattamente quello che l'utente non ha chiesto e non vede arrivare, cioè
+        quello che conviene misurare di più. `TokenUsageHook` è l'unico che lo
+        dichiara.
+        """
+        loop, spy = _make_loop_with_spy
+        spy.runs_when_ephemeral.return_value = True
+
+        await loop.process_direct("test", session_key="dream:hook-test", ephemeral=True)
+
+        spy.after_iteration.assert_called()
 
     async def test_extra_hooks_fire_for_normal_sessions(self, tmp_path, _make_loop_with_spy):
         """Without ephemeral, extra hooks should fire normally."""
