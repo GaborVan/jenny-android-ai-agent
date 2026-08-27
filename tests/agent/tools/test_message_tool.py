@@ -743,3 +743,86 @@ async def test_a_refused_alert_does_not_burn_the_run_budget() -> None:
 
     assert "Message sent" in result
     assert [m.content for m in sent] == ["Acerello è al 9%, dagli acqua"]
+
+
+# --- macchina del template: niente da consegnare -------------------------------
+
+_TEMPLATE_LEAK = (
+    "<｜end▁of▁thinking｜>\n\n"
+    "<｜｜DSML｜｜tool_calls>\n"
+    '<｜｜DSML｜｜invoke name="complete_goal">\n'
+    '<｜｜DSML｜｜parameter name="recap" string="true">no'
+)
+
+
+@pytest.mark.asyncio
+async def test_a_template_leak_never_reaches_the_user() -> None:
+    """Misurato il 2026-08-26 alle 23:13:29 sul dispositivo: un turno heartbeat
+    ha consegnato in chat questo blocco come avviso proattivo — deepseek-v4 ha
+    scritto la propria markup di tool call (DSML) nel canale del contenuto
+    invece che in ``tool_calls``. Passava di qui: il tool chiamava già
+    ``strip_think``, che però non conosceva quei delimitatori."""
+    sent: list[OutboundMessage] = []
+    tool = _silent_tool(sent)
+
+    result = await tool.execute(content=_TEMPLATE_LEAK)
+
+    assert result.startswith("Error: nothing was delivered")
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_a_visible_turn_does_not_get_an_empty_bubble_either() -> None:
+    """Il rifiuto vale anche fuori dal contratto silenzioso: qui non si giudica
+    *cosa* dice il messaggio — dopo lo strip non è rimasto nulla da dire, e
+    consegnarlo sarebbe una bolla vuota."""
+    sent: list[OutboundMessage] = []
+    tool = _visible_tool(sent)
+
+    result = await tool.execute(content=_TEMPLATE_LEAK)
+
+    assert result.startswith("Error: nothing was delivered")
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_the_leak_refusal_does_not_burn_the_run_budget() -> None:
+    """Stessa asimmetria del rifiuto dei marcatori: il modello ha un altro
+    tentativo, altrimenti un leak zittirebbe l'avviso vero del ciclo."""
+    sent: list[OutboundMessage] = []
+    tool = _silent_tool(sent)
+
+    await tool.execute(content=_TEMPLATE_LEAK)
+    result = await tool.execute(content="Acerello è al 9%, dagli acqua")
+
+    assert "Message sent" in result
+    assert [m.content for m in sent] == ["Acerello è al 9%, dagli acqua"]
+
+
+@pytest.mark.asyncio
+async def test_a_leaked_marker_before_a_real_alert_is_only_trimmed() -> None:
+    """Il marcatore in testa è la forma più comune del leak (esce sul confine
+    fra ragionamento e risposta): l'avviso sotto va consegnato, pulito."""
+    sent: list[OutboundMessage] = []
+    tool = _silent_tool(sent)
+
+    result = await tool.execute(
+        content="<｜end▁of▁thinking｜>\n\nAcerello è al 9%, dagli acqua"
+    )
+
+    assert "Message sent" in result
+    assert [m.content for m in sent] == ["Acerello è al 9%, dagli acqua"]
+
+
+@pytest.mark.asyncio
+async def test_an_alert_that_quotes_the_markers_is_still_delivered() -> None:
+    """Il rovescio: parlare di quei token è un messaggio legittimo, e questo
+    tool consegna anche le spiegazioni che Jenny scrive all'utente."""
+    sent: list[OutboundMessage] = []
+    tool = _silent_tool(sent)
+    text = "papi, ieri sera è uscito un `<｜｜DSML｜｜tool_calls>` in chat: era il modello."
+
+    result = await tool.execute(content=text)
+
+    assert "Message sent" in result
+    assert [m.content for m in sent] == [text]

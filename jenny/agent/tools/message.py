@@ -283,7 +283,26 @@ class MessageTool(Tool, ContextAware):
     ) -> str:
         from jenny.utils.helpers import strip_think
 
+        raw_content = content
         content = strip_think(content)
+        # Se lo strip ha svuotato un testo che c'era, quel testo era SOLO
+        # macchina del template — marker di thinking o un blocco di tool call
+        # scritto come prosa (v. ``strip_think``, punti 7-8). Consegnarlo
+        # comunque vuol dire una bolla vuota in chat; rifiutare lascia al
+        # modello un altro tentativo, ed è la stessa asimmetria di
+        # ``_unusable_silent_alert``: un invio perso è recuperabile al giro
+        # dopo, un invio di macchina all'utente no. Vale su qualunque turno,
+        # silenzioso o visibile, perché qui non si giudica *cosa* dice il
+        # messaggio: non è rimasto nulla da dire.
+        if raw_content.strip() and not content.strip() and not media:
+            logger.info(
+                "MessageTool: template-leak-only content suppressed: {!r}", raw_content[:80]
+            )
+            return (
+                "Error: nothing was delivered — after removing template markers "
+                "(thinking tokens, tool-call markup) your message had no text left. "
+                "Write it as plain user-facing text and send it again."
+            )
 
         if buttons is not None:
             if not isinstance(buttons, list) or any(
