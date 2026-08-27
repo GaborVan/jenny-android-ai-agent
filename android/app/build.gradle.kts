@@ -50,7 +50,13 @@ android {
         // versionCode must increase monotonically on every published build.
         // versionName tracks the Python package version in pyproject.toml —
         // keep the two in sync when releasing.
-        versionCode = 12
+        //
+        // Il 12 e' saltato di proposito: non e' mai stato pubblicato, ma tre APK
+        // diversi lo portano gia' (vedi l'avviso sull'albero sporco piu' sotto) e
+        // uno di quelli e' installato. Pubblicare a 12 avrebbe significato non
+        // poter provare l'aggiornamento proprio sul dispositivo che lo riceve:
+        // l'updater pretende un codice STRETTAMENTE maggiore di quello installato.
+        versionCode = 13
         versionName = "0.9.0"
 
         ndk {
