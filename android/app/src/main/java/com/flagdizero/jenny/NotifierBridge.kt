@@ -32,18 +32,43 @@ class NotifierBridge(context: Context) {
         // (niente pila infinita per la stessa sorgente), tag diversi convivono.
         private const val ALERT_ID = 2
 
-        /** Cancella gli alert pendenti del canale. Lo chiama MainActivity dal
-         *  solo percorso in cui la chat viene davvero aperta (tap sull'alert,
-         *  ACTION_OPEN_CHAT), non da onResume: questa app è la home del
-         *  telefono e onResume scatta a ogni ritorno alla schermata iniziale,
-         *  su qualunque vista — cancellare lì voleva dire cancellare sempre.
+        /** Cancella gli alert pendenti del canale.
+         *
+         *  La regola è una sola, e vale la pena scriverla per esteso perché è
+         *  già stata sbagliata in due modi opposti: **si cancella quando la
+         *  chat è a schermo**, perché è lì che il messaggio si legge, e mai
+         *  perché l'app è tornata in primo piano.
+         *
+         *  Prima stava in ``onResume`` liscio: questa app è la home del
+         *  telefono, ``onResume`` scatta a ogni ritorno alla schermata iniziale
+         *  e su qualunque vista, quindi l'alert veniva cancellato comunque —
+         *  letto o no. Poi solo sul tap dell'alert (``ACTION_OPEN_CHAT``), che
+         *  è l'errore opposto: chi apriva la chat da sé si ritrovava in coda
+         *  notifiche di messaggi che aveva davanti agli occhi.
+         *
+         *  I tre chiamanti sono quindi i tre modi in cui la chat arriva a
+         *  schermo: il tap sull'alert (``onNewIntent`` e il suo gemello in
+         *  ``onCreate`` per l'activity morta), il cambio vista dentro la SPA
+         *  (``JennyNative.chatOpened``, da ``ChatController.activate``) e il
+         *  rientro in primo piano a chat **già** attiva (``onResume``, dietro
+         *  la domanda ``CHAT_ON_SCREEN_JS`` — che è ciò che lo distingue
+         *  dall'``onResume`` liscio di allora).
+         *
          *  Non tocca la notifica persistente del gateway, che vive su un altro
          *  canale. */
-        fun clearAlerts(context: Context) {
+        fun clearAlerts(context: Context, trigger: String) {
             val manager = context.getSystemService(NotificationManager::class.java) ?: return
-            manager.activeNotifications
-                .filter { it.notification.channelId == CHANNEL_ID }
-                .forEach { manager.cancel(it.tag, it.id) }
+            val pending = manager.activeNotifications.filter {
+                it.notification.channelId == CHANNEL_ID
+            }
+            pending.forEach { manager.cancel(it.tag, it.id) }
+            // Il *trigger* è il motivo per cui questa riga esiste. Postare logga
+            // solo i soppressi, e cancellare non loggava niente: da fuori
+            // "l'alert non c'è più" ha quattro spiegazioni indistinguibili — uno
+            // dei tre percorsi qui sotto, o il dito dell'utente sulla tendina.
+            // Misurato il 27/08/2026: la prima verifica di questa funzione è
+            // stata inconcludente esattamente per questo.
+            Log.d(TAG, "clearAlerts($trigger): cancelled ${pending.size} alert(s)")
         }
     }
 

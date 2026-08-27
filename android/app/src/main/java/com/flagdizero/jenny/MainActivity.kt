@@ -120,6 +120,22 @@ class MainActivity : AppCompatActivity() {
             })()
         """
 
+        /**
+         * La chat è la vista a schermo? È la domanda che separa questo
+         * ``onResume`` da quello di una volta (v. ``NotifierBridge.clearAlerts``):
+         * il ritorno in primo piano non dice niente su cosa l'utente stia
+         * guardando, e in un launcher scatta a ogni pressione di Home.
+         *
+         * Senza SPA caricata il risultato è ``null``, che non è ``"true"``:
+         * nessun alert viene cancellato, ed è la direzione d'errore giusta.
+         */
+        private const val CHAT_ON_SCREEN_JS = """
+            (function () {
+              var app = window.mobileApp;
+              return !!(app && app.currentMode === 'chat');
+            })()
+        """
+
         // Finestra minima fra due recuperi della SPA: il ricaricamento non è
         // istantaneo e senza questo una raffica di pressioni lo farebbe ripartire
         // da capo ogni volta, senza mai arrivare in fondo.
@@ -450,7 +466,7 @@ class MainActivity : AppCompatActivity() {
         // buildGatewayUrl). La chat si aprirà: gli alert sono consumati.
         if (intent?.action == ACTION_OPEN_CHAT) {
             openChatOnLoad = true
-            NotifierBridge.clearAlerts(this)
+            NotifierBridge.clearAlerts(this, "cold-start-alert-tap")
         }
 
         // Catena, non due chiamate: ensureNotificationPermission() invoca
@@ -530,7 +546,7 @@ class MainActivity : AppCompatActivity() {
         if (intent?.action == ACTION_OPEN_CHAT) {
             webView?.evaluateJavascript(OPEN_CHAT_JS) { result ->
                 if (result?.trim() == "true") {
-                    NotifierBridge.clearAlerts(this@MainActivity)
+                    NotifierBridge.clearAlerts(this@MainActivity, "alert-tap")
                 } else {
                     Log.w(TAG, "Alert tap could not reach the SPA; chat not opened")
                 }
@@ -565,11 +581,21 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         isInForeground = true
-        // Qui NON si cancellano gli alert pendenti: v. il ramo ACTION_OPEN_CHAT
-        // in onNewIntent. Questa è la home del telefono, onResume scatta a ogni
-        // ritorno alla schermata iniziale e su qualunque vista — non è una
-        // prova che il messaggio sia stato letto.
         webView?.onResume()
+        // Terzo modo in cui la chat arriva a schermo: il rientro in primo piano
+        // con la chat GIÀ attiva. Non passa da nessun cambio vista, quindi
+        // ChatController.activate() non viene chiamato e la SPA non ha niente da
+        // notificare — questo ramo è l'unico che lo copre.
+        //
+        // La domanda è ciò che lo rende diverso dall'onResume che c'era prima:
+        // non si cancella perché siamo tornati in primo piano (in un launcher
+        // vuol dire "ha premuto Home", su qualunque vista), si cancella perché
+        // la chat è quello che l'utente ha davanti. Asincrono per forza — la
+        // risposta arriva dal thread JS — e va bene: un alert cancellato una
+        // frazione di secondo dopo il resume è indistinguibile.
+        webView?.evaluateJavascript(CHAT_ON_SCREEN_JS) { result ->
+            if (result?.trim() == "true") NotifierBridge.clearAlerts(this, "resume-on-chat")
+        }
         // Pacchetti installati/disinstallati mentre eravamo dietro (tipicamente
         // l'uninstaller di sistema): ora la SPA può aggiornare la griglia.
         flushPackageNotices()
@@ -862,6 +888,21 @@ class MainActivity : AppCompatActivity() {
                 wv.systemGestureExclusionRects =
                     if (r > l && b > t) listOf(android.graphics.Rect(l, t, r, b)) else emptyList()
             }
+        }
+
+        /**
+         * La SPA è entrata in chat (``ChatController.activate``). Secondo dei tre
+         * modi in cui la chat arriva a schermo, e l'unico che il guscio nativo
+         * non può vedere da sé: un cambio vista dentro la WebView non produce
+         * nessun callback d'activity.
+         *
+         * ``NotificationManager`` è thread-safe, quindi non serve saltare sul
+         * thread UI come fanno i metodi qui sopra — quelli toccano la WebView e
+         * la finestra, questo no.
+         */
+        @JavascriptInterface
+        fun chatOpened() {
+            NotifierBridge.clearAlerts(this@MainActivity, "chat-view-opened")
         }
 
         @JavascriptInterface
