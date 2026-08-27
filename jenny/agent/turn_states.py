@@ -75,6 +75,7 @@ class StateHandlersMixin:
             *,
             turn_latency_ms: int | None = None,
         ) -> OutboundMessage | None: ...
+        def _message_tool_spoke(self, tools: ToolRegistry | None = None) -> bool: ...
         async def _build_bus_progress_callback(
             self, msg: InboundMessage
         ) -> Callable[..., Awaitable[None]]: ...
@@ -407,17 +408,14 @@ class StateHandlersMixin:
 
     async def _state_respond(self, ctx: TurnContext) -> str:
         # "Ha parlato" si legge dal MessageTool: una consegna verso il target
-        # d'origine in questo turno. Il registry del turno viene prima di quello
-        # di default — il flag ``_sent_in_turn`` sta in una ContextVar *per
-        # istanza*, quindi con un registry sostituito (l'idioma di Dream/Atlas)
-        # leggere l'istanza di default darebbe sempre ``False`` e un turno
-        # silenzioso che ha parlato risulterebbe muto. Calcolato sempre, non solo
-        # per i monitor: e' cio da cui ``_process_message`` costruisce il
-        # ``TurnOutcome``, e prima viaggiava contrabbandato nei metadata inbound.
-        message_tool = (ctx.tools or self.tools).get("message")
-        ctx.spoke_via_tool = bool(
-            isinstance(message_tool, MessageTool) and message_tool._sent_in_turn
-        )
+        # d'origine in questo turno. Si passa il registry del TURNO, che qui c'è e
+        # va preferito a quello di default (il perché sta nella docstring di
+        # ``_message_tool_spoke``: con un registry sostituito la lettura
+        # sbagliata dà sempre ``False``, e un turno silenzioso che ha parlato
+        # risulterebbe muto). Calcolato sempre, non solo per i monitor: e' cio da
+        # cui ``_process_message`` costruisce il ``TurnOutcome``, e prima
+        # viaggiava contrabbandato nei metadata inbound.
+        ctx.spoke_via_tool = self._message_tool_spoke(ctx.tools)
         if ctx.suppress_response:
             ctx.outbound = None
             return "ok"

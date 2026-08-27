@@ -1104,6 +1104,18 @@ export class ChatController {
     // scrollToBottom() un no-op); riallinea lo scroll ora che la vista è di nuovo visibile.
     if (this._autoScroll) this.scrollToBottom(true);
     else this._restoreScrollAnchor();
+
+    /* La chat è a schermo: gli avvisi di sistema che la annunciavano hanno
+       finito il loro lavoro, e restare in coda vuol dire chiedere all'utente di
+       scartare a mano notifiche di messaggi che ha davanti agli occhi. La regola
+       completa e i suoi tre chiamanti stanno nella docstring di
+       `NotifierBridge.clearAlerts`; il gemello di questa riga è in
+       `MainActivity.onResume`, per il rientro a chat già attiva — dove nessun
+       cambio vista avviene e quindi qui non si passa.
+
+       Fuori dal guscio nativo (browser, test) `JennyNative` non esiste: l'optional
+       chaining basta, il try è per un guscio che esponga il ponte ma sollevi. */
+    try { window.JennyNative?.chatOpened?.(); } catch (e) { /* nessun guscio nativo */ }
   }
 
   /* Posizione di lettura della chat, misurata come distanza dal fondo.
@@ -1658,15 +1670,31 @@ export class ChatController {
 
     if (msg.text && msg.kind !== 'tool_hint') {
       this._ensureAiMessage();
-      if (!this._currentContent) {
-        const content = document.createElement('div');
-        content.className = 'chat-content';
-        this._currentMsg.appendChild(content);
-        this._currentContent = content;
-      }
-      this._currentContent.innerHTML = renderMarkdown(msg.text);
-      renderKaTeX(this._currentContent);
-      this._makeFilePathsClickable(this._currentContent);
+      /* Un `message` è un testo COMPLETO: va in un blocco suo, e quel blocco si
+         chiude subito. Prima il ramo riusava `_currentContent` quando c'era e ce
+         lo lasciava appeso, e da lì il difetto misurato il 27/08/2026 sul cron
+         delle 20:00: l'avviso consegnato dal tool `message` (`turn_seq 4`) e poi
+         i delta della narrazione del modello ("l'ho chiamato, aspetto la
+         risposta") nello STESSO turno — stesso `turn_id`, quindi nessun confine
+         di turno e nessun `_resetStreamState`. `_handleDelta` trovava il blocco
+         già dipinto, non ne apriva uno nuovo, e `_flushRender` scriveva la
+         narrazione SOPRA l'avviso: in chat restava il solo testo di servizio,
+         mentre notifica Android e transcript avevano quello vero. Lo stesso
+         riuso cancellava il primo di due `message` nello stesso turno.
+
+         L'asimmetria che decide la forma della fix: un blocco che si chiude non
+         perde niente, un blocco riusato perde tutto. È la stessa disciplina di
+         `_handleStreamEnd`, e un segmento di stream ancora aperto si chiude
+         proprio da lì — che il buffer lo rende per intero, quindi non se ne
+         perde la coda. */
+      if (this._deltaBuffer) this._handleStreamEnd();
+      const content = document.createElement('div');
+      content.className = 'chat-content';
+      this._currentMsg.appendChild(content);
+      content.innerHTML = renderMarkdown(msg.text);
+      renderKaTeX(content);
+      this._makeFilePathsClickable(content);
+      // `_currentContent` resta null: il delta successivo apre il proprio blocco.
     }
 
     if (msg.media_urls?.length) {

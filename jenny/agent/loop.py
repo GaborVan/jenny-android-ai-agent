@@ -1726,6 +1726,21 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
                             return f"{stream_base_id}:{stream_segment}"
 
                         async def on_stream(delta: str) -> None:
+                            # Secondo gate, sullo stesso asse del primo: là si
+                            # decideva se streammare un turno, qui se streammare
+                            # ancora. Da quando il tool ``message`` ha consegnato
+                            # nella conversazione corrente, il testo finale del
+                            # turno viene soppresso (v. ``_assemble_outbound``) —
+                            # e ciò che il modello scrive dopo è una nota di
+                            # servizio rivolta a se stesso, non all'utente.
+                            # Streammarla comunque rendeva la WebUI l'unica
+                            # superficie che la vedeva, e — finché
+                            # ``_handleMessage`` riusava la bolla — la vedeva *al
+                            # posto* dell'avviso. Misurato il 27/08/2026 sul cron
+                            # delle 20:00: in chat "L'ho chiamato, aspetto la sua
+                            # risposta", su notifica e transcript l'avviso vero.
+                            if self._message_tool_spoke():
+                                return
                             meta = dict(msg.metadata or {})
                             meta["_stream_delta"] = True
                             meta["_stream_id"] = _current_stream_id()
@@ -2007,10 +2022,7 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             ephemeral=False,
             clear_pending=False,
         )
-        message_tool = self.tools.get("message")
-        spoke_via_tool = bool(
-            isinstance(message_tool, MessageTool) and message_tool._sent_in_turn
-        )
+        spoke_via_tool = self._message_tool_spoke()
         if silent:
             # Un turno di sistema silenzioso non ha un outbound: ne il contenuto
             # ne il fallback. Il vecchio contratto ("restituisce SEMPRE una
@@ -2186,6 +2198,23 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             final_text=ctx.final_content or "",
         )
 
+    def _message_tool_spoke(self, tools: ToolRegistry | None = None) -> bool:
+        """Il tool ``message`` ha già consegnato verso il target d'origine in questo turno.
+
+        Lettore unico del flag, e non è un accorpamento estetico: da questo booleano
+        pendono tre decisioni che devono restare la stessa decisione — il gate dello
+        stream in :meth:`_dispatch`, la soppressione della risposta finale qui sotto e
+        il ``_streamed`` con cui il dispatcher decide se ri-consegnarla. Se divergessero
+        di un caso, la WebUI mostrerebbe di nuovo qualcosa che gli altri canali non
+        hanno (o, nel verso opposto, non mostrerebbe niente).
+
+        *tools* esiste perché il flag vive in una ContextVar **per istanza**: con un
+        registry sostituito (l'idioma di Dream/Atlas) leggere l'istanza di default
+        darebbe sempre ``False``. Chi ha il registry del turno lo passa.
+        """
+        mt = (tools or self.tools).get("message")
+        return isinstance(mt, MessageTool) and mt._sent_in_turn
+
     def _assemble_outbound(
         self,
         msg: InboundMessage,
@@ -2199,7 +2228,8 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
     ) -> OutboundMessage | None:
         """Assemble the final outbound message from turn results."""
         # MessageTool suppression
-        if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
+        tool_spoke = self._message_tool_spoke()
+        if tool_spoke:
             if not had_injections or stop_reason == "empty_final_response":
                 return None
 
@@ -2207,7 +2237,13 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
 
         meta = dict(msg.metadata or {})
-        if on_stream is not None and stop_reason not in {"error", "tool_error"}:
+        # ``_streamed`` dice al dispatcher "i client l'hanno già visto arrivare a
+        # pezzi, non ri-spedirlo" (``dispatcher.py``). Non basta che un canale di
+        # stream *esistesse*: se il tool ha parlato, il gate in ``_dispatch`` ha
+        # scartato i delta, e siamo qui solo nell'unico caso in cui la soppressione
+        # non scatta — tool + injection utente a metà turno. Segnarlo streammato
+        # farebbe scartare al dispatcher un testo che nessuno ha mai visto.
+        if on_stream is not None and not tool_spoke and stop_reason not in {"error", "tool_error"}:
             meta["_streamed"] = True
         if turn_latency_ms is not None:
             meta["latency_ms"] = int(turn_latency_ms)
