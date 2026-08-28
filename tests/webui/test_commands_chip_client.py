@@ -143,6 +143,87 @@ class Chip {
 """
 
 
+_ALIGN_HARNESS = """
+import assert from 'node:assert/strict';
+
+/* Le tre misure che `_alignToChip` legge, e l'unica che scrive. */
+function makeChip({ chipLeft, menuWidth, rowWidth }) {
+  const chip = {
+    menu: { offsetWidth: menuWidth, offsetParent: { clientWidth: rowWidth }, style: {} },
+    el: { offsetLeft: chipLeft },
+    __ALIGN__,
+  };
+  return chip;
+}
+const leftOf = (chip) => parseInt(chip.menu.style.left, 10);
+"""
+
+
+def _align_harness() -> str:
+    return _ALIGN_HARNESS.replace("__ALIGN__", _member(_chip(), "_alignToChip"))
+
+
+def _run_align(script: str) -> None:
+    source = _align_harness() + "\n" + script
+    proc = subprocess.run(
+        [str(_NODE), "--input-type=module", "-e", source],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+
+
+# ── 5. Il pannello sta sopra il suo chip ─────────────────────────────────────
+
+
+def test_the_panel_starts_where_the_chip_starts() -> None:
+    """Bordo sinistro con bordo sinistro, come la tendina dello scope.
+
+    In CSS non si può dire: il contenitore posizionato è `.compose-scope`, larga
+    tutta la riga, quindi `left: 0` è il bordo della *riga*. Misurato sul
+    telefono il 28/08 con `right: 0`: chip 236..364 CSS px, pannello 359..700 —
+    accanto, non sopra.
+    """
+    _run_align("""
+      const chip = makeChip({ chipLeft: 236, menuWidth: 340, rowWidth: 690 });
+      chip._alignToChip();
+      assert.equal(leftOf(chip), 236);
+    """)
+
+
+def test_it_stays_inside_the_row_when_the_chip_is_too_far_right() -> None:
+    """Su uno schermo stretto i due desideri sono incompatibili: vince restare a schermo.
+
+    Un pannello agganciato al chip e uscito dal bordo destro perde la fine delle
+    descrizioni, cioè il motivo per cui la tendina esiste.
+    """
+    _run_align("""
+      const chip = makeChip({ chipLeft: 236, menuWidth: 340, rowWidth: 350 });
+      chip._alignToChip();
+      assert.equal(leftOf(chip), 10, 'il pannello deve appoggiarsi al margine destro');
+    """)
+
+
+def test_it_never_goes_negative() -> None:
+    """Pannello più largo della riga: al bordo sinistro, non fuori dallo schermo."""
+    _run_align("""
+      const chip = makeChip({ chipLeft: 40, menuWidth: 400, rowWidth: 300 });
+      chip._alignToChip();
+      assert.equal(leftOf(chip), 0);
+    """)
+
+
+def test_it_does_nothing_without_a_positioned_row() -> None:
+    """`offsetParent` è null su un elemento non ancora in pagina: non si scrive nulla."""
+    _run_align("""
+      const chip = makeChip({ chipLeft: 236, menuWidth: 340, rowWidth: 690 });
+      chip.menu.offsetParent = null;
+      chip._alignToChip();
+      assert.equal(chip.menu.style.left, undefined);
+    """)
+
+
 def _harness() -> str:
     src = _chip()
     return (

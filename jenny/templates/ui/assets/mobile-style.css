@@ -838,11 +838,18 @@ body {
 }
 .scope-menu.open,
 .commands-menu.open { display: flex; }
-/* Ancorata a destra, dove sta il suo chip. **Dopo** la regola condivisa qui
-   sopra e non nel blocco del chip: `left: 0` ha la stessa specificita', quindi
-   a decidere e' l'ordine — scritta prima, la tendina dei comandi si apriva dal
-   bordo opposto a quello che l'aveva aperta (visto sul telefono, 28/08). */
-.commands-menu { left: auto; right: 0; }
+/* La posizione orizzontale la scrive `commands-chip.js::_alignToChip()` a ogni
+   apertura: il pannello si allinea al **suo chip**, non a un bordo della riga.
+   Qui resta solo il valore di partenza, per l'istante prima della misura.
+
+   Perche' non basta il CSS: il contenitore posizionato e' `.compose-scope`, che
+   e' larga tutta la riga, quindi `left: 0` ancora il pannello al bordo sinistro
+   della *riga* e `right: 0` a quello destro — e il chip dei comandi non sta su
+   nessuno dei due (misurato sul telefono il 28/08: chip 236..364 CSS px,
+   pannello 359..700, cioe' accanto al chip invece che sopra). Lo scope chip non
+   ha il problema solo perche' e' il primo elemento della riga, quindi `left: 0`
+   e' gia' il suo bordo. */
+.commands-menu { left: 0; right: auto; }
 /* Scorre solo l'elenco dei progetti: "personale" in cima e "nuovo" in fondo
    restano fermi, perche' sono le due voci che si cercano senza guardare. */
 .scope-menu-scroll,

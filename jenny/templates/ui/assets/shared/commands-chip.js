@@ -90,8 +90,37 @@ export class CommandsChip {
     this.menu.classList.add('open');
     this.el.setAttribute('aria-expanded', 'true');
     this._renderMenu();                 // subito, con quel che c'è in cache
+    this._alignToChip();
     await this._load();
-    if (this._open) this._renderMenu();
+    if (this._open) {
+      this._renderMenu();
+      // Di nuovo dopo la lista vera: la larghezza del pannello cambia con il
+      // contenuto, e il vincolo che lo tiene dentro la riga dipende da quella.
+      this._alignToChip();
+    }
+  }
+
+  /* Il pannello si allinea al **suo chip**, bordo sinistro con bordo sinistro.
+   *
+   * In CSS non si può dire: il contenitore posizionato è `.compose-scope`, larga
+   * tutta la riga, quindi `left: 0` è il bordo della *riga* e `right: 0` quello
+   * opposto — e questo chip non sta su nessuno dei due. Misurato sul telefono il
+   * 28/08: il pannello si apriva accanto al chip, con in comune solo lo spigolo.
+   * Lo scope chip non ha il problema perché è il primo elemento della riga.
+   *
+   * Il secondo termine è il vincolo: allineato al chip, ma **dentro la riga**.
+   * Senza, su uno schermo stretto un pannello da 340px agganciato a un chip a
+   * due terzi della riga uscirebbe dal bordo destro — e quel che si perde è la
+   * fine delle descrizioni, cioè il motivo per cui la tendina esiste. Quando i
+   * due desideri sono incompatibili vince restare a schermo, e il pannello si
+   * appoggia al margine destro: è il comportamento che ogni popover ha al bordo.
+   */
+  _alignToChip() {
+    const row = this.menu.offsetParent;   // .compose-scope
+    if (!row) return;
+    const available = row.clientWidth - this.menu.offsetWidth;
+    const left = Math.max(0, Math.min(this.el.offsetLeft, available));
+    this.menu.style.left = `${left}px`;
   }
 
   close() {
