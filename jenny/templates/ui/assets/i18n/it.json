@@ -34,7 +34,8 @@
     "scrollToBottom": "Vai in fondo",
     "newChat": "Nuova chat",
     "newChatConfirm": "Iniziare una chat nuova? Jenny smette di ricordare quel che è stato detto finora. La conversazione non viene cancellata: si rilegge scorrendo in su.",
-    "newChatConfirmOk": "Nuova chat"
+    "newChatConfirmOk": "Nuova chat",
+    "loadPrevious": "Mostra la conversazione precedente"
   },
   "commands": {
     "label": "Comandi",

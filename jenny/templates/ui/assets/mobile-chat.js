@@ -768,6 +768,7 @@ export class ChatController {
       this._renderThreadMessages(thread.messages || []);
       this.historyCursor = thread.page?.before_cursor || null;
       this.hasMoreHistory = thread.page?.has_more_before !== false;
+      this._ensureHistoryReach();
       this.scrollToBottom(true);
     } catch (err) {
       // Anche il fallimento è di una conversazione sola: riaprire il latch
@@ -788,6 +789,42 @@ export class ChatController {
     } finally {
       this._loadingInitialHistory = false;
     }
+  }
+
+  /* Il modo di raggiungere la pagina precedente **quando non si può scorrere**.
+
+     `setupInfiniteScroll` aspetta un evento `scroll` con `scrollTop === 0`, e un
+     contenitore che non trabocca non ne emette nessuno: la pagina più vecchia
+     esiste, il client sa che esiste (`hasMoreHistory`), e non c'è gesto che
+     possa chiederla. Prima non si notava perché la prima pagina è lunga; da
+     quando `/new` fa ripartire la chat dal separatore è lo **stato normale
+     subito dopo un reset** — tre righe a schermo e la conversazione di prima
+     irraggiungibile, cioè la stessa cancellazione apparente che questo disegno
+     esiste per non fare.
+
+     Un bottone e non un allungamento artificiale del contenuto: la riga dice
+     cosa c'è sopra, e sparisce da sola appena la chat cresce abbastanza da
+     rendere di nuovo possibile il gesto. */
+  _ensureHistoryReach() {
+    const existing = this.chatArea.querySelector('.chat-history-more');
+    const canScroll = this.chatArea.scrollHeight > this.chatArea.clientHeight + 4;
+    if (!this.hasMoreHistory || canScroll) {
+      existing?.remove();
+      return;
+    }
+    if (existing) return;
+    const btn = document.createElement('button');
+    btn.className = 'chat-history-more';
+    btn.type = 'button';
+    btn.textContent = i18n.t('chat.loadPrevious');
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      await this.loadMoreHistory();
+      // `loadMoreHistory` richiama `_ensureHistoryReach`, che toglie questo
+      // nodo quando non serve più; se serve ancora (pagina corta) va riabilitato.
+      btn.disabled = false;
+    });
+    this._insertAtTop(btn);
   }
 
   /* La riga «storia non caricata», al posto della chat vuota che mentiva.
@@ -831,6 +868,7 @@ export class ChatController {
       this._renderThreadMessagesToTop(messages);
       this.historyCursor = thread.page?.before_cursor || null;
       this.hasMoreHistory = thread.page?.has_more_before !== false;
+      this._ensureHistoryReach();
       const scrollHeightAfter = this.chatArea.scrollHeight;
       this.chatArea.scrollTop = scrollHeightAfter - scrollHeightBefore;
     } catch (err) {

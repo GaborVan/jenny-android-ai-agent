@@ -34,7 +34,8 @@
     "scrollToBottom": "Jump to bottom",
     "newChat": "New chat",
     "newChatConfirm": "Start a new chat? Jenny stops remembering everything said so far. The conversation is not deleted — scroll up to read it again.",
-    "newChatConfirmOk": "New chat"
+    "newChatConfirmOk": "New chat",
+    "loadPrevious": "Show the previous conversation"
   },
   "commands": {
     "label": "Commands",

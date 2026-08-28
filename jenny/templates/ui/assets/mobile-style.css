@@ -764,9 +764,6 @@ body {
 }
 .commands-chip-mark { flex-shrink: 0; font-size: 12px; line-height: 1; }
 .commands-chip-label { font-weight: 500; white-space: nowrap; }
-/* Ancorata a destra, dove sta il chip: `left: 0` (ereditato dal pannello dello
-   scope) la faceva partire dal bordo opposto a quello che l'ha aperta. */
-.commands-menu { left: auto; right: 0; }
 /* Il comando e' un letterale da digitare, non prosa: monospazio, come ogni
    altro frammento di codice nell'interfaccia. */
 .commands-menu-name { font-family: var(--font-mono); font-size: 11.5px; }
@@ -841,6 +838,11 @@ body {
 }
 .scope-menu.open,
 .commands-menu.open { display: flex; }
+/* Ancorata a destra, dove sta il suo chip. **Dopo** la regola condivisa qui
+   sopra e non nel blocco del chip: `left: 0` ha la stessa specificita', quindi
+   a decidere e' l'ordine — scritta prima, la tendina dei comandi si apriva dal
+   bordo opposto a quello che l'aveva aperta (visto sul telefono, 28/08). */
+.commands-menu { left: auto; right: 0; }
 /* Scorre solo l'elenco dei progetti: "personale" in cima e "nuovo" in fondo
    restano fermi, perche' sono le due voci che si cercano senza guardare. */
 .scope-menu-scroll,
@@ -1715,6 +1717,26 @@ body {
   color: var(--text-muted);
   white-space: nowrap;
 }
+
+/* «Mostra la conversazione precedente»: compare solo quando c'è una pagina più
+   vecchia e la chat non è abbastanza lunga da poterla scorrere (v.
+   `_ensureHistoryReach`), che è lo stato subito dopo `/new`. Discreta come il
+   separatore che le sta sotto: è un modo di tornare indietro, non un invito. */
+.chat-history-more {
+  display: block;
+  margin: 8px auto 2px;
+  padding: 5px 12px;
+  background: var(--overlay);
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius-pill);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  color: var(--text-muted);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.chat-history-more:hover { background: var(--overlay-strong); }
+.chat-history-more:disabled { opacity: .5; }
 
 /* Identity line — first scrollable element of the chat */
 .chat-identity {
