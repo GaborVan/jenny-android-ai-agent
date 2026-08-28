@@ -22,7 +22,6 @@ import { api } from './api-client.js';
 import { rpc } from './rpc-client.js';
 import { escapeHtml, showToast } from './utils.js';
 import { confirmDialog, detailDialog, promptDialog } from './dialog.js';
-import { setupLongPress } from './longpress.js';
 import { deleteProjectFlow } from './project-delete.js';
 
 /** Cartella che ospita i progetti, finche' il backend non dice la sua.
@@ -395,17 +394,14 @@ export class ScopeChip {
           active,
           onPick: () => this.select({ kind: 'project', name: project.name }),
         });
+        if (active) activeEl = item;
         /* Un progetto si cancella da dove lo si è creato.
            Fino alla 0.9.x la sola strada era il file manager, dopo aver saputo
            che i progetti vivono in `wikis/`: chi ne apriva uno per sbaglio non
-           trovava la via indietro (issue #11). Long-press e non un cestino
-           sulla riga: è l'idioma dell'app (griglia delle app, explorer del
-           workspace) ed è quello giusto qui, dove ogni riga è anzitutto una
-           *scelta* e un bersaglio distruttivo permanente accanto al nome si
-           sbaglia con il pollice. */
-        this._attachDelete(item, project.name);
-        if (active) activeEl = item;
-        list.appendChild(item);
+           trovava la via indietro (issue #11). Un tasto **visibile** e non una
+           pressione lunga: un gesto che non si vede non è una risposta a «non
+           trovavo come si fa», che è la domanda da cui nasce tutto questo. */
+        list.appendChild(this._projectRow(item, project.name));
       }
     }
     /* Le cartelle che ci sono ma non si aprono, in fondo all'elenco.
@@ -544,12 +540,6 @@ export class ScopeChip {
     btn.appendChild(check);
 
     btn.addEventListener('click', () => {
-      // Il tap sintetico che segue un long-press non deve *entrare* nel
-      // progetto sotto la domanda appena aperta: il flag lo posa
-      // `setupLongPress` (v. `_attachDelete`), qui lo si consuma. Stessa
-      // guardia dell'explorer del workspace; sulle righe senza pressione lunga
-      // il flag non esiste e questo ramo non si vede mai.
-      if (btn.dataset.longpress) { delete btn.dataset.longpress; return; }
       this.close();
       onPick();
     });
@@ -594,16 +584,36 @@ export class ScopeChip {
    *  ma e' uno schermo che dice il falso, ed e' il tipo di falso che poi si
    *  scambia per il difetto che questa cancellazione e' venuta a chiudere.
    */
-  /** Long-press su una riga progetto: la cancellazione, e il seguito che è di
-   *  questa tendina — uscire dallo scope se era quello aperto, e ridisegnare
-   *  l'elenco che non ha più quella voce.
+  /** Una riga progetto: la scelta, e accanto il modo di cancellarla.
    *
-   *  `dataset.longpress` lo posa `setupLongPress` e lo consuma il click: senza
-   *  quel consumo il tap sintetico che segue la pressione lunga *entrerebbe*
-   *  nel progetto un istante dopo aver aperto la domanda, cioè cambierebbe
-   *  conversazione sotto la finestra. È la stessa guardia dell'explorer. */
-  _attachDelete(item, name) {
-    setupLongPress(item, async () => {
+   *  Due `<button>` affiancati e non uno dentro l'altro — un bottone dentro un
+   *  bottone non è markup valido, ed è la stessa ragione per cui l'explorer del
+   *  workspace fa la cella con un `div`. Il cestino è spento (`--text-faint`) e
+   *  separato dal nome: si vede, ma non è la cosa che l'occhio incontra per
+   *  prima su una riga che serve soprattutto a *entrare* nel progetto.
+   *
+   *  La domanda di conferma non è qui: la fa `deleteProjectFlow`, che è la
+   *  stessa dei due chiamanti e nomina quante conversazioni si porta via. Qui
+   *  c'è solo il seguito che appartiene a questa tendina — uscire dallo scope se
+   *  era quello aperto, e ridisegnare un elenco che nomina ancora un progetto
+   *  che non c'è più. */
+  _projectRow(item, name) {
+    const row = document.createElement('div');
+    row.className = 'scope-menu-row';
+    row.appendChild(item);
+
+    const del = document.createElement('button');
+    del.className = 'scope-menu-del';
+    del.type = 'button';
+    del.setAttribute('aria-label', i18n.t('scope.deleteProject', { name }));
+    const icon = document.createElement('i');
+    icon.className = 'ti ti-trash';
+    del.appendChild(icon);
+    del.addEventListener('click', async (e) => {
+      // Il click non deve arrivare alla riga sotto: entrare nel progetto un
+      // istante prima di chiedere se cancellarlo cambierebbe conversazione
+      // sotto la finestra di conferma.
+      e.stopPropagation();
       this.close();
       if (!(await deleteProjectFlow(name))) return;
       if (!this.leaveIfSelected(name)) {
@@ -614,6 +624,8 @@ export class ScopeChip {
       }
       showToast(i18n.t('workspace.deletedProject', { name }), 'success');
     });
+    row.appendChild(del);
+    return row;
   }
 
   leaveIfSelected(name) {

@@ -934,6 +934,35 @@ body {
 .scope-menu-check { flex-shrink: 0; font-size: 14px; color: var(--accent); }
 .scope-menu-item[data-active="0"] .scope-menu-check { visibility: hidden; }
 .scope-menu-new .scope-menu-name { color: var(--text-muted); }
+/* Riga progetto: la scelta e, accanto, il modo di cancellarla. Il cestino è
+   **sempre visibile**: il `⋮` dell'explorer del workspace si mostra solo su
+   `.ws-item:hover`, che su un touchscreen non scatta mai — lì è arredamento, e
+   ripeterlo qui vorrebbe dire rispondere «non trovavo come si fa» con un altro
+   comando invisibile. Spento e staccato dal nome, però: la riga serve
+   soprattutto a *entrare* nel progetto. */
+.scope-menu-row { display: flex; align-items: center; }
+.scope-menu-row .scope-menu-item { flex: 1; min-width: 0; }
+.scope-menu-del {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  margin-right: 2px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 14px;
+  cursor: pointer;
+  transition: background .12s, color .12s;
+  -webkit-tap-highlight-color: transparent;
+}
+.scope-menu-del:hover,
+.scope-menu-del:focus-visible { background: var(--overlay-strong); color: var(--error); outline: none; }
+.scope-menu-del:active { transform: scale(0.92); }
 /* Le cartelle che ci sono ma non si aprono: si leggono e non si toccano.
    Più spente di "Nuovo progetto..." (`--text-muted`), che è un'azione: questa
    riga non è un'azione, ed è la sola riga della tendina che non fa niente.

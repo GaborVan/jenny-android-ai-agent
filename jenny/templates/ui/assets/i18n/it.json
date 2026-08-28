@@ -738,7 +738,8 @@
     "leftoverChatBody": "Sotto questo nome c'è ancora la chat di un progetto che non c'è più: {count} messaggi. Posso riprenderla — se l'avevi cancellato per sbaglio è tutta lì — oppure partire pulito e buttarla.",
     "leftoverChatBodyNoCount": "Sotto questo nome c'è ancora la chat di un progetto che non c'è più. Posso riprenderla — se l'avevi cancellato per sbaglio è tutta lì — oppure partire pulito e buttarla.",
     "leftoverChatKeep": "Riprendila",
-    "leftoverChatDiscard": "Parti pulito"
+    "leftoverChatDiscard": "Parti pulito",
+    "deleteProject": "Elimina il progetto {name}"
   },
   "write": {
     "write": "Scrive",

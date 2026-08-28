@@ -143,7 +143,12 @@ def test_the_two_anchors_stay_out_of_the_scroller() -> None:
     assert personal < listed < new, "la lista che scorre deve stare in mezzo alle due voci fisse"
     for pinned in ("this._item({\n      name: this.personalLabel", "add.classList.add"):
         assert pinned in body
-    assert "list.appendChild(item)" in body, "i progetti vanno dentro il riquadro che scorre"
+    # La riga di un progetto e' un contenitore (`_projectRow`: la scelta piu' il
+    # tasto elimina), non piu' il bottone nudo — ma deve continuare a finire
+    # dentro il riquadro che scorre, che e' quel che questo test difende.
+    assert re.search(r"list\.appendChild\(this\._projectRow\(", body), (
+        "i progetti vanno dentro il riquadro che scorre"
+    )
 
 
 def test_the_open_menu_shows_where_you_are() -> None:

@@ -125,12 +125,17 @@ class Chip {
   render() { this.rendered++; }   // il chip in sé non è oggetto di questi test
   get personalLabel() { return i18n.t('scope.personal'); }
   select() {}
-  /* Il gesto di cancellazione non è oggetto di questi test — che guardano
-     *cosa* la tendina scrive — e il metodo vero tira dentro `setupLongPress` e
-     il flusso di `project-delete.js`. Qui è un innesto muto: se un giorno
-     `_renderMenu` cominciasse a *dipendere* da quel che fa, questo stub tornerà
-     a farsi notare. */
-  _attachDelete() {}
+  /* La riga di un progetto avvolge la scelta e il tasto elimina. Qui il
+     contenitore c'è (i test contano i nodi per classe, e uno in mezzo cambia
+     l'albero) ma il tasto no: il flusso di cancellazione non è oggetto di
+     questi test, che guardano *cosa* la tendina scrive. Il tasto ha i suoi in
+     `test_scope_chip_delete_client.py`. */
+  _projectRow(item) {
+    const row = makeEl('div');
+    row.className = 'scope-menu-row';
+    row.appendChild(item);
+    return row;
+  }
   __LOAD_PROJECTS__
   __RENDER_MENU__
   __LABEL__
