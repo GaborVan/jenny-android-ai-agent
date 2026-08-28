@@ -3175,8 +3175,25 @@ export class ChatController {
       this._updateActions();
       return;
     }
+    this._sendCommandLine(command);
+  }
+
+  /* Una riga di comando, senza portarsi via quel che c'era nel composer.
+   *
+   * Il testo che si stava scrivendo torna dov'era e gli allegati non partono
+   * (v. `sendMessage`): un comando non è un messaggio, e il pulsante che lo
+   * manda sta a un pollice dalla graffetta. Chi aveva scritto mezza domanda e
+   * ha toccato «Nuova chat» la ritrova nella chat nuova, che è il posto giusto
+   * per mandarla. */
+  async _sendCommandLine(command) {
+    const draft = this.input.value;
     this.input.value = command;
-    this.sendMessage();
+    await this.sendMessage({ attachments: false });
+    if (!draft.trim()) return;
+    this.input.value = draft;
+    this._autoResize();
+    this._updateSendState();
+    this._updateActions();
   }
 
   /* `/new` con una domanda davanti.
@@ -3196,14 +3213,21 @@ export class ChatController {
       i18n.t('chat.newChatConfirm'),
       i18n.t('chat.newChatConfirmOk'),
     ))) return;
-    this.input.value = '/new';
-    await this.sendMessage();
+    await this._sendCommandLine('/new');
   }
 
-  async sendMessage() {
+  /* `attachments: false` manda il testo e **lascia il composer com'è**: è la
+     strada dei comandi (v. `_sendCommandLine`). Un comando è riconosciuto dal
+     solo testo — `turn_states::_state_command` guarda `msg.content` e nient'altro
+     — quindi i file allegati farebbero il viaggio fino al gateway per essere
+     ignorati. Con `/new` era peggio che inutile: la riga utente di un comando
+     sopravvive nel transcript quando porta media (`transcript_recorder`), e
+     siccome sta nello stesso turno del confine la chat appena azzerata si
+     riapriva con `/new` e le sue immagini appesi in cima. */
+  async sendMessage({ attachments = true } = {}) {
     const text = this.input.value.trim();
-    const hasImages = this.imageHandler.count > 0;
-    if (!text && !hasImages) return;
+    const media = attachments ? this.imageHandler.getImages() : [];
+    if (!text && !media.length) return;
 
     sessionManager.ensureAttached();
 
@@ -3215,14 +3239,13 @@ export class ChatController {
     msg.appendChild(content);
     // Renderizza gli allegati nella bolla appena inviata (thumb immagini / chip
     // file): senza questo l'anteprima del composer sparirebbe al clear.
-    const attachments = this.imageHandler.getAttachmentEntries();
-    if (attachments.length) this._renderMediaAttachments(msg, attachments);
+    const entries = attachments ? this.imageHandler.getAttachmentEntries() : [];
+    if (entries.length) this._renderMediaAttachments(msg, entries);
     this.chatArea.appendChild(msg);
     this._autoScroll = true;
     this.scrollToBottom(true);
 
-    const media = this.imageHandler.getImages();
-    this.imageHandler.clear();
+    if (attachments) this.imageHandler.clear();
     this.input.value = '';
     this.input.style.height = 'auto';
     this._updateSendState();
