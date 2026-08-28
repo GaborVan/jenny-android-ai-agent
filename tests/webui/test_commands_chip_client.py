@@ -377,6 +377,26 @@ def test_a_failed_load_says_so_instead_of_showing_an_empty_menu() -> None:
     """)
 
 
+def test_an_empty_list_says_so_instead_of_opening_blank() -> None:
+    """Lettura riuscita, zero comandi: un pannello vuoto si legge come rotto.
+
+    Non è uno stato che si raggiunge finché la tabella del backend ha righe — ed
+    è per questo che va tenuto fermo qui: chi un giorno la svuota, o la filtra,
+    non passa da `commands-chip.js`, e il difetto che vedrebbe è «la tendina non
+    si apre».
+    """
+    it = _locale("it")
+    _run_js(f"""
+      const chip = new Chip();
+      chip._commands = [];
+      chip._renderMenu();
+      const written = texts(chip.menu);
+      assert.ok(written.includes({json.dumps(it["commands"]["empty"])}),
+                'la tendina si apre senza dire niente');
+      assert.equal(byClass(chip.menu, 'commands-menu-item').length, 0);
+    """)
+
+
 def test_picking_a_row_hands_the_spec_to_its_owner() -> None:
     """La tendina non manda niente: consegna, e chi possiede la chat decide."""
     _run_js("""

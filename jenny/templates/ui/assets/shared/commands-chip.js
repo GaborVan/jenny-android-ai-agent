@@ -39,9 +39,10 @@ export class CommandsChip {
     this.enabled = Boolean(this.el && this.menu);
     this._open = false;
     this._initialized = false;
-    // `null` = mai chiesto, `[]` = chiesto e vuoto. La differenza si vede: la
-    // tendina dice "carico" nel primo caso e "nessun comando" nel secondo, e
-    // dire il secondo mentre è vero il primo è la sola bugia possibile qui.
+    // `null` = mai chiesto, `[]` = chiesto. La differenza si vede: finché è
+    // `null` la tendina dice "carico", dopo dice cosa ha trovato — l'elenco, la
+    // riga d'errore, o "nessun comando". Dire "vuoto" mentre si sta ancora
+    // leggendo è la sola bugia possibile qui, e questi due valori la evitano.
     this._commands = null;
     this._loadFailed = false;
     /** Lo monta chi possiede la chat: `(command) => void`. Senza, il chip è
@@ -186,6 +187,15 @@ export class CommandsChip {
       // vorrebbe dire proporre due voci che non fanno niente.
       if (spec.scope === 'project' && !inProject) continue;
       list.appendChild(this._item(spec));
+    }
+    // Un pannello che si apre vuoto si legge come rotto, e non e' quel che e'
+    // successo: la lettura e' andata, l'elenco era vuoto. Lo stato non si
+    // raggiunge finche' la tabella del backend ha righe — ed e' esattamente per
+    // questo che va scritto qui e non lasciato all'occhio di chi legge il
+    // codice: chi svuota la tabella non passa da questo file.
+    if (!list.children.length) {
+      list.remove?.();
+      this.menu.appendChild(this._note(i18n.t('commands.empty')));
     }
   }
 

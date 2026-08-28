@@ -42,6 +42,7 @@
     "aria": "Show commands",
     "loading": "Loading…",
     "loadFailed": "Could not load the command list.",
+    "empty": "No commands available.",
     "new": {
       "title": "New chat"
     },

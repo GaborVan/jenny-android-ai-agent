@@ -42,6 +42,7 @@
     "aria": "Mostra i comandi",
     "loading": "Carico…",
     "loadFailed": "Elenco dei comandi non caricato.",
+    "empty": "Nessun comando disponibile.",
     "new": {
       "title": "Chat nuova"
     },
