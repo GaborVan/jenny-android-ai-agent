@@ -17,7 +17,7 @@
  */
 
 import { i18n } from './i18n.js';
-import { AppState } from './state.js';
+import { AppState, claimComposeMenu, onOtherComposeMenu } from './state.js';
 import { api } from './api-client.js';
 import { rpc } from './rpc-client.js';
 import { escapeHtml, showToast } from './utils.js';
@@ -156,6 +156,7 @@ export class ScopeChip {
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') this.close();
     });
+    onOtherComposeMenu('scope', () => this.close());
     i18n.onLocaleChange(() => {
       this.render();
       if (this._open) this._renderMenu();
@@ -296,6 +297,10 @@ export class ScopeChip {
 
   async open() {
     if (!this.enabled) return;
+    // Una sola tendina per volta: chi si apre lo dichiara, l'altra si chiude.
+    // Non basta il listener su `document` — il `stopPropagation` del chip
+    // impedisce al click di arrivarci (v. `state.js::composeMenu`).
+    claimComposeMenu('scope');
     this._open = true;
     this.menu.classList.add('open');
     this.el.setAttribute('aria-expanded', 'true');

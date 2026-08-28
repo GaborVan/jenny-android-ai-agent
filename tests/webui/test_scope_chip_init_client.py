@@ -79,10 +79,18 @@ const i18n = {
 const AppState = {
   readonlyTurn: false,
   pinnedWiki: null,
+  composeMenu: null,
   subs: [],
   on(key, fn) { this.subs.push([key, fn]); },
   set(key, value) { AppState[key] = value; },
 };
+/* «Una sola tendina aperta» passa dallo stesso canale, e per questo test è
+   un'iscrizione come le altre: quel che si misura qui è che `init` non ne
+   registri due. Il comportamento sta in `test_compose_menus_client.py`. */
+function claimComposeMenu(id) { AppState.set('composeMenu', id); }
+function onOtherComposeMenu(id, close) {
+  AppState.on('composeMenu', (who) => { if (who !== id) close(); });
+}
 
 /* Un elemento ridotto a quel che `render()` e `init()` toccano. `inner` decide
    quali figli esistono: `null` è il caso dell'index a cui manca lo span. */
@@ -215,7 +223,7 @@ def test_the_latch_does_not_swallow_the_first_init() -> None:
       chip.init();
       assert.equal(chip._initialized, true);
       assert.equal(docListeners, 2);
-      assert.deepEqual(AppState.subs.map(([key]) => key), ['readonlyTurn']);
+      assert.deepEqual(AppState.subs.map(([key]) => key), ['composeMenu', 'readonlyTurn']);
       assert.equal(i18n.localeSubs, 1);
       // E `init` disegna: il chip nomina la personale già prima di ogni rete.
       assert.equal(chipEl.dataset.scope, 'personal');

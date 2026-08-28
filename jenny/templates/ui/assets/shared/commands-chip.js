@@ -27,6 +27,7 @@
 import { api } from './api-client.js';
 import { i18n } from './i18n.js';
 import { scopeChip } from './scope-chip.js';
+import { claimComposeMenu, onOtherComposeMenu } from './state.js';
 
 export class CommandsChip {
   constructor() {
@@ -57,13 +58,16 @@ export class CommandsChip {
     });
     this.menu.addEventListener('click', (e) => e.stopPropagation());
     // Chiusura: tap fuori ed Escape, come gli sheet dell'app e come lo scope
-    // chip. È anche ciò che rende i due menu mutuamente esclusivi senza che
-    // nessuno dei due sappia dell'altro: aprire l'uno è un click sul document,
-    // che chiude l'altro.
+    // chip. Questo **non** basta a chiudere l'altra tendina quando si apre
+    // questa: il `stopPropagation()` qui sopra è necessario — senza, il click
+    // che apre arriverebbe a `document` e richiuderebbe subito — ed è anche il
+    // motivo per cui l'altro chip non vede mai quel click. Ci pensa la riga
+    // sotto (`onOtherComposeMenu`).
     document.addEventListener('click', () => this.close());
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') this.close();
     });
+    onOtherComposeMenu('commands', () => this.close());
     i18n.onLocaleChange(() => {
       this.render();
       if (this._open) this._renderMenu();
@@ -86,6 +90,8 @@ export class CommandsChip {
 
   async open() {
     if (!this.enabled) return;
+    // V. `scope-chip.js::open` e `state.js::composeMenu`: una sola per volta.
+    claimComposeMenu('commands');
     this._open = true;
     this.menu.classList.add('open');
     this.el.setAttribute('aria-expanded', 'true');
