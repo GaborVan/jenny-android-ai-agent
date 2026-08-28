@@ -112,7 +112,7 @@ See [Scheduling and proactivity](../using/scheduling.md) for the user-facing beh
 
 ## Related
 
-- [Slash commands](../using/slash-commands.md) — exact `/new`, `/clear`, `/stop`, `/status` behavior and output text.
+- [Slash commands](../using/slash-commands.md) — exact `/new`, `/stop`, `/status` behavior and output text.
 - [Memory, Dream and Atlas](../using/memory.md) — the long-term memory pipeline this page only summarizes.
 - [Architecture](architecture.md) — where the agent loop sits among the bus, providers, tools, and channels.
 - [Concepts](concepts.md) — higher-level vocabulary (workspace, session, provider) used throughout these docs.

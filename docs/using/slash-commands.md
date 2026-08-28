@@ -268,7 +268,7 @@ No skills available.
 | The persisted transcript | Untouched — it is a separate, permanent log, and the page break only changes where reading starts. |
 | Long-term memory | Untouched. The discarded conversation is archived for Dream, which will consolidate it into `MEMORY.md` as usual. |
 
-If you want a conversation to actually go away, deleting it is a different operation: a [project](./projects.md) and its conversation are removed together (long-press the project in the scope chip, or use the file manager), and the personal conversation's transcript lives in the workspace.
+If you want a conversation to actually go away, deleting it is a different operation: a [project](./projects.md) and its conversation are removed together (tap the bin on its row in the scope chip, or use the file manager), and the personal conversation's transcript lives in the workspace.
 
 > **A note for anyone upgrading.** There used to be a `/clear` command, undocumented in `/help` and handled entirely inside the WebUI: it wiped the screen, printed `Chat cleared.` and left the model's context completely intact. It gave a convincing confirmation for something it had not done — the model went on remembering everything — and it was the first thing most people tried. It has been removed. Typing `/clear` now just sends an ordinary message to the agent; the command you want is `/new`.
 
