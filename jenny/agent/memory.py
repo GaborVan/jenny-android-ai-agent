@@ -41,6 +41,26 @@ from jenny.utils.prompt_templates import render_template
 # ``dream_prompt_history``, che sul prompt fa il taglio inverso.
 DREAM_HISTORY_HEADER = "\n\n## Conversation History\n"
 
+# Chiave nei metadata di sessione: il cursore sotto il quale il diario non entra
+# più nel prompt *di quella sessione*.
+#
+# Esiste perché ``/new`` non azzerava quel che il modello vede. Il comando
+# archivia la conversazione scartata in ``history.jsonl``
+# (``Consolidator.archive``), e il blocco ``# Recent History`` reinietta ogni
+# voce dall'ultimo cursore di Dream: il primo turno della sessione "nuova"
+# portava quindi il riassunto di quella appena buttata, più quelli di ogni
+# auto-compattazione precedente, finché Dream non passava. Con centinaia di file
+# letti prima del reset è esattamente il «continua a citare le note» della issue
+# #11 — e la stessa ragione per cui una regola di stile nuova non attaccava: il
+# modello aveva sotto gli occhi il riassunto delle proprie risposte vecchie.
+#
+# **Il cursore di Dream non si tocca**, e questa chiave esiste proprio per non
+# toccarlo: spostarlo avrebbe fatto saltare a Dream quelle voci, cioè avrebbe
+# pagato la pulizia del prompt con un buco nella memoria di lungo periodo. Qui si
+# alza solo il pavimento di *lettura per il prompt*; ``read_unprocessed_history``
+# e Dream continuano a vedere tutto.
+HISTORY_FLOOR_METADATA_KEY = "_history_floor"
+
 
 def is_gardener_session_key(key: str | None) -> bool:
     """True se *key* è la sessione di una passata del giardiniere. **T7.8.**
@@ -505,6 +525,7 @@ class MemoryStore:
         *,
         max_chars: int | None = None,
         session_key: str | None = None,
+        prompt_visible: bool = True,
     ) -> int:
         """Append *entry* to history.jsonl and return its auto-incrementing cursor.
 
@@ -551,6 +572,18 @@ class MemoryStore:
         personale» non si legge come simmetrico — personale non vuol dire segreto
         a un progetto. Il ragionamento intero, e i due soli blocchi che si
         chiudono, stanno in ``.agent/security.md``.
+
+        ``prompt_visible=False`` scrive la voce **per Dream e non per i prompt**:
+        :meth:`read_recent_history_for_prompt` la salta. Serve a ``/new``, che
+        archivia qui la conversazione che l'utente ha appena buttato — senza il
+        flag quel riassunto tornava nel blocco ``# Recent History`` del turno
+        successivo, cioe' il reset restituiva al modello quel che aveva appena
+        smesso di ricordare. Il flag e' sulla *voce* e non un cursore da
+        aggiornare dopo, perche' l'archiviazione gira in background: qualunque
+        seconda scrittura arriverebbe a sessione ormai ricaricata, e salvare
+        l'oggetto vecchio vorrebbe dire riscrivere sopra i messaggi del turno
+        intanto arrivato. Dream continua a vederla: e' la sola cosa che questo
+        flag non tocca.
         """
         if session_key and is_project_session_key(session_key):
             logger.debug(
@@ -583,9 +616,17 @@ class MemoryStore:
                     "persisting empty content to avoid re-polluting context",
                     cursor,
                 )
-            record = {"cursor": cursor, "timestamp": ts, "content": content}
+            record: dict[str, Any] = {
+                "cursor": cursor, "timestamp": ts, "content": content,
+            }
             if session_key:
                 record["session_key"] = session_key
+            # Scritto solo quando e' falso: il diario e' append-only e riletto a
+            # ogni turno, quindi una chiave in piu' su ogni riga si paga per
+            # sempre, e l'assenza vuol dire "visibile" — cioe' come si sono
+            # sempre comportate le voci gia' su disco.
+            if not prompt_visible:
+                record["prompt_visible"] = False
             with open(self.history_file, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
                 f.flush()
@@ -676,6 +717,18 @@ class MemoryStore:
         # which stays correct even if the monotonic invariant was broken by
         # external writes.
         return max((c for _, c in self._iter_valid_entries()), default=0) + 1
+
+    def current_history_cursor(self) -> int:
+        """Il cursore dell'ultima voce di diario, ``0`` se il diario è vuoto.
+
+        Serve a chi vuole dire «da qui in avanti»: ``/new`` se lo segna come
+        pavimento del prompt (:data:`HISTORY_FLOOR_METADATA_KEY`). Passa da
+        :meth:`_next_cursor` e non dall'ultima riga del file perché quel metodo è
+        già la risposta robusta alla stessa domanda — tiene il massimo fra
+        ``.cursor`` e l'ultima voce persistita, che su Android divergono a ogni
+        kill fra l'append e la riscrittura del cursore.
+        """
+        return self._next_cursor() - 1
 
     def read_unprocessed_history(self, since_cursor: int) -> list[dict[str, Any]]:
         """Return history entries with a valid cursor > *since_cursor*."""
@@ -769,7 +822,17 @@ class MemoryStore:
         """
         if session_key is not None and is_project_session_key(session_key):
             return []
-        entries = self.read_unprocessed_history(since_cursor=since_cursor)
+        entries = [
+            entry
+            for entry in self.read_unprocessed_history(since_cursor=since_cursor)
+            # Voce scritta "per Dream e non per i prompt" — oggi solo il
+            # riassunto che ``/new`` archivia della conversazione buttata. Il
+            # gate sta qui, prima di ogni ramo, perche' vale per **tutti** i tipi
+            # di sessione: quel riassunto non e' roba di cui nessuno deve essere
+            # informato a meta' turno, chiunque stia chiedendo. V.
+            # :meth:`append_history` (``prompt_visible``).
+            if entry.get("prompt_visible") is not False
+        ]
         if session_key is None:
             return entries
         own_only = is_gardener_session_key(session_key)
@@ -1324,14 +1387,23 @@ class MemoryStore:
         *,
         max_chars: int | None = None,
         session_key: str | None = None,
+        prompt_visible: bool = True,
     ) -> None:
-        """Fallback: dump raw messages to history.jsonl without LLM summarization."""
+        """Fallback: dump raw messages to history.jsonl without LLM summarization.
+
+        ``prompt_visible`` viaggia fino a :meth:`append_history` per la stessa
+        ragione che vale la': questa e' la strada che ``/new`` prende quando la
+        chiamata di riassunto fallisce, e un dump grezzo della conversazione
+        appena azzerata nel prompt del turno dopo e' il difetto in versione
+        peggiore, non in versione attenuata.
+        """
         limit = max_chars if max_chars is not None else _RAW_ARCHIVE_MAX_CHARS
         formatted = truncate_text(self._format_messages(messages), limit)
         self.append_history(
             f"[RAW] {len(messages)} messages\n"
             f"{formatted}",
             session_key=session_key,
+            prompt_visible=prompt_visible,
         )
         logger.warning(
             "Memory consolidation degraded: raw-archived {} messages", len(messages)

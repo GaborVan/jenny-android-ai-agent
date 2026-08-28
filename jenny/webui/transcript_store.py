@@ -32,6 +32,17 @@ def _is_user_transcript_row(row: dict[str, Any]) -> bool:
     return row.get("event") == "user" or row.get("role") == "user"
 
 
+def _is_session_boundary_row(row: dict[str, Any]) -> bool:
+    """La riga che ``/new`` lascia nel transcript.
+
+    La scrive ``channels/ws_sender.py`` (``payload["session_boundary"]``) e la
+    rilegge ``transcript_replay.py`` per renderla come separatore. Sta qui,
+    accanto all'altro predicato di riga, perche' da questa versione decide anche
+    **dove comincia la cronologia visibile**: v. ``_select_transcript_page``.
+    """
+    return row.get("session_boundary") is True
+
+
 def _split_transcript_turns(lines: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
     turns: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []

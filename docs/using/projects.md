@@ -59,7 +59,7 @@ On success the chip drops you straight into the new project. The scaffolding —
 
 Later, once the project has some pages, `/init` inside it rewrites that project's `AGENTS.md` from what the folder actually contains — its scope, the conventions the pages already follow, and the open questions. Outside a project, `/init` refuses and tells you to pick one from the chip.
 
-There is no way to *delete* a project from the UI. The folder is the project: remove it from the Workspace file browser, or over [ssh](./ssh.md), and it stops being offered.
+To **delete** a project, open the chip and tap the bin on its row, then confirm — the same place you created it. The confirmation names how many messages of its conversation go with it, because a project's chat is deleted together with its folder. The Workspace file browser offers the same thing from the project's folder. (Deleting the folder by hand, or over [ssh](./ssh.md), also works but leaves the conversation behind under a name that is now free — which is why the file browser refuses that route and routes you to the project delete instead.)
 
 A folder whose name breaks the naming rule is **not listed in the chip** at all, and cannot be opened as a conversation. Renaming it (letters, numbers, dot, dash, underscore) makes it appear.
 

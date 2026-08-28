@@ -125,6 +125,17 @@ class Chip {
   render() { this.rendered++; }   // il chip in sé non è oggetto di questi test
   get personalLabel() { return i18n.t('scope.personal'); }
   select() {}
+  /* La riga di un progetto avvolge la scelta e il tasto elimina. Qui il
+     contenitore c'è (i test contano i nodi per classe, e uno in mezzo cambia
+     l'albero) ma il tasto no: il flusso di cancellazione non è oggetto di
+     questi test, che guardano *cosa* la tendina scrive. Il tasto ha i suoi in
+     `test_scope_chip_delete_client.py`. */
+  _projectRow(item) {
+    const row = makeEl('div');
+    row.className = 'scope-menu-row';
+    row.appendChild(item);
+    return row;
+  }
   __LOAD_PROJECTS__
   __RENDER_MENU__
   __LABEL__
@@ -300,7 +311,10 @@ def test_the_note_string_is_translated_in_both_locales() -> None:
 def test_the_error_note_has_a_rule_of_its_own() -> None:
     """Grep, non comportamento: che la classe `is-error` sia colorata."""
     css = CSS.read_text(encoding="utf-8")
-    assert re.search(r"\.scope-menu-note\.is-error\s*\{[^}]*var\(--error\)", css), (
+    # Il selettore può essere elencato insieme a quello della tendina dei
+    # comandi, che riusa la stessa regola: è lo stesso corpo, ed è quel che il
+    # test guarda.
+    assert re.search(r"\.scope-menu-note\.is-error[^{]*\{[^}]*var\(--error\)", css), (
         "la nota del guasto non si distingue da una nota qualsiasi"
     )
 

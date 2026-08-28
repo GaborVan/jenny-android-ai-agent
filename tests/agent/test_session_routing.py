@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from jenny.agent.loop import AgentLoop
+from jenny.agent.memory import MemoryStore
 from jenny.bus.events import InboundMessage
 from jenny.bus.queue import MessageBus
 from jenny.command.builtin import cmd_new, register_builtin_commands
@@ -175,6 +176,10 @@ class TestCmdNewUnifiedSession:
             sessions=sessions,
             consolidator=SimpleNamespace(archive=AsyncMock(return_value=True)),
             _cancel_active_tasks=AsyncMock(return_value=0),
+            # `/new` segna il pavimento del diario nei metadata della sessione:
+            # da quel cursore in giu' il blocco `# Recent History` non entra piu'
+            # nel prompt di questa conversazione (issue #11).
+            context=SimpleNamespace(memory=MemoryStore(tmp_path)),
             # Svuotare la conversazione svuota anche il dedup delle letture: il
             # contenuto dei file stava nei messaggi che non ci sono piu'.
             forget_file_reads=forgotten.append,
@@ -217,6 +222,10 @@ class TestCmdNewUnifiedSession:
             sessions=sessions,
             consolidator=SimpleNamespace(archive=AsyncMock(return_value=True)),
             _cancel_active_tasks=AsyncMock(return_value=0),
+            # `/new` segna il pavimento del diario nei metadata della sessione:
+            # da quel cursore in giu' il blocco `# Recent History` non entra piu'
+            # nel prompt di questa conversazione (issue #11).
+            context=SimpleNamespace(memory=MemoryStore(tmp_path)),
             # Svuotare la conversazione svuota anche il dedup delle letture: il
             # contenuto dei file stava nei messaggi che non ci sono piu'.
             forget_file_reads=forgotten.append,

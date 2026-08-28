@@ -352,6 +352,7 @@ class Consolidator:
         *,
         session_key: str | None = None,
         summary_messages: list[dict] | None = None,
+        prompt_visible: bool = True,
     ) -> str | None:
         """Summarize messages via LLM and append to history.jsonl.
 
@@ -359,6 +360,13 @@ class Consolidator:
         session); they are what gets raw-dumped if the LLM call fails.
         ``summary_messages``, when given, lets callers include retained
         messages in the summary without archiving them.
+
+        ``prompt_visible=False`` scrive la voce per Dream e non per i prompt di
+        turno: e' ``/new``, che archivia qui una conversazione che l'utente ha
+        deciso di non avere piu' davanti (v. ``MemoryStore.append_history``). Il
+        default resta ``True``, che e' il caso normale — l'auto-compattazione
+        riassume una conversazione **che continua**, e il modello deve
+        continuare a vederne la coda.
 
         Returns the summary text on success, None if nothing to archive.
         """
@@ -398,12 +406,16 @@ class Consolidator:
                 summary,
                 max_chars=_ARCHIVE_SUMMARY_MAX_CHARS,
                 session_key=session_key,
+                prompt_visible=prompt_visible,
             )
             return summary
         except Exception:
             logger.warning("Consolidation LLM call failed, raw-dumping to history")
             await asyncio.to_thread(
-                self.store.raw_archive, messages, session_key=session_key
+                self.store.raw_archive,
+                messages,
+                session_key=session_key,
+                prompt_visible=prompt_visible,
             )
             return None
 

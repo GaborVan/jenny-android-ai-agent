@@ -732,6 +732,42 @@ body {
 }
 .write-switch[data-mode="readonly"] .write-switch-mark { color: var(--accent); }
 .write-switch-label { font-weight: 500; white-space: nowrap; }
+
+/* Terzo controllo della riga: i comandi. Stessa pillola dell'interruttore —
+   sono due vicini della stessa riga, e due forme diverse la farebbero leggere
+   come due cose di natura diversa. Cede lo scope chip, non questo: il suo testo
+   ha gia' l'ellissi (`.scope-chip-crumb`), questo e' un'icona e una parola. */
+.commands-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  padding: 4px 9px;
+  background: var(--overlay);
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius-pill);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background .12s, border-color .12s, color .12s;
+  -webkit-tap-highlight-color: transparent;
+}
+.commands-chip:hover { background: var(--overlay-strong); }
+.commands-chip:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+.commands-chip:active { transform: scale(0.98); }
+.commands-chip[aria-expanded="true"] {
+  background: var(--overlay-strong);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+.commands-chip-mark { flex-shrink: 0; font-size: 12px; line-height: 1; }
+.commands-chip-label { font-weight: 500; white-space: nowrap; }
+/* Il comando e' un letterale da digitare, non prosa: monospazio, come ogni
+   altro frammento di codice nell'interfaccia. */
+.commands-menu-name { font-family: var(--font-mono); font-size: 11.5px; }
+
 .scope-chip[data-scope="project"] .scope-chip-mark { color: var(--accent); }
 .scope-chip-path {
   display: inline-flex;
@@ -752,7 +788,8 @@ body {
 .scope-chip-sep { flex-shrink: 0; font-size: 10px; color: var(--text-faint); }
 .scope-chip-switch { flex-shrink: 0; margin-left: 1px; font-size: 12px; color: var(--text-faint); }
 
-.scope-menu {
+.scope-menu,
+.commands-menu {
   position: absolute;
   left: 0;
   bottom: calc(100% + 6px);
@@ -799,10 +836,24 @@ body {
      pietra. Stessa scelta, e stesso motivo, di `.session-info-popover`. */
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18), 0 2px 8px rgba(0, 0, 0, 0.10);
 }
-.scope-menu.open { display: flex; }
+.scope-menu.open,
+.commands-menu.open { display: flex; }
+/* La posizione orizzontale la scrive `commands-chip.js::_alignToChip()` a ogni
+   apertura: il pannello si allinea al **suo chip**, non a un bordo della riga.
+   Qui resta solo il valore di partenza, per l'istante prima della misura.
+
+   Perche' non basta il CSS: il contenitore posizionato e' `.compose-scope`, che
+   e' larga tutta la riga, quindi `left: 0` ancora il pannello al bordo sinistro
+   della *riga* e `right: 0` a quello destro — e il chip dei comandi non sta su
+   nessuno dei due (misurato sul telefono il 28/08: chip 236..364 CSS px,
+   pannello 359..700, cioe' accanto al chip invece che sopra). Lo scope chip non
+   ha il problema solo perche' e' il primo elemento della riga, quindi `left: 0`
+   e' gia' il suo bordo. */
+.commands-menu { left: 0; right: auto; }
 /* Scorre solo l'elenco dei progetti: "personale" in cima e "nuovo" in fondo
    restano fermi, perche' sono le due voci che si cercano senza guardare. */
-.scope-menu-scroll {
+.scope-menu-scroll,
+.commands-menu-scroll {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
@@ -818,11 +869,14 @@ body {
   color: var(--text-faint);
 }
 .scope-menu-sep { height: 0.5px; margin: 4px 6px; background: var(--border); }
-.scope-menu-note { padding: 6px 10px 8px; font-size: 11px; color: var(--text-faint); }
+.scope-menu-note,
+.commands-menu-note { padding: 6px 10px 8px; font-size: 11px; color: var(--text-faint); }
 /* Elenco non letto: e' un guasto, non uno stato vuoto — e va distinto a occhio
    da "Nessun progetto ancora", che sta nello stesso posto. */
-.scope-menu-note.is-error { color: var(--error); }
-.scope-menu-item {
+.scope-menu-note.is-error,
+.commands-menu-note.is-error { color: var(--error); }
+.scope-menu-item,
+.commands-menu-item {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -840,8 +894,11 @@ body {
   -webkit-tap-highlight-color: transparent;
 }
 .scope-menu-item:hover,
-.scope-menu-item:focus-visible { background: var(--overlay-strong); outline: none; }
-.scope-menu-item > i:first-child {
+.scope-menu-item:focus-visible,
+.commands-menu-item:hover,
+.commands-menu-item:focus-visible { background: var(--overlay-strong); outline: none; }
+.scope-menu-item > i:first-child,
+.commands-menu-item > i:first-child {
   flex-shrink: 0;
   width: 18px;
   font-size: 15px;
@@ -855,8 +912,10 @@ body {
   color: var(--flower);
   text-align: center;
 }
-.scope-menu-text { flex: 1; min-width: 0; }
-.scope-menu-name {
+.scope-menu-text,
+.commands-menu-text { flex: 1; min-width: 0; }
+.scope-menu-name,
+.commands-menu-name {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -865,7 +924,8 @@ body {
 .scope-menu-item[data-active="1"] .scope-menu-name { font-weight: 500; }
 /* L'ultima attività è il criterio con cui si scelge davvero, appena i
    progetti passano i tre: si merita la riga. */
-.scope-menu-when {
+.scope-menu-when,
+.commands-menu-desc {
   display: block;
   margin-top: 1px;
   font-size: 10px;
@@ -874,6 +934,35 @@ body {
 .scope-menu-check { flex-shrink: 0; font-size: 14px; color: var(--accent); }
 .scope-menu-item[data-active="0"] .scope-menu-check { visibility: hidden; }
 .scope-menu-new .scope-menu-name { color: var(--text-muted); }
+/* Riga progetto: la scelta e, accanto, il modo di cancellarla. Il cestino è
+   **sempre visibile**: il `⋮` dell'explorer del workspace si mostra solo su
+   `.ws-item:hover`, che su un touchscreen non scatta mai — lì è arredamento, e
+   ripeterlo qui vorrebbe dire rispondere «non trovavo come si fa» con un altro
+   comando invisibile. Spento e staccato dal nome, però: la riga serve
+   soprattutto a *entrare* nel progetto. */
+.scope-menu-row { display: flex; align-items: center; }
+.scope-menu-row .scope-menu-item { flex: 1; min-width: 0; }
+.scope-menu-del {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  margin-right: 2px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 14px;
+  cursor: pointer;
+  transition: background .12s, color .12s;
+  -webkit-tap-highlight-color: transparent;
+}
+.scope-menu-del:hover,
+.scope-menu-del:focus-visible { background: var(--overlay-strong); color: var(--error); outline: none; }
+.scope-menu-del:active { transform: scale(0.92); }
 /* Le cartelle che ci sono ma non si aprono: si leggono e non si toccano.
    Più spente di "Nuovo progetto..." (`--text-muted`), che è un'azione: questa
    riga non è un'azione, ed è la sola riga della tendina che non fa niente.
@@ -1492,35 +1581,12 @@ body {
   font-weight: 500;
 }
 
-/* Context menu button on item */
-.ws-item-menu {
-  position: absolute;
-  top: 2px;
-  right: 2px;
-  width: 22px;
-  height: 22px;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--text-faint);
-  cursor: pointer;
-  display: none;
-  align-items: center;
-  justify-content: center;
-  transition: background .12s;
-  padding: 0;
-}
-.ws-item:hover .ws-item-menu {
-  display: flex;
-}
-.ws-item-menu:hover {
-  background: var(--bg);
-  color: var(--text);
-}
-.ws-item-menu .ti {
-  font-size: 12px;
-  pointer-events: none;
-}
+/* Nessun bottone-menu sulla cella: le azioni si aprono tenendo premuto
+   (`setupLongPress` in mobile-workspace.js), come nella griglia delle app.
+   C'era un `⋮`, ma mostrato solo su `.ws-item:hover` — cioè mai, su un
+   touchscreen: markup e CSS che sembravano una funzione e su un telefono non
+   esistevano. Tolto il 28/08 invece di renderlo visibile: su una griglia fitta
+   sarebbe un'icona per cella. */
 
 /* Empty state */
 .ws-empty {
@@ -1664,6 +1730,26 @@ body {
   color: var(--text-muted);
   white-space: nowrap;
 }
+
+/* «Mostra la conversazione precedente»: compare solo quando c'è una pagina più
+   vecchia e la chat non è abbastanza lunga da poterla scorrere (v.
+   `_ensureHistoryReach`), che è lo stato subito dopo `/new`. Discreta come il
+   separatore che le sta sotto: è un modo di tornare indietro, non un invito. */
+.chat-history-more {
+  display: block;
+  margin: 8px auto 2px;
+  padding: 5px 12px;
+  background: var(--overlay);
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius-pill);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  color: var(--text-muted);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.chat-history-more:hover { background: var(--overlay-strong); }
+.chat-history-more:disabled { opacity: .5; }
 
 /* Identity line — first scrollable element of the chat */
 .chat-identity {

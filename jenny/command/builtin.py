@@ -25,11 +25,28 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class BuiltinCommandSpec:
+    """Una voce del menu comandi, piu' la riga di ``/help``.
+
+    ``icon`` e' un nome **Tabler** senza il prefisso ``ti-``: e' il font che la
+    WebUI impacchetta, e la tendina lo rende come ``ti-<icon>``. Non e' un
+    dettaglio da indovinare — fino alla 0.9.0 cinque di questi nomi erano di
+    Lucide (``square-pen``, ``sprout``, ``brush-cleaning``, ``file-pen``,
+    ``circle-help``), e nessuno se n'era accorto perche' il campo non era mai
+    stato disegnato da nessuno. Un nome che in Tabler non c'e' rende un quadrato
+    vuoto, quindi ``tests/webui/test_command_specs.py`` li confronta con il font
+    vero: aggiungendo un comando, prendere il nome da la'.
+
+    ``scope`` dice **dove** il comando fa qualcosa. ``"project"`` sono i due che
+    fuori da un progetto non hanno un soggetto (``/tidy``, ``/init``): la tendina
+    li nasconde invece di offrirli e lasciarli fallire.
+    """
+
     command: str
     title: str
     description: str
     icon: str
     arg_hint: str = ""
+    scope: str = "any"
 
     def as_dict(self) -> dict[str, str]:
         return {
@@ -38,6 +55,7 @@ class BuiltinCommandSpec:
             "description": self.description,
             "icon": self.icon,
             "arg_hint": self.arg_hint,
+            "scope": self.scope,
         }
 
 
@@ -46,7 +64,7 @@ BUILTIN_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
         "/new",
         "New chat",
         "Stop the current task and start a fresh conversation.",
-        "square-pen",
+        "message-plus",
     ),
     BuiltinCommandSpec(
         "/stop",
@@ -107,7 +125,7 @@ BUILTIN_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
             "project it works on that one; elsewhere name it: '/gardener <project>'. Add "
             "'settings' to read the periodic pass, or 'off' to stop it."
         ),
-        "sprout",
+        "seeding",
         # Corto di proposito: è il suggerimento accanto al comando nella palette,
         # non la sua documentazione. Le forme per esteso stanno in
         # ``_gardener_usage()``, che `/gardener settings` stampa in coda.
@@ -128,19 +146,21 @@ BUILTIN_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
             "conversation, with its pages and your answers in hand; the gardener's periodic pass "
             "cannot do that."
         ),
-        "brush-cleaning",
+        "wand",
+        scope="project",
     ),
     BuiltinCommandSpec(
         "/init",
         "Write this project's instructions",
         "Inside a project: read the wiki and write its AGENTS.md.",
-        "file-pen",
+        "file-pencil",
+        scope="project",
     ),
     BuiltinCommandSpec(
         "/help",
         "Show help",
         "List available slash commands.",
-        "circle-help",
+        "help-circle",
     ),
 )
 
@@ -196,6 +216,11 @@ async def cmd_status(ctx: CommandContext) -> OutboundMessage:
 
 async def cmd_new(ctx: CommandContext) -> OutboundMessage:
     """Stop active task and start a fresh session."""
+    # Import locale: ``jenny.agent.memory`` passa da ``jenny.agent.__init__``,
+    # che importa ``AgentLoop``, che importa questo modulo. E' lo stesso motivo
+    # per cui gli altri handler qui dentro importano dove servono.
+    from jenny.agent.memory import HISTORY_FLOOR_METADATA_KEY
+
     loop = ctx.loop
     cancelled = await loop._cancel_active_tasks(ctx.key)
     if cancelled:
@@ -206,6 +231,14 @@ async def cmd_new(ctx: CommandContext) -> OutboundMessage:
     session = ctx.session or loop.sessions.get_or_create(ctx.key)
     snapshot = session.messages[session.last_consolidated:]
     session.clear()
+    # Il diario non entra piu' nel prompt di questa sessione da qui in giu'.
+    # Senza questa riga `/new` azzerava i messaggi ma lasciava nel system prompt
+    # il blocco `# Recent History`, cioe' i riassunti di ogni auto-compattazione
+    # della conversazione appena buttata: il modello ripartiva "pulito" con
+    # davanti il sommario di quel che aveva smesso di ricordare. Il cursore di
+    # Dream resta dov'e' — quelle voci devono ancora finire in MEMORY.md. Vedi
+    # ``memory.HISTORY_FLOOR_METADATA_KEY``.
+    session.metadata[HISTORY_FLOOR_METADATA_KEY] = loop.context.memory.current_history_cursor()
     loop.sessions.save(session)
     loop.sessions.invalidate(session.key)
     # La conversazione e' vuota, quindi non contiene piu' il contenuto di nessun
@@ -214,7 +247,17 @@ async def cmd_new(ctx: CommandContext) -> OutboundMessage:
     # ha mai letto niente.
     loop.forget_file_reads(session.key)
     if snapshot:
-        loop._schedule_background(loop.consolidator.archive(snapshot, session_key=ctx.key))
+        # L'altra meta' dello stesso confine, e non e' coperta dal pavimento: il
+        # riassunto di questo snapshot lo scrive l'archiviazione **dopo**, quindi
+        # con un cursore piu' alto. `prompt_visible=False` lo dichiara roba di
+        # Dream e non di prompt, una volta e sulla voce, cosi' non serve
+        # nessuna seconda scrittura del pavimento a task finito — che arriverebbe
+        # a sessione ormai ricaricata.
+        loop._schedule_background(
+            loop.consolidator.archive(
+                snapshot, session_key=ctx.key, prompt_visible=False,
+            )
+        )
     return OutboundMessage(
         channel=ctx.msg.channel, chat_id=ctx.msg.chat_id,
         content="New session started.",

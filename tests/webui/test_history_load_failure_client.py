@@ -134,6 +134,10 @@ function makeChat() {
     _resetStreamState() {},
     _clearGoalBanner() {},
     _ensureIdentity() {},
+    /* Il bottone «mostra la conversazione precedente» non è oggetto di questi
+       test, e il metodo vero misura l'altezza di un contenitore che qui non
+       esiste. Ha un test suo: `test_history_reach_client.py`. */
+    _ensureHistoryReach() {},
     _initRuntimeModelFromBootstrap() {},
     scrollToBottom() {},
     _renderThreadMessages(msgs) { chat.rendered = msgs.map((m) => m.text); },

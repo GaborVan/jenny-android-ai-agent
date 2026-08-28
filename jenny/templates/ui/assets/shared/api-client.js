@@ -107,6 +107,15 @@ class ApiClient {
     } catch (_) { /* mai propagare */ }
   }
 
+  /** L'elenco dei comandi slash, per la tendina del composer.
+   *  Fonte unica: `command/builtin.py::BUILTIN_COMMAND_SPECS`, la stessa da cui
+   *  esce `/help`. Il client non tiene un secondo elenco. */
+  async getCommands() {
+    const res = await this._fetch('/api/webui/commands');
+    if (!res.ok) throw new Error(`Commands failed: ${res.status}`);
+    return res.json();
+  }
+
   async getSkills() {
     const res = await this._fetch('/api/webui/skills');
     if (!res.ok) throw new Error(`Skills failed: ${res.status}`);

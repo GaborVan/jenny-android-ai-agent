@@ -10,6 +10,7 @@ import { advancedMode } from './shared/advanced-mode.js';
 import { openImageLightbox } from './shared/image-lightbox.js';
 import { setupLongPress } from './shared/longpress.js';
 import { scopeChip } from './shared/scope-chip.js';
+import { deleteProjectFlow } from './shared/project-delete.js';
 
 const CM_THEMES = { dark: 'darcula', light: 'eclipse' };
 
@@ -491,29 +492,18 @@ export class WorkspaceController {
     el.dataset.kind = 'dir';
 
     el.innerHTML =
-      `<button class="ws-item-menu" title="${i18n.t('workspace.actions')}"><i class="ti ti-dots-vertical"></i></button>` +
       `<div class="ws-item-icon folder-icon">${FOLDER_ICON_SVG}</div>` +
       `<div class="ws-item-name">${escapeHtml(item.name)}</div>`;
 
-    el.addEventListener('click', (e) => {
+    el.addEventListener('click', () => {
       // Il tap sintetico che segue il long-press non deve navigare nella
       // cartella *sotto* lo sheet appena aperto: il flag lo posa
       // setupLongPress, qui lo si consuma.
       if (el.dataset.longpress) { delete el.dataset.longpress; return; }
-      if (e.target.closest('.ws-item-menu')) return;
       this.navigateTo(itemPath);
     });
 
     setupLongPress(el, () => {
-      this.showContextSheet({ path: itemPath, kind: 'dir', name: item.name });
-    });
-
-    el.querySelector('.ws-item-menu').addEventListener('click', (e) => {
-      e.stopPropagation();
-      // Il click sul menu non arriva al listener della cella (stopPropagation):
-      // il flag di un long-press iniziato qui sopra va consumato lo stesso, o
-      // ingoierebbe il tap successivo.
-      delete el.dataset.longpress;
       this.showContextSheet({ path: itemPath, kind: 'dir', name: item.name });
     });
 
@@ -532,25 +522,17 @@ export class WorkspaceController {
     el.dataset.ext = ext;
 
     el.innerHTML =
-      `<button class="ws-item-menu" title="${i18n.t('workspace.actions')}"><i class="ti ti-dots-vertical"></i></button>` +
       `<div class="ws-item-icon">${icon}</div>` +
       `<div class="ws-item-name">${escapeHtml(item.name)}</div>`;
 
-    el.addEventListener('click', (e) => {
+    el.addEventListener('click', () => {
       // Come per le cartelle: il tap sintetico del long-press aprirebbe il file
       // sotto lo sheet appena comparso.
       if (el.dataset.longpress) { delete el.dataset.longpress; return; }
-      if (e.target.closest('.ws-item-menu')) return;
       this.openFile(itemPath, ext);
     });
 
     setupLongPress(el, () => {
-      this.showContextSheet({ path: itemPath, kind: 'file', name: item.name });
-    });
-
-    el.querySelector('.ws-item-menu').addEventListener('click', (e) => {
-      e.stopPropagation();
-      delete el.dataset.longpress;
       this.showContextSheet({ path: itemPath, kind: 'file', name: item.name });
     });
 
@@ -762,26 +744,16 @@ export class WorkspaceController {
     }
   }
 
-  /** Cancella un progetto per intero, dopo averlo detto per intero. */
+  /** Cancella un progetto per intero, dopo averlo detto per intero.
+   *
+   *  La domanda e la chiamata stanno in `shared/project-delete.js`: da quando
+   *  si cancella anche dal chip dello scope i chiamanti sono due, e la frase
+   *  che dice quante conversazioni si porta via deve essere la stessa in
+   *  entrambi. Qui resta il *seguito*, che è di questa vista: il file aperto
+   *  nell'editor e la cartella su cui si sta.
+   */
   async _deleteProject(name, path) {
-    let described = null;
-    try {
-      described = await api.describeProject(name);
-    } catch (err) {
-      console.warn('project describe failed:', err);
-    }
-    const messages = described?.conversation?.messages;
-    const question = messages
-      ? i18n.t('workspace.deleteProjectConfirmWithChat', { name, count: messages })
-      : i18n.t('workspace.deleteProjectConfirm', { name });
-    if (!(await confirmDialog(question))) return;
-    try {
-      await rpc.deleteProject(name);
-    } catch (err) {
-      console.warn('project.delete failed:', err?.code || '(no code)', err?.message);
-      showToast(i18n.t('workspace.deleteProjectFailed', { name }), 'error');
-      return;
-    }
+    if (!(await deleteProjectFlow(name))) return;
     // Il progetto non esiste piu': se la chat era la sua, il chip lo deve
     // smettere di nominare. Prima del ritorno anticipato, perche' quel ramo
     // riguarda il file aperto nell'editor e non ha niente a che vedere con lo

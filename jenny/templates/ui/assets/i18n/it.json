@@ -12,7 +12,6 @@
     "placeholder": "Chiedi qualcosa…",
     "error": "Errore",
     "attach": "Allega",
-    "cleared": "Chat cancellata.",
     "wsError": "WebSocket non connesso. In attesa di riconnessione...",
     "agentRunning": "Agent in esecuzione",
     "copy": "Copia",
@@ -32,7 +31,57 @@
     "restricted": "Limitato",
     "default": "Predefinito",
     "message": "Messaggio",
-    "scrollToBottom": "Vai in fondo"
+    "scrollToBottom": "Vai in fondo",
+    "newChat": "Nuova chat",
+    "newChatConfirm": "Iniziare una chat nuova? Jenny smette di ricordare quel che è stato detto finora. La conversazione non viene cancellata: si rilegge scorrendo in su.",
+    "newChatConfirmOk": "Nuova chat",
+    "loadPrevious": "Mostra la conversazione precedente"
+  },
+  "commands": {
+    "label": "Comandi",
+    "aria": "Mostra i comandi",
+    "loading": "Carico…",
+    "loadFailed": "Elenco dei comandi non caricato.",
+    "empty": "Nessun comando disponibile.",
+    "new": {
+      "title": "Chat nuova"
+    },
+    "stop": {
+      "title": "Ferma quel che sta girando"
+    },
+    "status": {
+      "title": "Stato di runtime e provider"
+    },
+    "model": {
+      "title": "Mostra o cambia il modello"
+    },
+    "history": {
+      "title": "Stampa la cronologia salvata"
+    },
+    "goal": {
+      "title": "Trattalo come un obiettivo lungo"
+    },
+    "dream": {
+      "title": "Consolida la memoria adesso"
+    },
+    "atlas": {
+      "title": "Ricostruisci l'indice della wiki"
+    },
+    "gardener": {
+      "title": "Trasforma il diario in pagine"
+    },
+    "skill": {
+      "title": "Elenca le skill attive"
+    },
+    "tidy": {
+      "title": "Risistema la wiki di questo progetto"
+    },
+    "init": {
+      "title": "Scrivi le istruzioni del progetto"
+    },
+    "help": {
+      "title": "Elenca tutti i comandi"
+    }
   },
   "subagents": {
     "title": "Subagent",
@@ -396,7 +445,6 @@
     "clone": "Clona",
     "delete": "Elimina",
     "download": "Scarica",
-    "actions": "Azioni",
     "new": "Nuovo",
     "fileName": "Nome file:",
     "folderName": "Nome cartella:",
@@ -690,7 +738,8 @@
     "leftoverChatBody": "Sotto questo nome c'è ancora la chat di un progetto che non c'è più: {count} messaggi. Posso riprenderla — se l'avevi cancellato per sbaglio è tutta lì — oppure partire pulito e buttarla.",
     "leftoverChatBodyNoCount": "Sotto questo nome c'è ancora la chat di un progetto che non c'è più. Posso riprenderla — se l'avevi cancellato per sbaglio è tutta lì — oppure partire pulito e buttarla.",
     "leftoverChatKeep": "Riprendila",
-    "leftoverChatDiscard": "Parti pulito"
+    "leftoverChatDiscard": "Parti pulito",
+    "deleteProject": "Elimina il progetto {name}"
   },
   "write": {
     "write": "Scrive",

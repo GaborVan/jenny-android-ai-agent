@@ -36,7 +36,7 @@ Start here if you just want to install and use the app.
 | [Backup and restore](using/backup.md) | Encrypted `.jbk` backups (for disaster recovery) vs. local workspace snapshots (a time machine), and how to restore either. |
 | [Phone app launcher](using/app-launcher.md) | The Android app launcher grid in the Apps tab: opening, hiding, and uninstalling installed apps from inside Jenny. |
 | [Wiki](using/wiki.md) | The knowledge base Jenny compiles on request, its graph view, and the audit/feedback workflow. |
-| [Slash commands](using/slash-commands.md) | Built-in commands like `/new`, `/clear`, and `/stop`, and how unrecognized commands fall through to the LLM. |
+| [Slash commands](using/slash-commands.md) | Built-in commands like `/new` and `/stop`, the Commands chip that lists them, and how unrecognized commands fall through to the LLM. |
 | [Troubleshooting](using/troubleshooting.md) | Diagnosing common on-device symptoms — offline dot, silent errors, missed reminders, silent Telegram, blocked URLs. |
 
 ### Reference

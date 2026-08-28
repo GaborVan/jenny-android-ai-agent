@@ -196,6 +196,37 @@ def test_append_user_message_skips_bare_stop_command(tmp_path, monkeypatch) -> N
     assert read_transcript_lines("websocket:chat-1") == []
 
 
+def test_append_user_message_skips_bare_new_command(tmp_path, monkeypatch) -> None:
+    """Stessa ragione di `/stop`, piu' una che e' solo di `/new`.
+
+    Il confine che il comando lascia e' il pavimento della cronologia visibile,
+    ma la riga utente sta nello **stesso turno** del confine — i turni si
+    spezzano su `turn_end`, e un comando non ne apre uno — quindi non finisce
+    sotto quel pavimento: senza questo, la chat appena azzerata si riapriva con
+    un `/new` appeso in cima allo schermo pulito.
+    """
+    _configure_workspace(tmp_path, monkeypatch)
+    recorder = WebUITranscriptRecorder(log=_NullLog())
+    recorder.append_user_message("chat-1", "/new", metadata={})
+
+    from jenny.webui.transcript_store import read_transcript_lines
+
+    assert read_transcript_lines("websocket:chat-1") == []
+
+
+def test_append_user_message_keeps_the_commands_that_are_decisions(tmp_path, monkeypatch) -> None:
+    """`/model fast` non e' rumore: rileggere cosa si e' scelto, e quando, serve."""
+    _configure_workspace(tmp_path, monkeypatch)
+    recorder = WebUITranscriptRecorder(log=_NullLog())
+    recorder.append_user_message("chat-1", "/model fast", metadata={})
+
+    from jenny.webui.transcript_store import read_transcript_lines
+
+    lines = read_transcript_lines("websocket:chat-1")
+    assert len(lines) == 1
+    assert lines[0]["text"] == "/model fast"
+
+
 def test_append_user_message_persists_stop_when_media_attached(tmp_path, monkeypatch) -> None:
     _configure_workspace(tmp_path, monkeypatch)
     recorder = WebUITranscriptRecorder(log=_NullLog())

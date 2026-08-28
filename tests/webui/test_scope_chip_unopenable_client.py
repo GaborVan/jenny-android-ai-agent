@@ -168,6 +168,17 @@ class Chip {
   render() {}
   get personalLabel() { return i18n.t('scope.personal'); }
   select(scope) { this.picked.push(scope); }
+  /* La riga di un progetto avvolge la scelta e il tasto elimina. Qui il
+     contenitore c'è (i test contano i nodi per classe, e uno in mezzo cambia
+     l'albero) ma il tasto no: il flusso di cancellazione non è oggetto di
+     questi test, che guardano *cosa* la tendina scrive. Il tasto ha i suoi in
+     `test_scope_chip_delete_client.py`. */
+  _projectRow(item) {
+    const row = makeEl('div');
+    row.className = 'scope-menu-row';
+    row.appendChild(item);
+    return row;
+  }
   __LOAD_PROJECTS__
   __RENDER_MENU__
   __LABEL__

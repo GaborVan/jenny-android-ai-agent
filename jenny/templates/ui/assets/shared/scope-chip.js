@@ -17,11 +17,12 @@
  */
 
 import { i18n } from './i18n.js';
-import { AppState } from './state.js';
+import { AppState, claimComposeMenu, onOtherComposeMenu } from './state.js';
 import { api } from './api-client.js';
 import { rpc } from './rpc-client.js';
 import { escapeHtml, showToast } from './utils.js';
 import { confirmDialog, detailDialog, promptDialog } from './dialog.js';
+import { deleteProjectFlow } from './project-delete.js';
 
 /** Cartella che ospita i progetti, finche' il backend non dice la sua.
  *
@@ -154,6 +155,7 @@ export class ScopeChip {
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') this.close();
     });
+    onOtherComposeMenu('scope', () => this.close());
     i18n.onLocaleChange(() => {
       this.render();
       if (this._open) this._renderMenu();
@@ -294,6 +296,10 @@ export class ScopeChip {
 
   async open() {
     if (!this.enabled) return;
+    // Una sola tendina per volta: chi si apre lo dichiara, l'altra si chiude.
+    // Non basta il listener su `document` — il `stopPropagation` del chip
+    // impedisce al click di arrivarci (v. `state.js::composeMenu`).
+    claimComposeMenu('scope');
     this._open = true;
     this.menu.classList.add('open');
     this.el.setAttribute('aria-expanded', 'true');
@@ -389,7 +395,13 @@ export class ScopeChip {
           onPick: () => this.select({ kind: 'project', name: project.name }),
         });
         if (active) activeEl = item;
-        list.appendChild(item);
+        /* Un progetto si cancella da dove lo si è creato.
+           Fino alla 0.9.x la sola strada era il file manager, dopo aver saputo
+           che i progetti vivono in `wikis/`: chi ne apriva uno per sbaglio non
+           trovava la via indietro (issue #11). Un tasto **visibile** e non una
+           pressione lunga: un gesto che non si vede non è una risposta a «non
+           trovavo come si fa», che è la domanda da cui nasce tutto questo. */
+        list.appendChild(this._projectRow(item, project.name));
       }
     }
     /* Le cartelle che ci sono ma non si aprono, in fondo all'elenco.
@@ -572,6 +584,50 @@ export class ScopeChip {
    *  ma e' uno schermo che dice il falso, ed e' il tipo di falso che poi si
    *  scambia per il difetto che questa cancellazione e' venuta a chiudere.
    */
+  /** Una riga progetto: la scelta, e accanto il modo di cancellarla.
+   *
+   *  Due `<button>` affiancati e non uno dentro l'altro — un bottone dentro un
+   *  bottone non è markup valido, ed è la stessa ragione per cui l'explorer del
+   *  workspace fa la cella con un `div`. Il cestino è spento (`--text-faint`) e
+   *  separato dal nome: si vede, ma non è la cosa che l'occhio incontra per
+   *  prima su una riga che serve soprattutto a *entrare* nel progetto.
+   *
+   *  La domanda di conferma non è qui: la fa `deleteProjectFlow`, che è la
+   *  stessa dei due chiamanti e nomina quante conversazioni si porta via. Qui
+   *  c'è solo il seguito che appartiene a questa tendina — uscire dallo scope se
+   *  era quello aperto, e ridisegnare un elenco che nomina ancora un progetto
+   *  che non c'è più. */
+  _projectRow(item, name) {
+    const row = document.createElement('div');
+    row.className = 'scope-menu-row';
+    row.appendChild(item);
+
+    const del = document.createElement('button');
+    del.className = 'scope-menu-del';
+    del.type = 'button';
+    del.setAttribute('aria-label', i18n.t('scope.deleteProject', { name }));
+    const icon = document.createElement('i');
+    icon.className = 'ti ti-trash';
+    del.appendChild(icon);
+    del.addEventListener('click', async (e) => {
+      // Il click non deve arrivare alla riga sotto: entrare nel progetto un
+      // istante prima di chiedere se cancellarlo cambierebbe conversazione
+      // sotto la finestra di conferma.
+      e.stopPropagation();
+      this.close();
+      if (!(await deleteProjectFlow(name))) return;
+      if (!this.leaveIfSelected(name)) {
+        // Non era lo scope aperto: nessun cambio di conversazione, ma l'elenco
+        // in cache nomina ancora un progetto che non c'è più.
+        this._projects = null;
+        await this._loadProjects();
+      }
+      showToast(i18n.t('workspace.deletedProject', { name }), 'success');
+    });
+    row.appendChild(del);
+    return row;
+  }
+
   leaveIfSelected(name) {
     if (this.scope.kind !== 'project' || this.scope.name !== name) return false;
     this._projects = null;              // l'elenco su disco e' cambiato

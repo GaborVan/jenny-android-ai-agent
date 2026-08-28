@@ -10,7 +10,11 @@ from typing import Any, Callable, Mapping, NamedTuple, Sequence
 
 from loguru import logger
 
-from jenny.agent.memory import MemoryStore, is_gardener_session_key
+from jenny.agent.memory import (
+    HISTORY_FLOOR_METADATA_KEY,
+    MemoryStore,
+    is_gardener_session_key,
+)
 from jenny.agent.skills import SkillsLoader
 from jenny.config.paths import get_output_path
 from jenny.session.goal_state import goal_state_runtime_lines
@@ -416,6 +420,21 @@ def _absolute_workspace(root: Path) -> Path:
     return expanded.resolve()
 
 
+def _history_floor(session_metadata: Mapping[str, Any] | None) -> int:
+    """Il pavimento del diario scritto nei metadata della sessione, o ``0``.
+
+    Tollerante di proposito: i metadata sono un dizionario persistito su disco,
+    e una chiave corrotta o scritta da una versione diversa deve valere «nessun
+    pavimento» — cioè il comportamento di sempre — non far fallire il turno.
+    """
+    if not session_metadata:
+        return 0
+    floor = session_metadata.get(HISTORY_FLOOR_METADATA_KEY)
+    if isinstance(floor, bool) or not isinstance(floor, (int, float)):
+        return 0
+    return max(0, int(floor))
+
+
 class ContextBuilder:
     """Builds the context (system prompt + messages) for the agent."""
 
@@ -514,6 +533,7 @@ class ContextBuilder:
         session_key: str | None = None,
         available_tools: list[str] | None = None,
         orchestrator: bool | None = None,
+        history_floor: int = 0,
     ) -> str:
         """Build the system prompt from identity, bootstrap files, memory, and skills.
 
@@ -807,8 +827,14 @@ class ContextBuilder:
             parts.append(render_template("agent/apps_section.md", apps_summary=apps_summary))
 
         if include_memory_recent_history:
+            # Due pavimenti, e vince il più alto. Quello di Dream dice «queste
+            # voci non sono ancora entrate nella memoria di lungo periodo»;
+            # ``history_floor`` dice «questa sessione è stata azzerata qui», ed è
+            # l'unico che sa che la conversazione a cui quelle voci si
+            # riferiscono l'utente l'ha buttata (v.
+            # ``memory.HISTORY_FLOOR_METADATA_KEY``).
             entries = self.memory.read_recent_history_for_prompt(
-                since_cursor=self.memory.get_last_dream_cursor(),
+                since_cursor=max(self.memory.get_last_dream_cursor(), history_floor),
                 session_key=session_key,
             )
             if entries:
@@ -1411,6 +1437,7 @@ class ContextBuilder:
                     session_key=session_key,
                     available_tools=available_tools,
                     orchestrator=orchestrator,
+                    history_floor=_history_floor(session_metadata),
                 ),
             },
             *history,

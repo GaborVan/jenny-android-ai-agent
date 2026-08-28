@@ -1077,3 +1077,98 @@ def test_build_response_schema(monkeypatch, tmp_path) -> None:
     assert out["schemaVersion"] == WEBUI_TRANSCRIPT_SCHEMA_VERSION
     assert out["sessionKey"] == key
     assert len(out["messages"]) == 1
+
+
+# ── Il confine di /new e' un'interruzione di pagina ────────────────────────────
+#
+# Da 0.9.x `/new` non lascia piu' la conversazione vecchia a schermo: il
+# separatore che il comando scrive nel transcript e' anche il punto in cui la
+# cronologia visibile comincia. Non e' una cancellazione — questi test tengono
+# fermi entrambi i versi: la prima pagina si ferma li', e chi scorre in su
+# ritrova quel che c'era prima.
+
+
+def _append_session_boundary(key: str, chat_id: str) -> None:
+    """La coppia di righe che `/new` lascia: il comando e il suo confine.
+
+    Senza `turn_end` di proposito: e' come le scrive la produzione — un comando
+    non apre un turno dell'agente, e ``_split_transcript_turns`` spezza solo su
+    quello.
+    """
+    append_transcript_object(key, {"event": "user", "chat_id": chat_id, "text": "/new"})
+    append_transcript_object(
+        key,
+        {
+            "event": "message",
+            "chat_id": chat_id,
+            "text": "New session started.",
+            "session_boundary": True,
+        },
+    )
+
+
+def test_first_page_starts_at_the_last_session_boundary(tmp_path, monkeypatch) -> None:
+    key = "websocket:boundary"
+    _write_segmented_turns(tmp_path, monkeypatch, key, "boundary", 4)
+    _append_session_boundary(key, "boundary")
+    _append_numbered_turn(key, "boundary", 5)
+
+    page = build_webui_thread_response(key, limit=40)
+
+    assert page is not None
+    contents = _message_contents(page)
+    # Il confine e quel che viene dopo, e nulla di prima: il limite era 40, cioe'
+    # abbondante per tutto il transcript — chi ha chiuso la pagina e' il confine.
+    assert "New session started." in contents
+    assert _numbered_turn_texts(5, 5)[0] in contents
+    assert _numbered_turn_texts(1, 4)[0] not in contents
+    # E si dichiara: senza questo lo scroll in su non partirebbe nemmeno.
+    assert page["page"]["has_more_before"] is True
+    assert page["page"]["before_cursor"]
+
+
+def test_scrolling_past_the_boundary_returns_the_previous_session(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    key = "websocket:boundary-back"
+    _write_segmented_turns(tmp_path, monkeypatch, key, "boundary-back", 4)
+    _append_session_boundary(key, "boundary-back")
+    _append_numbered_turn(key, "boundary-back", 5)
+
+    first = build_webui_thread_response(key, limit=40)
+    assert first is not None
+    older = build_webui_thread_response(key, limit=40, before=first["page"]["before_cursor"])
+
+    assert older is not None
+    # Tutta la conversazione precedente, in una pagina: nessuna riga e' andata
+    # perduta, era solo sotto la piega.
+    assert _message_contents(older) == _numbered_turn_texts(1, 4)
+    assert older["page"]["has_more_before"] is False
+
+
+def test_two_boundaries_in_a_row_are_one_page_break(tmp_path, monkeypatch) -> None:
+    """Due `/new` di fila non fanno girare a vuoto la paginazione.
+
+    Senza un turno in mezzo le quattro righe stanno nello **stesso** turno
+    (``_split_transcript_turns`` spezza solo su ``turn_end``), quindi le
+    interruzioni sono una, non due: la pagina dopo e' gia' la conversazione
+    precedente. Il punto del test e' che si scende — ogni pagina consuma almeno
+    un turno e ``before`` esclude quello da cui si e' partiti, quindi non esiste
+    la richiesta che ripresenta se stessa.
+    """
+    key = "websocket:boundary-twice"
+    _write_segmented_turns(tmp_path, monkeypatch, key, "boundary-twice", 2)
+    _append_session_boundary(key, "boundary-twice")
+    _append_session_boundary(key, "boundary-twice")
+
+    first = build_webui_thread_response(key, limit=40)
+    assert first is not None
+    cursor = first["page"]["before_cursor"]
+    assert cursor
+    assert _numbered_turn_texts(1, 2)[0] not in _message_contents(first)
+
+    second = build_webui_thread_response(key, limit=40, before=cursor)
+    assert second is not None
+    assert _message_contents(second) == _numbered_turn_texts(1, 2)
+    assert second["page"]["has_more_before"] is False

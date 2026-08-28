@@ -12,7 +12,6 @@
     "placeholder": "Ask something…",
     "error": "Error",
     "attach": "Attach",
-    "cleared": "Chat cleared.",
     "wsError": "WebSocket not connected. Waiting for reconnection...",
     "agentRunning": "Agent running",
     "copy": "Copy",
@@ -32,7 +31,57 @@
     "restricted": "Restricted",
     "default": "Default",
     "message": "Message",
-    "scrollToBottom": "Jump to bottom"
+    "scrollToBottom": "Jump to bottom",
+    "newChat": "New chat",
+    "newChatConfirm": "Start a new chat? Jenny stops remembering everything said so far. The conversation is not deleted — scroll up to read it again.",
+    "newChatConfirmOk": "New chat",
+    "loadPrevious": "Show the previous conversation"
+  },
+  "commands": {
+    "label": "Commands",
+    "aria": "Show commands",
+    "loading": "Loading…",
+    "loadFailed": "Could not load the command list.",
+    "empty": "No commands available.",
+    "new": {
+      "title": "New chat"
+    },
+    "stop": {
+      "title": "Stop the current task"
+    },
+    "status": {
+      "title": "Runtime and provider status"
+    },
+    "model": {
+      "title": "Show or switch the model"
+    },
+    "history": {
+      "title": "Print the saved history"
+    },
+    "goal": {
+      "title": "Treat this as a long-running goal"
+    },
+    "dream": {
+      "title": "Consolidate memory now"
+    },
+    "atlas": {
+      "title": "Rebuild the wiki directory"
+    },
+    "gardener": {
+      "title": "Turn the journal into pages"
+    },
+    "skill": {
+      "title": "List the enabled skills"
+    },
+    "tidy": {
+      "title": "Restructure this project's wiki"
+    },
+    "init": {
+      "title": "Write this project's instructions"
+    },
+    "help": {
+      "title": "List every command"
+    }
   },
   "subagents": {
     "title": "Subagents",
@@ -396,7 +445,6 @@
     "clone": "Clone",
     "delete": "Delete",
     "download": "Download",
-    "actions": "Actions",
     "new": "New",
     "fileName": "File name:",
     "folderName": "Folder name:",
@@ -690,7 +738,8 @@
     "leftoverChatBody": "This name still carries the chat of a project that is gone: {count} messages. I can pick it up again — if you deleted it by mistake it is all there — or start clean and throw it away.",
     "leftoverChatBodyNoCount": "This name still carries the chat of a project that is gone. I can pick it up again — if you deleted it by mistake it is all there — or start clean and throw it away.",
     "leftoverChatKeep": "Pick it up",
-    "leftoverChatDiscard": "Start clean"
+    "leftoverChatDiscard": "Start clean",
+    "deleteProject": "Delete the project {name}"
   },
   "write": {
     "write": "Writes",

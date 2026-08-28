@@ -30,6 +30,7 @@ from jenny.webui.transcript_replay import replay_transcript_to_ui_messages
 # marca i re-export che non hanno un chiamante interno (ruff non li pota).
 from jenny.webui.transcript_store import (
     _TRANSCRIPT_ACTIVE_CHUNK_ID,
+    _is_session_boundary_row,
     _is_user_transcript_row,
     _read_chunk_turns,
     _read_segment_manifest_entries,
@@ -218,6 +219,23 @@ def _count_user_messages_before_ordinal(
     return total
 
 
+def _is_session_boundary_turn(turn: list[dict[str, Any]]) -> bool:
+    """Se *turn* contiene il confine lasciato da ``/new``.
+
+    E' il turno in cui il modello ha smesso di ricordare quel che sta sopra, e da
+    questa versione e' anche **dove comincia la cronologia visibile**: la pagina
+    lo include e si ferma, cosi' la chat riaperta parte dal separatore invece di
+    ripescare una conversazione che l'utente ha chiuso.
+
+    Non e' una cancellazione e non deve diventarlo: ``has_more_before`` resta
+    vero (``first_ref.ordinal > 0``), quindi lo scroll in su ricarica la sessione
+    precedente come una pagina piu' vecchia — e' un'interruzione di pagina, che
+    e' il contrario esatto di quel che faceva il vecchio ``/clear`` (schermo
+    pulito e nulla di vero sotto).
+    """
+    return any(_is_session_boundary_row(row) for row in turn)
+
+
 def _select_transcript_page(
     session_key: str,
     *,
@@ -234,6 +252,8 @@ def _select_transcript_page(
     selected: list[_TranscriptTurnRef] = []
     selected_message_count = 0
     selected_record_count = 0
+    # Il confine di ``/new`` chiude la pagina: v. ``_is_session_boundary_turn``.
+    hit_boundary = False
 
     for chunk in reversed(chunks):
         if chunk.start_ordinal >= upper_ordinal:
@@ -261,6 +281,12 @@ def _select_transcript_page(
             selected.append(_TranscriptTurnRef(ordinal, turn))
             selected_message_count += _count_anchor_messages(turn)
             selected_record_count += len(turn)
+            if _is_session_boundary_turn(turn):
+                # Si include e si smette: il separatore e' la prima cosa che la
+                # pagina mostra, ed e' anche la spiegazione di perche' sopra non
+                # c'e' niente.
+                hit_boundary = True
+                break
             if selected_message_count >= page_limit:
                 break
             # Secondo tetto, sui record grezzi. Il limite in messaggi non dice
@@ -273,7 +299,8 @@ def _select_transcript_page(
             if selected_record_count >= _MAX_TRANSCRIPT_PAGE_RECORDS:
                 break
         if (
-            selected_message_count >= page_limit
+            hit_boundary
+            or selected_message_count >= page_limit
             or selected_record_count >= _MAX_TRANSCRIPT_PAGE_RECORDS
         ):
             break
