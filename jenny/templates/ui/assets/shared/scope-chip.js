@@ -22,6 +22,8 @@ import { api } from './api-client.js';
 import { rpc } from './rpc-client.js';
 import { escapeHtml, showToast } from './utils.js';
 import { confirmDialog, detailDialog, promptDialog } from './dialog.js';
+import { setupLongPress } from './longpress.js';
+import { deleteProjectFlow } from './project-delete.js';
 
 /** Cartella che ospita i progetti, finche' il backend non dice la sua.
  *
@@ -388,6 +390,15 @@ export class ScopeChip {
           active,
           onPick: () => this.select({ kind: 'project', name: project.name }),
         });
+        /* Un progetto si cancella da dove lo si è creato.
+           Fino alla 0.9.x la sola strada era il file manager, dopo aver saputo
+           che i progetti vivono in `wikis/`: chi ne apriva uno per sbaglio non
+           trovava la via indietro (issue #11). Long-press e non un cestino
+           sulla riga: è l'idioma dell'app (griglia delle app, explorer del
+           workspace) ed è quello giusto qui, dove ogni riga è anzitutto una
+           *scelta* e un bersaglio distruttivo permanente accanto al nome si
+           sbaglia con il pollice. */
+        this._attachDelete(item, project.name);
         if (active) activeEl = item;
         list.appendChild(item);
       }
@@ -528,6 +539,12 @@ export class ScopeChip {
     btn.appendChild(check);
 
     btn.addEventListener('click', () => {
+      // Il tap sintetico che segue un long-press non deve *entrare* nel
+      // progetto sotto la domanda appena aperta: il flag lo posa
+      // `setupLongPress` (v. `_attachDelete`), qui lo si consuma. Stessa
+      // guardia dell'explorer del workspace; sulle righe senza pressione lunga
+      // il flag non esiste e questo ramo non si vede mai.
+      if (btn.dataset.longpress) { delete btn.dataset.longpress; return; }
       this.close();
       onPick();
     });
@@ -572,6 +589,28 @@ export class ScopeChip {
    *  ma e' uno schermo che dice il falso, ed e' il tipo di falso che poi si
    *  scambia per il difetto che questa cancellazione e' venuta a chiudere.
    */
+  /** Long-press su una riga progetto: la cancellazione, e il seguito che è di
+   *  questa tendina — uscire dallo scope se era quello aperto, e ridisegnare
+   *  l'elenco che non ha più quella voce.
+   *
+   *  `dataset.longpress` lo posa `setupLongPress` e lo consuma il click: senza
+   *  quel consumo il tap sintetico che segue la pressione lunga *entrerebbe*
+   *  nel progetto un istante dopo aver aperto la domanda, cioè cambierebbe
+   *  conversazione sotto la finestra. È la stessa guardia dell'explorer. */
+  _attachDelete(item, name) {
+    setupLongPress(item, async () => {
+      this.close();
+      if (!(await deleteProjectFlow(name))) return;
+      if (!this.leaveIfSelected(name)) {
+        // Non era lo scope aperto: nessun cambio di conversazione, ma l'elenco
+        // in cache nomina ancora un progetto che non c'è più.
+        this._projects = null;
+        await this._loadProjects();
+      }
+      showToast(i18n.t('workspace.deletedProject', { name }), 'success');
+    });
+  }
+
   leaveIfSelected(name) {
     if (this.scope.kind !== 'project' || this.scope.name !== name) return false;
     this._projects = null;              // l'elenco su disco e' cambiato

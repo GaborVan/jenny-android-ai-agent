@@ -10,7 +10,8 @@ import { ImageHandler } from './shared/image-handler.js';
 import { openImageLightbox } from './shared/image-lightbox.js';
 import { i18n } from './shared/i18n.js';
 import { getProviderBrand } from './shared/provider-brand.js';
-import { detailDialog } from './shared/dialog.js';
+import { confirmDialog, detailDialog } from './shared/dialog.js';
+import { commandsChip } from './shared/commands-chip.js';
 import {
   saActions,
   saActivityFrame,
@@ -281,6 +282,8 @@ export class ChatController {
     if (input) input.placeholder = i18n.t('chat.placeholder');
     const attachBtn = document.getElementById('btn-attach');
     if (attachBtn) attachBtn.title = i18n.t('chat.attach');
+    const newChatBtn = document.getElementById('btn-new-chat');
+    if (newChatBtn) newChatBtn.title = i18n.t('chat.newChat');
   }
 
   setupEventListeners() {
@@ -288,6 +291,15 @@ export class ChatController {
     document.getElementById('btn-attach').addEventListener('click', () => {
       this.imageHandler.trigger();
     });
+    document.getElementById('btn-new-chat')?.addEventListener('click', () => {
+      this.startNewChat();
+    });
+    /* La tendina dei comandi si accende qui e non in `mobile-app.js` come le
+       altre due della riga: quelle hanno bisogno dello stato di sessione, questa
+       ha bisogno solo di qualcuno a cui consegnare la scelta — cioè di questo
+       controller. */
+    commandsChip.onPick = (spec) => this.runCommand(spec);
+    commandsChip.init();
 
 
     // Textarea auto-resize + send enable/disable + hide secondary actions
@@ -1651,10 +1663,28 @@ export class ChatController {
 
   _handleMessage(msg) {
     if (msg.session_boundary) {
-      this._resetStreamState();
-      this._appendSessionBoundary(msg.text || '');
-      this._bumpUnread();
-      this.scrollToBottom();
+      /* `/new` pulisce anche lo schermo, e lo fa **ricaricando il thread** invece
+         di svuotare il DOM da sé.
+
+         Il confine è anche il pavimento della cronologia visibile: il server
+         ferma la prima pagina lì (`webui/transcript.py::_is_session_boundary_turn`),
+         quindi quel che questa fetch riporta è esattamente il separatore e nulla
+         sopra — e "nulla sopra" resta vero alla riapertura dell'app, che è ciò
+         che il vecchio `/clear` prometteva senza mantenerlo. Scorrere in su
+         ricarica la conversazione precedente come pagina più vecchia: non è una
+         cancellazione, è un'interruzione di pagina.
+
+         Ricaricare e non dipingere: così lo stato a schermo è per costruzione
+         identico a quello di un reload, e non c'è una seconda strada da tenere
+         d'accordo con la prima (`invalidateHistory` + `loadInitialHistory` è già
+         quella del resync e del cambio di conversazione). Nessuna corsa con la
+         scrittura: `ws_sender.send` persiste il record **prima** del fanout, e
+         l'append è sincrono — quando questo frame arriva, la riga c'è.
+
+         `_appendSessionBoundary` resta viva: la usa il replay, che è chi disegna
+         il separatore che questa fetch riporta. */
+      this.invalidateHistory();
+      this.loadInitialHistory();
       return;
     }
     const isHint = msg.kind === 'tool_hint';
@@ -3067,37 +3097,63 @@ export class ChatController {
     });
   }
 
-  async sendMessage() {
-    const text = this.input.value.trim();
-    const hasImages = this.imageHandler.count > 0;
-    if (!text && !hasImages) return;
-
-    if (text === '/clear') {
-      this.chatArea.innerHTML = '';
-      this.identityEl = null;
-      this._ensureIdentity();
-      // Lo schermo pulito resta pulito per tutta la sessione della WebUI.
-      // Svuotare la lista porta scrollTop a 0, e il browser emette uno scroll
-      // event sintetico: con hasMoreHistory ancora true l'infinite scroll
-      // (setupInfiniteScroll) ricaricava subito l'ultima pagina di storico e la
-      // chat riappariva tutta un istante dopo il "Chat cancellata.".
-      // Disarmare la paginazione è l'unico modo per fermarla, perché dopo il
-      // wipe la chat non è nemmeno più scrollabile: nessun gesto dell'utente
-      // potrebbe distinguersi da quell'evento sintetico. Lo storico torna
-      // disponibile alla prossima loadInitialHistory() (riapertura dell'app o
-      // invalidateHistory()).
-      this.historyCursor = null;
-      this.hasMoreHistory = false;
-      const el = document.createElement('div');
-      el.className = 'chat-sys';
-      el.textContent = i18n.t('chat.cleared');
-      this.chatArea.appendChild(el);
-      this.input.value = '';
-      this.input.style.height = 'auto';
+  /* Un comando scelto dalla tendina.
+   *
+   * Due comportamenti, come sul menu di Telegram: quello che non prende
+   * argomenti parte, quello che ne prende uno **precompila il composer** e
+   * lascia scrivere. Mandare `/model` da solo non è sbagliato (stampa lo stato),
+   * ma è quasi mai quel che si voleva scegliendolo da un elenco.
+   *
+   * `/new` passa dalla sua conferma: è la stessa azione del pulsante, e la
+   * conferma vive in un posto solo. */
+  runCommand(spec) {
+    const command = spec?.command;
+    if (!command) return;
+    if (command === '/new') {
+      this.startNewChat();
+      return;
+    }
+    if (spec.arg_hint) {
+      this.input.value = `${command} `;
+      this.input.focus();
+      // Il cursore in fondo: `focus()` da solo lo mette dove capita quando il
+      // valore è stato appena riscritto.
+      const end = this.input.value.length;
+      this.input.setSelectionRange(end, end);
+      this._autoResize();
       this._updateSendState();
       this._updateActions();
       return;
     }
+    this.input.value = command;
+    this.sendMessage();
+  }
+
+  /* `/new` con una domanda davanti.
+   *
+   * La conferma non è cerimonia: il pulsante sta a un pollice dalla graffetta,
+   * e questa azione non si annulla — il modello dimentica, e non c'è un modo di
+   * fargli ricordare. Quel che *resta* è il registro a schermo, un'interruzione
+   * di pagina più in su: per questo la domanda parla di contesto e non di
+   * cancellazione, che sarebbe falso.
+   *
+   * Passa da `sendMessage` invece di scrivere sul socket: è l'unica strada che
+   * conosce lo scope, l'interruttore di scrittura e la riconnessione. La bolla
+   * `/new` che disegna resta a schermo per il tempo del giro e poi sparisce con
+   * lo schermo, che il confine ripulisce (v. `_handleMessage`). */
+  async startNewChat() {
+    if (!(await confirmDialog(
+      i18n.t('chat.newChatConfirm'),
+      i18n.t('chat.newChatConfirmOk'),
+    ))) return;
+    this.input.value = '/new';
+    await this.sendMessage();
+  }
+
+  async sendMessage() {
+    const text = this.input.value.trim();
+    const hasImages = this.imageHandler.count > 0;
+    if (!text && !hasImages) return;
 
     sessionManager.ensureAttached();
 

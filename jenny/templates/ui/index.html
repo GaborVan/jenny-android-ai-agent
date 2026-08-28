@@ -155,11 +155,26 @@
               <i class="write-switch-mark ti ti-pencil"></i>
               <span class="write-switch-label"></span>
             </button>
+            <!-- Terza domanda della stessa riga: *cosa posso chiedere*. I
+                 comandi esistevano da sempre e non li vedeva nessuno (issue
+                 #11); la tendina la costruisce shared/commands-chip.js
+                 dall'elenco che serve il backend. -->
+            <div class="commands-menu" id="commands-menu" role="menu" aria-labelledby="commands-chip"></div>
+            <button class="commands-chip" id="commands-chip" type="button"
+                    aria-haspopup="menu" aria-expanded="false"
+                    aria-label="Comandi" data-i18n-aria="commands.aria">
+              <i class="commands-chip-mark ti ti-command"></i>
+              <span class="commands-chip-label"></span>
+            </button>
           </div>
           <div id="input-row" class="compose-row">
             <div class="compose-pill">
               <textarea id="chat-input" placeholder="Chiedi qualcosa…" rows="1" aria-label="Messaggio" data-i18n-placeholder="chat.placeholder" data-i18n-aria="chat.message"></textarea>
               <div class="input-actions" id="secondary-actions">
+                <!-- Scorciatoia a un tocco per il comando che la issue #11
+                     chiede per nome. È lo stesso `/new` della tendina, e passa
+                     dalla stessa conferma: sta a un pollice dalla graffetta. -->
+                <button class="input-action" id="btn-new-chat" title="Nuova chat" data-i18n-title="chat.newChat"><i class="ti ti-message-plus"></i></button>
                 <button class="input-action" id="btn-attach" title="Allega" data-i18n-title="chat.attach"><i class="ti ti-paperclip"></i></button>
               </div>
             </div>

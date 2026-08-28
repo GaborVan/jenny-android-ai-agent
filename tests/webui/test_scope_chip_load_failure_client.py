@@ -125,6 +125,12 @@ class Chip {
   render() { this.rendered++; }   // il chip in sé non è oggetto di questi test
   get personalLabel() { return i18n.t('scope.personal'); }
   select() {}
+  /* Il gesto di cancellazione non è oggetto di questi test — che guardano
+     *cosa* la tendina scrive — e il metodo vero tira dentro `setupLongPress` e
+     il flusso di `project-delete.js`. Qui è un innesto muto: se un giorno
+     `_renderMenu` cominciasse a *dipendere* da quel che fa, questo stub tornerà
+     a farsi notare. */
+  _attachDelete() {}
   __LOAD_PROJECTS__
   __RENDER_MENU__
   __LABEL__
@@ -300,7 +306,10 @@ def test_the_note_string_is_translated_in_both_locales() -> None:
 def test_the_error_note_has_a_rule_of_its_own() -> None:
     """Grep, non comportamento: che la classe `is-error` sia colorata."""
     css = CSS.read_text(encoding="utf-8")
-    assert re.search(r"\.scope-menu-note\.is-error\s*\{[^}]*var\(--error\)", css), (
+    # Il selettore può essere elencato insieme a quello della tendina dei
+    # comandi, che riusa la stessa regola: è lo stesso corpo, ed è quel che il
+    # test guarda.
+    assert re.search(r"\.scope-menu-note\.is-error[^{]*\{[^}]*var\(--error\)", css), (
         "la nota del guasto non si distingue da una nota qualsiasi"
     )
 

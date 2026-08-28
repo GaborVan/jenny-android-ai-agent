@@ -33,8 +33,18 @@ def _css() -> str:
 
 
 def _rule(selector: str) -> str:
-    """Il corpo della prima regola per ``selector``."""
-    body = re.search(rf"^{re.escape(selector)} \{{(.*?)^\}}", _css(), re.S | re.M)
+    """Il corpo della prima regola che *include* ``selector``.
+
+    Non solo la regola dove il selettore è solo: da quando la tendina dei
+    comandi riusa queste misure (pannello, righe, elenco che scorre) i selettori
+    sono elencati insieme — ``.scope-menu,\n.commands-menu { … }`` — proprio per
+    non tenerne due copie allineate a mano. È lo stesso corpo, e questi test
+    guardano il corpo: pretendere il selettore da solo vorrebbe dire che
+    condividere una regola fa fallire il contratto di chi la scriveva prima.
+    """
+    body = re.search(
+        rf"^{re.escape(selector)}(?:,\n[^{{\n]+)* \{{(.*?)^\}}", _css(), re.S | re.M,
+    )
     assert body, f"regola {selector} non trovata in mobile-style.css"
     return body.group(1)
 
@@ -80,7 +90,7 @@ def test_the_menu_is_capped_and_lays_out_as_a_column() -> None:
     rule = _rule(".scope-menu")
     assert "max-height:" in rule, "senza tetto il pannello esce dallo schermo dall'alto"
     assert "flex-direction: column" in rule
-    assert ".scope-menu.open { display: flex; }" in _css(), (
+    assert re.search(r"^\.scope-menu\.open[^{]*\{ display: flex; \}", _css(), re.M), (
         "con `display: block` il figlio che scorre non riceve l'altezza rimasta"
     )
 

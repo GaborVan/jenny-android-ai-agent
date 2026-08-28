@@ -520,7 +520,11 @@ class TestNewCommandArchival:
 
         call_count = 0
 
-        async def _failing_summarize(_messages, *, session_key=None) -> bool:
+        async def _failing_summarize(_messages, *, session_key=None, prompt_visible=True) -> bool:
+            # `/new` archivia per Dream e non per i prompt: senza questo
+            # il riassunto della conversazione appena buttata tornava nel
+            # system prompt del turno dopo (issue #11).
+            assert prompt_visible is False
             nonlocal call_count
             assert session_key == UNIFIED_SESSION_KEY
             call_count += 1
@@ -555,7 +559,11 @@ class TestNewCommandArchival:
         archived_count = -1
         archived_session_key = None
 
-        async def _fake_summarize(messages, *, session_key=None) -> bool:
+        async def _fake_summarize(messages, *, session_key=None, prompt_visible=True) -> bool:
+            # `/new` archivia per Dream e non per i prompt: senza questo
+            # il riassunto della conversazione appena buttata tornava nel
+            # system prompt del turno dopo (issue #11).
+            assert prompt_visible is False
             nonlocal archived_count, archived_session_key
             archived_count = len(messages)
             archived_session_key = session_key
@@ -584,7 +592,11 @@ class TestNewCommandArchival:
             session.add_message("assistant", f"resp{i}")
         loop.sessions.save(session)
 
-        async def _ok_summarize(_messages, *, session_key=None) -> bool:
+        async def _ok_summarize(_messages, *, session_key=None, prompt_visible=True) -> bool:
+            # `/new` archivia per Dream e non per i prompt: senza questo
+            # il riassunto della conversazione appena buttata tornava nel
+            # system prompt del turno dopo (issue #11).
+            assert prompt_visible is False
             assert session_key == UNIFIED_SESSION_KEY
             return True
 
@@ -612,7 +624,11 @@ class TestNewCommandArchival:
         archived = asyncio.Event()
         release_archive = asyncio.Event()
 
-        async def _slow_summarize(_messages, *, session_key=None) -> bool:
+        async def _slow_summarize(_messages, *, session_key=None, prompt_visible=True) -> bool:
+            # `/new` archivia per Dream e non per i prompt: senza questo
+            # il riassunto della conversazione appena buttata tornava nel
+            # system prompt del turno dopo (issue #11).
+            assert prompt_visible is False
             assert session_key == UNIFIED_SESSION_KEY
             await release_archive.wait()
             archived.set()

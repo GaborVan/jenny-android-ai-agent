@@ -168,6 +168,12 @@ class Chip {
   render() {}
   get personalLabel() { return i18n.t('scope.personal'); }
   select(scope) { this.picked.push(scope); }
+  /* Il gesto di cancellazione non è oggetto di questi test — che guardano
+     *cosa* la tendina scrive — e il metodo vero tira dentro `setupLongPress` e
+     il flusso di `project-delete.js`. Qui è un innesto muto: se un giorno
+     `_renderMenu` cominciasse a *dipendere* da quel che fa, questo stub tornerà
+     a farsi notare. */
+  _attachDelete() {}
   __LOAD_PROJECTS__
   __RENDER_MENU__
   __LABEL__

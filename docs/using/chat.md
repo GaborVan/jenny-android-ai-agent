@@ -119,6 +119,6 @@ Scrolling to the very top of the chat automatically loads older history (infinit
 - [Tour of the WebUI](webui-tour.md) — the Session Info popover, the dock, and how the chat tab fits into the rest of the app.
 - [Scheduling and proactivity](scheduling.md) — why delegation is the normal path, the six subagent types, and what Jenny can do to a running subagent from her side.
 - [Files and attachments](attachments.md) — sending images/files, attachment limits, and what the agent can actually read from them.
-- [Slash commands](slash-commands.md) — the full command list, including `/stop`, `/new`, and `/clear`.
+- [Slash commands](slash-commands.md) — the full command list, including `/stop` and `/new`, and the Commands chip that shows them all.
 - [Memory, Dream and Atlas](memory.md) — the difference between what stays on screen and what the model actually remembers.
 - [Settings](../reference/settings.md) and [Configuration reference](../reference/configuration.md) — where "Reasoning effort" and `websocket.showReasoning` live.

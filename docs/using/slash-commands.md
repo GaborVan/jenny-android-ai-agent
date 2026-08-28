@@ -1,10 +1,12 @@
 # Slash commands
 
-Typing a message that starts with `/` in the chat input can trigger a built-in command instead of a normal turn — here is the full list, exactly what each one prints, and the one client-side command that isn't in that list at all.
+Typing a message that starts with `/` in the chat input can trigger a built-in command instead of a normal turn. You don't have to remember any of them: the **Commands** chip above the composer lists them all with a one-line description each, and picking one either sends it or fills the composer in for you. Here is the full list and exactly what each one prints.
 
 ## How commands work
 
-Commands are matched on the whole message (case-insensitive), either as an exact word (`/new`) or as a prefix followed by an argument (`/model fast`). If what you type doesn't match any known command, it is **not rejected** — it's forwarded to the agent as an ordinary chat message, exactly as if it had no leading slash. There's no command palette or autocomplete in the WebUI: you type commands by hand.
+Commands are matched on the whole message (case-insensitive), either as an exact word (`/new`) or as a prefix followed by an argument (`/model fast`). If what you type doesn't match any known command, it is **not rejected** — it's forwarded to the agent as an ordinary chat message, exactly as if it had no leading slash.
+
+You can type them by hand, or pick them from the **Commands** chip in the row above the composer, next to the scope chip and the write switch. That list is built from the same table that `/help` prints, so it can't drift out of date; a command that takes an argument (`/model`, `/history`, `/goal`, …) is written into the composer for you instead of being sent immediately, so you can finish the line. Two of them — `/tidy` and `/init` — only appear when the conversation is bound to a [project](./projects.md), because outside one they have no subject. There is still no autocomplete on `/` itself.
 
 Two commands — `/stop` and `/status` — are handled on a "priority" fast path that runs even while a turn is actively streaming or a tool is executing. The rest wait for the current dispatch to be free, which in practice is rarely noticeable.
 
@@ -24,7 +26,7 @@ All server-side command responses below are **hardcoded in English**, regardless
 | `/atlas` | `[force]` | Rebuilds the wiki directory (`memory/WIKI.md`) from your wikis, in the background |
 | `/gardener` | `[project\|settings\|…]` | Runs one [gardener](./gardener.md) pass on a project now, or reads and changes the periodic pass |
 | `/skill` | none | Lists the currently enabled skills with their descriptions |
-| `/help` | none | Lists all of the above, plus `/init` (but not `/clear` — see below) |
+| `/help` | none | Lists all of the above, plus `/init` |
 
 One more command, `/init`, appears in `/help` but is not in the list above because it is not a command in the same sense: inside a [project](./projects.md) it is expanded into an ordinary agent turn that reads the wiki and writes that project's `AGENTS.md`. Outside a project it refuses and tells you to pick one from the chip.
 
@@ -38,7 +40,13 @@ Cancels any active task first, then clears the model's context (the LLM stops re
 New session started.
 ```
 
-**This does not erase anything from the screen.** Everything above the separator stays fully visible and scrollable — see [`/new` vs `/clear`](#new-vs-clear-the-crucial-distinction) below for why that matters.
+There are three ways to run it: the **New chat** button in the composer (next to the paperclip), the first entry in the Commands chip, or typing `/new`. The first two ask for confirmation first, since the reset can't be undone.
+
+**The screen starts again from the separator.** The conversation before it is not deleted: the separator is a page break in the visible history, and scrolling up loads the previous session as an older page. That's true after closing and reopening the app too — the chat comes back starting at the last separator, not at the top of everything.
+
+**And the model really does start empty.** Two things would otherwise leak back into the very next turn's system prompt through the `# Recent History` block ([the agent turn](../internals/agent-turn.md)): the summaries of any auto-compaction that happened during the cleared conversation, and the summary `/new` itself writes when archiving it. Neither is injected any more — a per-session floor covers the first, and the archived summary is marked as Dream-only for the second. Dream still consolidates both into long-term memory: `/new` resets what is *in front of* the model, and never deletes what it has already learned.
+
+If a conversation seems to keep dragging in an old topic — or to ignore a rule you added to `AGENTS.md` halfway through, which it re-reads from disk on every turn — this is the command you want. A model imitates its own history, and the history is what `/new` takes away.
 
 ### `/stop` — cancel the active turn
 
@@ -132,7 +140,7 @@ If the argument isn't a number:
 Usage: /history [count] — e.g. /history 5 (default: 10, max: 50)
 ```
 
-This reads the persisted session history, not the on-screen transcript — see [`/new` vs `/clear`](#new-vs-clear-the-crucial-distinction) for the difference.
+This reads the persisted session history, not the on-screen transcript: the two are separate, and `/new` resets the first without deleting the second.
 
 ### `/goal <description>` — start a long-running goal
 
@@ -249,31 +257,20 @@ No skills available.
 /help — List available slash commands.
 ```
 
-`/clear` is deliberately **not** in this list — see below.
+## What `/new` does and does not delete
 
-## `/clear` — the hidden, client-side command
+`/new` is a reset of the model's context, not a delete button — nothing is destroyed on the server:
 
-`/clear` exists but does not appear in `/help`, is not registered as a server command, and is handled entirely inside the WebUI before your message is even sent. It:
+| | What happens |
+|---|---|
+| The model's context | Cleared. It stops remembering anything before the separator. |
+| The visible chat | Starts again from the separator. Scroll up to reach the previous session; reopening the app shows the same thing. |
+| The persisted transcript | Untouched — it is a separate, permanent log, and the page break only changes where reading starts. |
+| Long-term memory | Untouched. The discarded conversation is archived for Dream, which will consolidate it into `MEMORY.md` as usual. |
 
-- Wipes the rendered message list from the screen.
-- Prints a local system line: `Chat cleared.`
-- Disarms the WebUI's own history pagination, so the cleared screen stays cleared: scrolling up does not pull the older messages back. They reappear the next time the chat view loads its history from scratch — reopening the app, or reloading the WebUI.
+If you want a conversation to actually go away, deleting it is a different operation: a [project](./projects.md) and its conversation are removed together (long-press the project in the scope chip, or use the file manager), and the personal conversation's transcript lives in the workspace.
 
-It never reaches the gateway. The server-side session, the model's context, and the persisted transcript are all completely untouched.
-
-## `/new` vs `/clear`: the crucial distinction
-
-These two commands are easy to confuse and do genuinely different things — and **neither one deletes anything on the server**:
-
-| | `/new` | `/clear` |
-|---|---|---|
-| Where it runs | Server (gateway) | Client (WebUI only, never sent) |
-| What it clears | The model's context (what the LLM remembers) | Only what's drawn on your screen right now |
-| Effect on the visible chat | Nothing is erased; adds a "New session started." separator | Wipes the screen; stays wiped until the app is reopened |
-| Effect on the persisted transcript | Untouched — it's a separate, permanent log | Untouched |
-| In `/help`? | Yes | No |
-
-In short: **`/new` changes what the model remembers but leaves everything on screen; `/clear` changes what you see but leaves everything the model remembers and everything stored on the server untouched.** If you want a genuinely blank-looking chat that the model has also forgotten, you need `/new` — `/clear` alone hides nothing permanently, and everything comes back the next time you reopen the app. If you want to actually forget content, `/new` is still not permanent deletion: the discarded messages are archived for Dream, not destroyed, and the full transcript with everything before the separator is still visible on screen.
+> **A note for anyone upgrading.** There used to be a `/clear` command, undocumented in `/help` and handled entirely inside the WebUI: it wiped the screen, printed `Chat cleared.` and left the model's context completely intact. It gave a convincing confirmation for something it had not done — the model went on remembering everything — and it was the first thing most people tried. It has been removed. Typing `/clear` now just sends an ordinary message to the agent; the command you want is `/new`.
 
 ## Periodic tasks (HEARTBEAT.md)
 

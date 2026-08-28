@@ -535,6 +535,8 @@ class GatewayHTTPHandler:
         m = re.match(r"^/api/webui/android-apps/([^/]+)/app-info$", got)
         if m:
             return await self._handle_webui_android_app_info(request, m.group(1))
+        if got == "/api/webui/commands":
+            return self._handle_webui_commands(request)
         if got == "/api/webui/hidden-apps":
             return self._handle_webui_hidden_apps(request)
         if got == "/api/webui/hidden-apps/update":
@@ -633,6 +635,27 @@ class GatewayHTTPHandler:
             message,
         )
         return _http_json_response({"ok": True})
+
+    def _handle_webui_commands(self, request: WsRequest) -> Response:
+        """L'elenco dei comandi slash, per la tendina del composer.
+
+        La tabella e' ``command/builtin.py::BUILTIN_COMMAND_SPECS``, cioe' la
+        stessa che compone ``/help``: la WebUI non tiene un secondo elenco. Su
+        ``api`` e non su ``rpc`` perche' e' una lettura senza parametri (la
+        divisione sta in testa a ``assets/shared/rpc-client.js``).
+
+        Sono i comandi *predefiniti* e non "quelli registrati nel router": due
+        di essi (``/tidy``, ``/init``) non passano dal router perche' si
+        espandono nel turno (v. ``agent/loop.py::PROJECT_INIT_COMMAND``), e sono
+        proprio i due che l'utente ha meno modo di scoprire da solo.
+        """
+        if not self.check_api_secret(request):
+            return _http_error(401, "Unauthorized")
+        from jenny.command.builtin import BUILTIN_COMMAND_SPECS
+
+        return _http_json_response(
+            {"commands": [spec.as_dict() for spec in BUILTIN_COMMAND_SPECS]}
+        )
 
     def _handle_webui_hidden_apps(self, request: WsRequest) -> Response:
         if not self.check_api_secret(request):

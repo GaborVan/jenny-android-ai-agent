@@ -10,6 +10,7 @@ import { advancedMode } from './shared/advanced-mode.js';
 import { openImageLightbox } from './shared/image-lightbox.js';
 import { setupLongPress } from './shared/longpress.js';
 import { scopeChip } from './shared/scope-chip.js';
+import { deleteProjectFlow } from './shared/project-delete.js';
 
 const CM_THEMES = { dark: 'darcula', light: 'eclipse' };
 
@@ -762,26 +763,16 @@ export class WorkspaceController {
     }
   }
 
-  /** Cancella un progetto per intero, dopo averlo detto per intero. */
+  /** Cancella un progetto per intero, dopo averlo detto per intero.
+   *
+   *  La domanda e la chiamata stanno in `shared/project-delete.js`: da quando
+   *  si cancella anche dal chip dello scope i chiamanti sono due, e la frase
+   *  che dice quante conversazioni si porta via deve essere la stessa in
+   *  entrambi. Qui resta il *seguito*, che è di questa vista: il file aperto
+   *  nell'editor e la cartella su cui si sta.
+   */
   async _deleteProject(name, path) {
-    let described = null;
-    try {
-      described = await api.describeProject(name);
-    } catch (err) {
-      console.warn('project describe failed:', err);
-    }
-    const messages = described?.conversation?.messages;
-    const question = messages
-      ? i18n.t('workspace.deleteProjectConfirmWithChat', { name, count: messages })
-      : i18n.t('workspace.deleteProjectConfirm', { name });
-    if (!(await confirmDialog(question))) return;
-    try {
-      await rpc.deleteProject(name);
-    } catch (err) {
-      console.warn('project.delete failed:', err?.code || '(no code)', err?.message);
-      showToast(i18n.t('workspace.deleteProjectFailed', { name }), 'error');
-      return;
-    }
+    if (!(await deleteProjectFlow(name))) return;
     // Il progetto non esiste piu': se la chat era la sua, il chip lo deve
     // smettere di nominare. Prima del ritorno anticipato, perche' quel ramo
     // riguarda il file aperto nell'editor e non ha niente a che vedere con lo
