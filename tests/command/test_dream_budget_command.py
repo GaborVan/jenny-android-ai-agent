@@ -113,10 +113,35 @@ def _ctx(loop: SimpleNamespace, raw: str) -> CommandContext:
     return CommandContext(msg=msg, session=None, key="k", raw=raw, loop=loop)
 
 
-async def _drain() -> None:
-    """Lascia girare il task fire-and-forget del ramo senza argomento."""
-    for _ in range(50):
-        await asyncio.sleep(0)
+async def _drain(timeout: float = 30.0) -> None:
+    """Aspetta il task fire-and-forget del ramo senza argomento. Davvero.
+
+    Era ``for _ in range(50): await asyncio.sleep(0)``, e ha fatto rosso la CI
+    (3.12, 28/08/2026) su un commit che non toccava niente di tutto questo: il
+    prompt di Dream era arrivato al provider e "Dream completed" non era ancora
+    stato pubblicato. Un ``sleep(0)`` cede il controllo, **non** lascia passare
+    tempo: il ciclo di Dream attraversa ``asyncio.to_thread``, e su una macchina
+    carica il thread non ha finito dopo cinquanta giri di event loop. Passava per
+    fortuna, e la fortuna sulla CI finisce.
+
+    Qui si aspetta l'oggetto giusto — i task vivi che non sono questo test —
+    finché non sono finiti. ``cmd_dream`` fa `asyncio.create_task` senza tenere
+    il manico e senza appoggiarlo al loop, quindi ``all_tasks()`` è l'unico modo
+    che il test ha di nominarli; e si rilegge a ogni giro perché un task ne può
+    aprire un altro. Il tetto esiste solo per non appendere la suite: se scatta è
+    un difetto, e lo dice invece di lasciare fallire un ``assert ([])`` tre righe
+    più in là.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    current = asyncio.current_task()
+    while True:
+        pending = [t for t in asyncio.all_tasks() if t is not current and not t.done()]
+        if not pending:
+            return
+        remaining = deadline - loop.time()
+        assert remaining > 0, f"task ancora in volo dopo {timeout}s: {pending}"
+        await asyncio.wait(pending, timeout=remaining)
 
 
 def _config_path(workspace: Path) -> Path:
