@@ -812,7 +812,19 @@ export class ChatController {
       existing?.remove();
       return;
     }
-    if (existing) return;
+    /* Riancorato in cima **anche quando c'è già**, ed è il difetto che i test
+       non vedevano: la pagina chiesta dal tocco entra da
+       `_renderThreadMessagesToTop`, cioè sopra di lui, e il bottone resta in
+       mezzo — «mostra la conversazione precedente» con quella conversazione
+       stampata sotto, che indica la direzione sbagliata. Succede quando la
+       pagina caricata è corta (due `/new` di fila: un separatore e basta), e
+       allora la chat non trabocca ancora e il bottone non se ne va.
+       `insertBefore` sposta un nodo già attaccato invece di duplicarlo, quindi
+       il `disabled` del giro in corso resta suo. */
+    this._insertAtTop(existing || this._createHistoryReachButton());
+  }
+
+  _createHistoryReachButton() {
     const btn = document.createElement('button');
     btn.className = 'chat-history-more';
     btn.type = 'button';
@@ -824,7 +836,7 @@ export class ChatController {
       // nodo quando non serve più; se serve ancora (pagina corta) va riabilitato.
       btn.disabled = false;
     });
-    this._insertAtTop(btn);
+    return btn;
   }
 
   /* La riga «storia non caricata», al posto della chat vuota che mentiva.
