@@ -492,29 +492,18 @@ export class WorkspaceController {
     el.dataset.kind = 'dir';
 
     el.innerHTML =
-      `<button class="ws-item-menu" title="${i18n.t('workspace.actions')}"><i class="ti ti-dots-vertical"></i></button>` +
       `<div class="ws-item-icon folder-icon">${FOLDER_ICON_SVG}</div>` +
       `<div class="ws-item-name">${escapeHtml(item.name)}</div>`;
 
-    el.addEventListener('click', (e) => {
+    el.addEventListener('click', () => {
       // Il tap sintetico che segue il long-press non deve navigare nella
       // cartella *sotto* lo sheet appena aperto: il flag lo posa
       // setupLongPress, qui lo si consuma.
       if (el.dataset.longpress) { delete el.dataset.longpress; return; }
-      if (e.target.closest('.ws-item-menu')) return;
       this.navigateTo(itemPath);
     });
 
     setupLongPress(el, () => {
-      this.showContextSheet({ path: itemPath, kind: 'dir', name: item.name });
-    });
-
-    el.querySelector('.ws-item-menu').addEventListener('click', (e) => {
-      e.stopPropagation();
-      // Il click sul menu non arriva al listener della cella (stopPropagation):
-      // il flag di un long-press iniziato qui sopra va consumato lo stesso, o
-      // ingoierebbe il tap successivo.
-      delete el.dataset.longpress;
       this.showContextSheet({ path: itemPath, kind: 'dir', name: item.name });
     });
 
@@ -533,25 +522,17 @@ export class WorkspaceController {
     el.dataset.ext = ext;
 
     el.innerHTML =
-      `<button class="ws-item-menu" title="${i18n.t('workspace.actions')}"><i class="ti ti-dots-vertical"></i></button>` +
       `<div class="ws-item-icon">${icon}</div>` +
       `<div class="ws-item-name">${escapeHtml(item.name)}</div>`;
 
-    el.addEventListener('click', (e) => {
+    el.addEventListener('click', () => {
       // Come per le cartelle: il tap sintetico del long-press aprirebbe il file
       // sotto lo sheet appena comparso.
       if (el.dataset.longpress) { delete el.dataset.longpress; return; }
-      if (e.target.closest('.ws-item-menu')) return;
       this.openFile(itemPath, ext);
     });
 
     setupLongPress(el, () => {
-      this.showContextSheet({ path: itemPath, kind: 'file', name: item.name });
-    });
-
-    el.querySelector('.ws-item-menu').addEventListener('click', (e) => {
-      e.stopPropagation();
-      delete el.dataset.longpress;
       this.showContextSheet({ path: itemPath, kind: 'file', name: item.name });
     });
 

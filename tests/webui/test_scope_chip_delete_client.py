@@ -162,10 +162,11 @@ def test_a_project_row_carries_a_delete_button() -> None:
 def test_it_is_not_behind_a_hover() -> None:
     """Grep, non comportamento: su un touchscreen `:hover` non scatta mai.
 
-    È il difetto del `⋮` dell'explorer del workspace, che esiste nel markup e su
-    un telefono non si vede: `.ws-item-menu { display: none }` più
-    `.ws-item:hover .ws-item-menu { display: flex }`. Qui la regola base non deve
-    nascondere niente.
+    L'explorer del workspace aveva un `⋮` scritto così — `display: none` più
+    `.ws-item:hover .ws-item-menu { display: flex }` — quindi presente nel
+    markup e invisibile su un telefono. Lì la risposta è stata toglierlo e
+    tenere la pressione lunga (una griglia fitta, un'icona per cella); qui il
+    tasto c'è, e allora deve vedersi davvero.
     """
     css = CSS.read_text(encoding="utf-8")
     rule = re.search(r"^\.scope-menu-del \{(.*?)^\}", css, re.S | re.M)

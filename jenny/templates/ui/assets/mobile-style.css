@@ -1581,35 +1581,12 @@ body {
   font-weight: 500;
 }
 
-/* Context menu button on item */
-.ws-item-menu {
-  position: absolute;
-  top: 2px;
-  right: 2px;
-  width: 22px;
-  height: 22px;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--text-faint);
-  cursor: pointer;
-  display: none;
-  align-items: center;
-  justify-content: center;
-  transition: background .12s;
-  padding: 0;
-}
-.ws-item:hover .ws-item-menu {
-  display: flex;
-}
-.ws-item-menu:hover {
-  background: var(--bg);
-  color: var(--text);
-}
-.ws-item-menu .ti {
-  font-size: 12px;
-  pointer-events: none;
-}
+/* Nessun bottone-menu sulla cella: le azioni si aprono tenendo premuto
+   (`setupLongPress` in mobile-workspace.js), come nella griglia delle app.
+   C'era un `⋮`, ma mostrato solo su `.ws-item:hover` — cioè mai, su un
+   touchscreen: markup e CSS che sembravano una funzione e su un telefono non
+   esistevano. Tolto il 28/08 invece di renderlo visibile: su una griglia fitta
+   sarebbe un'icona per cella. */
 
 /* Empty state */
 .ws-empty {
