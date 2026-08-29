@@ -395,7 +395,7 @@ class TestVerbiSensibili:
             "Paga ora", "Procedi al pagamento", "Acquista", "Compra subito",
             "Conferma ordine", "Abbonati", "Pay now", "Buy it now", "Checkout",
             "Place order", "Elimina definitivamente", "Cancella account",
-            "Rimuovi dal carrello", "Delete", "Remove item", "Bonifico",
+            "Rimuovi dal carrello", "Delete", "Remove item", "Bonifico", "Entra",
             "Invia denaro", "Transfer funds", "Accedi", "Sign in", "Log in",
         ],
     )
@@ -409,6 +409,7 @@ class TestVerbiSensibili:
             "Conferma le preferenze", "Accetta tutti", "Gestisci i cookie",
             # confini di parola: nessuno di questi e' il verbo.
             "Ordinamento per data", "Cancelleria", "Rimozione automatica spiegata",
+            "Rientra nella media", "Entrata principale", "Centrale elettrica",
             "Paginazione", "Pagina successiva",
         ],
     )

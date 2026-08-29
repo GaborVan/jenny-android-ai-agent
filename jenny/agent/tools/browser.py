@@ -68,7 +68,10 @@ _SENSITIVE_VERBS = (
     r"elimin(?:a|are)", r"cancell(?:a|are)", r"rimuov(?:i|ere)", r"svuota",
     r"delete", r"remove", r"empty (?:cart|trash)",
     r"trasferisc(?:i|ere)", r"bonifico", r"invia denaro", r"transfer", r"send money",
-    r"accedi", r"sign in", r"log ?in",
+    # "entra" e' l'etichetta di accesso piu' comune sui siti italiani, e senza
+    # di essa l'interlocco non copre il caso piu' frequente qui. Il confine di
+    # parola la tiene stretta: non scatta su "rientra", "entrata", "centrale".
+    r"accedi", r"entra", r"sign in", r"log ?in",
 )
 _SENSITIVE_RE = re.compile(r"\b(?:" + "|".join(_SENSITIVE_VERBS) + r")\b", re.IGNORECASE)
 
