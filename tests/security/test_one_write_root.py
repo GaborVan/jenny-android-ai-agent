@@ -295,6 +295,11 @@ _NOT_A_WRITE_ROOT = {
     ),
     ("message.py", "project_path"): "risolve gli allegati in uscita: è una lettura",
     ("message.py", "allowed_root"): "idem — l'alias storico, non una seconda risposta",
+    ("memory_recall.py", "project_path"): (
+        "domanda opposta: non dove si scrive, ma **se** questo turno è dentro un "
+        "progetto. recall_history legge solo la radice e tace altrove, e il "
+        "confronto col workspace di radice è l'unico modo di accorgersene"
+    ),
 }
 
 
