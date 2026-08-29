@@ -199,6 +199,14 @@
     return s;
   }
 
+  // L'identita' di un elemento **non comprende il suo ref**: il ref porta il
+  // numero di versione, che cambia a ogni snapshot, quindi confrontare le righe
+  // gia' composte fa risultare nuova ogni riga di una pagina ferma. Misurato sul
+  // telefono il 29/08: "0 invariate, 72 sparite" su due snapshot identici.
+  function keyFor(item) {
+    return item.role + '|' + item.name + '|' + item.state.join(',');
+  }
+
   // ---------------------------------------------------------------- snapshot
 
   function snapshot(args) {
@@ -211,25 +219,32 @@
     var items = collect();
     var n = 0;
     var lines = [];
+    var keys = [];
     var used = 0;
     var deferred = {};      // ruolo -> quante righe non mostrate
     var truncated = false;
 
     function push(item) {
+      // Il ref si assegna **dopo** il tetto: allocarlo prima lascia buchi nella
+      // numerazione e mette nella mappa elementi che il modello non ha mai visto.
+      var probe = lineFor(item, item.actionable ? version + ':e' + n : null);
+      if (used + probe.length + 1 > maxChars) { truncated = true; return false; }
       var ref = null;
       if (item.actionable) { ref = version + ':e' + (n++); J.refs[ref] = item.el; }
-      var line = lineFor(item, ref);
-      if (used + line.length + 1 > maxChars) { truncated = true; return false; }
-      lines.push(line); used += line.length + 1;
+      lines.push(lineFor(item, ref)); keys.push(keyFor(item));
+      used += probe.length + 1;
       return true;
     }
 
-    // Primo giro: quel che si vede adesso, più tutto ciò che il filtro nomina —
-    // un elemento sotto la piega si trova per nome, non scorrendo alla cieca.
+    // Con un filtro si cerca: contano gli elementi che portano quel testo, ovunque
+    // siano. Senza, si guarda: conta quel che si vede adesso, e il resto si conta
+    // invece di elencarlo (e' cio' che tiene una pagina vera dentro il tetto).
     for (var i = 0; i < items.length; i++) {
       var it = items[i];
-      var match = filter && it.name.toLowerCase().indexOf(filter) >= 0;
-      if (!it.inView && !match) { deferred[it.role] = (deferred[it.role] || 0) + 1; continue; }
+      var wanted = filter
+        ? it.name.toLowerCase().indexOf(filter) >= 0
+        : it.inView;
+      if (!wanted) { deferred[it.role] = (deferred[it.role] || 0) + 1; continue; }
       if (!push(it)) { deferred[it.role] = (deferred[it.role] || 0) + 1; }
     }
 
@@ -239,8 +254,9 @@
     for (var k in deferred) if (deferred[k]) rest.push(deferred[k] + ' ' + k);
     var trailer = '';
     if (rest.length) {
-      trailer = '… fuori schermo: ' + rest.sort().join(', ') +
-        ' — usa filter="<testo>" per raggiungerli, o scroll.';
+      trailer = (filter ? '… senza "' + filter + '" nel nome: ' : '… fuori schermo: ') +
+        rest.sort().join(', ') +
+        (filter ? '.' : ' — usa filter="<testo>" per raggiungerli, o scroll.');
     }
     if (truncated) {
       trailer = (trailer ? trailer + '\n' : '') +
@@ -256,14 +272,14 @@
       var before = {};
       for (var b = 0; b < J.prev.length; b++) before[J.prev[b]] = 1;
       var added = [];
-      for (var c = 0; c < lines.length; c++) if (!before[lines[c]]) added.push(lines[c]);
+      for (var c = 0; c < lines.length; c++) if (!before[keys[c]]) added.push(lines[c]);
       var kept = lines.length - added.length;
       var removed = J.prev.length - kept;
-      diff = (added.length ? added.join('\n') : '(nessuna riga nuova)') +
+      diff = (added.length ? added.join('\n') : '(niente di nuovo sulla pagina)') +
         '\n… ' + kept + ' invariate, ' + removed + ' sparite.' +
         (trailer ? '\n' + trailer : '');
     }
-    J.prev = lines;
+    J.prev = keys;
 
     return {
       url: location.href,
