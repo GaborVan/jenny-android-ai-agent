@@ -83,10 +83,13 @@ class JennyBrowserBridge(context: Context) {
     private val snapshotVersion = AtomicInteger(0)
     private val hostVerdicts = ConcurrentHashMap<String, Boolean>()
 
+    // R.raw.browser_agent e non getIdentifier("browser_agent"): la build di
+    // release offusca i nomi delle risorse (nell'APK il file diventa `res/XX.js`),
+    // quindi cercarlo per nome a runtime funziona in debug e fallisce dove conta.
+    // La costante e risolta a compile time e sopravvive all'offuscamento.
     private val agentJs: String by lazy {
-        appContext.resources.openRawResource(
-            appContext.resources.getIdentifier("browser_agent", "raw", appContext.packageName)
-        ).bufferedReader().use { it.readText() }
+        appContext.resources.openRawResource(R.raw.browser_agent)
+            .bufferedReader().use { it.readText() }
     }
 
     // ------------------------------------------------------------------ guardia
