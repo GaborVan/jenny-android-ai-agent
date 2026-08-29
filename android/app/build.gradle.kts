@@ -249,6 +249,13 @@ dependencies {
     // in-app (con pulsante di chiusura) invece di dirottare la WebView SPA.
     implementation("androidx.browser:browser:1.7.0")
 
+    // Multi-profile WebView (ProfileStore): la sessione di navigazione dei tool
+    // browser_* tiene cookie e storage separati dal barattolo globale che usa
+    // web_fetch, e li butta alla chiusura. Verificato il 29/08: la 1.14.0 sta
+    // dentro compileSdk 34 (a differenza di WorkManager 2.10+), e il Titan 2
+    // (WebView 143) espone MULTI_PROFILE a runtime.
+    implementation("androidx.webkit:webkit:1.14.0")
+
     // WorkManager: rete di sicurezza anti-doze indipendente dalle sveglie
     // (GatewayWorker). Gira sul backend JobScheduler, e i gestori batteria dei
     // produttori sono molto piu restii a interferire con un concetto di sistema
