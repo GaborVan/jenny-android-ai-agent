@@ -6,6 +6,7 @@ test coprono il contratto Python — decodifica, ciclo di vita, concorrenza,
 validazione dell'URL — e le regole del motore si verificano sul telefono.
 """
 
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -280,3 +281,48 @@ class TestRegistrazione:
         ctx = SimpleNamespace(android_context=None, config=SimpleNamespace(android_web=None))
         assert BrowserOpenTool.enabled(ctx) is False
         assert BrowserOpenTool.disabled_reason(ctx) is None
+
+
+class TestChiusuraPerInattivita:
+    """La sessione viva tiene ~100 MB: se nessuno la chiude, la chiude il guardiano."""
+
+    async def test_una_sessione_dimenticata_si_chiude(self, monkeypatch):
+        monkeypatch.setattr(browser, "_IDLE_POLL_S", 0.02)
+        holder = _install(monkeypatch)
+        await browser._call(object(), "snapshot", "full", "", 100, 30, timeout=5, idle_s=0.1)
+        b = holder["bridge"]
+        assert browser._BROWSER_INSTANCE is not None
+        await asyncio.sleep(0.35)
+        assert browser._BROWSER_INSTANCE is None
+        assert b.closed == 1
+
+    async def test_l_attivita_rimanda_la_chiusura(self, monkeypatch):
+        monkeypatch.setattr(browser, "_IDLE_POLL_S", 0.02)
+        _install(monkeypatch)
+        for _ in range(6):
+            await browser._call(object(), "snapshot", "full", "", 100, 30, timeout=5, idle_s=0.2)
+            await asyncio.sleep(0.05)
+        assert browser._BROWSER_INSTANCE is not None
+
+    async def test_un_solo_guardiano_per_sessione(self, monkeypatch):
+        monkeypatch.setattr(browser, "_IDLE_POLL_S", 0.02)
+        _install(monkeypatch)
+        await browser._call(object(), "snapshot", "full", "", 100, 30, timeout=5, idle_s=5)
+        first = browser._IDLE_TASK
+        await browser._call(object(), "snapshot", "full", "", 100, 30, timeout=5, idle_s=5)
+        assert browser._IDLE_TASK is first
+
+    async def test_il_reset_lo_ferma(self, monkeypatch):
+        monkeypatch.setattr(browser, "_IDLE_POLL_S", 0.02)
+        _install(monkeypatch)
+        await browser._call(object(), "snapshot", "full", "", 100, 30, timeout=5, idle_s=5)
+        task = browser._IDLE_TASK
+        browser.reset_browser_state()
+        await asyncio.sleep(0.05)
+        assert task.cancelled() or task.done()
+        assert browser._IDLE_TASK is None
+
+    async def test_niente_guardiano_se_spento(self, monkeypatch):
+        _install(monkeypatch)
+        await browser._call(object(), "snapshot", "full", "", 100, 30, timeout=5, idle_s=0)
+        assert browser._IDLE_TASK is None

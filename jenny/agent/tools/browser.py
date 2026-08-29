@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import Any
 
 from loguru import logger
@@ -34,6 +35,12 @@ from jenny.config.tool_schemas import AndroidWebToolsConfig
 
 _BROWSER_LOCK = asyncio.Lock()
 _BROWSER_INSTANCE: Any = None
+_LAST_USE: float = 0.0
+_IDLE_TASK: asyncio.Task[None] | None = None
+
+# Ogni quanto il guardiano guarda l'orologio. Costante di modulo perche' un
+# test non deve aspettare i minuti veri.
+_IDLE_POLL_S = 15
 
 
 def reset_browser_state() -> None:
@@ -44,7 +51,17 @@ def reset_browser_state() -> None:
     (gateway ripartito nello stesso processo) esplode con "bound to a different
     event loop" al primo acquire.
     """
-    global _BROWSER_INSTANCE, _BROWSER_LOCK
+    global _BROWSER_INSTANCE, _BROWSER_LOCK, _IDLE_TASK, _LAST_USE
+    if _IDLE_TASK is not None:
+        # Il task puo' appartenere a un loop gia' chiuso (e' proprio il caso
+        # per cui questa funzione esiste): li' ``cancel`` solleva invece di
+        # cancellare, e non c'e' niente da cancellare comunque.
+        try:
+            _IDLE_TASK.cancel()
+        except RuntimeError:
+            pass
+    _IDLE_TASK = None
+    _LAST_USE = 0.0
     _BROWSER_INSTANCE = None
     _BROWSER_LOCK = asyncio.Lock()
 
@@ -56,9 +73,9 @@ def _resolve_bridge_class() -> Any:
     return jclass("com.flagdizero.jenny.JennyBrowserBridge")
 
 
-def _get_browser(context: Any) -> Any:
+def _get_browser(context: Any, idle_s: int = 0) -> Any:
     """Costruisce o restituisce la sessione. Chiamato **dentro** il lucchetto."""
-    global _BROWSER_INSTANCE
+    global _BROWSER_INSTANCE, _IDLE_TASK
     if _BROWSER_INSTANCE is not None:
         return _BROWSER_INSTANCE
     bridge_cls = _resolve_bridge_class()
@@ -66,7 +83,38 @@ def _get_browser(context: Any) -> Any:
         _BROWSER_INSTANCE = bridge_cls(context)
     except Exception as exc:
         raise RuntimeError(f"Failed to construct JennyBrowserBridge: {exc}") from exc
+    if idle_s > 0 and (_IDLE_TASK is None or _IDLE_TASK.done()):
+        _IDLE_TASK = asyncio.create_task(_watch_idle(idle_s))
     return _BROWSER_INSTANCE
+
+
+async def _watch_idle(idle_s: int) -> None:
+    """Chiude una sessione lasciata aperta.
+
+    Non e' igiene: una sessione viva tiene una seconda WebView, misurata sul
+    Titan 2 il 29/08 a **+101 MB**, restituiti alla chiusura. La differenza fra
+    un costo temporaneo e uno permanente e' solo questo guardiano: il modello
+    puo' dimenticarsi di chiamare ``browser_close``, e un subagent che va in
+    errore a meta` lavoro non lo chiama di sicuro.
+
+    Prende il lucchetto prima di chiudere, cosi' non puo' strappare la sessione
+    a una chiamata in volo: ``_call`` lo tiene per tutta la sua durata.
+    """
+    while True:
+        await asyncio.sleep(min(_IDLE_POLL_S, max(1, idle_s)))
+        if _BROWSER_INSTANCE is None:
+            return
+        idle_for = time.monotonic() - _LAST_USE
+        if idle_for < idle_s:
+            continue
+        async with _BROWSER_LOCK:
+            if _BROWSER_INSTANCE is None:
+                return
+            if time.monotonic() - _LAST_USE < idle_s:
+                continue
+            logger.info("Sessione browser chiusa dopo {:.0f}s di inattivita", idle_for)
+            destroy_browser()
+            return
 
 
 def destroy_browser() -> None:
@@ -102,7 +150,9 @@ def _decode(raw: Any) -> dict[str, Any]:
     return data if isinstance(data, dict) else {"error": "risposta inattesa dal bridge"}
 
 
-async def _call(context: Any, method: str, *args: Any, timeout: int) -> dict[str, Any]:
+async def _call(
+    context: Any, method: str, *args: Any, timeout: int, idle_s: int = 0
+) -> dict[str, Any]:
     """Chiama il bridge fuori dal loop, con il lucchetto e un fermo indipendente.
 
     Il fermo asyncio a ``timeout + 10`` e' voluto: quello Kotlin puo' non
@@ -110,13 +160,17 @@ async def _call(context: Any, method: str, *args: Any, timeout: int) -> dict[str
     gateway resta appeso. Se scatta, la sessione e' da buttare: il modello
     riparte da ``browser_open``, non da uno stato che non sappiamo descrivere.
     """
+    global _LAST_USE
     async with _BROWSER_LOCK:
-        bridge = _get_browser(context)
+        bridge = _get_browser(context, idle_s)
+        _LAST_USE = time.monotonic()
         fn = getattr(bridge, method)
         try:
             raw = await asyncio.wait_for(
                 asyncio.to_thread(fn, *args), timeout=timeout + 10
             )
+            # Una pagina lenta non e` inattivita`: si timbra anche in uscita.
+            _LAST_USE = time.monotonic()
         except asyncio.CancelledError:
             logger.warning("browser.{} annullato", method)
             destroy_browser()
@@ -195,6 +249,7 @@ class _BrowserToolBase(Tool):
         self.timeout = cfg.timeout
         self.max_snapshot_chars = cfg.max_snapshot_chars
         self.max_read_chars = cfg.max_read_chars
+        self.idle_close_s = cfg.idle_close_s
 
     @classmethod
     def create(cls, ctx: Any) -> Tool:
@@ -228,14 +283,14 @@ class BrowserOpenTool(_BrowserToolBase):
         if not ok:
             return f"Error: URL validation failed: {err}"
 
-        opened = await _call(self.android_context, "open", url, self.timeout, timeout=self.timeout)
+        opened = await _call(self.android_context, "open", url, self.timeout, timeout=self.timeout, idle_s=self.idle_close_s)
         if opened.get("error"):
             return f"Error: {opened['error']}"
 
         shot = await _call(
             self.android_context, "snapshot",
             "full", filter or "", self.max_snapshot_chars, self.timeout,
-            timeout=self.timeout,
+            timeout=self.timeout, idle_s=self.idle_close_s,
         )
         if shot.get("error"):
             return f"Error: {shot['error']}"
@@ -269,7 +324,7 @@ class BrowserSnapshotTool(_BrowserToolBase):
         shot = await _call(
             self.android_context, "snapshot",
             mode, filter or "", self.max_snapshot_chars, self.timeout,
-            timeout=self.timeout,
+            timeout=self.timeout, idle_s=self.idle_close_s,
         )
         if shot.get("error"):
             return f"Error: {shot['error']}"
@@ -311,7 +366,7 @@ class BrowserDoTool(_BrowserToolBase):
         if not steps:
             return "Error: nessun passo da eseguire"
         payload = json.dumps(steps, ensure_ascii=False)
-        out = await _call(self.android_context, "act", payload, self.timeout, timeout=self.timeout)
+        out = await _call(self.android_context, "act", payload, self.timeout, timeout=self.timeout, idle_s=self.idle_close_s)
         if out.get("error"):
             return f"Error: {out['error']}"
 
@@ -325,7 +380,7 @@ class BrowserDoTool(_BrowserToolBase):
         shot = await _call(
             self.android_context, "snapshot",
             "diff", "", self.max_snapshot_chars, self.timeout,
-            timeout=self.timeout,
+            timeout=self.timeout, idle_s=self.idle_close_s,
         )
         if shot.get("error"):
             return f"{header}\n\n(snapshot non disponibile: {shot['error']})"
@@ -354,7 +409,7 @@ class BrowserReadTool(_BrowserToolBase):
     async def execute(self, ref: str = "", **kwargs: Any) -> Any:
         out = await _call(
             self.android_context, "read", ref or "", self.max_read_chars, self.timeout,
-            timeout=self.timeout,
+            timeout=self.timeout, idle_s=self.idle_close_s,
         )
         if out.get("error"):
             return f"Error: {out['error']}"
