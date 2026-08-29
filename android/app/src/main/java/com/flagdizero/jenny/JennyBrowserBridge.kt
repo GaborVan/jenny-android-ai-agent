@@ -83,6 +83,13 @@ class JennyBrowserBridge(context: Context) {
     private val snapshotVersion = AtomicInteger(0)
     private val hostVerdicts = ConcurrentHashMap<String, Boolean>()
 
+    // L'ultimo indirizzo rifiutato dalla guardia. Serve a **dirlo**: un blocco
+    // muto lascia il modello davanti a un about:blank vuoto, che sembra un sito
+    // rotto e invita a riprovare. Misurato sul telefono il 29/08 con un redirect
+    // di httpbin verso 192.168.1.1: fermato correttamente, e raccontato come
+    // "0 elementi".
+    private val lastBlocked = AtomicReference<String?>(null)
+
     // R.raw.browser_agent e non getIdentifier("browser_agent"): la build di
     // release offusca i nomi delle risorse (nell'APK il file diventa `res/XX.js`),
     // quindi cercarlo per nome a runtime funziona in debug e fallisce dove conta.
@@ -186,6 +193,7 @@ class JennyBrowserBridge(context: Context) {
             val uri = request?.url ?: return false
             if (isBlockedLiteral(uri)) {
                 Log.w(TAG, "navigazione bloccata (letterale): $uri")
+                if (request.isForMainFrame) lastBlocked.set(uri.toString())
                 return true
             }
             return false
@@ -204,6 +212,7 @@ class JennyBrowserBridge(context: Context) {
             val host = uri.host ?: return null
             if (isBlockedHost(host)) {
                 Log.w(TAG, "richiesta bloccata: $uri")
+                if (request.isForMainFrame) lastBlocked.set(uri.toString())
                 return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
             }
             return null
@@ -303,6 +312,7 @@ class JennyBrowserBridge(context: Context) {
         val uri = Uri.parse(url)
         if (isBlockedLiteral(uri)) return """{"error":"indirizzo non consentito"}"""
         val started = CountDownLatch(1)
+        lastBlocked.set(null)
         handler.post {
             ensureWebViewOnMain()
             loading.set(true)
@@ -312,6 +322,12 @@ class JennyBrowserBridge(context: Context) {
         }
         started.await(10, TimeUnit.SECONDS)
         val settled = awaitSettled(timeoutSeconds)
+        lastBlocked.getAndSet(null)?.let {
+            val msg = "navigazione rifiutata: $it e' un indirizzo di rete privata o " +
+                "locale. Se ci sei arrivato da un redirect, il sito di partenza sta " +
+                "puntando dentro la rete del telefono."
+            return """{"error":${quote(msg)}}"""
+        }
         lastError.get()?.let { return """{"error":${quote(it)}}""" }
         val (u, t) = currentUrlAndTitle()
         return """{"ok":true,"settled":$settled,"url":${quote(u)},"title":${quote(t)}}"""
