@@ -31,7 +31,9 @@ if TYPE_CHECKING:
         agent_type=StringSchema(
             "Which kind of subagent to run. Pick deliberately — it decides which "
             "tools the subagent gets. "
-            "'researcher': web search and fetch, read/list/write files, NO code "
+            "'researcher': web search and fetch, an interactive browser session "
+            "(browser_open/snapshot/do/read/close — for pages behind a cookie wall, "
+            "a login or a site's own search box), read/list/write files, NO code "
             "execution — use it for gathering material online. "
             "'writer': read/list/write files and apply_patch, NO network — use it "
             "for docs, wiki pages and synthesis of material already gathered. "

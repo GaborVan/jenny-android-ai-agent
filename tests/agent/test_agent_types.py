@@ -25,7 +25,11 @@ from jenny.config.schema import ToolsConfig
 # Insieme atteso per tipo: e la definizione del contratto, quindi va scritto per
 # esteso invece di essere derivato dal codice sotto test.
 EXPECTED_TOOLS = {
-    "researcher": {"web_search", "web_fetch", "read_file", "list_dir", "write_file"},
+    "researcher": {
+        "web_search", "web_fetch",
+        "browser_open", "browser_snapshot", "browser_do", "browser_read", "browser_close",
+        "read_file", "list_dir", "write_file",
+    },
     "writer": {"read_file", "list_dir", "write_file", "apply_patch"},
     "coder": {
         "read_file", "write_file", "edit_file", "list_dir", "apply_patch",
