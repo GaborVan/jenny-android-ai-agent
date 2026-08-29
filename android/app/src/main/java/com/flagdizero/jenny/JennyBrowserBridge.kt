@@ -113,6 +113,15 @@ class JennyBrowserBridge(context: Context) {
     // indirizzo, che ripassa dalla validazione e sposta il perimetro.
     private val scopeDomain = AtomicReference<String?>(null)
 
+    // Vero mentre un browser_open sta caricando. Il perimetro non vale sulla
+    // catena di redirect di un'apertura esplicita: chiedere una pagina
+    // significa accettare dove quella pagina dice di andare per mostrarsi.
+    // Misurato il 29/08: senza questo, la pagina di accesso di Wikipedia non si
+    // apre — rimbalza su auth.wikimedia.org, e il recinto appena piantato la
+    // ferma. Il guardiano sugli indirizzi privati invece resta attivo sempre:
+    // quello non e' una preferenza sull'ambito, e' il confine della rete di casa.
+    private val openInFlight = AtomicBoolean(false)
+
     // R.raw.browser_agent e non getIdentifier("browser_agent"): la build di
     // release offusca i nomi delle risorse (nell'APK il file diventa `res/XX.js`),
     // quindi cercarlo per nome a runtime funziona in debug e fallisce dove conta.
@@ -228,7 +237,7 @@ class JennyBrowserBridge(context: Context) {
                 if (request.isForMainFrame) lastBlocked.set(uri.toString())
                 return true
             }
-            if (request.isForMainFrame) {
+            if (request.isForMainFrame && !openInFlight.get()) {
                 val scope = scopeDomain.get()
                 val host = uri.host
                 if (scope != null && host != null && registrable(host) != scope) {
@@ -376,9 +385,10 @@ class JennyBrowserBridge(context: Context) {
         if (isBlockedLiteral(uri)) return """{"error":"indirizzo non consentito"}"""
         val started = CountDownLatch(1)
         lastBlocked.set(null)
-        // Un browser_open e' un atto esplicito: sposta il perimetro sul nuovo
-        // dominio invece di essere fermato da quello vecchio.
-        uri.host?.let { scopeDomain.set(registrable(it)) }
+        // Un browser_open e' un atto esplicito: il perimetro si rifa' **dopo**,
+        // sull'indirizzo dove la pagina si e' posata davvero.
+        openInFlight.set(true)
+        scopeDomain.set(null)
         handler.post {
             ensureWebViewOnMain()
             loading.set(true)
@@ -388,11 +398,14 @@ class JennyBrowserBridge(context: Context) {
         }
         started.await(10, TimeUnit.SECONDS)
         val settled = awaitSettled(timeoutSeconds)
+        openInFlight.set(false)
         lastBlocked.getAndSet(null)?.let {
             return """{"error":${quote(describeBlock(it))}}"""
         }
         lastError.get()?.let { return """{"error":${quote(it)}}""" }
         val (u, t) = currentUrlAndTitle()
+        // Il recinto si pianta dove si e' finiti, non dove si era chiesto.
+        Uri.parse(u).host?.let { scopeDomain.set(registrable(it)) }
         return """{"ok":true,"settled":$settled,"url":${quote(u)},"title":${quote(t)}}"""
     }
 
