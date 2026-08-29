@@ -267,8 +267,12 @@
 
     // Modalità differenza: si mandano solo le righe nuove. Dopo una navigazione
     // J.prev non c'è (documento nuovo) e si ricade sul pieno, che è corretto.
+    // Una ricerca non entra nel confronto in nessuna delle due direzioni: né come
+    // termine di paragone (v. sotto), né come cosa da confrontare. Misurato sul
+    // telefono: uno snapshot filtrato contro la fotografia intera precedente
+    // dichiarava "20 sparite", che erano semplicemente le righe non richieste.
     var diff = null;
-    if (args.mode === 'diff' && J.prev) {
+    if (args.mode === 'diff' && J.prev && !filter) {
       var before = {};
       for (var b = 0; b < J.prev.length; b++) before[J.prev[b]] = 1;
       var added = [];
