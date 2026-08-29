@@ -279,7 +279,10 @@
         '\n… ' + kept + ' invariate, ' + removed + ' sparite.' +
         (trailer ? '\n' + trailer : '');
     }
-    J.prev = keys;
+    // Una fotografia filtrata e' una ricerca, non un ritratto della pagina:
+    // tenerla come termine di paragone fa dire alla differenza successiva che
+    // sono "sparite" tutte le righe che il filtro non aveva chiesto.
+    if (!filter) J.prev = keys;
 
     return {
       url: location.href,
