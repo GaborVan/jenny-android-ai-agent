@@ -8,6 +8,11 @@ validazione dell'URL — e le regole del motore si verificano sul telefono.
 
 import asyncio
 import json
+import os
+import pathlib
+import shutil
+import subprocess
+import tempfile
 from types import SimpleNamespace
 
 import pytest
@@ -326,3 +331,39 @@ class TestChiusuraPerInattivita:
         _install(monkeypatch)
         await browser._call(object(), "snapshot", "full", "", 100, 30, timeout=5, idle_s=0)
         assert browser._IDLE_TASK is None
+
+
+class TestMotoreNellaPagina:
+    """Il motore vive in un file JS che nessun test Python puo' eseguire.
+
+    Due cose si possono comunque tenere ferme da qui, ed entrambe rompono la
+    feature in modo invisibile: un errore di sintassi (che si vedrebbe solo come
+    una sessione muta sul telefono) e il segnaposto che il Kotlin sostituisce.
+    """
+
+    JS = pathlib.Path(__file__).resolve().parents[3] / (
+        "android/app/src/main/res/raw/browser_agent.js"
+    )
+
+    def test_il_file_c_e(self):
+        assert self.JS.is_file(), f"motore non trovato in {self.JS}"
+
+    def test_un_solo_segnaposto(self):
+        # JennyBrowserBridge.runAgent fa `agentJs.replace("__ARGS__", args)`:
+        # zero segnaposti significa argomenti ignorati, due significa JSON
+        # incollato dove non deve stare.
+        assert self.JS.read_text().count("__ARGS__") == 1
+
+    def test_sintassi(self):
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node non disponibile")
+        src = self.JS.read_text().replace("__ARGS__", '{"op":"snapshot"}')
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as fh:
+            fh.write(src)
+            tmp = fh.name
+        try:
+            proc = subprocess.run([node, "--check", tmp], capture_output=True, text=True)
+            assert proc.returncode == 0, proc.stderr
+        finally:
+            os.unlink(tmp)

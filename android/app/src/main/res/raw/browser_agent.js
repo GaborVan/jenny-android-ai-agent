@@ -1,7 +1,9 @@
 // Motore lato pagina della sessione di navigazione (browser_* tools).
 //
-// Kotlin lo inietta con evaluateJavascript sostituendo __ARGS__ con un oggetto
-// JSON. Vive nella pagina, quindi `window.__jenny` sopravvive fra una chiamata e
+// Kotlin lo inietta con evaluateJavascript sostituendo il segnaposto in fondo
+// al file con un oggetto JSON. La sostituzione e' testuale e globale, quindi
+// il segnaposto deve comparire **una volta sola**: nominarlo qui sopra lo
+// farebbe sostituire anche dentro questo commento. Vive nella pagina, quindi `window.__jenny` sopravvive fra una chiamata e
 // l'altra ma **muore a ogni navigazione**: è esattamente ciò che rende un
 // riferimento vecchio un errore invece di un click sull'elemento sbagliato.
 //
@@ -357,11 +359,34 @@
             el.click();
             r.ok = true;
           } else if (a === 'type') {
+            // Un elemento su cui non si puo' scrivere deve **fallire**, non
+            // annuire: `el.value = "..."` su un <a> attacca una proprieta'
+            // inventata e non cambia niente. Misurato sul telefono il 29/08 —
+            // il modello ci ha provato quattro volte di fila, perche' ogni
+            // volta gli rispondevamo "ok".
+            var tag = el.tagName.toLowerCase();
+            var typeable = tag === 'input' || tag === 'textarea' || el.isContentEditable;
+            if (!typeable) {
+              r.error = 'non ci si puo\' scrivere: ' + (role(el) || tag) +
+                ' "' + accessibleName(el, role(el)).slice(0, 40) + '". Serve un textbox o una searchbox: ' +
+                'cerca quello nello snapshot, o clicca prima questo se apre un campo.';
+              results.push(r); break;
+            }
             el.focus();
             el.value = st.text || '';
             fire(el, 'input'); fire(el, 'change');
-            r.ok = true;
+            // Verifica invece di fidarsi: un campo controllato da un framework
+            // puo' rimettersi come prima appena lo si tocca.
+            if (String(el.value) !== String(st.text || '')) {
+              r.error = 'il campo non ha tenuto il testo (lo riscrive la pagina)';
+              results.push(r); break;
+            }
+            r.ok = true; r.value = String(el.value).slice(0, 60);
           } else if (a === 'select') {
+            if (el.tagName.toLowerCase() !== 'select') {
+              r.error = 'non e\' un elenco a tendina: ' + (role(el) || el.tagName.toLowerCase());
+              results.push(r); break;
+            }
             var want = String(st.value == null ? '' : st.value).toLowerCase();
             var picked = -1;
             for (var o = 0; o < (el.options || []).length; o++) {
