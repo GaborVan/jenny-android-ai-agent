@@ -11,7 +11,7 @@
 // bridge il danno è già fatto — nessuno tronca il risultato di un tool a valle
 // (context_governor taglia la cronologia, non la singola risposta).
 (function (ARGS) {
-  var J = (window.__jenny = window.__jenny || { v: 0, refs: {}, prev: null });
+  var J = (window.__jenny = window.__jenny || { v: 0, n: 0, refs: {}, prev: null });
 
   // ---------------------------------------------------------------- visibilità
 
@@ -215,8 +215,14 @@
     var maxChars = args.maxChars || 2000;
     var filter = clean(args.filter).toLowerCase();
     var version = args.version;
-    J.v = version;
-    J.refs = {};
+    // La versione e' quella del **documento**, non della fotografia. Guardare
+    // una pagina non la cambia: azzerare i ref a ogni snapshot faceva morire
+    // riferimenti ancora buoni, e il modello si ritrovava rifiutato per aver
+    // guardato due volte. Misurato il 29/08 su it.m.wikipedia.org: uno snapshot
+    // di troppo e il browser_read successivo veniva respinto.
+    // La protezione resta: un elemento sostituito sotto non e' piu' connesso al
+    // documento, e resolve() lo rifiuta lo stesso.
+    if (J.v !== version) { J.v = version; J.refs = {}; J.prev = null; J.n = 0; }
 
     var items = collect();
     var n = 0;
@@ -230,11 +236,12 @@
     function push(item) {
       // Il ref si assegna **dopo** il tetto: allocarlo prima lascia buchi nella
       // numerazione e mette nella mappa elementi che il modello non ha mai visto.
-      var probe = lineFor(item, item.actionable ? version + ':e' + n : null);
+      var probe = lineFor(item, item.actionable ? version + ':e' + J.n : null);
       if (used + probe.length + 1 > maxChars) { truncated = true; return false; }
       var ref = null;
       if (item.actionable) {
-        ref = version + ':e' + (n++);
+        ref = version + ':e' + (J.n++);
+        n++;
         J.refs[ref] = item.el;
         // Ruolo e nome tornano anche a parte, non solo dentro il testo: la
         // politica su cosa si puo' cliccare e dove si puo' scrivere sta in
@@ -252,8 +259,11 @@
     // invece di elencarlo (e' cio' che tiene una pagina vera dentro il tetto).
     for (var i = 0; i < items.length; i++) {
       var it = items[i];
+      // Il filtro guarda il nome **e** il ruolo: chiedere filter="heading" e
+      // ricevere le intestazioni e' quello che chiunque si aspetta, e senza
+      // questo il modello ci prova comunque e trova il vuoto.
       var wanted = filter
-        ? it.name.toLowerCase().indexOf(filter) >= 0
+        ? (it.name.toLowerCase().indexOf(filter) >= 0 || it.role === filter)
         : it.inView;
       if (!wanted) { deferred[it.role] = (deferred[it.role] || 0) + 1; continue; }
       if (!push(it)) { deferred[it.role] = (deferred[it.role] || 0) + 1; }
@@ -345,7 +355,11 @@
         if (a === 'wait') {
           r.ok = true;                       // l'attesa vera la fa Kotlin
         } else if (a === 'scroll') {
-          var amount = (st.amount || 1) * (window.innerHeight || 800) * 0.85;
+          // `amount` sono schermate, non pixel. Il modello passa numeri da pixel
+          // (visti 300, 1500, 2500), che senza tetto mandano la pagina a fondo
+          // corsa e costano tre chiamate per tornare indietro.
+          var screens = Math.max(1, Math.min(10, st.amount || 1));
+          var amount = screens * (window.innerHeight || 800) * 0.85;
           if ((st.direction || 'down') === 'up') amount = -amount;
           window.scrollBy(0, amount);
           r.ok = true; r.scrollY = window.scrollY;

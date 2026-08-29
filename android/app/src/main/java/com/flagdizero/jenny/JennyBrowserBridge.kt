@@ -95,7 +95,6 @@ class JennyBrowserBridge(context: Context) {
     private val loading = AtomicBoolean(false)
     private val lastError = AtomicReference<String?>(null)
     private val lastFinishAt = AtomicReference(0L)
-    private val snapshotVersion = AtomicInteger(0)
     private val hostVerdicts = ConcurrentHashMap<String, Boolean>()
 
     // L'ultimo indirizzo rifiutato dalla guardia. Serve a **dirlo**: un blocco
@@ -413,7 +412,10 @@ class JennyBrowserBridge(context: Context) {
         mode: String, filter: String, maxChars: Int,
         timeoutSeconds: Long = DEFAULT_TIMEOUT_SECONDS,
     ): String {
-        val v = snapshotVersion.incrementAndGet()
+        // La versione e' quella del documento: sale quando la pagina cambia, non
+        // quando la si guarda. Un ref resta buono finche' il suo elemento e'
+        // ancora attaccato al documento in cui e' nato.
+        val v = generation.get()
         val args = """{"op":"snapshot","mode":${quote(mode)},"filter":${quote(filter)},""" +
             """"maxChars":$maxChars,"version":$v}"""
         return runAgent(args, timeoutSeconds)

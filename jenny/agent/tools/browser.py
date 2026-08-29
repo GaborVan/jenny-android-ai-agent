@@ -48,6 +48,7 @@ _IDLE_POLL_S = 15
 # modello: serve a questo strato per sapere **su cosa** sta per agire, perche' il
 # nome lo conosce solo la pagina e la politica deve stare dove si puo' testare.
 _LAST_INDEX: dict[str, tuple[str, str]] = {}
+_INDEX_VERSION: str = ""
 
 # Verbi che cambiano il mondo di chi legge: soldi, distruzione, identita'. Un
 # click su uno di questi non parte da solo.
@@ -227,9 +228,16 @@ async def _call(
 
 def _render_snapshot(data: dict[str, Any]) -> str:
     """Compone lo snapshot per il modello, e aggiorna l'indice dei ref."""
+    # I ref si accumulano dentro lo stesso documento, quindi l'indice si somma
+    # invece di sostituirsi: un ref di uno snapshot precedente e' ancora valido, e
+    # la politica deve sapere come si chiama. Si svuota quando cambia il documento.
     index = data.get("index")
     if isinstance(index, dict):
-        _LAST_INDEX.clear()
+        version = str(data.get("version", ""))
+        global _INDEX_VERSION
+        if version != _INDEX_VERSION:
+            _LAST_INDEX.clear()
+            _INDEX_VERSION = version
         for ref, pair in index.items():
             if isinstance(pair, list) and len(pair) == 2:
                 _LAST_INDEX[str(ref)] = (str(pair[0]), str(pair[1]))
@@ -371,7 +379,10 @@ class BrowserOpenTool(_BrowserToolBase):
 @tool_parameters(
     tool_parameters_schema(
         mode=StringSchema("'diff' (default, only what changed) or 'full'"),
-        filter=StringSchema("Only show elements whose label contains this text"),
+        filter=StringSchema(
+            "Show only elements whose label contains this text, or whose role is "
+            "exactly this (heading, button, link, textbox, combobox...)"
+        ),
     )
 )
 class BrowserSnapshotTool(_BrowserToolBase):
@@ -409,7 +420,10 @@ _STEP = ObjectSchema(
     value=StringSchema("Option value or label to pick (action=select)"),
     key=StringSchema("Key name, default Enter (action=press)"),
     direction=StringSchema("up | down (action=scroll)"),
-    amount=IntegerSchema("Screens to scroll, default 1 (action=scroll)"),
+    amount=IntegerSchema(
+        "How many screenfuls to scroll — 1 is one screen, capped at 10. "
+        "Not pixels (action=scroll)"
+    ),
     ms=IntegerSchema("Milliseconds to wait (action=wait)"),
     confirm=BooleanSchema(
         description=(

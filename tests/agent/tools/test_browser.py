@@ -500,6 +500,25 @@ class TestIndiceDeiRef:
         })
         assert browser._LAST_INDEX == {"3:e0": ("button", "Paga ora")}
 
+    def test_i_ref_si_accumulano_nello_stesso_documento(self):
+        """Guardare due volte non deve uccidere i ref della prima occhiata."""
+        browser._LAST_INDEX.clear()
+        browser._INDEX_VERSION = ""
+        browser._render_snapshot({"url": "u", "version": 2, "index": {"2:e0": ["button", "A"]},
+                                  "text": ""})
+        browser._render_snapshot({"url": "u", "version": 2, "index": {"2:e1": ["link", "B"]},
+                                  "text": ""})
+        assert set(browser._LAST_INDEX) == {"2:e0", "2:e1"}
+
+    def test_un_documento_nuovo_lo_svuota(self):
+        browser._LAST_INDEX.clear()
+        browser._INDEX_VERSION = ""
+        browser._render_snapshot({"url": "u", "version": 2, "index": {"2:e0": ["button", "A"]},
+                                  "text": ""})
+        browser._render_snapshot({"url": "v", "version": 3, "index": {"3:e0": ["link", "B"]},
+                                  "text": ""})
+        assert set(browser._LAST_INDEX) == {"3:e0"}
+
     def test_uno_snapshot_senza_indice_non_lo_cancella(self):
         """Un bridge vecchio non deve disarmare la politica in silenzio."""
         browser._LAST_INDEX.clear()
