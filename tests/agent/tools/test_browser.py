@@ -54,6 +54,7 @@ class FakeBridge:
             "text": '- searchbox "Cerca" [ref=1:e0]\n- button "Vai" [ref=1:e1]',
         }
         self.act_payload = {"results": [{"i": 0, "action": "click", "ok": True}], "failed": False}
+        self.notice = ""
 
     # I metodi del motore tornano il valore JS, cioe' JSON **codificato due volte**.
     def _js(self, obj):
@@ -74,6 +75,11 @@ class FakeBridge:
     def read(self, ref, max_chars, timeout):
         self.calls.append(("read", ref, max_chars, timeout))
         return self._js({"url": "https://esempio.test/", "chars": 3, "truncated": False, "text": "ciao"})
+
+    # Il nome lo detta il Kotlin, non lo stile Python: e' il metodo del bridge.
+    def takeNotice(self):  # noqa: N802
+        self.calls.append(("takeNotice",))
+        return json.dumps({"notice": self.notice})
 
     def close(self):
         self.closed += 1
@@ -191,7 +197,8 @@ class TestDo:
         out = await _tool(BrowserDoTool).execute(steps=steps)
         calls = holder["bridge"].calls
         assert json.loads(calls[0][1]) == steps
-        assert calls[1][1] == "diff"
+        assert [c[0] for c in calls] == ["act", "takeNotice", "snapshot"]
+        assert calls[2][1] == "diff"
         assert "0. click: ok" in out
 
     async def test_un_passo_fallito_si_vede(self, monkeypatch):
@@ -367,3 +374,157 @@ class TestMotoreNellaPagina:
             assert proc.returncode == 0, proc.stderr
         finally:
             os.unlink(tmp)
+
+
+def _index(monkeypatch, mapping):
+    """Finge l'indice ruolo/nome lasciato dall'ultimo snapshot."""
+    browser._LAST_INDEX.clear()
+    browser._LAST_INDEX.update(mapping)
+
+
+class TestVerbiSensibili:
+    """Un click che costa non parte da solo.
+
+    Non e' il modello a giudicare: una pagina ostile convince un giudizio e non
+    convince una lista.
+    """
+
+    @pytest.mark.parametrize(
+        "nome",
+        [
+            "Paga ora", "Procedi al pagamento", "Acquista", "Compra subito",
+            "Conferma ordine", "Abbonati", "Pay now", "Buy it now", "Checkout",
+            "Place order", "Elimina definitivamente", "Cancella account",
+            "Rimuovi dal carrello", "Delete", "Remove item", "Bonifico",
+            "Invia denaro", "Transfer funds", "Accedi", "Sign in", "Log in",
+        ],
+    )
+    def test_li_riconosce(self, nome):
+        assert browser._is_sensitive(nome) is True
+
+    @pytest.mark.parametrize(
+        "nome",
+        [
+            # "conferma" da sola no: sarebbe ogni banner dei cookie.
+            "Conferma le preferenze", "Accetta tutti", "Gestisci i cookie",
+            # confini di parola: nessuno di questi e' il verbo.
+            "Ordinamento per data", "Cancelleria", "Rimozione automatica spiegata",
+            "Paginazione", "Pagina successiva",
+        ],
+    )
+    def test_non_scatta_a_vuoto(self, nome):
+        assert browser._is_sensitive(nome) is False
+
+    @pytest.mark.parametrize("nome", ["Login page explained", "Accedi alla guida"])
+    def test_scatta_anche_dove_non_servirebbe(self, nome):
+        """Falsi positivi noti, e accettati.
+
+        Il lessico non distingue il verbo dal sostantivo: un link intitolato
+        "Login page explained" chiede conferma come la chiederebbe un bottone di
+        accesso. Il prezzo e' una domanda in piu'; il prezzo dell'errore opposto
+        e' un acquisto o una cancellazione fatti da soli. Si tara con i compiti
+        veri della Fase 4, non a tavolino.
+        """
+        assert browser._is_sensitive(nome) is True
+
+    async def test_un_click_sensibile_si_ferma_prima_di_toccare_la_pagina(self, monkeypatch):
+        holder = _install(monkeypatch)
+        _index(monkeypatch, {"1:e4": ("button", "Paga ora")})
+        out = await _tool(BrowserDoTool).execute(steps=[{"action": "click", "ref": "1:e4"}])
+        assert out.startswith("Error:")
+        assert "confirm" in out
+        assert "bridge" not in holder      # la pagina non e' stata toccata
+
+    async def test_con_il_consenso_passa(self, monkeypatch):
+        holder = _install(monkeypatch)
+        _index(monkeypatch, {"1:e4": ("button", "Paga ora")})
+        await _tool(BrowserDoTool).execute(
+            steps=[{"action": "click", "ref": "1:e4", "confirm": True}]
+        )
+        assert [c[0] for c in holder["bridge"].calls][0] == "act"
+
+    async def test_rifiuta_tutto_il_blocco_non_meta(self, monkeypatch):
+        """Fermarsi a meta' lascerebbe la pagina in uno stato che nessuno descrive."""
+        holder = _install(monkeypatch)
+        _index(monkeypatch, {"1:e0": ("textbox", "Cerca"), "1:e9": ("button", "Elimina")})
+        out = await _tool(BrowserDoTool).execute(steps=[
+            {"action": "type", "ref": "1:e0", "text": "x"},
+            {"action": "click", "ref": "1:e9"},
+        ])
+        assert out.startswith("Error:")
+        assert "passo 1" in out
+        assert "bridge" not in holder
+
+    async def test_un_nome_che_non_conosciamo_non_blocca(self, monkeypatch):
+        holder = _install(monkeypatch)
+        _index(monkeypatch, {})
+        await _tool(BrowserDoTool).execute(steps=[{"action": "click", "ref": "1:e4"}])
+        assert holder["bridge"].calls
+
+
+class TestPassword:
+    async def test_non_ci_si_scrive(self, monkeypatch):
+        holder = _install(monkeypatch)
+        _index(monkeypatch, {"1:e7": ("password", "")})
+        out = await _tool(BrowserDoTool).execute(
+            steps=[{"action": "type", "ref": "1:e7", "text": "segreto"}]
+        )
+        assert out.startswith("Error:")
+        assert "bridge" not in holder
+
+    async def test_il_consenso_non_la_sblocca(self, monkeypatch):
+        """`confirm` vale per i verbi, non per le credenziali: quelle non passano."""
+        holder = _install(monkeypatch)
+        _index(monkeypatch, {"1:e7": ("password", "")})
+        out = await _tool(BrowserDoTool).execute(
+            steps=[{"action": "type", "ref": "1:e7", "text": "segreto", "confirm": True}]
+        )
+        assert out.startswith("Error:")
+        assert "bridge" not in holder
+
+    async def test_non_si_legge(self, monkeypatch):
+        holder = _install(monkeypatch)
+        _index(monkeypatch, {"1:e7": ("password", "")})
+        out = await _tool(BrowserReadTool).execute(ref="1:e7")
+        assert out.startswith("Error:")
+        assert "bridge" not in holder
+
+
+class TestIndiceDeiRef:
+    def test_lo_snapshot_lo_aggiorna(self):
+        browser._LAST_INDEX.clear()
+        browser._render_snapshot({
+            "url": "https://x.test/", "version": 3, "refs": 1, "total": 1,
+            "index": {"3:e0": ["button", "Paga ora"]}, "text": "- button ...",
+        })
+        assert browser._LAST_INDEX == {"3:e0": ("button", "Paga ora")}
+
+    def test_uno_snapshot_senza_indice_non_lo_cancella(self):
+        """Un bridge vecchio non deve disarmare la politica in silenzio."""
+        browser._LAST_INDEX.clear()
+        browser._LAST_INDEX["1:e0"] = ("button", "Paga")
+        browser._render_snapshot({"url": "https://x.test/", "text": "..."})
+        assert browser._LAST_INDEX == {"1:e0": ("button", "Paga")}
+
+    def test_la_chiusura_lo_svuota(self, monkeypatch):
+        _install(monkeypatch)
+        browser._LAST_INDEX["1:e0"] = ("button", "Paga")
+        browser.destroy_browser()
+        assert browser._LAST_INDEX == {}
+
+
+class TestLaGuardiaSiFaSentire:
+    async def test_un_blocco_durante_la_navigazione_arriva_al_modello(self, monkeypatch):
+        """La guardia lavora *durante* la navigazione, quindi non sta nei passi.
+
+        Senza il ritiro esplicito, un click fermato lascia il modello davanti a
+        una pagina che semplicemente non e' cambiata.
+        """
+        class ConBlocco(FakeBridge):
+            def __init__(self, context=None):
+                super().__init__(context)
+                self.notice = "navigazione fermata: la sessione e' aperta su esempio.test"
+
+        _install(monkeypatch, ConBlocco)
+        out = await _tool(BrowserDoTool).execute(steps=[{"action": "click", "ref": "1:e1"}])
+        assert "navigazione fermata" in out

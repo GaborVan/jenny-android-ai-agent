@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from typing import Any
 
@@ -26,6 +27,7 @@ from jenny.agent.tools.android_web import _UNTRUSTED_BANNER
 from jenny.agent.tools.base import Tool, tool_parameters
 from jenny.agent.tools.schema import (
     ArraySchema,
+    BooleanSchema,
     IntegerSchema,
     ObjectSchema,
     StringSchema,
@@ -42,6 +44,38 @@ _IDLE_TASK: asyncio.Task[None] | None = None
 # test non deve aspettare i minuti veri.
 _IDLE_POLL_S = 15
 
+# Ruolo e nome accessibile dell'ultimo snapshot, per ref. Non arriva mai al
+# modello: serve a questo strato per sapere **su cosa** sta per agire, perche' il
+# nome lo conosce solo la pagina e la politica deve stare dove si puo' testare.
+_LAST_INDEX: dict[str, tuple[str, str]] = {}
+
+# Verbi che cambiano il mondo di chi legge: soldi, distruzione, identita'. Un
+# click su uno di questi non parte da solo.
+#
+# Perche' un lessico e non un giudizio del modello: l'iniezione di istruzioni
+# dentro le pagine non si risolve ragionandoci — una pagina ostile convince il
+# modello che il bottone e' innocuo, mentre non convince una lista. Ed e' per lo
+# stesso motivo che il confine e' grossolano di proposito: preferisce chiedere di
+# piu' che lasciar passare.
+#
+# Confronto a parola intera: "ordina" non deve scattare su "ordinamento", e
+# "conferma" da sola non deve scattare su ogni banner dei cookie — per questo
+# c'e' "conferma ordine" e non "conferma".
+_SENSITIVE_VERBS = (
+    r"pag(?:a|are|amento)", r"acquist(?:a|are|o)", r"compra", r"ordina",
+    r"conferma ordine", r"procedi al pagamento", r"abbonati",
+    r"pay", r"buy", r"purchase", r"checkout", r"place order", r"subscribe",
+    r"elimin(?:a|are)", r"cancell(?:a|are)", r"rimuov(?:i|ere)", r"svuota",
+    r"delete", r"remove", r"empty (?:cart|trash)",
+    r"trasferisc(?:i|ere)", r"bonifico", r"invia denaro", r"transfer", r"send money",
+    r"accedi", r"sign in", r"log ?in",
+)
+_SENSITIVE_RE = re.compile(r"\b(?:" + "|".join(_SENSITIVE_VERBS) + r")\b", re.IGNORECASE)
+
+
+def _is_sensitive(name: str) -> bool:
+    return bool(name) and _SENSITIVE_RE.search(name) is not None
+
 
 def reset_browser_state() -> None:
     """Azzera istanza e lucchetto all'avvio del gateway.
@@ -52,6 +86,7 @@ def reset_browser_state() -> None:
     event loop" al primo acquire.
     """
     global _BROWSER_INSTANCE, _BROWSER_LOCK, _IDLE_TASK, _LAST_USE
+    _LAST_INDEX.clear()
     if _IDLE_TASK is not None:
         # Il task puo' appartenere a un loop gia' chiuso (e' proprio il caso
         # per cui questa funzione esiste): li' ``cancel`` solleva invece di
@@ -120,6 +155,7 @@ async def _watch_idle(idle_s: int) -> None:
 def destroy_browser() -> None:
     """Chiude la sessione e butta il profilo (cookie inclusi), se c'e'."""
     global _BROWSER_INSTANCE
+    _LAST_INDEX.clear()
     if _BROWSER_INSTANCE is not None:
         try:
             _BROWSER_INSTANCE.close()
@@ -187,7 +223,13 @@ async def _call(
 
 
 def _render_snapshot(data: dict[str, Any]) -> str:
-    """Compone lo snapshot per il modello."""
+    """Compone lo snapshot per il modello, e aggiorna l'indice dei ref."""
+    index = data.get("index")
+    if isinstance(index, dict):
+        _LAST_INDEX.clear()
+        for ref, pair in index.items():
+            if isinstance(pair, list) and len(pair) == 2:
+                _LAST_INDEX[str(ref)] = (str(pair[0]), str(pair[1]))
     head = [
         _UNTRUSTED_BANNER,
         f"url: {data.get('url', '')}",
@@ -202,6 +244,32 @@ def _render_snapshot(data: dict[str, Any]) -> str:
         f"su {total} visibili"
     )
     return "\n".join(head) + "\n\n" + str(data.get("text", ""))
+
+
+def _refuse_step(steps: list[dict[str, Any]]) -> str | None:
+    """Politica sui passi, applicata **prima** di toccare la pagina.
+
+    Rifiuta l'intera chiamata e non solo il passo: i passi sono un blocco, e
+    fermarsi a meta' lascerebbe la pagina in uno stato che nessuno ha descritto.
+    """
+    for i, st in enumerate(steps):
+        if not isinstance(st, dict):
+            continue
+        action = str(st.get("action", "")).lower()
+        ref = str(st.get("ref", ""))
+        role, name = _LAST_INDEX.get(ref, ("", ""))
+        if action == "type" and role == "password":
+            return (
+                f"passo {i}: non scrivo in un campo password. Le credenziali le mette "
+                "l'utente dal telefono, non io — chiediglielo e prosegui da dopo il login."
+            )
+        if action == "click" and _is_sensitive(name) and not st.get("confirm"):
+            return (
+                f'passo {i}: "{name}" e\' un\'azione che costa (soldi, cancellazione o '
+                "accesso). Non la faccio da sola: chiedi conferma all'utente, e se dice di "
+                'si\' ripeti lo stesso passo aggiungendo "confirm": true.'
+            )
+    return None
 
 
 class _BrowserToolBase(Tool):
@@ -340,6 +408,12 @@ _STEP = ObjectSchema(
     direction=StringSchema("up | down (action=scroll)"),
     amount=IntegerSchema("Screens to scroll, default 1 (action=scroll)"),
     ms=IntegerSchema("Milliseconds to wait (action=wait)"),
+    confirm=BooleanSchema(
+        description=(
+            "Set true only after the user agreed, to allow a click that costs money, "
+            "deletes something or signs in"
+        )
+    ),
     required=["action"],
 )
 
@@ -365,6 +439,8 @@ class BrowserDoTool(_BrowserToolBase):
     async def execute(self, steps: list[dict[str, Any]] | None = None, **kwargs: Any) -> Any:
         if not steps:
             return "Error: nessun passo da eseguire"
+        if (refusal := _refuse_step(steps)) is not None:
+            return f"Error: {refusal}"
         payload = json.dumps(steps, ensure_ascii=False)
         out = await _call(self.android_context, "act", payload, self.timeout, timeout=self.timeout, idle_s=self.idle_close_s)
         if out.get("error"):
@@ -376,6 +452,16 @@ class BrowserDoTool(_BrowserToolBase):
             detail = r.get("error") or r.get("selected") or ""
             lines.append(f"  {r.get('i')}. {r.get('action')}: {mark}{' — ' + detail if detail else ''}")
         header = "passi eseguiti:\n" + "\n".join(lines) if lines else "nessun passo eseguito"
+
+        # La guardia lavora **durante** la navigazione, quindi non puo' finire nel
+        # risultato dei passi: si ritira qui, altrimenti un blocco resta muto e il
+        # modello vede solo una pagina che non e' cambiata.
+        notice = await _call(
+            self.android_context, "takeNotice",
+            timeout=self.timeout, idle_s=self.idle_close_s,
+        )
+        if notice.get("notice"):
+            header += f"\n\n⚠ {notice['notice']}"
 
         shot = await _call(
             self.android_context, "snapshot",
@@ -407,6 +493,9 @@ class BrowserReadTool(_BrowserToolBase):
         return True
 
     async def execute(self, ref: str = "", **kwargs: Any) -> Any:
+        role, _name = _LAST_INDEX.get(ref, ("", ""))
+        if role == "password":
+            return "Error: non leggo un campo password."
         out = await _call(
             self.android_context, "read", ref or "", self.max_read_chars, self.timeout,
             timeout=self.timeout, idle_s=self.idle_close_s,

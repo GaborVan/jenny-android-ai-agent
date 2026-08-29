@@ -222,6 +222,7 @@
     var n = 0;
     var lines = [];
     var keys = [];
+    var index = {};
     var used = 0;
     var deferred = {};      // ruolo -> quante righe non mostrate
     var truncated = false;
@@ -232,7 +233,15 @@
       var probe = lineFor(item, item.actionable ? version + ':e' + n : null);
       if (used + probe.length + 1 > maxChars) { truncated = true; return false; }
       var ref = null;
-      if (item.actionable) { ref = version + ':e' + (n++); J.refs[ref] = item.el; }
+      if (item.actionable) {
+        ref = version + ':e' + (n++);
+        J.refs[ref] = item.el;
+        // Ruolo e nome tornano anche a parte, non solo dentro il testo: la
+        // politica su cosa si puo' cliccare e dove si puo' scrivere sta in
+        // Python, dove si puo' testare, ma il nome accessibile lo sa solo la
+        // pagina. Questo indice non arriva al modello.
+        index[ref] = [item.role, item.name];
+      }
       lines.push(lineFor(item, ref)); keys.push(keyFor(item));
       used += probe.length + 1;
       return true;
@@ -297,6 +306,7 @@
       refs: n,
       total: items.length,
       chars: text.length,
+      index: index,
       text: diff !== null ? diff : text,
       mode: diff !== null ? 'diff' : 'full',
     };

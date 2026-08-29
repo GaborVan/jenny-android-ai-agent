@@ -66,6 +66,21 @@ class JennyBrowserBridge(context: Context) {
          * Chromium naviga. Questo è l'unico strato che vede dove porta un click,
          * un redirect o una sottorisorsa.
          */
+        /**
+         * Suffissi pubblici a due livelli, per non ridurre `amazon.co.uk` a
+         * `co.uk` — che aprirebbe il perimetro a **tutto** il Regno Unito.
+         * E' una lista corta e dichiaratamente parziale: la Public Suffix List
+         * completa e' migliaia di voci e non vale il peso qui. Un suffisso che
+         * manca rende il perimetro piu' largo, mai piu' stretto, quindi il modo
+         * di sbagliare e' permettere troppo e non bloccare a torto.
+         */
+        private val TWO_LEVEL_SUFFIXES = setOf(
+            "co.uk", "org.uk", "ac.uk", "gov.uk", "me.uk", "net.uk",
+            "com.au", "net.au", "org.au", "co.jp", "ne.jp", "or.jp",
+            "com.br", "com.mx", "com.ar", "com.tr", "com.cn", "com.tw",
+            "co.in", "co.nz", "co.za", "co.kr", "com.sg", "com.hk",
+        )
+
         private val BLOCKED_V4 = listOf(
             "0.0.0.0" to 8, "10.0.0.0" to 8, "100.64.0.0" to 10, "127.0.0.0" to 8,
             "169.254.0.0" to 16, "172.16.0.0" to 12, "192.168.0.0" to 16,
@@ -90,6 +105,14 @@ class JennyBrowserBridge(context: Context) {
     // "0 elementi".
     private val lastBlocked = AtomicReference<String?>(null)
 
+    // Il dominio su cui la sessione e' stata aperta. Una navigazione che ne esce
+    // viene fermata: e' la difesa piu' forte contro una pagina che prova a
+    // portare la sessione altrove, ed e' anche l'unica che vede un click,
+    // perche' l'indirizzo di destinazione Python non lo conosce mai.
+    // Uscire resta possibile, ma come atto esplicito: un browser_open sul nuovo
+    // indirizzo, che ripassa dalla validazione e sposta il perimetro.
+    private val scopeDomain = AtomicReference<String?>(null)
+
     // R.raw.browser_agent e non getIdentifier("browser_agent"): la build di
     // release offusca i nomi delle risorse (nell'APK il file diventa `res/XX.js`),
     // quindi cercarlo per nome a runtime funziona in debug e fallisce dove conta.
@@ -97,6 +120,15 @@ class JennyBrowserBridge(context: Context) {
     private val agentJs: String by lazy {
         appContext.resources.openRawResource(R.raw.browser_agent)
             .bufferedReader().use { it.readText() }
+    }
+
+    /** Dominio registrabile, per confronto di perimetro. Euristica, v. sopra. */
+    private fun registrable(host: String): String {
+        val labels = host.lowercase().trimEnd('.').split('.')
+        if (labels.size <= 2) return labels.joinToString(".")
+        val lastTwo = labels.takeLast(2).joinToString(".")
+        val take = if (lastTwo in TWO_LEVEL_SUFFIXES) 3 else 2
+        return labels.takeLast(take).joinToString(".")
     }
 
     // ------------------------------------------------------------------ guardia
@@ -196,6 +228,15 @@ class JennyBrowserBridge(context: Context) {
                 if (request.isForMainFrame) lastBlocked.set(uri.toString())
                 return true
             }
+            if (request.isForMainFrame) {
+                val scope = scopeDomain.get()
+                val host = uri.host
+                if (scope != null && host != null && registrable(host) != scope) {
+                    Log.w(TAG, "fuori perimetro ($scope): $uri")
+                    lastBlocked.set("PERIMETRO|$scope|$uri")
+                    return true
+                }
+            }
             return false
         }
 
@@ -251,10 +292,32 @@ class JennyBrowserBridge(context: Context) {
         }
         done.await(10, TimeUnit.SECONDS)
         hostVerdicts.clear()
+        scopeDomain.set(null)
+        lastBlocked.set(null)
         if (WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)) {
             try { ProfileStore.getInstance().deleteProfile(PROFILE_NAME) } catch (_: Exception) {}
         }
         return """{"ok":true}"""
+    }
+
+    /** Traduce un blocco della guardia in una frase per il modello. */
+    private fun describeBlock(raw: String): String {
+        if (raw.startsWith("PERIMETRO|")) {
+            val parts = raw.split("|", limit = 3)
+            return "navigazione fermata: la sessione e' aperta su ${parts[1]} e questo " +
+                "porta fuori (${parts.getOrElse(2) { "?" }}). Se ci vuoi andare davvero, " +
+                "chiama browser_open su quell'indirizzo: e' un atto esplicito e sposta " +
+                "il perimetro."
+        }
+        return "navigazione rifiutata: $raw e' un indirizzo di rete privata o locale. " +
+            "Se ci sei arrivato da un redirect, il sito di partenza sta puntando dentro " +
+            "la rete del telefono."
+    }
+
+    /** Restituisce e consuma l'ultimo blocco, per chi non passa da open(). */
+    fun takeNotice(): String {
+        val raw = lastBlocked.getAndSet(null) ?: return """{"notice":""}"""
+        return """{"notice":${quote(describeBlock(raw))}}"""
     }
 
     fun isIsolated(): Boolean = WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)
@@ -313,6 +376,9 @@ class JennyBrowserBridge(context: Context) {
         if (isBlockedLiteral(uri)) return """{"error":"indirizzo non consentito"}"""
         val started = CountDownLatch(1)
         lastBlocked.set(null)
+        // Un browser_open e' un atto esplicito: sposta il perimetro sul nuovo
+        // dominio invece di essere fermato da quello vecchio.
+        uri.host?.let { scopeDomain.set(registrable(it)) }
         handler.post {
             ensureWebViewOnMain()
             loading.set(true)
@@ -323,10 +389,7 @@ class JennyBrowserBridge(context: Context) {
         started.await(10, TimeUnit.SECONDS)
         val settled = awaitSettled(timeoutSeconds)
         lastBlocked.getAndSet(null)?.let {
-            val msg = "navigazione rifiutata: $it e' un indirizzo di rete privata o " +
-                "locale. Se ci sei arrivato da un redirect, il sito di partenza sta " +
-                "puntando dentro la rete del telefono."
-            return """{"error":${quote(msg)}}"""
+            return """{"error":${quote(describeBlock(it))}}"""
         }
         lastError.get()?.let { return """{"error":${quote(it)}}""" }
         val (u, t) = currentUrlAndTitle()
