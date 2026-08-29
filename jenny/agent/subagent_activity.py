@@ -761,6 +761,51 @@ def _end_web_fetch(args: Mapping[str, Any], outcome: _Outcome) -> str:
     return f"{_fmt_bytes(outcome.size)}, {_plural(outcome.lines, 'line')}"
 
 
+# -- browser_* ---------------------------------------------------------------
+#
+# La sessione interattiva parla di **pagine**, non di byte: quel che interessa a
+# chi guarda scorrere il subagent e' dove si trova e quanti appigli ha, non
+# quanto pesa la risposta.
+
+
+def _start_browser_open(args: Mapping[str, Any]) -> str:
+    return f"opening {_display_url(args.get('url'))} in the browser"
+
+
+def _end_browser(args: Mapping[str, Any], outcome: _Outcome) -> str:
+    return _plural(outcome.lines, "element") if outcome.lines else "empty page"
+
+
+def _start_browser_snapshot(args: Mapping[str, Any]) -> str:
+    filt = _arg_text(args, "filter", limit=40)
+    return f'looking for "{filt}" on the page' if filt else "looking at the page"
+
+
+def _start_browser_do(args: Mapping[str, Any]) -> str:
+    steps = args.get("steps")
+    n = len(steps) if isinstance(steps, list) else 0
+    if n == 1 and isinstance(steps[0], Mapping):
+        return f"{steps[0].get('action', 'acting')} on the page"
+    return f"running {_plural(n, 'step')} on the page" if n else "acting on the page"
+
+
+def _start_browser_read(args: Mapping[str, Any]) -> str:
+    ref = _arg_text(args, "ref", limit=16)
+    return f"reading {ref}" if ref else "reading the page"
+
+
+def _end_browser_read(args: Mapping[str, Any], outcome: _Outcome) -> str:
+    return _fmt_bytes(outcome.size) if outcome.size else "empty"
+
+
+def _start_browser_close(args: Mapping[str, Any]) -> str:
+    return "closing the browser"
+
+
+def _end_browser_close(args: Mapping[str, Any], outcome: _Outcome) -> str:
+    return "closed"
+
+
 # -- download_file -----------------------------------------------------------
 
 
@@ -1071,6 +1116,11 @@ _FORMATTERS: dict[str, tuple[_StartFn, _EndFn]] = {
     "journal_append": (_start_journal_append, _end_journal_append),
     "web_search": (_start_web_search, _end_web_search),
     "web_fetch": (_start_web_fetch, _end_web_fetch),
+    "browser_open": (_start_browser_open, _end_browser),
+    "browser_snapshot": (_start_browser_snapshot, _end_browser),
+    "browser_do": (_start_browser_do, _end_browser),
+    "browser_read": (_start_browser_read, _end_browser_read),
+    "browser_close": (_start_browser_close, _end_browser_close),
     "download_file": (_start_download_file, _end_download_file),
     "python_exec": (_start_python_exec, _end_python_exec),
     "write_stdin": (_start_write_stdin, _end_write_stdin),

@@ -136,6 +136,13 @@ This platform has no shell, subprocess, or CLI tools. The only code-execution to
 {% endif %}
 - Repeating the *same* `web_fetch` URL or the *same* `web_search` query more than twice in a turn is blocked ("repeated external lookup blocked"). A URL that failed will fail again: move to a different source. On a research job, read the few pages that matter — four or five — and take the rest from `web_search` snippets.
 - Do not invent freshness-sensitive facts when tools can verify them.
+{% if has('browser_open') %}
+- `web_fetch` reads a page; `browser_open` **stays on it**. Reach for the browser session when a single fetch cannot get there: a cookie wall, a login, a site whose search box has no URL you can build, page 2 of a list.
+- The snapshot is structure, not prose: interactive elements with a `ref`, plus headings. What is off-screen is **counted, not listed** — reach it with `browser_snapshot filter="some text"` or by scrolling. The prose comes from `browser_read`, for the part you ask for.
+- A `ref` carries the snapshot version (`3:e12`). One from an older snapshot is refused, not guessed: take a fresh snapshot instead of retrying the old ref.
+- Fill a form with ONE `browser_do` carrying every step, not one call per field. Steps stop at the first failure.
+- Close with `browser_close` when done: an open session holds a second browser on the phone.
+{% endif %}
 
 {% endif %}
 {% if has('message') %}

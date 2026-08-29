@@ -90,7 +90,15 @@ _AGENT_TYPES: tuple[AgentType, ...] = (
     # e il percorso piu corto da "pagina ostile" a "codice eseguito".
     AgentType(
         name="researcher",
-        tools=frozenset(("web_search", "web_fetch", *_FS_READ, "write_file")),
+        tools=frozenset((
+            "web_search", "web_fetch",
+            # Sessione interattiva: e' qui che serve, perche' e' qui che si
+            # incontrano i muri dei cookie e i moduli di ricerca interni. Non
+            # sta in ``requires``: fuori da Android non esiste, e un researcher
+            # senza deve restare valido.
+            "browser_open", "browser_snapshot", "browser_do", "browser_read", "browser_close",
+            *_FS_READ, "write_file",
+        )),
         temperature=0.2,
         max_iterations=60,
         requires=frozenset(("web_search", "web_fetch")),

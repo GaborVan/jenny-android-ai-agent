@@ -61,6 +61,7 @@ _HARDCODED_TOOL_MODULES = [
     "filesystem",
     "python_exec",
     "android_web",
+    "browser",
     "download",
     "location",
     "long_task",

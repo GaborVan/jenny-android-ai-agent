@@ -85,12 +85,36 @@ class AndroidWebFetchConfig(Base):
     max_chars: int = 50000
 
 
+class AndroidWebBrowserConfig(Base):
+    """Sessione di navigazione interattiva (tool ``browser_*``).
+
+    Condivide l'interruttore di ``androidWeb.enable``: e' lo stesso WebView di
+    search/fetch come categoria di rischio, quindi non ha senso poterla accendere
+    a parte.
+
+    ``max_snapshot_chars`` e' il tetto **autorevole** sullo snapshot, e non e' un
+    dettaglio di comodo: nessuno tronca il risultato di un tool a valle
+    (``context_governor`` taglia la cronologia, non la singola risposta), quindi
+    quel che esce di qui entra intero nel turno. Il default viene da una misura
+    del 29/08 su cinque pagine vere: una camminata piatta produce 4.600 caratteri
+    su una SERP e 102.510 su una voce di Wikipedia, per cui il tetto da solo non
+    basta e la riduzione (viewport prima, resto contato) sta nel motore in
+    ``res/raw/browser_agent.js``.
+    """
+
+    timeout: int = 30
+    max_snapshot_chars: int = 2500
+    max_read_chars: int = 4000
+    idle_close_s: int = 300
+
+
 class AndroidWebToolsConfig(Base):
     """Android-only WebView web tools configuration."""
 
     enable: bool = True
     search: AndroidWebSearchConfig = Field(default_factory=AndroidWebSearchConfig)
     fetch: AndroidWebFetchConfig = Field(default_factory=AndroidWebFetchConfig)
+    browser: AndroidWebBrowserConfig = Field(default_factory=AndroidWebBrowserConfig)
 
 
 class LocationConfig(Base):

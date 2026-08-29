@@ -93,6 +93,7 @@ def run_gateway(
     # del controllo aggiornamenti, registro dei job SSH).
     try:
         from jenny.agent.tools.android_web import reset_android_web_state
+        from jenny.agent.tools.browser import reset_browser_state
         from jenny.agent.tools.ssh_jobs import reset_job_store
         from jenny.agent.tools.ssh_transport import reset_ssh_backend
         from jenny.config.store import reset_config_store_state
@@ -104,6 +105,7 @@ def run_gateway(
         from jenny.webui.settings_api import reset_update_check_state
 
         reset_android_web_state()
+        reset_browser_state()
         reset_installed_apps_state()
         reset_notifier_state()
         reset_location_state()

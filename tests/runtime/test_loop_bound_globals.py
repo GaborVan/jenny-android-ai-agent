@@ -48,6 +48,7 @@ _LOOP_BOUND_FACTORIES = {
 # da ``android_entry.run_gateway``.
 ALLOWED: dict[str, str] = {
     "jenny/agent/tools/android_web.py:_BRIDGE_LOCK": "reset_android_web_state",
+    "jenny/agent/tools/browser.py:_BROWSER_LOCK": "reset_browser_state",
     "jenny/config/store.py:_LOCK": "reset_config_store_state",
     "jenny/runtime/location.py:_BRIDGE_LOCK": "reset_location_state",
     "jenny/runtime/notifier.py:_BRIDGE_LOCK": "reset_notifier_state",
