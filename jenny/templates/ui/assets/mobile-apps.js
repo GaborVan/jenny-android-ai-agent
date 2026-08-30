@@ -228,31 +228,65 @@ export class AppsController {
    *  liste — altrimenti sulla corsa del primo caricamento una nascosta
    *  comparirebbe per un istante, che è la stessa guardia di `_renderAndroidGrid`.
    *
-   *  L'ordine è alfabetico e stabile: il ranking per frequenza e recenza è il
-   *  passo 3. Il `key` è già quello che gli servirà (`android:<pkg>`,
+   *  L'ordine è alfabetico e stabile: il cassetto lo riordina per pertinenza,
+   *  frequenza e recenza (`shared/launcher-rank.js`), ma questa è la lista, non
+   *  la classifica. Il `key` è quello del ranking (`android:<pkg>`,
    *  `jenny:<slug>`, `skill:<nome>`), così due voci omonime in spazi diversi non
-   *  si confondono mai. */
+   *  si confondono mai; `id` è la stessa cosa senza prefisso, per chi deve poi
+   *  avviarla.
+   *
+   *  **`description` e `problem` non sono decorazione** (difetto 02 del
+   *  rilievo). Il gateway manda per ogni skill e per ogni Jenny App una
+   *  descrizione, e dice anche quando qualcosa non va — `broken`/`error`,
+   *  `available`/`unavailable_reason`, `disabled` — e la griglia di oggi lo
+   *  riduce tutto a un pallino colorato o a un nome troncato. Qui arriva intero
+   *  alle righe, che è anche ciò su cui si cerca. Le app Android non hanno una
+   *  descrizione e non gliene inventiamo una: al suo posto va il nome del
+   *  pacchetto, che è un dato vero, distingue due app omonime, e si cerca
+   *  ("gmail" trova *Gmail* anche da `com.google.android.gm`). */
   launcherEntries() {
     const entries = [];
     for (const skill of this.skills) {
       if (!advancedMode() && skill.internal) continue;
+      /* `_skillUserSummary` preferisce il riassunto localizzato delle skill
+         locked e ripiega su `description`; il suo ultimo ripiego è il *nome*,
+         che in una riga che il nome ce l'ha già sopra sarebbe solo rumore. */
+      const summary = this._skillUserSummary(skill);
+      const description = summary === skill.name ? '' : summary;
       entries.push({
-        key: `skill:${skill.name}`, kind: 'skill', name: skill.name,
+        key: `skill:${skill.name}`, id: skill.name, kind: 'skill', name: skill.name,
         glyph: 'ti-puzzle', icon: null,
+        description,
+        problem: skill.disabled
+          ? i18n.t('apps.disabled')
+          : (skill.available === false ? (skill.unavailable_reason || null) : null),
+        searchText: description,
       });
     }
     for (const app of this.jennyApps) {
+      const problem = app.broken
+        ? (app.error || i18n.t('apps.invalidManifest')) : null;
       entries.push({
-        key: `jenny:${app.slug}`, kind: 'jenny', name: app.name || app.slug,
+        key: `jenny:${app.slug}`, id: app.slug, kind: 'jenny', name: app.name || app.slug,
         glyph: app.broken ? 'ti-alert-triangle' : (app.icon || 'ti-apps'), icon: null,
+        description: app.description || '',
+        problem,
+        hasServer: !!app.has_server,
+        // Anche l'errore si cerca: "manifest" deve far emergere le app rotte
+        // tutte insieme, che è il modo in cui uno le ripara.
+        searchText: [app.description, app.slug, problem].filter(Boolean).join(' '),
       });
     }
     if (this._androidAppsLoaded && this._hiddenLoaded) {
       for (const app of this.androidApps) {
         if (this.hiddenPackages.has(app.packageName)) continue;
         entries.push({
-          key: `android:${app.packageName}`, kind: 'android', name: app.label,
+          key: `android:${app.packageName}`, id: app.packageName, kind: 'android',
+          name: app.label,
           glyph: 'ti-apps', icon: app.icon || null,
+          description: app.packageName,
+          problem: null,
+          searchText: app.packageName,
         });
       }
     }
@@ -260,6 +294,30 @@ export class AppsController {
       a.name.localeCompare(b.name, i18n.locale, { sensitivity: 'base' })
       || a.key.localeCompare(b.key));
     return entries;
+  }
+
+  /** Avvia una voce del cassetto.
+   *
+   *  Sta qui e non nel foglio perché "aprire" significa tre cose diverse nei tre
+   *  spazi di nomi, e sono già decise: sono le stesse azioni del tap sulla cella
+   *  della scheda (v. `wireEvents`). Due copie di questa scelta divergerebbero
+   *  al primo caso particolare — una skill locked, una Jenny App rotta — ed è
+   *  esattamente dove la divergenza si nota di meno e costa di più. */
+  activateEntry(entry) {
+    if (!entry) return;
+    if (entry.kind === 'android') {
+      this.launchAndroidApp(entry.id);
+      return;
+    }
+    if (entry.kind === 'jenny') {
+      // Rotta compresa: `openApp` chiede conferma e propone la riparazione in
+      // chat, che dalla riga del cassetto è la strada giusta come dalla cella.
+      this.openApp(entry.id);
+      return;
+    }
+    const skill = this.skills.find(s => s.name === entry.id);
+    if (skill?.locked && !advancedMode()) this.showSkillSheet(entry.id);
+    else this._openSkillFile(entry.id);
   }
 
   render() {

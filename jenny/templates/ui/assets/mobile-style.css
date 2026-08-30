@@ -3207,6 +3207,54 @@ body {
 .launcher-close:hover { color: var(--text); background: var(--overlay-strong); }
 .launcher-close i { font-size: 13px; }
 
+/* ── Il campo di ricerca ──
+   Sta fra l'intestazione e la lista, ed è il corpo del cassetto: alto quanto
+   basta per il pollice, non di più, perché ogni pixel qui è una riga in meno
+   nella lista — che è la ragione per cui il cassetto esiste. */
+.launcher-search-row {
+  position: relative;
+  display: flex; align-items: center;
+  padding: 8px 12px 4px;
+  flex-shrink: 0;
+}
+.launcher-search-icon {
+  position: absolute; left: 23px;
+  font-size: 15px; color: var(--text-faint);
+  pointer-events: none;
+}
+.launcher-search {
+  flex: 1; min-width: 0;
+  height: 36px;
+  padding: 0 32px;
+  border: 0.5px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--overlay);
+  color: var(--text);
+  font-size: 14px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color .2s cubic-bezier(.25,.1,.25,1);
+}
+.launcher-search::placeholder { color: var(--text-faint); }
+.launcher-search:focus { border-color: rgba(var(--accent-rgb), 0.55); }
+/* La ✕ compare solo quando c'è qualcosa da pulire: un pulsante sempre visibile
+   che a volte non fa niente insegna a non fidarsi dei pulsanti. Nascosta con
+   `visibility`, non `display`, così il campo non cambia larghezza sotto il dito
+   nell'istante in cui si svuota. */
+.launcher-search-clear {
+  position: absolute; right: 21px;
+  width: 22px; height: 22px;
+  border: none; border-radius: 50%;
+  background: var(--overlay-strong); color: var(--text-faint);
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  visibility: hidden; opacity: 0;
+  transition: opacity .15s cubic-bezier(.25,.1,.25,1);
+  -webkit-tap-highlight-color: transparent;
+}
+.launcher-search-clear.visible { visibility: visible; opacity: 1; }
+.launcher-search-clear i { font-size: 12px; }
+
 .launcher-list {
   flex: 1; min-height: 0;
   overflow-y: auto;
@@ -3224,6 +3272,13 @@ body {
      la decide la shell del dispositivo e il Titan 2 ha la propria. */
 }
 
+/* La riga è attivabile col tocco, e lo dice: `cursor`, stato premuto, anello di
+   fuoco. `flex-shrink: 0` perché la lista è un flex column che scorre — senza,
+   con molte voci le righe si schiaccerebbero invece di scorrere.
+   **L'altezza non dipende dal contenuto**: descrizione ed errore stanno su una
+   riga sola con l'ellissi (v. `.launcher-row-desc`), quindi una Jenny App rotta
+   non alza la propria riga né sposta le altre — è il difetto 05 del rilievo,
+   dove l'errore dentro la cella porta la riga della griglia da 100 a 147 px. */
 .launcher-row {
   display: flex; align-items: center; gap: 10px;
   padding: 10px 12px;
@@ -3231,6 +3286,15 @@ body {
   border-radius: var(--radius);
   background: var(--overlay);
   flex-shrink: 0;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background .15s cubic-bezier(.25,.1,.25,1), transform .15s cubic-bezier(.34,1.56,.64,1);
+}
+.launcher-row:active { background: var(--overlay-strong); transform: scale(0.985); }
+.launcher-row:focus-visible {
+  outline: none;
+  border-color: rgba(var(--accent-rgb), 0.7);
+  background: var(--overlay-strong);
 }
 /* Icona piccola a sinistra — 22 px, contro il 22% di cella che la griglia di
    oggi spende per la stessa informazione (difetto 03 del rilievo). Taglia fissa
@@ -3260,6 +3324,16 @@ body {
 .launcher-row-desc {
   font-size: 11px; color: var(--text-muted);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* Il guasto al posto della descrizione, nella riga e non in un blocco che si
+   allarga: `white-space: nowrap` è ereditato da `.launcher-row-desc` e va
+   tenuto, perché è ciò che impedisce a un errore lungo di deformare la lista. */
+.launcher-row-desc--problem { color: var(--error); }
+/* Jenny App con un backend proprio (`has_server`): un glifo, non una parola —
+   la colonna di destra è già occupata dal tipo. */
+.launcher-row-server {
+  font-size: 13px; color: var(--text-faint);
+  flex-shrink: 0;
 }
 .launcher-row-kind {
   font-size: 10px; color: var(--text-faint);

@@ -178,6 +178,33 @@ perde svuotando i dati dell'app, l'ordine si riforma in qualche giorno d'uso. Se
 diventa fastidioso perderlo, la strada già battuta è quella delle app nascoste —
 JSON privato dell'app via gateway, fuori dal workspace e fuori dai backup.
 
+> **Girato il 30/08/2026 col passo 3.** Il ranking vive in
+> `assets/shared/launcher-rank.js`, modulo **puro** (niente DOM, niente
+> `window`, niente i18n) con lo storage passato dal costruttore — è quello che
+> lo rende provabile sotto node senza un telefono, e la casella 3.6 chiedeva
+> esattamente questo. Formato compatto `{"<chiave>": [conteggio, ultimoMs]}`,
+> con un tetto di 300 chiavi tagliato per recenza. Verificato sul telefono che
+> sopravvive a force-stop + riavvio, non solo che si scrive.
+
+**Due scelte che il passo 3 ha dovuto fare, e che il piano non aveva deciso:**
+
+**a) Cosa mettere sotto il nome di una app Android.** Non hanno una descrizione,
+e inventargliela era escluso. Ci va il **nome del pacchetto**: è un dato vero,
+distingue due app con la stessa etichetta, e — non previsto ma utile — diventa
+un secondo campo su cui cercare, così `com.android` o `gm` trovano l'app anche
+quando non se ne ricorda il nome commerciale. Il costo è una riga grigia sotto
+ogni app di sistema; in un cassetto dove di solito si guardano cinque risultati,
+non pesa.
+
+**b) A campo vuoto il titolo dice «Recenti», ma l'ordine è per frequenza.**
+Sono due cose diverse e la tensione è reale. La lettura che le tiene insieme:
+«Recenti» nomina il *gruppo* in cima — quello che si usa — mentre dentro quel
+gruppo comanda la frequenza, poi la recenza, come dice la regola di 3.3. Se
+l'ordine di quel gruppo dovesse invece essere puramente cronologico, è una riga
+sola in `rankEntries` (scambiare i due criteri); **la si cambia guardando la
+lista dopo una settimana d'uso vera, non ora** — è la stessa domanda della
+casella 7.4. Appena si digita, il titolo diventa «Risultati».
+
 ---
 
 ## I passi
@@ -191,12 +218,13 @@ il carosello si comportano bene con un foglio vuoto, il resto è contenuto.
 `AppsController` istanziabile senza vista; il foglio legge le tre liste da lì e
 si aggiorna sui frame che quello già ascolta.
 
-**Passo 3 — la lista digitabile** *(una giornata)*
+**Passo 3 — la lista digitabile** *(una giornata)* — **girato il 30/08/2026**
 Ricerca sui tre spazi di nomi con la `description` che oggi si butta
 ([`apps_api.py:31`](../jenny/webui/apps_api.py),
 [`skills_api.py:52`](../jenny/webui/skills_api.py)); ordinamento per pertinenza,
 poi per frequenza e recenza; a campo vuoto, «Recenti». Righe con nome +
-descrizione, e il tipo a destra.
+descrizione, e il tipo a destra. **E le righe si attivano col tocco**: un
+cassetto le cui righe non fanno niente non si può provare davvero.
 
 **Passo 4 — tastiera e rotella** *(mezza giornata)*
 Type-ahead, ↑↓ e rotella muovono la selezione, ⏎ apre, ⇧⏎ apre la scheda del
@@ -205,6 +233,13 @@ risultato, Esc pulisce e poi chiude.
 **Passo 5 — geometria e gesture** *(mezza giornata)*
 Maniglia trascinabile, inset misurato dal nativo, foglio che si ridimensiona
 sopra la tastiera software (`visualViewport`).
+
+> **Il passo 3 ha alzato la priorità di 5.5.** Con la tastiera software su, il
+> foglio è coperto per intero — `innerHeight` non cambia, e la lista resta
+> dov'era, sotto i tasti: si cerca alla cieca. Sul Titan 2 non si vede, perché
+> la tastiera è fisica; ovunque altro è la prima cosa che salta all'occhio.
+> Dettagli e conseguenze per chi verifica: la nota in fondo al passo 3 della
+> [lista di esecuzione](./apps-drawer-checklist.md).
 
 **Passo 6 — i bordi** *(mezza giornata)*
 Riga «Gestisci», stati vuoti veri (nessun risultato ≠ elenco che non si è
@@ -243,6 +278,26 @@ Nota a margine, dallo stesso giro: il dock è alto **56 px CSS**
 casella 0.3.
 
 ---
+
+## Una domanda che solo l'uso può chiudere — frecency
+
+Il passo 3 ha implementato 3.3 alla lettera: **pertinenza, poi frequenza, poi
+recenza**. Con quell'ordine la cima della lista a campo vuoto è *quel che usi di
+più*, non *quel che hai usato per ultimo* — e l'etichetta originale «Recenti»
+diceva un'altra cosa. Corretta il 30/08 in **«Più usate»**: si cambia
+l'etichetta, non l'algoritmo, perché l'algoritmo non si può giudicare senza
+averlo usato.
+
+Resta la domanda vera, ed è nota: la frequenza pura ha un difetto conosciuto —
+una app aperta cinquanta volte il mese scorso e mai più resta inchiodata in cima
+per sempre. La risposta standard è la *frecency* (frequenza pesata da un
+decadimento sulla recenza), ma sceglierla adesso significherebbe tarare una
+costante di decadimento senza un solo giorno di dati.
+
+**Chi decide: la casella 7.4**, dopo una sessione d'uso vera. Se serve, è uno
+scambio di due righe in `rankEntries` (`shared/launcher-rank.js`), che è un
+modulo puro con undici test propri: cambiarlo costa poco proprio perché è stato
+isolato.
 
 ## Cosa NON è stabilito
 

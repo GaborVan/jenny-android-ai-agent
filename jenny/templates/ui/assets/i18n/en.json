@@ -476,13 +476,18 @@
     "deletedProject": "Project “{name}” deleted, conversation included"
   },
   "launcher": {
-    "title": "Open",
     "open": "Open apps",
     "kindSkill": "Skill",
     "kindJennyApp": "Jenny App",
     "kindAndroidApp": "Android App",
     "loading": "Loading...",
-    "empty": "No app, Jenny App or skill to open."
+    "empty": "No app, Jenny App or skill to open.",
+    "recent": "Most used",
+    "results": "Results",
+    "searchPlaceholder": "Search apps, skills…",
+    "clearSearch": "Clear search",
+    "noResults": "No results for “{query}”.",
+    "hasServer": "Has its own server"
   },
   "apps": {
     "jennyApps": "Jenny Apps",

@@ -269,6 +269,7 @@ _UI_MANIFEST = [
     "assets/shared/image-handler.js",
     "assets/shared/image-lightbox.js",
     "assets/shared/keyboard.js",
+    "assets/shared/launcher-rank.js",
     "assets/shared/longpress.js",
     "assets/shared/mascot.js",
     "assets/shared/pinch-zoom.js",

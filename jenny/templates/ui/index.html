@@ -350,9 +350,24 @@
     <div class="launcher-handle"></div>
   </div>
   <div class="launcher-head">
-    <span class="launcher-title" id="launcher-title" data-i18n="launcher.title">Apri</span>
+    <span class="launcher-title" id="launcher-title" data-i18n="launcher.recent">Recenti</span>
     <button class="launcher-close" id="launcher-close" type="button"
             aria-label="Chiudi" data-i18n-aria="common.close"><i class="ti ti-x"></i></button>
+  </div>
+  <!-- Il campo di ricerca è il corpo del cassetto, non un accessorio: è la
+       direzione *Digita* del rilievo (su 68 voci, cercare batte scorrere a
+       partire dalla quarta). Niente `autofocus` — alzerebbe la tastiera
+       software e si mangerebbe il foglio (D6); il type-ahead è del passo 4, e
+       così `enterkeyhint="go"`, che promette un ⏎ che qui ancora non apre. -->
+  <div class="launcher-search-row">
+    <i class="ti ti-search launcher-search-icon"></i>
+    <input class="launcher-search" id="launcher-search" type="text"
+           autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false"
+           enterkeyhint="go" aria-controls="launcher-list"
+           placeholder="Cerca app, skill…" data-i18n-placeholder="launcher.searchPlaceholder"
+           aria-label="Cerca app, skill…" data-i18n-aria="launcher.searchPlaceholder">
+    <button class="launcher-search-clear" id="launcher-search-clear" type="button"
+            aria-label="Pulisci" data-i18n-aria="launcher.clearSearch"><i class="ti ti-x"></i></button>
   </div>
   <div class="launcher-list" id="launcher-list"></div>
 </div>

@@ -3,8 +3,8 @@
 Stato di [`apps-drawer-plan.md`](./apps-drawer-plan.md). Il ragionamento sta là,
 qui c'è solo cosa è fatto. Si spunta quando è **girato**, non quando è scritto.
 
-Ramo: `feat/apps-drawer`, aperto. **Passi 0, 1 e 2 girati (30/08/2026), e su un
-emulatore quadrato — il Titan 2 non era collegato.** Il passo 7 non è una fase
+Ramo: `feat/apps-drawer`, aperto. **Passi 0, 1, 2 e 3 girati (30/08/2026), e su
+un emulatore quadrato — il Titan 2 non era collegato.** Il passo 7 non è una fase
 finale ma un prerequisito sparso: le tre incognite in fondo al piano vanno chiuse
 *prima* del passo 5. Delle tre, il passo 1 ne chiude una: `goHome()` smonta il
 foglio con **una** chiamata a `dismiss`, non otto (v. 1.8).
@@ -74,17 +74,44 @@ casella spuntata per ragionamento. Nessun modulo JS nuovo (il foglio è ancora
 
 ## Passo 3 — la lista digitabile
 
-- [ ] **3.1** Ricerca su nome **e** descrizione, sui tre spazi di nomi insieme
-- [ ] **3.2** La `description` compare nella riga — è il difetto 02 del rilievo, e questo è il passo che lo chiude
-- [ ] **3.3** Ordine: pertinenza, poi frequenza, poi recenza. A campo vuoto: «Recenti»
-- [ ] **3.4** Ranking in `localStorage`, chiavi `android:<pkg>` / `jenny:<slug>` / `skill:<nome>`
-- [ ] **3.5** Una app rotta compare con il suo errore **nella riga**, non in una tessera che deforma la griglia (difetto 05)
-- [ ] **3.6** Test: due voci con lo stesso nome in spazi diversi non si sovrascrivono nel ranking
+Girato il 30/08/2026 sullo stesso AVD `jenny_square`, build debug da
+`app:installDebug`. Osservazioni via CDP sulla WebView + screenshot + tocchi
+veri (`adb shell input tap` sulle coordinate lette a runtime) e tasti veri
+(`adb shell input text`); nessuna casella spuntata per ragionamento. Nuovo
+modulo puro `jenny/templates/ui/assets/shared/launcher-rank.js` — aggiunto a
+`_UI_MANIFEST`.
+
+- [x] **3.1** Ricerca su nome **e** descrizione, sui tre spazi di nomi insieme — tastiera vera sull'emulatore: `remind` → **solo** `skill:cron`, che quel termine ce l'ha solo nella descrizione; `com.android` → solo `android:com.android.chrome`, dal nome del pacchetto; `jenny` → 6 righe su due spazi di nomi (una app Android per nome, quattro skill per descrizione). Più termini sono in AND e possono cadere in campi diversi (provato sotto node). Accenti e maiuscole non contano (NFKD, come `wiki-search.js`)
+- [x] **3.2** La `description` compare nella riga — difetto 02 chiuso. `launcherEntries()` porta `description` (Jenny App), `_skillUserSummary()` (skill: preferisce `user_summary` localizzato, ripiega su `description`, e scarta il ripiego sul *nome*) e il `packageName` per le app Android, che una descrizione non ce l'hanno: **non è testo inventato**, e per giunta si cerca. Usati anche `available`/`unavailable_reason`/`disabled` (come guasto) e `has_server` (glifo `ti-cloud`). Screenshot con le tre categorie insieme, ciascuna con la sua seconda riga
+- [x] **3.3** Ordine: pertinenza, poi frequenza, poi recenza — sul telefono: con `tel` vince *Telefono* (attacco sul nome) su *Voicetel* (sottostringa) su *Impostazioni* (solo descrizione); a campo vuoto, con `cassetto-rotta` a 3 avvii e `cassetto-buona` a 2 (più recente), l'ordine è **rotta, buona**, cioè la frequenza batte la recenza, e le voci a 1 avvio seguono per recenza. Le mai aperte restano in coda in ordine alfabetico. Il titolo del foglio diventa «Recenti» a campo vuoto e «Risultati» appena si digita
+- [x] **3.4** Ranking in `localStorage`, chiavi `android:<pkg>` / `jenny:<slug>` / `skill:<nome>` — letto dal telefono dopo quattro avvii veri: `{"android:com.google.android.calendar":[1,…],"skill:app-creator":[1,…],"jenny:cassetto-rotta":[3,…],"jenny:cassetto-buona":[2,…]}`. **Sopravvive a force-stop + riavvio**: riaperto il foglio dopo il restart, le quattro voci usate sono ancora in cima nello stesso ordine
+- [x] **3.5** Una app rotta compare con il suo errore **nella riga** (difetto 05) — `app.json` malformata scritta con `run-as` in `workspace/apps/cassetto-rotta/`, poi un turno di chat vero per far partire `apps_list_changed`. Misurato a foglio aperto: **28 righe, un'unica altezza — 52 px CSS per tutte**, compresa quella rotta, con l'errore dentro la riga in `var(--error)` e `scrollWidth === clientWidth` (nessuno sfondamento laterale). Il tocco sulla riga rotta apre lo stesso dialog di conferma della cella
+- [x] **3.6** Test automatico vero: `tests/webui/test_launcher_rank_client.py`, che esegue `shared/launcher-rank.js` sotto node (idioma di `test_wiki_search_client.py`). Tre test sulla casella: i contatori di `skill:notes` e `jenny:notes` restano separati, la separazione **si vede nell'ordine**, e ciò che finisce in `localStorage` porta il prefisso (una separazione solo in memoria si perderebbe al riavvio, e si noterebbe solo dopo un force-stop)
+
+**In più, e parte del passo 3:**
+
+- [x] **3.7** Le righe si attivano **col tocco**, tutte e tre le specie — tocchi veri sull'emulatore: *Calendar* → l'app parte davvero (`topResumedActivity` passa a `com.google.android.gms/…MinuteMaidActivity`, il primo avvio di Calendar) e **il foglio si chiude**; *Bacheca del cassetto* → `.app-frame-overlay` sopra il foglio (livelli `[miniapp, launcher]`), e Indietro torna al foglio con la query intatta (1.7 per la via vera); *app-creator* (skill locked) → la scheda della skill sopra il foglio (`[dialog, launcher]`), e Indietro chiude solo quella. Ogni attivazione registra l'uso **prima** di avviare
+- [x] **3.8** Digitare non ridisegna (difetto 07) — marchiate le 27 righe in cache, poi 10 tasti **e** un `_render()` completo (la via di `apps_list_changed`): **27 su 27 sopravvivono** e tutti e 22 gli `<img>` restano gli stessi nodi, cioè nessuna icona base64 viene ridecodificata né dai tasti né da un ricaricamento in cui non è cambiato niente. Misurato: **0,22 ms per tasto** contro **1,0 ms** per una ricostruzione completa dello stesso elenco (e quel confronto sottostima il guadagno, perché anche il rebuild riusa la bitmap già decodificata dalla stessa data URL)
+
+> **Nota per il passo 5, vista provando il passo 3 — 5.5 non è un ritocco.**
+> Col fuoco nel campo la tastiera software dell'emulatore sale e **copre tutto
+> il foglio**, lista compresa: `innerHeight` resta 432 px CSS, la WebView non si
+> ridimensiona, e le righe continuano a stare dove stavano — sotto la tastiera.
+> Si cerca alla cieca. Sul Titan 2, che ha la tastiera fisica, non si vede; su
+> qualunque altro dispositivo è la prima cosa che si nota. Il `visualViewport`
+> di 5.5 è quindi un requisito del cassetto, non una rifinitura, e va fatto
+> prima di mostrare il foglio a chi non ha una tastiera hardware.
+>
+> Conseguenza pratica per chi verifica: dopo aver digitato con
+> `adb shell input text`, serve un `KEYCODE_BACK` per far scendere la tastiera
+> **prima** di leggere le coordinate delle righe o di toccarne una — altrimenti
+> il tap finisce sui tasti (una volta ha scritto una `t` nel campo invece di
+> aprire l'app, e sembrava che l'attivazione non funzionasse).
 
 ## Passo 4 — tastiera e rotella
 
 - [ ] **4.1** Type-ahead con le stesse guardie di `_maybeTypeAheadFocus` (no spazio, no modificatori, no furto se si scrive altrove)
-- [ ] **4.2** All'apertura il campo **non** ha il fuoco (verificato su un dispositivo con tastiera software: non deve salire niente)
+- [ ] **4.2** All'apertura il campo **non** ha il fuoco (verificato su un dispositivo con tastiera software: non deve salire niente) — *scritto col passo 3 (`open()` non tocca il campo, il fuoco va sulla ✕) ma non ancora provato sul telefono*
 - [ ] **4.3** ↑↓ e rotella muovono la selezione; la riga selezionata resta in vista
 - [ ] **4.4** ⏎ apre, ⇧⏎ apre la scheda del risultato, Esc pulisce il campo e — se già vuoto — chiude il foglio
 - [ ] **4.5** Le righe restano raggiungibili con Tab e annunciate da TalkBack (le celle di oggi sono `<div>` con `tabindex` aggiunto a mano: qui si parte con la semantica giusta)
@@ -95,7 +122,7 @@ casella spuntata per ragionamento. Nessun modulo JS nuovo (il foglio è ancora
 - [ ] **5.2** Il margine inferiore viene dal valore misurato in 0.2, non da una costante
 - [ ] **5.3** Nuovo metodo su `JennyGestureBridge` che espone l'inset obbligatorio alla WebUI
 - [ ] **5.4** Provato: scorrere la lista con passate verso l'alto partite in fondo al foglio **non** fa collassare la UI (è il caso peggiore, v. `goHome`)
-- [ ] **5.5** Il foglio si ridimensiona sopra la tastiera software (`visualViewport`) e la riga selezionata resta visibile
+- [ ] **5.5** Il foglio si ridimensiona sopra la tastiera software (`visualViewport`) e la riga selezionata resta visibile — **misurato mancante col passo 3**: oggi la tastiera copre il foglio intero e si cerca alla cieca (v. la nota in fondo al passo 3)
 - [ ] **5.6** Niente `setGestureExclusion` sul bordo inferiore: non funzionerebbe e lascerebbe credere il contrario a chi legge il codice dopo
 
 ## Passo 6 — i bordi
