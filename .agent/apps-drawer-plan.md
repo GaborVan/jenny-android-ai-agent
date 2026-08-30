@@ -417,6 +417,35 @@ scambio di due righe in `rankEntries` (`shared/launcher-rank.js`), che è un
 modulo puro con undici test propri: cambiarlo costa poco proprio perché è stato
 isolato.
 
+## Il punto più fragile della catena — `kb-open` che si incolla
+
+Trovato dalla rilettura d'insieme del passo 7, **non corretto di proposito**: la
+correzione richiede un dispositivo che qui non c'è.
+
+`.launcher-sheet.kb-open` azzera il `padding-bottom`, ed è **giusto finché la
+tastiera è davvero alzata**: lì il fondo del foglio non tocca il fondo dello
+schermo — c'è la tastiera in mezzo, che quei tocchi se li prende lei. Il
+problema è quando la classe resta accesa senza tastiera.
+
+`kb-open` si accende su `kbInset > 0 || layoutH < this._fullViewportH`, e
+`_fullViewportH` è un **massimo monotòno** che si ri-azzera solo a un cambio di
+**larghezza**. Alla chiusura della tastiera si spegne da sé (l'altezza risale e
+la disuguaglianza diventa falsa). Ma qualunque riduzione d'altezza *permanente*
+che non sia la tastiera — multifinestra, una barra di sistema che compare —
+lascia la disuguaglianza vera per sempre: la classe si incolla, e il foglio
+perde il margine **mentre tocca ancora il fondo dello schermo**. Cioè
+esattamente l'invariante che il passo 5 esiste per difendere.
+
+Perché non l'ho corretto: le vie plausibili sono tutte euristiche (ri-basare
+`_fullViewportH` alla perdita di fuoco del campo; pretendere che la riduzione
+sia "grande abbastanza da essere una tastiera"; distinguere i due regimi dal
+`visualViewport`), e sceglierne una senza poterla provare sul regime che la
+farebbe scattare significa scambiare un difetto noto con uno ignoto. Sul Titan 2,
+con la tastiera fisica, questo ramo **potrebbe non accendersi mai**.
+
+**È la prima cosa da guardare quando il telefono è collegato** — v.
+[`apps-drawer-handover.md`](./apps-drawer-handover.md).
+
 ## Cosa NON è stabilito
 
 **Non si sa se il Titan 2 sia in navigazione a gesture.** ~~Non è stato letto.~~

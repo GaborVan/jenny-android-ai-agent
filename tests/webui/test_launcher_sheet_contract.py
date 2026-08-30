@@ -300,8 +300,15 @@ def test_home_dismounts_the_sheet_in_one_call() -> None:
     layers = _method(_src("mobile-app.js"), "_overlayLayers")
     launcher = layers[layers.index("name: 'launcher'"):]
     assert "close: () => { this.launcher.close(); }" in launcher
-    collapse = _method(_src("mobile-launcher.js"), "collapseToRoot")
-    assert "this.close()" in collapse
+    # Home passa **solo** di lì. La seconda asserzione qui citava
+    # `LauncherController.collapseToRoot`, che `goHome` non chiama mai: itera
+    # `this.controllers`, e il foglio ne sta fuori di proposito (è un livello,
+    # non una vista). Il metodo è stato rimosso; un test che lo nominava dava
+    # per coperto un percorso inesistente.
+    assert "collapseToRoot" not in _src("mobile-launcher.js"), (
+        "il foglio non è in this.controllers: un collapseToRoot qui non lo "
+        "chiamerebbe nessuno"
+    )
 
 
 # ── tre difetti visti girare sull'emulatore, e le loro guardie ──────────────
@@ -520,3 +527,45 @@ def test_the_search_field_does_not_autofocus() -> None:
     assert "autofocus" not in field.group(0)
     open_body = _method(_src("mobile-launcher.js"), "open")
     assert "this.search.focus" not in open_body
+
+
+# ── l'invariante: la lista fuori dalla fascia della gesture ─────────────────
+
+
+def test_the_gesture_margin_chain_is_unbroken() -> None:
+    """Il margine che tiene la lista fuori dalla fascia di home attraversa
+    quattro strati — metodo nativo, ponte JS, custom property, CSS — e nessuno
+    di essi conosce gli altri: sono legati solo dai nomi. Rinominarne uno da
+    una parte sola non rompeva nessun test, e il difetto sarebbe comparso solo
+    su un dispositivo in navigazione a gesture, come otto pixel di lista dentro
+    la zona in cui il tocco va alla shell (v. il passo 5 del piano: sono
+    esattamente quegli otto pixel a separare "scorre" da "l'interfaccia
+    collassa"). Questo test è il nodo che li tiene insieme.
+    """
+    kotlin = (
+        ROOT / "android/app/src/main/java/com/flagdizero/jenny/MainActivity.kt"
+    ).read_text(encoding="utf-8")
+    assert "fun getBottomGestureInset()" in kotlin
+    # Raggiunto solo per reflection: senza l'annotazione la WebView non lo vede,
+    # e R8 in release non avrebbe motivo di tenerlo.
+    head = kotlin[: kotlin.index("fun getBottomGestureInset()")]
+    assert head.rstrip().endswith("@JavascriptInterface"), (
+        "il metodo del ponte deve portare @JavascriptInterface"
+    )
+
+    js = _src("mobile-launcher.js")
+    assert "native.getBottomGestureInset()" in js, "il consumatore JS chiama il metodo nativo"
+    assert "'--gesture-inset-bottom'" in js, "e ne scrive il valore nella custom property"
+
+    css = _src("mobile-style.css")
+    assert "padding-bottom: var(--gesture-inset-bottom, 0px)" in css, (
+        "e il foglio la consuma come proprio padding inferiore"
+    )
+
+
+def test_the_margin_rounds_away_from_the_gesture_zone() -> None:
+    """`round` sbaglia per difetto metà delle volte, e per difetto vuol dire
+    dentro la fascia: a dpr 3, 25 px nativi sono 8,33 px CSS."""
+    body = _method(_src("mobile-launcher.js"), "_syncGestureInset")
+    assert "Math.ceil(px / dpr)" in body
+    assert "Math.round(px / dpr)" not in body

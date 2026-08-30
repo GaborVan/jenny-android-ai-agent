@@ -284,7 +284,12 @@ export class LauncherController {
     }
     const dpr = window.devicePixelRatio || 1;
     document.documentElement.style.setProperty(
-      '--gesture-inset-bottom', `${Math.max(0, Math.round(px / dpr))}px`,
+      /* `ceil`, non `round`: mezzo pixel di troppo non si vede, mezzo di
+         meno rimette la lista dentro la fascia in cui il tocco va alla
+         shell. A dpr 3 la differenza è reale — 25 px nativi fanno 8,33
+         CSS, e `round` li darebbe come 8. È l'unica riga in cui questo
+         margine si calcola: qui l'errore ha una direzione sicura sola. */
+      '--gesture-inset-bottom', `${Math.max(0, Math.ceil(px / dpr))}px`,
     );
   }
 
@@ -543,10 +548,6 @@ export class LauncherController {
     this.close();
   }
 
-  /** Home / cambio vista: il foglio non ha sotto-stati da collassare. */
-  collapseToRoot() {
-    this.close();
-  }
 
   /** La riga «Gestisci» (6.1, D4): il foglio lancia, la scheda gestisce.
    *
