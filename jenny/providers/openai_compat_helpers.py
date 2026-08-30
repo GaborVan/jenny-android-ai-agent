@@ -9,9 +9,11 @@ il provider → nessun ciclo. Il provider re-importa i nomi che usa.
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import string
 from typing import Any
+from urllib.parse import urlsplit
 
 from jenny.providers.body_merge import deep_merge
 from jenny.providers.endpoint_budget import (
@@ -207,6 +209,27 @@ def _is_direct_openai_base(api_base: str | None) -> bool:
         return True
     normalized = api_base.strip().lower().rstrip("/")
     return "api.openai.com" in normalized and "openrouter" not in normalized
+
+
+_VERSION_SEGMENT_RE = re.compile(r"^v\d+$")
+
+
+def _versioned_base_candidate(api_base: str | None) -> str | None:
+    """Ritorna ``<base>/v1`` se la base non porta già un segmento di versione.
+
+    Serve al recupero automatico dal 404: parecchi gateway OpenAI-compatibili
+    servono la lista modelli sulla radice ma le completions solo sotto ``/v1``,
+    quindi una base senza versione è una causa frequente di endpoint inesistente.
+    ``None`` quando la versione c'è già (o la base è vuota): lì un secondo
+    tentativo non avrebbe niente da correggere.
+    """
+    base = (api_base or "").strip().rstrip("/")
+    if not base:
+        return None
+    last_segment = urlsplit(base).path.rstrip("/").rsplit("/", 1)[-1]
+    if _VERSION_SEGMENT_RE.match(last_segment):
+        return None
+    return f"{base}/v1"
 
 
 def _responses_circuit_key(

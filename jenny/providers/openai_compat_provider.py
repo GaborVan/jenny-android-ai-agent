@@ -43,6 +43,7 @@ from jenny.providers.openai_compat_helpers import (
     _thinking_extra_body,
     _thinking_styles_for,
     _uses_openrouter_attribution,
+    _versioned_base_candidate,
     is_openai_reasoning_model,
 )
 from jenny.providers.openai_compat_parsing import ResponseParsingMixin
@@ -111,10 +112,13 @@ class OpenAICompatProvider(ResponseParsingMixin, LLMProvider):
         if self._http_client is None:
             self._build_http_client()
 
+    def _base_url(self) -> str:
+        """Base HTTP corrente, senza slash finale."""
+        return (self._effective_base or "https://api.openai.com/v1").rstrip("/")
+
     def _api_url(self, path: str) -> str:
         """Return a fully-qualified API URL for the httpx fallback."""
-        base = (self._effective_base or "https://api.openai.com/v1").rstrip("/")
-        return f"{base}{path}"
+        return f"{self._base_url()}{path}"
 
     def _auth_headers(self) -> dict[str, str]:
         """Return request headers for the httpx fallback."""
@@ -131,6 +135,47 @@ class OpenAICompatProvider(ResponseParsingMixin, LLMProvider):
             body = _deep_merge(body, extra_body)
         return body
 
+    async def _send_request(
+        self,
+        url: str,
+        body: dict[str, Any],
+        *,
+        stream: bool,
+    ) -> httpx.Response:
+        """POST singola su ``url``; propaga ``HTTPStatusError`` sugli status di errore."""
+        if self._http_client is None:
+            raise RuntimeError("HTTP client not initialized")
+        request = self._http_client.build_request(
+            "POST", url,
+            headers=self._auth_headers(),
+            json=body,
+            timeout=_openai_compat_timeout_s(local=self._is_local),
+            params=self._extra_query or None,
+        )
+        response = await self._http_client.send(request, stream=stream)
+        response.raise_for_status()
+        return response
+
+    @staticmethod
+    async def _error_body_text(response: httpx.Response | None, *, stream: bool) -> str:
+        """Corpo della risposta di errore, letto anche quando la richiesta era in streaming."""
+        if response is None:
+            return ""
+        try:
+            if stream and not response.is_closed:
+                await response.aread()
+            return response.text
+        except Exception:
+            return ""
+
+    @staticmethod
+    async def _release(response: httpx.Response | None) -> None:
+        """Chiude una risposta di errore prima di riprovare, per non trattenere la connessione."""
+        if response is None:
+            return
+        with suppress(Exception):
+            await response.aclose()
+
     async def _http_request(
         self,
         path: str,
@@ -138,30 +183,65 @@ class OpenAICompatProvider(ResponseParsingMixin, LLMProvider):
         *,
         stream: bool = False,
     ) -> httpx.Response:
-        """Send a POST request on the httpx client."""
+        """Send a POST request on the httpx client.
+
+        Su 404 ritenta **una sola volta** con ``<base>/v1`` quando la base
+        configurata non porta già un segmento di versione: è il caso dei gateway
+        che espongono ``/models`` sulla radice ma le completions solo sotto
+        ``/v1``, dove la lista modelli si popola e poi ogni turno fallisce. Se il
+        secondo tentativo passa, la base corretta resta valida per il processo;
+        se fallisce anche quello l'errore nomina entrambi gli URL provati, così
+        chi legge sa che a essere sbagliata è la base e non la chiave.
+        """
         await self._ensure_client()
-        if self._http_client is None:
-            raise RuntimeError("HTTP client not initialized")
         url = self._api_url(path)
-        headers = self._auth_headers()
-        timeout = _openai_compat_timeout_s(local=self._is_local)
-        request = self._http_client.build_request(
-            "POST", url, headers=headers, json=body, timeout=timeout,
-            params=self._extra_query or None,
-        )
-        response = await self._http_client.send(request, stream=stream)
         try:
-            response.raise_for_status()
+            return await self._send_request(url, body, stream=stream)
         except httpx.HTTPStatusError as e:
-            try:
-                if stream and not e.response.is_closed:
-                    await e.response.aread()
-                text = e.response.text if e.response else ""
-            except Exception:
-                text = ""
-            raise RuntimeError(
-                f"HTTP {e.response.status_code}: {text[:500]}"
-            ) from e
+            status = e.response.status_code if e.response is not None else 0
+            candidate = _versioned_base_candidate(self._base_url()) if status == 404 else None
+            if candidate is None:
+                text = await self._error_body_text(e.response, stream=stream)
+                raise RuntimeError(f"HTTP {status} from {url}: {text[:500]}") from e
+            await self._release(e.response)
+            return await self._retry_on_versioned_base(
+                path, body, failed_url=url, base=candidate, stream=stream,
+            )
+
+    async def _retry_on_versioned_base(
+        self,
+        path: str,
+        body: dict[str, Any],
+        *,
+        failed_url: str,
+        base: str,
+        stream: bool,
+    ) -> httpx.Response:
+        """Secondo e ultimo tentativo su ``base``, adottata solo se risponde."""
+        retry_url = f"{base}{path}"
+        logger.info("HTTP 404 from {} — retrying once on the versioned base {}", failed_url, retry_url)
+        try:
+            response = await self._send_request(retry_url, body, stream=stream)
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code if e.response is not None else 0
+            text = await self._error_body_text(e.response, stream=stream)
+            if status == 404:
+                raise RuntimeError(
+                    f"HTTP 404: no endpoint at {failed_url} nor at {retry_url}. "
+                    "The provider's API base URL looks wrong — check it in Settings. "
+                    f"Server said: {text[:300]}"
+                ) from e
+            # Uno status diverso dal 404 dice che l'endpoint c'è: la base
+            # versionata è quella giusta e va adottata anche se questa richiesta
+            # fallisce per altro (chiave, modello, quota). Senza, ogni turno
+            # ripagherebbe il tentativo a vuoto per poi fallire allo stesso modo.
+            self._effective_base = base
+            raise RuntimeError(f"HTTP {status} from {retry_url}: {text[:500]}") from e
+
+        logger.warning(
+            "API base URL auto-corrected for this run: {} -> {}", self._base_url(), base,
+        )
+        self._effective_base = base
         return response
 
     @classmethod
