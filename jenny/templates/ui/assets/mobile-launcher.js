@@ -46,6 +46,31 @@ const KIND_LABEL_KEYS = {
    a pagine il valore non si usa: lì l'unità è già un passo. */
 const WHEEL_PIXELS_PER_STEP = 24;
 
+/* ── Geometria (passo 5) ───────────────────────────────────────────────────
+   Le tre costanti qui sotto sono **forma**, non misure del dispositivo: quelle
+   si leggono a runtime dal ponte nativo e dal `visualViewport`, e non compaiono
+   in questo file. Il numero misurato il 30/08 sull'emulatore quadrato (96 px
+   fisici di zona di gesture, di cui 8 px CSS dentro la WebView) è servito a
+   dimensionare il problema; cablarlo qui sarebbe sbagliato, perché la soglia la
+   decide la shell del dispositivo e il Titan 2 ha la propria. */
+
+/* Quanto del viewport **senza tastiera** occupa il foglio a riposo. */
+const SHEET_HEIGHT_RATIO = 0.66;
+/* Il minimo di sfondo che resta a vedersi sopra il foglio: senza, in uno spazio
+   stretto il foglio diventa a tutto schermo e smette di sembrare un foglio. */
+const SHEET_TOP_GAP = 8;
+/* Sotto questa altezza il foglio stringe la propria cornice (v. `.compact` nel
+   CSS). Il conto: cornice piena ≈ 105 px, una riga 52 — sotto le due righe la
+   cornice costa più di quanto renda, ed è la lista la ragione per cui il foglio
+   esiste. */
+const COMPACT_HEIGHT = 220;
+/* Quanto va trascinato in giù, in frazione della propria altezza, perché il
+   foglio si chiuda invece di tornare su. Distanza e basta: **nessuna soglia di
+   velocità** (D7). Un lancio veloce e corto e un trascinamento lento e lungo
+   fanno la stessa cosa, e non c'è una costante di velocità da tarare su un
+   dispositivo per poi scoprirla sbagliata su un altro. */
+const DRAG_CLOSE_RATIO = 0.3;
+
 export class LauncherController {
   /** @param {object} app istanza di MobileApp (per il ritorno del fuoco). */
   constructor(app) {
@@ -111,6 +136,17 @@ export class LauncherController {
     // apertura: leggere una riga di localStorage costa meno di decidere se
     // leggerla, e il ranking serve già al primo disegno.
     this._usage = new UsageRanking(window.localStorage);
+    /* L'altezza del viewport **senza tastiera**, da cui si calcola quella del
+       foglio. Serve ricordarla perché su questo guscio la finestra si
+       ridimensiona davvero quando la tastiera software sale (misurato: 432 →
+       124 px CSS), e un foglio alto il 66% di *quel* che resta si accartoccia
+       proprio quando serve di più. Si riparte da capo quando cambia la
+       larghezza — cioè a una rotazione: la tastiera l'altezza la cambia, la
+       larghezza no. */
+    this._fullViewportH = window.innerHeight;
+    this._viewportWidth = window.innerWidth;
+    // Trascinamento in corso, o null. V. `_onDragStart`.
+    this._drag = null;
 
     if (!this.sheet) return;
 
@@ -178,6 +214,215 @@ export class LauncherController {
       this._rows.clear();
       this._render();
     });
+
+    this._setupDrag();
+    this._setupGeometry();
+  }
+
+  /* ── Geometria: la zona di gesture e la tastiera (5.2, 5.3, 5.5) ────────── */
+
+  /** Aggancia le due misure che il foglio non può decidere da sé.
+   *
+   *  Entrambe vanno **rilette**, non prese una volta all'avvio: l'inset di
+   *  gesture cambia se si passa da gesture a tre pulsanti (o viceversa) mentre
+   *  l'app è viva, e la geometria del viewport cambia a ogni tastiera che sale
+   *  e a ogni rotazione.
+   */
+  _setupGeometry() {
+    const sync = () => { this._syncGestureInset(); this._syncViewport(); };
+    /* L'annuncio del lato nativo: `MainActivity.refreshGestureInsets()` lo
+       manda quando il valore **cambia davvero**, cioè su un cambio di modalità
+       di navigazione o di geometria della finestra. */
+    window.addEventListener('jenny-gesture-insets', sync);
+    window.addEventListener('resize', sync);
+    window.addEventListener('orientationchange', sync);
+    /* Il `visualViewport` è l'unico che vede la tastiera software su un guscio
+       che *non* ridimensiona la finestra (`adjustPan`/`adjustNothing`): lì
+       `innerHeight` non si muove e `resize` non parte. Dove invece la finestra
+       si ridimensiona — come su questo guscio — arrivano entrambi, e i due
+       percorsi convergono sullo stesso calcolo. */
+    window.visualViewport?.addEventListener('resize', sync);
+    window.visualViewport?.addEventListener('scroll', sync);
+    /* Subito, e non a shell pronta: `addJavascriptInterface` corre prima di
+       `loadUrl`, quindi `JennyNative` c'è già. E qui *non si può* aspettare —
+       questo costruttore gira dentro quello di `MobileApp`, prima che
+       `whenShellReady` abbia la sua coda: chiamarlo di qui lo faceva morire
+       sul nascere, e con lui tutta la SPA (visto girare, non dedotto).
+       Se il primo valore arrivasse comunque a zero perché la WebView non è
+       ancora stata misurata, il lato nativo manda `jenny-gesture-insets`
+       appena lo sa, e `open()` rilegge comunque. */
+    sync();
+  }
+
+  /** Porta al CSS l'inset di gesture in fondo, che il CSS non sa leggere.
+   *
+   *  `env(safe-area-inset-bottom)` **non** serve: misurato a `0px` su tutti e
+   *  quattro i lati, perché il decor di AppCompat consuma gli inset delle barre
+   *  prima della WebView. Il numero vero vive solo sul lato nativo
+   *  (`WindowInsets.getMandatorySystemGestureInsets()`), e arriva da
+   *  `JennyNative.getBottomGestureInset()` in px **fisici**.
+   *
+   *  Fuori da Android (browser, test) il ponte non c'è e la proprietà resta a
+   *  zero: nessuna zona di gesture da schivare, che è la verità.
+   */
+  _syncGestureInset() {
+    const native = window.JennyNative;
+    let px = 0;
+    if (typeof native?.getBottomGestureInset === 'function') {
+      try {
+        px = Number(native.getBottomGestureInset()) || 0;
+      } catch (_) {
+        /* bridge assente o troppo vecchio */
+      }
+    }
+    const dpr = window.devicePixelRatio || 1;
+    document.documentElement.style.setProperty(
+      '--gesture-inset-bottom', `${Math.max(0, Math.round(px / dpr))}px`,
+    );
+  }
+
+  /** Ricalcola quanto spazio ha il foglio, e quanto ne prende (5.5).
+   *
+   *  Due grandezze, e non una sola:
+   *  - `--launcher-kb-inset`: quanto della finestra è coperto in basso da
+   *    qualcosa che non l'ha ridimensionata (la tastiera in `adjustPan`). Il
+   *    foglio ci si appoggia sopra con `bottom`, invece di finirci sotto.
+   *  - `--launcher-height`: l'altezza del foglio. È il 66% del viewport
+   *    **senza tastiera**, ma non più dello spazio che c'è davvero — il
+   *    secondo termine è quello che conta quando la tastiera è su.
+   *
+   *  Senza questo, col fuoco nel campo il foglio resta alto il 66% di ciò che
+   *  la tastiera gli ha lasciato: misurati 82 px CSS su 124, cioè maniglia,
+   *  titolo, campo — e **zero righe**. Si cerca alla cieca, che è esattamente
+   *  ciò che un cassetto che si digita non deve fare.
+   */
+  _syncViewport() {
+    if (!this.sheet) return;
+    const layoutH = window.innerHeight;
+    if (window.innerWidth !== this._viewportWidth) {
+      // Rotazione: l'altezza "piena" di prima non vale più.
+      this._viewportWidth = window.innerWidth;
+      this._fullViewportH = layoutH;
+    } else {
+      this._fullViewportH = Math.max(this._fullViewportH, layoutH);
+    }
+    const vv = window.visualViewport;
+    const kbInset = vv
+      ? Math.max(0, Math.round(layoutH - (vv.offsetTop + vv.height)))
+      : 0;
+    const available = layoutH - kbInset;
+    const height = Math.max(
+      0,
+      Math.min(Math.round(this._fullViewportH * SHEET_HEIGHT_RATIO), available - SHEET_TOP_GAP),
+    );
+    const root = document.documentElement.style;
+    root.setProperty('--launcher-kb-inset', `${kbInset}px`);
+    root.setProperty('--launcher-height', `${height}px`);
+    /* Qualcosa sta mangiando il viewport: la tastiera software, in uno dei due
+       modi. Non è la stessa domanda di `.compact` — uno schermo corto e basta
+       (un pieghevole chiuso, un landscape) dà un foglio basso **che tocca
+       ancora il fondo dello schermo**, e lì la zona di gesture c'è. */
+    this.sheet.classList.toggle('kb-open', kbInset > 0 || layoutH < this._fullViewportH);
+    this.sheet.classList.toggle('compact', height < COMPACT_HEIGHT);
+    // La riga scelta deve restare sotto gli occhi anche dopo che il foglio si è
+    // ristretto: è metà della casella 5.5, e senza è un foglio che si
+    // ridimensiona bene attorno al vuoto.
+    if (this._open) this._revealSelected();
+  }
+
+  /** Riporta in vista la riga selezionata, se ce n'è una. */
+  _revealSelected() {
+    const el = this._selectedKey ? this._rows.get(this._selectedKey)?.el : null;
+    if (el?.isConnected) el.scrollIntoView({ block: 'nearest' });
+  }
+
+  /* ── Trascinamento (5.1, D7) ────────────────────────────────────────────── */
+
+  /** Il foglio si trascina **dalla maniglia e dalla riga del titolo. Dalla
+   *  lista mai.**
+   *
+   *  È l'unica regola, e decide l'origine del tocco: niente axis-lock, niente
+   *  soglia di velocità, nessun arbitrato fra "scorrere" e "chiudere" da fare a
+   *  metà gesto. Il motivo è che qui sotto c'è una chat, e in chat i
+   *  trascinamenti verticali sono già promessi allo scroller da `setupSwipeNav`
+   *  (`mobile-app.js`), che fa axis-lock a 10 px e restituisce ogni gesto più
+   *  verticale che orizzontale. Un foglio che contendesse i verticali della
+   *  propria lista è precisamente la ragione per cui i bottom sheet dentro
+   *  contenuto scrollabile sembrano rotti: la lista a volte scorre e a volte no,
+   *  e chi guarda non ha modo di sapere quale delle due sta per succedere.
+   */
+  _setupDrag() {
+    const zones = [
+      document.getElementById('launcher-handle-row'),
+      this.sheet.querySelector('.launcher-head'),
+    ];
+    for (const zone of zones) {
+      zone?.addEventListener('pointerdown', (e) => this._onDragStart(e));
+    }
+    /* Move e up si ascoltano sul **foglio**, non sulla zona: col puntatore
+       catturato gli eventi arrivano lì, e il dito esce quasi subito dai 20 px
+       della maniglia. */
+    this.sheet.addEventListener('pointermove', (e) => this._onDragMove(e));
+    this.sheet.addEventListener('pointerup', (e) => this._onDragEnd(e, false));
+    this.sheet.addEventListener('pointercancel', (e) => this._onDragEnd(e, true));
+  }
+
+  _onDragStart(e) {
+    if (!this._open || this._drag) return;
+    // Solo il pulsante primario / il dito: un tasto destro non trascina.
+    if (e.button > 0) return;
+    /* La ✕ resta un pulsante. Sta dentro la zona di trascinamento perché la
+       riga del titolo *è* la zona, e senza questa riga un tocco su di lei
+       comincerebbe un trascinamento da zero pixel — innocuo a vedersi, ma il
+       `setPointerCapture` porterebbe via il `click`. */
+    if (e.target.closest?.('button')) return;
+    const rect = this.sheet.getBoundingClientRect();
+    this._drag = { id: e.pointerId, startY: e.clientY, dy: 0, height: rect.height };
+    try {
+      this.sheet.setPointerCapture(e.pointerId);
+    } catch (_) {
+      /* puntatore già rilasciato */
+    }
+    // Durante il trascinamento il foglio segue il dito e basta: la transizione
+    // di `.launcher-sheet` lo farebbe arrivare in ritardo di 320 ms.
+    this.sheet.classList.add('dragging');
+  }
+
+  _onDragMove(e) {
+    if (!this._drag || e.pointerId !== this._drag.id) return;
+    /* Solo verso il basso. Tirare in su un foglio già a fine corsa lo
+       staccherebbe dal fondo dello schermo, e sotto non c'è niente da mostrare:
+       il rimbalzo elastico dei drawer qui è una fessura di sfondo. */
+    const dy = Math.max(0, e.clientY - this._drag.startY);
+    this._drag.dy = dy;
+    this.sheet.style.transform = `translateY(${dy}px)`;
+    // Lo scrim segue: la chiusura si vede arrivare mentre la si decide, invece
+    // di essere un sì/no che si scopre al rilascio.
+    if (this.scrim) {
+      this.scrim.style.opacity = String(Math.max(0, 1 - dy / this._drag.height));
+    }
+  }
+
+  _onDragEnd(e, cancelled) {
+    if (!this._drag || e.pointerId !== this._drag.id) return;
+    const { dy, height } = this._drag;
+    this._drag = null;
+    try {
+      this.sheet.releasePointerCapture(e.pointerId);
+    } catch (_) {
+      /* già rilasciato */
+    }
+    /* Si torna al foglio "di CSS": si tolgono gli stili in linea **e** la
+       classe che spegneva la transizione, così il tratto che resta — il ritorno
+       su, o la discesa fino in fondo — lo anima il CSS. Che è anche il modo in
+       cui `prefers-reduced-motion` lo spegne: la transizione è una proprietà di
+       `.launcher-sheet`, e la regola per il movimento ridotto la azzera lì. */
+    this.sheet.style.transform = '';
+    if (this.scrim) this.scrim.style.opacity = '';
+    this.sheet.classList.remove('dragging');
+    // Un gesto annullato dal sistema (una chiamata, una gesture di sistema che
+    // se lo prende) non è una decisione di chi guarda: il foglio torna su.
+    if (!cancelled && dy > height * DRAG_CLOSE_RATIO) this.close();
   }
 
   /** Il foglio è a schermo e reattivo? Letto da `_overlayLayers().present`. */
@@ -207,6 +452,12 @@ export class LauncherController {
        nessuna delle due sbagliata a guardare il DOM. */
     this._select(null);
     this._selectionPinned = false;
+    /* La geometria può essere cambiata mentre il foglio era chiuso — si è
+       passati a tre pulsanti, si è ruotato lo schermo, la tastiera è su per il
+       composer della chat. Si rilegge prima di mostrarlo, non dopo: il foglio
+       arriva già dell'altezza giusta invece di assestarsi a fine corsa. */
+    this._syncGestureInset();
+    this._syncViewport();
     // Prima di mostrarlo: la lista è già quella giusta quando il foglio arriva
     // a fine corsa, e non c'è un fotogramma con dentro l'elenco di ieri.
     this._attachSource();
@@ -241,6 +492,15 @@ export class LauncherController {
   close() {
     if (!this.sheet || !this._open) return;
     this._open = false;
+    /* Home può arrivare a metà trascinamento (1.8: `goHome()` smonta ogni
+       livello). Gli stili in linea del gesto vanno via qui, altrimenti alla
+       riapertura il foglio comparirebbe già spostato in giù di quanto era il
+       dito l'ultima volta. Il gesto in corso non si annulla: il suo
+       `pointerup` arriverà comunque e troverà `close()` già fatto, che è
+       idempotente. */
+    this.sheet.style.transform = '';
+    if (this.scrim) this.scrim.style.opacity = '';
+    this.sheet.classList.remove('dragging');
     this.sheet.classList.remove('open');
     this.sheet.setAttribute('aria-hidden', 'true');
     this.scrim?.classList.remove('open');

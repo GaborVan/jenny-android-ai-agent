@@ -3,11 +3,13 @@
 Stato di [`apps-drawer-plan.md`](./apps-drawer-plan.md). Il ragionamento sta là,
 qui c'è solo cosa è fatto. Si spunta quando è **girato**, non quando è scritto.
 
-Ramo: `feat/apps-drawer`, aperto. **Passi 0, 1, 2 e 3 girati (30/08/2026), e su
-un emulatore quadrato — il Titan 2 non era collegato.** Il passo 7 non è una fase
-finale ma un prerequisito sparso: le tre incognite in fondo al piano vanno chiuse
-*prima* del passo 5. Delle tre, il passo 1 ne chiude una: `goHome()` smonta il
-foglio con **una** chiamata a `dismiss`, non otto (v. 1.8).
+Ramo: `feat/apps-drawer`, aperto. **Passi 0, 1, 2, 3, 4 e 5 girati (30/08/2026), e
+su un emulatore quadrato — il Titan 2 non era collegato.** Il passo 7 non è una
+fase finale ma un prerequisito sparso: le incognite in fondo al piano si chiudono
+una alla volta. Il passo 1 ne ha chiusa una (`goHome()` smonta il foglio con
+**una** chiamata a `dismiss`, non otto — v. 1.8); il passo 5 un'altra, ma solo
+sull'emulatore: **la soglia della gesture di home sul Titan 2 resta non letta**,
+e il passo 5 è fatto apposta per non averne bisogno — la legge a runtime.
 
 ---
 
@@ -22,7 +24,7 @@ stata verificata sul Titan 2.**
 - [x] **0.2** `mandatorySystemGestureInsets.bottom` stampato e scritto nel piano accanto a D8: **96 px fisici = 32 dp** in gesture, 144 px / 48 dp con tre pulsanti (dove combacia con la barra: sovrapposizione zero). Di quei 96 px, **8 px CSS** cadono dentro la WebView. *Emulatore, non Titan 2*
 - [x] **0.2b** Scoperto misurando: `env(safe-area-inset-*)` è `0px` su tutti e quattro i lati — il decor di AppCompat consuma gli inset prima della WebView. D8 non è un affinamento, è l'unica via
 - [ ] **0.3** ~~Verificare che il dock di oggi (43 px, solo tap) non si becchi già la gesture di home~~ — **la domanda è mal posta**: il dock è alto **56** px CSS, non 43, e sull'emulatore quadrato **non è affatto a schermo** (`@media (max-height: 500px)` in `mobile-style.css:3387` lo mette a `display: none`; viewport misurato 432 px CSS). Se valesse anche sul Titan 2, cadrebbero D1 e D2, non il passo 5. Da chiudere con `adb shell wm density` sul telefono — v. «Il dock potrebbe non essere sullo schermo» nel piano
-- [ ] **0.4** Rimuovere la sonda temporanea `JennyInsetProbe` da `MainActivity.kt` (metodo `logInsetProbe`, la chiamata in `onPageFinished`, gli import `ViewCompat`/`WindowInsetsCompat`) quando 5.3 la sostituisce con il metodo vero del bridge
+- [x] **0.4** Sonda `JennyInsetProbe` rimossa dal codice col passo 5: `logInsetProbe` e la sua chiamata in `onPageFinished` sostituite da `refreshGestureInsets()`, il commento «TEMPORANEO» sull'import via. Gli import `ViewCompat`/`WindowInsetsCompat` **restano**, perché ora servono al metodo vero. `grep -rn JennyInsetProbe` non trova più niente fuori da questi due file di piano, dove è il verbale di una misura fatta
 
 ## Passo 1 — il foglio vuoto che si apre e si chiude
 
@@ -94,6 +96,9 @@ modulo puro `jenny/templates/ui/assets/shared/launcher-rank.js` — aggiunto a
 - [x] **3.8** Digitare non ridisegna (difetto 07) — marchiate le 27 righe in cache, poi 10 tasti **e** un `_render()` completo (la via di `apps_list_changed`): **27 su 27 sopravvivono** e tutti e 22 gli `<img>` restano gli stessi nodi, cioè nessuna icona base64 viene ridecodificata né dai tasti né da un ricaricamento in cui non è cambiato niente. Misurato: **0,22 ms per tasto** contro **1,0 ms** per una ricostruzione completa dello stesso elenco (e quel confronto sottostima il guadagno, perché anche il rebuild riusa la bitmap già decodificata dalla stessa data URL)
 
 > **Nota per il passo 5, vista provando il passo 3 — 5.5 non è un ritocco.**
+> ⚠️ *Il sintomo qui sotto è giusto, il meccanismo no: rimisurato col passo 5,
+> `innerHeight` scende a 124 px e la finestra **si ridimensiona**. V. la nota in
+> fondo al passo 5.*
 > Col fuoco nel campo la tastiera software dell'emulatore sale e **copre tutto
 > il foglio**, lista compresa: `innerHeight` resta 432 px CSS, la WebView non si
 > ridimensiona, e le righe continuano a stare dove stavano — sotto la tastiera.
@@ -157,14 +162,66 @@ si vedevano: il glifo Tabler di una skill contribuiva al nome accessibile della
 riga con un carattere della zona a uso privato (`aria-hidden` ora), mentre
 quello del server — che invece porta informazione — si nomina con `aria-label`.
 
-## Passo 5 — geometria e gesture *(bloccato dal passo 0)*
+## Passo 5 — geometria e gesture
 
-- [ ] **5.1** La maniglia e la riga delle rotaie trascinano il foglio; la lista **no**
-- [ ] **5.2** Il margine inferiore viene dal valore misurato in 0.2, non da una costante
-- [ ] **5.3** Nuovo metodo su `JennyGestureBridge` che espone l'inset obbligatorio alla WebUI
-- [ ] **5.4** Provato: scorrere la lista con passate verso l'alto partite in fondo al foglio **non** fa collassare la UI (è il caso peggiore, v. `goHome`)
-- [ ] **5.5** Il foglio si ridimensiona sopra la tastiera software (`visualViewport`) e la riga selezionata resta visibile — **misurato mancante col passo 3**: oggi la tastiera copre il foglio intero e si cerca alla cieca (v. la nota in fondo al passo 3)
-- [ ] **5.6** Niente `setGestureExclusion` sul bordo inferiore: non funzionerebbe e lascerebbe credere il contrario a chi legge il codice dopo
+Girato il 30/08/2026 sullo stesso AVD `jenny_square`, build debug da
+`app:installDebug`, navigazione a **gesture** (`navigation_mode = 2`). Per 5.1 e
+5.4 **gesti veri** (`adb shell input swipe` e `input tap`, durate da 80 a
+1200 ms), non `dispatchTouchEvent` da CDP: il punto è come li vede il sistema,
+che CDP scavalca. CDP serve solo a leggere lo stato dopo. Nessun modulo JS nuovo
+(la geometria sta in `mobile-launcher.js`), quindi `_UI_MANIFEST` non cambia, e
+nessuna stringa nuova.
+
+- [x] **5.1** Trascinano la maniglia e la riga del titolo; **la lista no** — passata verso il **basso** partita nella lista (720,1072 → 720,1320): la lista scorre (`scrollTop` 143 → 49), il foglio resta aperto e un `MutationObserver` sul suo `style`/`class` conta **0** mutazioni, cioè non si è mosso di un pixel né ha mai preso la classe `dragging`. Dalla maniglia (720,540 → 720,1100): 9 aggiornamenti da `translateY(14px)` a `translateY(172.7px)`, `dragging` vista addosso, e al rilascio — 172,7 > 85,5, cioè il 30% dei 285 px del foglio — si chiude. Dalla riga del titolo un trascinamento **corto** (24,1 px): torna su e resta aperto. La ✕, che sta dentro la zona, resta un pulsante: il tocco la chiude (guardia su `button` in `_onDragStart`, senza la quale il `setPointerCapture` le portava via il `click`)
+- [x] **5.2** Il margine viene dal ponte, non da una costante — a foglio aperto il fondo della lista sta a `y = 424` px CSS su un viewport di 432: **8 px CSS esatti** sopra il bordo della WebView, cioè i 24 px fisici che il nativo riporta. Controprova che non è cablato: passando a tre pulsanti il valore diventa `0px` da solo (là la WebView finisce dove comincia la zona, sovrapposizione zero), e tornando a gesture torna `8px`
+- [x] **5.3** `JennyGestureBridge.getBottomGestureInset()` — torna i px **fisici** di WebView che cadono dentro `mandatorySystemGestureInsets`, non l'inset intero: letto 24 su questa geometria, che è il numero calcolato nel piano (zona `[1344,1440)`, WebView `[72,1368)`). Legge un campo `@Volatile` che il thread UI tiene aggiornato — un `runOnUiThread` non basterebbe, il metodo deve *restituire* un valore. **Si rilegge davvero, e senza ricaricare la pagina**: con un marcatore su `window` e un contatore di eventi, alzare la tastiera (che ridimensiona la WebView) porta 24 → 0 con `marker` ancora vivo e **1** `jenny-gesture-insets` ricevuto. Su un cambio di modalità di navigazione l'activity si ricrea e la SPA riparte: il valore è giusto lo stesso, ma per l'altra via
+- [x] **5.4** Provato con **Jenny come app HOME dell'emulatore** (`cmd package set-home-activity`, verificata con `resolve-activity` prima e dopo; alla fine rimessa a `com.google.android.apps.nexuslauncher/.NexusLauncherActivity`). Sette passate verso l'alto partite **in fondo al foglio** — da `y = 1343`, cioè l'ultimo pixel della lista, e poi 1340, 1330, 1300 — con durate 80, 200, 600 e 1200 ms: **tutte scorrono la lista** (`scrollTop` 0 → 250 → 500 → 742 → 966 → 1392) col foglio ancora aperto, il livello `launcher` ancora presente e `mode` invariato. **Controprova nella stessa sessione, con Jenny già HOME**: la stessa passata partita a `y = 1420` — dentro la zona — va a casa e lascia `layers: []`. Gli 8 px CSS sono esattamente ciò che separa «scorre» da «si smonta tutto»
+- [x] **5.5** Il foglio si ridimensiona sopra la tastiera, e la riga selezionata resta visibile — col fuoco nel campo: prima 82 px di foglio su 124 di viewport, cornice e **zero righe**; ora 116 px (da 8 a 124: tutto lo spazio meno il distacco in cima), lista 46,3 px, righe strette a 43,7, **una riga intera visibile — e la riga selezionata è quella** (`selectedFullyVisible: true`, screenshot). Tre ↓ con la tastiera su: la selezione si muove e resta dentro il riquadro. **Il meccanismo però non è quello che diceva il piano**: v. la nota qui sotto
+- [x] **5.6** Niente `setGestureExclusion` sul bordo inferiore, e il perché sta scritto dove verrebbe la tentazione: nel doc-comment di `setGestureExclusion` stesso, che ora dice che vale sui bordi verticali, che in basso un rettangolo passerebbe **senza errori e senza effetto**, e che l'unica cosa che si può fare è starne fuori — con il rimando a `getBottomGestureInset`
+
+**In più, e non richiesto dalle caselle:** `prefers-reduced-motion` verificato
+emulando davvero la media feature (`Emulation.setEmulatedMedia`), non leggendo
+il CSS: `.launcher-sheet` e `.launcher-scrim` passano da
+`transform, visibility | 0.32s` a `none | 1e-05s` e tornano indietro. Quello che
+il movimento ridotto spegne è il tratto *dopo* il rilascio (ritorno su o
+discesa); il tratto sotto il dito non è un'animazione ma una manipolazione
+diretta, e resta.
+
+> **Un difetto che solo il far girare ha mostrato, e che vale per chi tocca
+> questo file dopo.** La prima versione chiamava `app.whenShellReady()` dal
+> costruttore di `LauncherController`. Ma quel costruttore gira **dentro** quello
+> di `MobileApp` (riga 63), e `_shellReadyCbs` nasce alla riga 88: il metodo
+> moriva su `undefined.push`, e con lui tutto `new MobileApp()`. Il sintomo era
+> `window.mobileApp === undefined` **senza un errore in logcat** — la SPA
+> caricata, il CSS applicato (il costruttore del cassetto era arrivato fin
+> quasi in fondo), e niente che rispondesse. Il ponte nativo c'è già al primo
+> script, quindi l'attesa non serviva a niente.
+
+> **Il passo 3 aveva letto male la tastiera, e la correzione cambia la forma
+> della soluzione.** La nota in fondo al passo 3 dice «`innerHeight` resta
+> 432 px CSS, la WebView non si ridimensiona». Rimisurato oggi sullo stesso AVD:
+> **la finestra si ridimensiona eccome**, `innerHeight` 432 → **124**, e
+> `visualViewport.height` con lei (`offsetTop` resta 0). Il sintomo osservato era
+> giusto — si cerca alla cieca — ma la causa è l'opposta: non un foglio *coperto*
+> dalla tastiera, ma un foglio alto il **66% di quel che la tastiera gli ha
+> lasciato**, cioè 82 px di sola cornice.
+>
+> Ne discende la forma di 5.5, che non è «spostare il foglio sopra la tastiera»:
+> - l'altezza è il 66% del viewport **senza** tastiera (ricordato, e azzerato
+>   quando cambia la *larghezza*, cioè a una rotazione), **limitato** dallo
+>   spazio che c'è davvero. Con la tastiera giù non cambia niente (285 px, come
+>   prima del passo 5); con la tastiera su il foglio prende tutto lo spazio meno
+>   8 px, invece di rimpicciolirsi con esso;
+> - `--launcher-kb-inset` copre comunque **l'altro** guscio possibile, quello che
+>   non ridimensiona la finestra (`adjustPan`): lì `innerHeight` non si muove e
+>   solo `visualViewport` vede la tastiera. Sul telefono vero, con la sua
+>   `windowSoftInputMode`, potrebbe essere quella la via che si accende;
+> - su questo schermo la tastiera si prende il **69%** dell'altezza (996 px su
+>   1440): riordinare lo spazio non basta, e serve una cornice `.compact`
+>   (padding stretti, righe da 43,7 px invece di 52). È l'unica ragione per cui
+>   una riga intera ci sta. Su un telefono di proporzioni normali il ramo
+>   `.compact` non si accende nemmeno: 66% di ~800 px CSS lascia ~500 px di
+>   spazio e otto righe.
 
 ## Passo 6 — i bordi
 

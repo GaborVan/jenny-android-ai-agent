@@ -39,7 +39,6 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
-// TEMPORANEO — sonda inset del passo 0 (v. logInsetProbe / JennyInsetProbe).
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -507,71 +506,72 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ------------------------------------------------------------------
-    // SONDA TEMPORANEA — passo 0 del piano .agent/apps-drawer-plan.md.
-    // Stampa gli inset di gesture che D8 vuole misurare. NON è API: al
-    // passo 5 diventa un metodo vero di JennyGestureBridge e questa sonda
-    // (tag JennyInsetProbe, questo metodo e la sua chiamata in
-    // onPageFinished, più gli import ViewCompat/WindowInsetsCompat) va
-    // rimossa. Cercare "JennyInsetProbe" per trovarne ogni traccia.
-    // ------------------------------------------------------------------
-    private fun logInsetProbe() {
-        val probeTag = "JennyInsetProbe"
+    // ── Inset di gesture obbligatorio (D8 del piano .agent/apps-drawer-plan.md) ──
+    //
+    // Quanta WebView cade dentro la fascia in cui la shell di sistema riconosce
+    // la gesture di home, in px fisici. È il numero che il cassetto usa per
+    // tenerci sopra la propria lista, e **non si può leggere dal CSS**:
+    // `env(safe-area-inset-*)` vale 0px su tutti e quattro i lati, perché il
+    // decor di AppCompat consuma gli inset delle barre prima della WebView.
+    //
+    // Nemmeno `navigationBars` andrebbe bene al suo posto: in modalità gesture
+    // la soglia di riconoscimento è più alta della barra (misurati 96 px contro
+    // 72 su un emulatore Android 17), ed è la soglia che porta via il tocco.
+    //
+    // Il valore lo decide la shell del dispositivo: non è una costante da
+    // cablare da nessuna parte, si rilegge a ogni cambio di geometria o di
+    // modalità di navigazione.
+    @Volatile
+    private var bottomGestureInsetPx: Int = 0
+
+    /**
+     * Ricalcola [bottomGestureInsetPx] e, se è cambiato, lo annuncia alla SPA.
+     * **Solo dal thread UI**: legge la geometria delle view.
+     */
+    private fun refreshGestureInsets() {
         val wv = webView ?: return
-        wv.postDelayed({
-            val insets = ViewCompat.getRootWindowInsets(window.decorView)
-            if (insets == null) {
-                Log.i(probeTag, "rootWindowInsets=null")
-                return@postDelayed
-            }
-            val d = resources.displayMetrics.density
-            fun dump(label: String, typeMask: Int) {
-                val i = insets.getInsets(typeMask)
-                Log.i(
-                    probeTag,
-                    "$label px(l=${i.left},t=${i.top},r=${i.right},b=${i.bottom}) " +
-                        "dp(l=${i.left / d},t=${i.top / d},r=${i.right / d},b=${i.bottom / d})"
-                )
-            }
-            Log.i(probeTag, "density=$d navMode=" + android.provider.Settings.Secure.getInt(
-                contentResolver, "navigation_mode", -1
-            ))
-            dump("mandatorySystemGestureInsets", WindowInsetsCompat.Type.mandatorySystemGestures())
-            dump("systemGestureInsets", WindowInsetsCompat.Type.systemGestures())
-            dump("navigationBars", WindowInsetsCompat.Type.navigationBars())
-            dump("systemBars", WindowInsetsCompat.Type.systemBars())
-            dump("tappableElement", WindowInsetsCompat.Type.tappableElement())
-            Log.i(probeTag, "webview px w=${wv.width} h=${wv.height}")
-            val js = """(function(){
-              var p=document.createElement('div');
-              p.style.cssText='position:fixed;left:0;bottom:0;width:1px;height:1px;'+
-                'padding-bottom:env(safe-area-inset-bottom);'+
-                'padding-top:env(safe-area-inset-top);'+
-                'padding-left:env(safe-area-inset-left);'+
-                'padding-right:env(safe-area-inset-right);';
-              document.documentElement.appendChild(p);
-              var cs=getComputedStyle(p);
-              var r={dpr:window.devicePixelRatio,
-                     innerW:window.innerWidth,innerH:window.innerHeight,
-                     vvH:(window.visualViewport?window.visualViewport.height:null),
-                     safeTop:cs.paddingTop,safeBottom:cs.paddingBottom,
-                     safeLeft:cs.paddingLeft,safeRight:cs.paddingRight};
-              r.mqMaxH500=window.matchMedia('(max-height: 500px)').matches;
-              r.dockHeightVar=getComputedStyle(document.documentElement)
-                .getPropertyValue('--dock-height').trim();
-              var dock=document.querySelector('nav.dock');
-              if(dock){var b=dock.getBoundingClientRect();var ds=getComputedStyle(dock);
-                r.dock={top:b.top,bottom:b.bottom,h:b.height,
-                        display:ds.display,padBottom:ds.paddingBottom};}
-              var shell=document.querySelector('.app');
-              if(shell){var s=shell.getBoundingClientRect();
-                r.shell={top:s.top,bottom:s.bottom,h:s.height,
-                         rows:getComputedStyle(shell).gridTemplateRows};}
-              p.remove();
-              return JSON.stringify(r);
-            })();"""
-            wv.evaluateJavascript(js) { res -> Log.i(probeTag, "css=$res") }
-        }, 1500L)
+        val insets = ViewCompat.getRootWindowInsets(window.decorView) ?: return
+        val mandatory = insets.getInsets(WindowInsetsCompat.Type.mandatorySystemGestures()).bottom
+        val decor = window.decorView
+        /* L'inset è misurato dal bordo della **finestra**, la WebView sta più in
+           alto (le barre di sistema la inset-ano): quello che serve al CSS è la
+           sola sovrapposizione fra le due. Prenderlo intero sprecherebbe la
+           fascia della barra di navigazione, che nella WebView non c'è. */
+        val wvLoc = IntArray(2)
+        val decorLoc = IntArray(2)
+        wv.getLocationInWindow(wvLoc)
+        decor.getLocationInWindow(decorLoc)
+        val wvBottomInDecor = (wvLoc[1] - decorLoc[1]) + wv.height
+        val zoneTop = decor.height - mandatory
+        val overlap = (wvBottomInDecor - zoneTop).coerceIn(0, wv.height)
+        if (overlap == bottomGestureInsetPx) return
+        bottomGestureInsetPx = overlap
+        // Prima che la SPA esista non c'è nessuno da avvisare: la legge da sé
+        // al primo disegno, con getBottomGestureInset().
+        if (!loaded) return
+        wv.evaluateJavascript(
+            "window.dispatchEvent(new Event('jenny-gesture-insets'))",
+            null
+        )
+    }
+
+    /**
+     * Aggancia il ricalcolo dell'inset a ciò che lo può cambiare: un nuovo
+     * dispatch di inset (cambio di modalità di navigazione, barre che vanno e
+     * vengono) e un cambio di geometria della WebView (rotazione, tastiera che
+     * ridimensiona la finestra).
+     *
+     * Il listener sugli inset **restituisce gli inset intatti**: qui si osserva
+     * soltanto, consumarli romperebbe chi li usa più sotto.
+     */
+    private fun observeGestureInsets(wv: WebView) {
+        ViewCompat.setOnApplyWindowInsetsListener(wv) { v, insets ->
+            refreshGestureInsets()
+            // Si osserva soltanto: la gestione di default della view resta la
+            // sua. Restituire `insets` e basta la salterebbe.
+            ViewCompat.onApplyWindowInsets(v, insets)
+        }
+        wv.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> refreshGestureInsets() }
     }
 
     /**
@@ -822,6 +822,9 @@ class MainActivity : AppCompatActivity() {
         // edge-swipe), altrimenti il drag di Jenny sul bordo triggera il back.
         // Sicuro: la WebView carica solo il gateway locale (127.0.0.1) fidato.
         wv.addJavascriptInterface(JennyGestureBridge(), "JennyNative")
+        // L'inset di gesture in fondo, che il CSS non può leggere da sé: v.
+        // bottomGestureInsetPx e JennyGestureBridge.getBottomGestureInset().
+        observeGestureInsets(wv)
 
         wv.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(
@@ -866,7 +869,9 @@ class MainActivity : AppCompatActivity() {
                 // Da qui in poi c'è una SPA a cui consegnare il tasto Indietro.
                 backCallback?.isEnabled = true
                 hideLoading()
-                logInsetProbe() // TEMPORANEO: sonda passo 0, v. JennyInsetProbe
+                // La SPA c'è: da qui in poi un cambio di inset la si può
+                // avvisare. Il primo valore glielo dà comunque il getter.
+                refreshGestureInsets()
             }
 
             override fun onReceivedError(
@@ -947,6 +952,24 @@ class MainActivity : AppCompatActivity() {
      * esiste: no-op. I metodi girano su un thread binder → post sull'UI thread.
      */
     inner class JennyGestureBridge {
+        /**
+         * Esclude un rettangolo dalle aree gesture di sistema della WebView.
+         *
+         * **Vale sui bordi verticali, e solo lì.** L'esclusione toglie alla
+         * shell il *back* edge-swipe, che è la ragione per cui esiste: la
+         * mascotte vive su un bordo laterale e ogni suo trascinamento veniva
+         * letto come Indietro.
+         *
+         * **Sul bordo inferiore non si chiama, e non è una dimenticanza.** La
+         * documentazione Android sulla navigazione a gesture è esplicita: da
+         * home e quick-switch le app non possono chiamarsi fuori come fanno col
+         * Back, e `systemGestureExclusionRects` su quella fascia non le
+         * riguarda. Un rettangolo in fondo passerebbe senza errori e non
+         * cambierebbe niente — cioè lascerebbe credere a chi legge il codice
+         * che il problema sia risolto. Quello che si può fare davvero è
+         * **starne fuori**, ed è ciò che fa il cassetto: v.
+         * [getBottomGestureInset].
+         */
         @JavascriptInterface
         fun setGestureExclusion(left: Int, top: Int, right: Int, bottom: Int) {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
@@ -981,6 +1004,30 @@ class MainActivity : AppCompatActivity() {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
             runOnUiThread { webView?.systemGestureExclusionRects = emptyList() }
         }
+
+        /**
+         * Quanti px fisici del **fondo** della WebView cadono dentro la fascia
+         * in cui la shell di sistema riconosce la gesture di home (D8 del piano
+         * `.agent/apps-drawer-plan.md`). Il cassetto ci tiene sopra la propria
+         * lista: una passata verso l'alto partita lì dentro non scorrerebbe,
+         * chiamerebbe `goHome()` — e siccome Jenny **è** il launcher, non
+         * porterebbe via a un'altra app ma smonterebbe tutti gli overlay.
+         *
+         * Il gemello di questo metodo — escludere quella fascia con
+         * `setGestureExclusion` — **non esiste, e di proposito**: v. il commento
+         * sopra `setGestureExclusion`.
+         *
+         * Non tocca la WebView, quindi non serve saltare sul thread UI: legge un
+         * campo `@Volatile` che il thread UI tiene aggiornato
+         * (`refreshGestureInsets`). Un `runOnUiThread` qui non basterebbe
+         * comunque — è asincrono, e questo metodo deve **restituire** un valore.
+         *
+         * Sotto API 29 il tipo di inset non esiste: la piattaforma torna 0 e il
+         * cassetto si comporta come su un dispositivo senza zona di gesture,
+         * che è esattamente il caso.
+         */
+        @JavascriptInterface
+        fun getBottomGestureInset(): Int = bottomGestureInsetPx
 
         /**
          * Allinea le barre di sistema al tema attivo della WebUI: `background`

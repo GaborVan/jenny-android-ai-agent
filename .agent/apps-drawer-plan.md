@@ -155,6 +155,16 @@ un cassetto da toccare.
 la riga delle rotaie. La lista mai. Nessun axis-lock, nessuna soglia di velocità
 da tarare: decide l'origine del tocco, e decide sempre allo stesso modo.
 
+> **Girato il 30/08/2026 col passo 5, con gesti veri.** L'unica costante che
+> resta è la **distanza**: si chiude oltre il 30% della propria altezza, e un
+> lancio veloce e corto fa la stessa cosa di un trascinamento lento e lungo.
+> Verificato che una passata verso il basso partita nella lista non muove il
+> foglio di un pixel (0 mutazioni di stile osservate) mentre scorre la lista, e
+> che dalla maniglia il foglio segue il dito e poi chiude. Una guardia che il
+> piano non prevedeva: la ✕ sta **dentro** la riga del titolo, cioè dentro la
+> zona di trascinamento, e senza escludere i `button` il `setPointerCapture` le
+> portava via il `click`.
+
 **D8 — Il margine inferiore si misura, non si spera.** `env(safe-area-inset-bottom)`
 dà l'inset della barra, non la soglia di riconoscimento della gesture: il valore
 vero è `WindowInsets.getMandatorySystemGestureInsets()`, che sta solo sul lato
@@ -196,6 +206,21 @@ distanzia sopra.
 > il margine che la lista del foglio deve tenersi sopra su questa geometria — non
 > i 32 dp pieni, che sono misurati dal bordo dello *schermo*, non da quello della
 > WebView.
+>
+> **Girato il 30/08/2026 col passo 5, e la sonda è andata via.** Il ponte è
+> `JennyGestureBridge.getBottomGestureInset()`, che restituisce **proprio quella
+> sovrapposizione** in px fisici — non l'inset intero, che sprecherebbe la
+> fascia della barra di navigazione. La ricalcola il thread UI
+> (`refreshGestureInsets`) su ogni dispatch di inset e ogni cambio di geometria
+> della WebView, in un campo `@Volatile`; il getter lo legge, perché un metodo
+> del bridge deve *restituire* un valore e `runOnUiThread` è asincrono. Quando
+> cambia, il nativo manda un evento `jenny-gesture-insets` alla SPA — verificato
+> che arriva **senza un ricaricamento** (marcatore su `window` sopravvissuto,
+> contatore a 1). Il lato CSS lo riceve come `--gesture-inset-bottom` su
+> `documentElement`, e il `padding-bottom` del foglio ci si appoggia.
+>
+> **La controprova che non è cablato**: passando a tre pulsanti il valore
+> diventa `0px` da solo, e tornando a gesture torna `8px`.
 
 **D9 — Il ranking parte da `localStorage`.** Frequenza e recenza per chiave
 (`android:<pkg>`, `jenny:<slug>`, `skill:<nome>`). Non è un dato prezioso: se si
@@ -266,15 +291,26 @@ produca sul Titan 2**: v. «Cosa NON è stabilito».
 > proprio — il default `layer.close || layer.dismiss` farebbe fare a Home due
 > giri invece di uno, e il conto di 1.8 lo direbbe.
 
-**Passo 5 — geometria e gesture** *(mezza giornata)*
+**Passo 5 — geometria e gesture** *(mezza giornata)* — **girato il 30/08/2026**
 Maniglia trascinabile, inset misurato dal nativo, foglio che si ridimensiona
 sopra la tastiera software (`visualViewport`).
 
-> **Il passo 3 ha alzato la priorità di 5.5.** Con la tastiera software su, il
-> foglio è coperto per intero — `innerHeight` non cambia, e la lista resta
-> dov'era, sotto i tasti: si cerca alla cieca. Sul Titan 2 non si vede, perché
-> la tastiera è fisica; ovunque altro è la prima cosa che salta all'occhio.
-> Dettagli e conseguenze per chi verifica: la nota in fondo al passo 3 della
+> **Il passo 3 ha alzato la priorità di 5.5 — e ne aveva letto male la causa.**
+> Il sintomo era giusto: con la tastiera software su si cerca alla cieca. Il
+> meccanismo no. Rimisurato col passo 5 sullo stesso AVD, **la finestra si
+> ridimensiona**: `innerHeight` 432 → **124** px CSS, e `visualViewport` con
+> lei. Il foglio non era *coperto* dalla tastiera, era alto il 66% di quel che
+> la tastiera gli aveva lasciato — 82 px di sola cornice, zero righe.
+>
+> La soluzione che ne discende non è «spostare il foglio sopra i tasti»: è
+> **calcolare l'altezza sul viewport senza tastiera** e limitarla allo spazio
+> disponibile, così con la tastiera giù non cambia niente e con la tastiera su
+> il foglio prende tutto invece di rimpicciolirsi. `--launcher-kb-inset` copre
+> comunque l'altro guscio possibile (`adjustPan`, dove `innerHeight` non si
+> muove e solo `visualViewport` vede la tastiera) — che è quello che il Titan 2
+> potrebbe avere. Su questo schermo la tastiera si prende il **69%**
+> dell'altezza, e serve anche una cornice `.compact`; su proporzioni normali
+> quel ramo non si accende. Dettagli e misure: la
 > [lista di esecuzione](./apps-drawer-checklist.md).
 
 **Passo 6 — i bordi** *(mezza giornata)*
@@ -353,6 +389,16 @@ non ha quella dell'emulatore: Unihertz ci mette la propria, su un altro livello
 di Android. Il valore misurato serve a dimensionare il CSS e a scrivere il metodo
 del bridge; **non** autorizza a cablare `8px` da nessuna parte. Il punto di D8
 resta intero: si legge dal nativo a runtime, perché il numero è del dispositivo.
+Col passo 5 è così: `8px` non compare in nessun sorgente, e sull'emulatore si
+è visto il valore andare a `0px` da solo passando a tre pulsanti.
+
+**Non si sa come il Titan 2 tratti la tastiera software — e la domanda è quasi
+oziosa lì, ma non altrove.** Sull'emulatore la finestra si ridimensiona
+(`innerHeight` 432 → 124); un altro guscio potrebbe invece far scorrere la
+finestra sotto la tastiera senza ridimensionarla, e allora conterebbe solo
+`visualViewport`. Il passo 5 copre entrambe le vie perché costa uguale, ma
+**quale delle due si accenda sul telefono non è stato letto**. Sul Titan 2, con
+la tastiera fisica, potrebbe non accendersi nessuna delle due.
 
 **Non si sa quali eventi produca la rotella del Titan 2.** Potrebbe essere
 `wheel`, potrebbero essere i codici delle frecce, potrebbe essere altro — e

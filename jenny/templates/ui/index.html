@@ -344,8 +344,12 @@
 <div class="launcher-scrim" id="launcher-scrim" aria-hidden="true"></div>
 <div class="launcher-sheet" id="launcher-sheet" role="dialog" aria-modal="true"
      aria-labelledby="launcher-title" aria-hidden="true" tabindex="-1">
-  <!-- Passo 5: da qui (maniglia + riga delle rotaie) si trascinerà il foglio.
-       La lista mai — v. D7. -->
+  <!-- Da qui — maniglia e riga del titolo — si trascina il foglio, e **dalla
+       lista mai** (D7): decide l'origine del tocco, e decide sempre allo stesso
+       modo. Sotto c'è una chat, dove i trascinamenti verticali sono già
+       promessi allo scroller da `setupSwipeNav`; contendere i verticali della
+       propria lista è la ragione per cui i bottom sheet dentro contenuto
+       scrollabile sembrano rotti. V. `LauncherController._setupDrag`. -->
   <div class="launcher-handle-row" id="launcher-handle-row">
     <div class="launcher-handle"></div>
   </div>

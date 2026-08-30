@@ -3149,8 +3149,24 @@ body {
 .launcher-scrim.open { opacity: 1; pointer-events: auto; }
 
 .launcher-sheet {
-  position: fixed; left: 0; right: 0; bottom: 0; z-index: 100;
-  height: 66%;
+  /* `bottom` e `height` li scrive JS (`LauncherController._syncViewport`); i
+     valori qui sono il ripiego di prima che l'abbia fatto — il primo
+     fotogramma, o un browser senza `visualViewport`.
+     `--launcher-kb-inset` è quanto della finestra copre la tastiera software
+     **senza averla ridimensionata** (adjustPan): lì il foglio ci si appoggia
+     sopra invece di finirci sotto. Dove la finestra si ridimensiona davvero
+     vale 0, e il foglio resta ancorato al fondo. */
+  position: fixed; left: 0; right: 0; z-index: 100;
+  bottom: var(--launcher-kb-inset, 0px);
+  height: var(--launcher-height, 66%);
+  /* Il margine di 5.2 (D8): il contenuto del foglio finisce **sopra** la fascia
+     in cui la shell di sistema riconosce la gesture di home. Il valore arriva
+     dal ponte nativo via `LauncherController._syncGestureInset()`, già in px
+     CSS: non è una costante, e dal CSS non si può leggere —
+     `env(safe-area-inset-bottom)` vale `0px`, perché il decor di AppCompat
+     consuma gli inset prima della WebView. `box-sizing: border-box` (globale)
+     fa sì che stringa la lista invece di allungare il foglio. */
+  padding-bottom: var(--gesture-inset-bottom, 0px);
   display: flex; flex-direction: column;
   background:
     radial-gradient(ellipse 80% 60% at 50% 100%, rgba(var(--accent-rgb), 0.05), transparent 60%),
@@ -3171,12 +3187,63 @@ body {
   visibility: visible;
   transition: transform .32s cubic-bezier(.22,.61,.36,1), visibility 0s linear 0s;
 }
+/* Mentre il dito lo tiene, il foglio non si anima: segue, e basta. JS gli
+   scrive `transform` in linea a ogni `pointermove`, e con la transizione accesa
+   arriverebbe 320 ms dopo il dito. Al rilascio la classe se ne va e il tratto
+   che resta — il ritorno su, o la discesa — torna a essere del CSS. */
+.launcher-sheet.dragging { transition: none; }
+
+/* Con la tastiera software su, il fondo dello schermo è la tastiera: la fascia
+   della gesture di home non è più sotto il foglio, e quei pixel servono alla
+   lista. È una condizione diversa da `.compact` — uno schermo corto e basta dà
+   un foglio basso che **tocca ancora il fondo**, e lì la fascia c'è. */
+.launcher-sheet.kb-open { padding-bottom: 0; }
+
+/* Il foglio è troppo basso perché la cornice piena valga il suo prezzo: si
+   stringe tutto ciò che non è la lista. Il conto che decide la soglia sta in
+   `COMPACT_HEIGHT` (`mobile-launcher.js`). Si stringe, non si nasconde: la ✕ e
+   il titolo restano, e il titolo è ciò che `aria-labelledby` nomina. */
+.launcher-sheet.compact .launcher-handle-row { padding: 3px 10px 2px; }
+.launcher-sheet.compact .launcher-head { padding: 0 14px 3px; }
+.launcher-sheet.compact .launcher-search-row { padding: 4px 12px 2px; }
+.launcher-sheet.compact .launcher-search { height: 30px; }
+.launcher-sheet.compact .launcher-list { padding: 3px 12px 4px; gap: 4px; }
+/* Anche le righe stringono. Sullo schermo quadrato la tastiera si prende il 69%
+   dell'altezza, e senza questo la lista resta alta 44 px con dentro righe da 52:
+   **zero righe intere**, cioè il difetto che 5.5 esiste per chiudere, spostato
+   di un passo. Stringe l'aria, non il contenuto: nome e descrizione restano
+   dove sono. */
+.launcher-sheet.compact .launcher-row { padding: 6px 12px; }
+
+@media (prefers-reduced-motion: reduce) {
+  /* Il movimento ridotto vale anche per il trascinamento — cioè per il tratto
+     che il CSS anima da solo dopo il rilascio, perché quello sotto il dito non
+     è un'animazione ma una manipolazione diretta. Esplicito e non lasciato alla
+     regola generale in fondo al foglio: quella è una rete di sicurezza, non una
+     dichiarazione di intenti. */
+  .launcher-sheet, .launcher-sheet.open, .launcher-scrim { transition: none; }
+}
+
+/* ── La zona di trascinamento (5.1, D7) ──
+   Il foglio si trascina da qui — maniglia e riga del titolo — **e dalla lista
+   mai**. Sotto c'è una chat, dove i trascinamenti verticali sono già promessi
+   allo scroller da `setupSwipeNav`: un foglio che contendesse i verticali della
+   propria lista renderebbe lo scorrimento un tiro a indovinare.
+   `touch-action: none` è ciò che rende il gesto nostro senza doverlo strappare
+   con `preventDefault` a metà; `user-select: none` evita che trascinare sopra
+   il titolo lo selezioni. */
+.launcher-handle-row, .launcher-head {
+  touch-action: none;
+  -webkit-user-select: none; user-select: none;
+}
 
 .launcher-handle-row {
   display: flex; justify-content: center;
   padding: 8px 10px 6px;
   flex-shrink: 0;
+  cursor: grab;
 }
+.launcher-sheet.dragging .launcher-handle-row { cursor: grabbing; }
 .launcher-handle {
   width: 32px; height: 3px;
   border-radius: 2px;
@@ -3260,16 +3327,12 @@ body {
   overflow-y: auto;
   display: flex; flex-direction: column; gap: 6px;
   padding: 10px 12px 12px;
-  /* TODO (passo 5 — D8): il fondo del foglio deve stare *sopra* la zona in cui
-     la shell di sistema riconosce la gesture di home, altrimenti una passata
-     verso l'alto partita qui non scorre la lista: chiama `goHome()`, che smonta
-     tutta la sotto-struttura della UI. Il margine giusto è
-     `WindowInsets.getMandatorySystemGestureInsets()`, che vive solo sul lato
-     nativo (`env(safe-area-inset-bottom)` vale 0px: il decor di AppCompat
-     consuma gli inset prima della WebView) e va esposto da `JennyGestureBridge`
-     e letto a runtime. Gli 8 px CSS misurati il 30/08 sono il numero
-     dell'emulatore quadrato su Android 17: NON si cablano qui, perché la soglia
-     la decide la shell del dispositivo e il Titan 2 ha la propria. */
+  /* La lista **non arriva al fondo dello schermo**, e non per gusto: il
+     `padding-bottom` di `.launcher-sheet` la tiene sopra la fascia in cui la
+     shell riconosce la gesture di home (5.2 / D8). Una passata verso l'alto
+     partita là dentro non scorrerebbe: chiamerebbe `goHome()` — e siccome Jenny
+     è il launcher del dispositivo, non porterebbe via a un'altra app ma
+     smonterebbe tutti gli overlay e collasserebbe ogni controller. */
 }
 
 /* La riga è attivabile col tocco, e lo dice: `cursor`, stato premuto, anello di
