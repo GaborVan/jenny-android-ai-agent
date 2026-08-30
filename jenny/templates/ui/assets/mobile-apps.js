@@ -41,6 +41,12 @@ export class AppsController {
     this._androidRefreshTimer = null;
     this._androidLoadSeq = 0;
     this._removalsAnnounced = new Set();
+    /* Chi vuole essere avvisato quando una delle tre liste cambia. Esiste per
+       il cassetto (D5): i dati restano di questo controller — il ricaricamento
+       delle app Android, l'elenco delle nascoste, `onPackageChanged`, i frame
+       `apps_list_changed` — e il foglio si limita a rileggerli quando cambiano,
+       invece di tenerne una seconda copia che andrebbe risincronizzata. */
+    this._changeListeners = new Set();
 
     this.searchInput?.addEventListener('input', () => this.render());
     // Bridge from sandboxed app iframes (opaque origin → origin check is
@@ -177,7 +183,90 @@ export class AppsController {
     this.loadJennyApps();
   }
 
+  /** Iscrive un ascoltatore ai cambi delle tre liste; ritorna la funzione che
+   *  lo disiscrive. */
+  addChangeListener(fn) {
+    this._changeListeners.add(fn);
+    return () => this._changeListeners.delete(fn);
+  }
+
+  /* Un ascoltatore che esplode non deve portarsi via gli altri né la ridisegnata
+     della scheda: il cassetto è un consumatore, non un pezzo di questo flusso. */
+  _emitChange() {
+    for (const fn of this._changeListeners) {
+      try {
+        fn();
+      } catch (err) {
+        console.error('Apps change listener failed:', err);
+      }
+    }
+  }
+
+  /** Avvia le fetch che mancano, senza pretendere che la scheda sia a schermo.
+   *
+   *  `activate()` la chiama e in più ridisegna; il cassetto la chiama e basta —
+   *  la sua lista la ricostruisce l'ascoltatore quando le risposte arrivano. */
+  ensureLoaded() {
+    if (!this._skillsLoaded) this.loadSkills();
+    if (!this._androidAppsLoaded) this.loadAndroidApps();
+    if (!this._jennyAppsLoaded) this.loadJennyApps();
+    if (!this._hiddenLoaded) this.loadHiddenApps();
+  }
+
+  /** Vero finché una delle quattro fetch iniziali non è tornata. Distingue
+   *  "non c'è niente" da "non è ancora arrivato niente". */
+  isLoadingLists() {
+    return !(this._skillsLoaded && this._jennyAppsLoaded
+             && this._androidAppsLoaded && this._hiddenLoaded);
+  }
+
+  /** Le tre liste normalizzate in righe, per il cassetto (D5: la sorgente è qui).
+   *
+   *  Le app nascoste restano nascoste, e non c'è un modo per rivelarle: lo
+   *  `_showHidden` della scheda è l'occhio della *gestione*, e nel foglio non
+   *  c'è. Le app Android non escono finché non sono arrivate **entrambe** le
+   *  liste — altrimenti sulla corsa del primo caricamento una nascosta
+   *  comparirebbe per un istante, che è la stessa guardia di `_renderAndroidGrid`.
+   *
+   *  L'ordine è alfabetico e stabile: il ranking per frequenza e recenza è il
+   *  passo 3. Il `key` è già quello che gli servirà (`android:<pkg>`,
+   *  `jenny:<slug>`, `skill:<nome>`), così due voci omonime in spazi diversi non
+   *  si confondono mai. */
+  launcherEntries() {
+    const entries = [];
+    for (const skill of this.skills) {
+      if (!advancedMode() && skill.internal) continue;
+      entries.push({
+        key: `skill:${skill.name}`, kind: 'skill', name: skill.name,
+        glyph: 'ti-puzzle', icon: null,
+      });
+    }
+    for (const app of this.jennyApps) {
+      entries.push({
+        key: `jenny:${app.slug}`, kind: 'jenny', name: app.name || app.slug,
+        glyph: app.broken ? 'ti-alert-triangle' : (app.icon || 'ti-apps'), icon: null,
+      });
+    }
+    if (this._androidAppsLoaded && this._hiddenLoaded) {
+      for (const app of this.androidApps) {
+        if (this.hiddenPackages.has(app.packageName)) continue;
+        entries.push({
+          key: `android:${app.packageName}`, kind: 'android', name: app.label,
+          glyph: 'ti-apps', icon: app.icon || null,
+        });
+      }
+    }
+    entries.sort((a, b) =>
+      a.name.localeCompare(b.name, i18n.locale, { sensitivity: 'base' })
+      || a.key.localeCompare(b.key));
+    return entries;
+  }
+
   render() {
+    /* Prima del ritorno anticipato, e prima di toccare il DOM della scheda: il
+       cassetto legge queste stesse liste anche quando `view-apps` non è mai
+       stata a schermo, e ogni strada che le cambia passa di qui. */
+    this._emitChange();
     if (!this.contentEl) return;
     const q = (this.searchInput?.value || '').toLowerCase().trim();
     this.contentEl.innerHTML = SECTIONS.map(section => this._renderSection(section, q)).join('');
@@ -864,10 +953,7 @@ export class AppsController {
   }
 
   activate() {
-    if (!this._skillsLoaded) this.loadSkills();
-    if (!this._androidAppsLoaded) this.loadAndroidApps();
-    if (!this._jennyAppsLoaded) this.loadJennyApps();
-    if (!this._hiddenLoaded) this.loadHiddenApps();
+    this.ensureLoaded();
     if (this._skillsLoaded && this._androidAppsLoaded && this._jennyAppsLoaded) this.render();
   }
 

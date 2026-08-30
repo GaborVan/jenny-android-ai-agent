@@ -258,6 +258,41 @@ va rifatto.
 Da lì, per esempio: `localStorage.setItem("mobile-last-mode","chat")`,
 `window.mobileApp.currentMode`, `window.mobileApp._overlayLayers().filter(l=>l.present())`.
 
+## Far scattare `onPackageChanged`
+
+`MainActivity` ascolta `PACKAGE_ADDED` / `PACKAGE_REMOVED` /
+`PACKAGE_FULLY_REMOVED` e li gira alla SPA. Per provocarli serve un pacchetto
+che si possa davvero installare e disinstallare.
+
+**Su un'app di sistema non si può**: `pm uninstall --user 0 <pkg>` risponde
+`only root can delete system app for a particular user`, e `adb root` su
+un'immagine `google_apis_playstore` dice `adbd cannot run as root in production
+builds`. Non c'è modo di aggirarlo dall'esterno.
+
+Serve quindi un APK proprio. Ne basta uno vuoto — nessuna classe, nessuna
+risorsa, solo una activity di sistema esportata con l'intent-filter `LAUNCHER`,
+altrimenti il pacchetto non compare nella lista (che viene da
+`queryIntentActivities`). Progetto Gradle minimo **fuori dal worktree**
+(`namespace` e `applicationId` a piacere, AGP 8.7.0, `compileSdk` 34,
+`minSdk` 26), con questo manifest:
+
+```xml
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:label="Sonda Cassetto">
+        <activity android:name="android.app.Activity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
+```
+
+`./gradlew app:assembleDebug` (~7 s a freddo), poi `adb install -r …` e
+`adb uninstall <pkg>`. La disinstallazione arriva come **due** notifiche
+(`REMOVED` e `FULLY_REMOVED`): è previsto, il lato JS accorpa i refresh.
+
 ## Una mini-app di prova
 
 `<workspace>/apps/<slug>/app.json` con `name`, `description` e **almeno una**

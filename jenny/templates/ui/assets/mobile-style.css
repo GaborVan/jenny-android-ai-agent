@@ -3232,6 +3232,23 @@ body {
   background: var(--overlay);
   flex-shrink: 0;
 }
+/* Icona piccola a sinistra — 22 px, contro il 22% di cella che la griglia di
+   oggi spende per la stessa informazione (difetto 03 del rilievo). Taglia fissa
+   perché le sorgenti sono due, un PNG base64 dal PackageManager e un glifo
+   Tabler, e devono incolonnarsi lo stesso. */
+.launcher-row-icon {
+  width: 22px; height: 22px;
+  flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--text-muted);
+}
+.launcher-row-icon img {
+  width: 100%; height: 100%;
+  object-fit: contain;
+  border-radius: 4px;
+}
+.launcher-row-icon i { font-size: 16px; }
+
 .launcher-row-text {
   flex: 1; min-width: 0;
   display: flex; flex-direction: column; gap: 2px;

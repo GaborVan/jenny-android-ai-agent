@@ -99,6 +99,24 @@ e i frame `apps_list_changed` / `app_data_changed`. Il foglio legge da lì; non 
 duplica quella macchina. Va reso istanziabile senza che la sua vista sia a
 schermo — oggi è costruito lazy dentro `switchMode`.
 
+> **Girato il 30/08/2026 col passo 2.** L'ostacolo era quello previsto e si
+> toglie con `MobileApp.appsController()`: stessa `controllerFactories.apps`,
+> istanza registrata in `this.controllers` — così `switchMode` non ne costruisce
+> una seconda e `onPackageChanged` la trova — e nessuna dipendenza dal fatto che
+> `view-apps` sia visibile, perché il suo markup sta in `index.html` fin dal
+> boot, solo `display: none`. Il foglio si iscrive a `addChangeListener` e non
+> ha né `api.`, né `fetch(`, né `wsManager`.
+>
+> **Un fatto sull'aggancio che il piano non diceva:** `apps_list_changed` non
+> nasce da un osservatore del filesystem. Lo emette `_sync_apps_and_notify`
+> (`agent/turn_states.py`) **all'inizio di un turno dell'agente**, quando il
+> sincronizzatore dei tool nota che `workspace/apps/` è cambiata. Una cartella
+> creata a mano non muove niente finché non parte un turno — che per provarlo
+> basta che *inizi*, non che riesca: con un provider fittizio la chiamata
+> all'LLM fallisce e il frame parte lo stesso. Non cambia una decisione, ma
+> cambia come si prova la casella 2.4, e la prima idea (creare la cartella e
+> aspettare) non avrebbe mostrato niente.
+
 **D6 — Type-ahead, non autofocus.** All'apertura il campo **non** prende il
 fuoco: su un telefono con tastiera software l'autofocus alzerebbe la tastiera e
 si mangerebbe il foglio. Il primo carattere stampabile lo mette a fuoco, con la
@@ -169,7 +187,7 @@ Lo scheletro e tutti gli innesti di navigazione, con dentro un contenuto finto.
 È il passo che vale la pena far girare sul telefono da solo: se Indietro, Home e
 il carosello si comportano bene con un foglio vuoto, il resto è contenuto.
 
-**Passo 2 — i dati** *(mezza giornata)*
+**Passo 2 — i dati** *(mezza giornata)* — **girato il 30/08/2026**
 `AppsController` istanziabile senza vista; il foglio legge le tre liste da lì e
 si aggiorna sui frame che quello già ascolta.
 

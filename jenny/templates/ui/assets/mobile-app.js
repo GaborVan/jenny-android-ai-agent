@@ -620,10 +620,33 @@ class MobileApp {
 
   // Un'app di sistema è stata installata o disinstallata (kind: 'added' |
   // 'removed'). Chiamato da MainActivity, che ascolta i broadcast del
-  // PackageManager. Se la sezione App non è ancora stata aperta non c'è niente
-  // da aggiornare: la lista verrà caricata fresca alla prima attivazione.
+  // PackageManager. Se né la scheda né il cassetto sono mai stati aperti non
+  // c'è niente da aggiornare: la lista verrà caricata fresca alla prima volta.
   onPackageChanged(kind, packageName) {
     this.controllers.apps?.onPackageChanged(kind, packageName);
+  }
+
+  /** Il proprietario dei dati delle app (D5), costruito anche a scheda mai
+   *  aperta.
+   *
+   *  `switchMode` costruisce i controller pigramente, quindi finché l'utente non
+   *  entrava nella sezione App `AppsController` non esisteva — e il cassetto si
+   *  sarebbe aperto vuoto. Qui la costruzione è la stessa (`controllerFactories`
+   *  resta l'unica ricetta) ma slegata dal fatto che `view-apps` sia a schermo:
+   *  il controller scrive nel DOM della scheda, che sta in pagina fin dal boot,
+   *  nascosto. Registrarlo in `this.controllers` è la parte che conta: da lì lo
+   *  ritrova `switchMode` — che non ne costruirà un secondo — e ci arriva
+   *  `onPackageChanged`. */
+  appsController() {
+    if (!this.controllers.apps) {
+      try {
+        this.controllers.apps = this.controllerFactories.apps();
+      } catch (err) {
+        console.error('Failed to init apps controller:', err);
+        return null;
+      }
+    }
+    return this.controllers.apps;
   }
 
   /* Ingresso unico nella sezione grafo con una vista precisa.

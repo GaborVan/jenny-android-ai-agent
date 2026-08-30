@@ -3,7 +3,7 @@
 Stato di [`apps-drawer-plan.md`](./apps-drawer-plan.md). Il ragionamento sta là,
 qui c'è solo cosa è fatto. Si spunta quando è **girato**, non quando è scritto.
 
-Ramo: `feat/apps-drawer`, aperto. **Passi 0 e 1 girati (30/08/2026), e su un
+Ramo: `feat/apps-drawer`, aperto. **Passi 0, 1 e 2 girati (30/08/2026), e su un
 emulatore quadrato — il Titan 2 non era collegato.** Il passo 7 non è una fase
 finale ma un prerequisito sparso: le tre incognite in fondo al piano vanno chiuse
 *prima* del passo 5. Delle tre, il passo 1 ne chiude una: `goHome()` smonta il
@@ -55,11 +55,22 @@ ragionamento.** Nuovo modulo: `jenny/templates/ui/assets/mobile-launcher.js`.
 
 ## Passo 2 — i dati
 
-- [ ] **2.1** `AppsController` istanziabile senza che `view-apps` sia a schermo
-- [ ] **2.2** Il foglio legge skill, Jenny App e app Android da lì — nessuna seconda copia della macchina di ricarica
-- [ ] **2.3** Le app nascoste restano nascoste anche nel foglio (e l'occhio non c'è: è gestione, sta nella scheda)
-- [ ] **2.4** Un `apps_list_changed` mentre il foglio è aperto lo aggiorna senza chiuderlo
-- [ ] **2.5** Una app disinstallata dal telefono sparisce dal foglio via `onPackageChanged`
+Girato il 30/08/2026 sullo stesso AVD `jenny_square`, build debug da
+`app:installDebug`. Osservazioni via CDP sulla WebView + screenshot; nessuna
+casella spuntata per ragionamento. Nessun modulo JS nuovo (il foglio è ancora
+`mobile-launcher.js`), quindi `_UI_MANIFEST` non cambia.
+
+- [x] **2.1** `AppsController` istanziabile senza che `view-apps` sia a schermo — nuovo `MobileApp.appsController()`, che usa la stessa `controllerFactories.apps` e registra l'istanza in `this.controllers` (così `switchMode` non ne costruisce una seconda e `onPackageChanged` la trova). Letto a foglio aperto in una sessione partita in chat: `currentMode: "chat"`, `getComputedStyle(view-apps).display === "none"`, `!!controllers.apps === true`, 27 righe nel foglio. Controprova: dopo una visita alla scheda App, `controllers.apps` è **lo stesso oggetto** di prima
+- [x] **2.2** Il foglio legge skill, Jenny App e app Android da lì — `launcherEntries()` sta in `mobile-apps.js`, e `mobile-launcher.js` non contiene né `api.`, né `fetch(`, né `wsManager`: **non parla con la rete** e non ha una seconda macchina di ricarica. Screenshot con le tre categorie insieme (`SKILL`, `JENNY APP`, `ANDROID APP`), icone base64 vere per le Android e glifi Tabler per le altre
+- [x] **2.3** Le app nascoste restano nascoste anche nel foglio — YouTube nascosta dal **percorso vero** (pressione lunga sulla cella nella scheda → "Hide", `adb shell input`). Due controprove: (a) con l'occhio della scheda **acceso** (`_showHidden === true`, YouTube di nuovo nella griglia) il foglio ne ha 27 e non ce l'ha; (b) dopo force-stop e riavvio dell'app la lista nascoste torna dal gateway e il foglio ne ha ancora 27 su 28. Nel foglio non c'è nessun controllo occhio (`querySelector` su `#launcher-sheet` per `[data-action="toggle-hidden"]`/`.ti-eye*`: nessuno)
+- [x] **2.4** Un `apps_list_changed` mentre il foglio è aperto lo aggiorna senza chiuderlo — creata `workspace/apps/prova-cassetto/` con `run-as`, poi un turno di chat vero (il frame lo emette `_sync_apps_and_notify`, non una simulazione): 27 → 28 righe, la nuova è `jenny:prova-cassetto`, `launcher.isOpen() === true` e lo scrim ancora `open` **durante e dopo**. Cancellata la cartella e rifatto: 28 → 27. Attribuito con un contatore temporaneo sui frame: **1** `apps_list_changed` per ciascun cambio
+- [x] **2.5** Una app disinstallata dal telefono sparisce dal foglio via `onPackageChanged` — APK di sonda minimo (`com.flagdizero.probeapp`, "Sonda Cassetto", una `LAUNCHER` e niente altro) costruito fuori dal worktree e installato con `adb install`: 28 → 29 a foglio aperto (`added:`). `adb uninstall`: 29 → 28, riga sparita, foglio ancora aperto e alla stessa posizione di scorrimento (screenshot prima/dopo). Attribuito: `onPackageChanged` chiamata `removed` ×2 (REMOVED + FULLY_REMOVED, come previsto da `MainActivity`), e **zero** `apps_list_changed` nello stesso intervallo. *Un pacchetto di sistema non serve: `pm uninstall --user 0` vuole root, e l'immagine playstore non ce l'ha.*
+
+> **Fuori dalle caselle, di proposito.** Le righe non sono ancora attivabili:
+> l'avvio arriva col passo 4, insieme ai tasti che scelgono cosa avviare.
+> Descrizione, ricerca e ordine per pertinenza sono il passo 3 — qui l'ordine è
+> alfabetico e stabile, e la `key` è già `android:<pkg>` / `jenny:<slug>` /
+> `skill:<nome>` perché il ranking del passo 3 la trovi pronta.
 
 ## Passo 3 — la lista digitabile
 

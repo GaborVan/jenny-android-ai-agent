@@ -478,15 +478,11 @@
   "launcher": {
     "title": "Open",
     "open": "Open apps",
-    "demoNote": "Step 1 placeholder content: the real list arrives with step 3.",
-    "demoName1": "First placeholder entry",
-    "demoDesc1": "A fake row, here only to give the sheet some height",
-    "demoName2": "Second placeholder entry",
-    "demoDesc2": "Name, description and kind: the shape the real rows will take",
-    "demoName3": "Third placeholder entry",
-    "demoDesc3": "An app installed on the phone will land here",
-    "demoName4": "Fourth placeholder entry",
-    "demoDesc4": "Four rows are enough to make the list scroll"
+    "kindSkill": "Skill",
+    "kindJennyApp": "Jenny App",
+    "kindAndroidApp": "Android App",
+    "loading": "Loading...",
+    "empty": "No app, Jenny App or skill to open."
   },
   "apps": {
     "jennyApps": "Jenny Apps",
