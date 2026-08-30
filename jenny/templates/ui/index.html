@@ -382,8 +382,31 @@
        selezione senza spostare il fuoco, che è ciò che tiene il campo
        scrivibile mentre si scorre. Le righe restano comunque focalizzabili
        una per una: con TalkBack ci si arriva a scorrimento, non a frecce. -->
+  <!-- Passo 6.2 — l'avviso che distingue "non c'è niente" da "non si è potuto
+       leggere". Serve al caso peggiore, che è quello *parziale*: se il ponte
+       nativo non risponde, le skill e le Jenny App ci sono tutte e mancano solo
+       le app del telefono — nessuno stato vuoto comparirebbe, e il cassetto
+       sembrerebbe un telefono con poche app. `role="status"` e non un dialog:
+       è un'informazione, non una domanda. -->
+  <div class="launcher-status" id="launcher-status" role="status" hidden>
+    <i class="ti ti-alert-triangle launcher-status-icon" aria-hidden="true"></i>
+    <span class="launcher-status-text" data-i18n="launcher.loadFailed">Parte dell'elenco non si è caricata.</span>
+    <button class="launcher-status-retry" id="launcher-status-retry" type="button"
+            data-i18n="launcher.retry">Riprova</button>
+  </div>
   <div class="launcher-list" id="launcher-list" role="listbox"
        aria-label="Risultati" data-i18n-aria="launcher.resultsList"></div>
+  <!-- D4 / 6.1 — il foglio *lancia*, la scheda *gestisce*. Disinstallare,
+       nascondere, accendere una skill, riparare un manifest e creare una app
+       nuova restano di là, e questa riga è la porta. Non è una `option` della
+       lista: non si apre con ⏎ e non si trova cercando, perché non è una cosa
+       da lanciare — è un altrove. In fondo al foglio e fuori dalla lista, così
+       non contende lo spazio ai risultati e resta ferma mentre scorrono. -->
+  <button class="launcher-manage" id="launcher-manage" type="button">
+    <i class="ti ti-adjustments-horizontal" aria-hidden="true"></i>
+    <span data-i18n="launcher.manage">Gestisci le app</span>
+    <i class="ti ti-chevron-right launcher-manage-chevron" aria-hidden="true"></i>
+  </button>
 </div>
 
 <!-- Wiki feedback popover -->

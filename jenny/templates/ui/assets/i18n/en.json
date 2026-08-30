@@ -488,7 +488,11 @@
     "clearSearch": "Clear search",
     "noResults": "No results for “{query}”.",
     "hasServer": "Has its own server",
-    "resultsList": "Results"
+    "resultsList": "Results",
+    "error": "Could not read the list of apps.",
+    "loadFailed": "Incomplete list: something did not answer.",
+    "retry": "Retry",
+    "manage": "Manage apps"
   },
   "apps": {
     "jennyApps": "Jenny Apps",
@@ -522,6 +526,7 @@
     "deleteSkillConfirm": "Delete skill \"{name}\"?",
     "deleteAppConfirm": "Delete app \"{name}\"? It will be removed permanently.",
     "cannotOpen": "Cannot open {name}",
+    "launchFailed": "Could not start {name} — it may have been uninstalled or disabled.",
     "operationFailed": "Operation failed",
     "deleteFailed": "Delete failed",
     "appDeleted": "App deleted",

@@ -3,7 +3,7 @@
 Stato di [`apps-drawer-plan.md`](./apps-drawer-plan.md). Il ragionamento sta là,
 qui c'è solo cosa è fatto. Si spunta quando è **girato**, non quando è scritto.
 
-Ramo: `feat/apps-drawer`, aperto. **Passi 0, 1, 2, 3, 4 e 5 girati (30/08/2026), e
+Ramo: `feat/apps-drawer`, aperto. **Passi da 0 a 6 girati (30/08/2026), e
 su un emulatore quadrato — il Titan 2 non era collegato.** Il passo 7 non è una
 fase finale ma un prerequisito sparso: le incognite in fondo al piano si chiudono
 una alla volta. Il passo 1 ne ha chiusa una (`goHome()` smonta il foglio con
@@ -225,12 +225,23 @@ diretta, e resta.
 
 ## Passo 6 — i bordi
 
-- [ ] **6.1** Riga «Gestisci» in fondo al foglio → `switchMode('apps')`
-- [ ] **6.2** Stati vuoti distinti: nessun risultato ≠ elenco non caricato (oggi sono lo stesso messaggio, v. `docs/using/app-launcher.md`)
-- [ ] **6.3** Un avvio fallito dice qualcosa — oggi non dice niente, ed è scritto nella documentazione come limite noto
-- [ ] **6.4** Stringhe in `it.json` **e** `en.json`, niente testo cablato
-- [ ] **6.5** `docs/using/app-launcher.md` aggiornato: descrive la scheda, e la scheda non è più il lanciatore
-- [ ] **6.6** `ruff check jenny/ tests/ && npx pyright jenny/bus jenny/command jenny/runtime jenny/session && pytest -q`
+Girato il 30/08/2026 sullo stesso AVD `jenny_square`, build debug da
+`app:installDebug`, navigazione a **gesture**. Tocchi veri (`adb shell input
+tap` sulle coordinate lette a runtime — attenzione: la WebView comincia a
+`y = 72` px fisici, quindi `phys_y = 72 + css_y·3`) e tasti veri; CDP per
+leggere lo stato. Nessun modulo JS nuovo, quindi `_UI_MANIFEST` non cambia.
+
+- [x] **6.1** Riga «Gestisci» in fondo al foglio → `switchMode('apps')` — `#launcher-manage`, **fuori** dalla lista (non è una `option`: non si apre con ⏎ e non si trova cercando). Tocco vero: `mode` chat → `apps`, `launcher.isOpen() === false`, livelli presenti `[]`, `#app.inert === false`, scrim a `pointer-events: none`, `view-apps` a `display: flex` — **nessun overlay orfano**. Lo stesso col ⏎ sul pulsante a fuoco (il guard su `BUTTON` in `_onKeyDown` lascia passare l'attivazione nativa). Il fondo della riga sta a `y = 424` su 432, cioè gli 8 px CSS di 5.2 sono rispettati anche ora che l'ultimo elemento è lei. *Verificata anche la guardia: con la vista già su `apps` — dove `switchMode` esce subito — il tocco chiude comunque il foglio.*
+- [x] **6.2** Stati vuoti distinti: **quattro**, e in più l'avviso che li scavalca. Sul telefono, guasto iniettato al livello di `window.fetch` con **il payload vero del gateway** (`{"apps": [], "error": "unavailable"}`, quello che ora risponde un ponte rotto): 27 → **5 righe** (skill e Jenny App), striscia visibile con «Incomplete list: something did not answer.» + **Riprova**, foglio ancora aperto, e **zero toast** (la guardia `!failed` impedisce l'annuncio di 22 disinstallazioni). Tocco vero su «Riprova» a guasto persistente: striscia ancora lì, pulsante riacceso; con l'endpoint sano, **un tocco** riporta 22 app Android, 27 righe e nasconde la striscia — cioè la ritentata rifà davvero la fetch. Tutte e quattro le fetch fallite → nota «Could not read the list of apps.» e `role="presentation"` sulla lista; tutte riuscite ma vuote → «No app, Jenny App or skill to open.»; query senza esito → «No results for "zzzqq".» *Il guasto del **ponte** al livello del gateway è provato dal test unitario che fa alzare un'eccezione al bridge vero (`test_list_declares_a_bridge_failure`); sul telefono non c'è modo di rompere il `PackageManager` dall'esterno, quindi lì è entrato il payload risultante, non la sua causa.*
+- [x] **6.3** Un avvio fallito dice qualcosa — con un **fallimento vero**: `pm disable-user com.google.android.deskclock` a foglio aperto lascia la riga stantia (disabilitare non emette `PACKAGE_REMOVED`: 27 righe prima e dopo), e il tocco vero su quella riga produce il toast `mobile-toast error` «Could not start Clock — it may have been uninstalled or disabled.», **il foglio resta aperto** (`layers: [launcher]`, `mode: chat`) e niente parte. Controprova nella stessa sessione: riabilitato il pacchetto, lo stesso tocco porta `topResumedActivity` su `com.google.android.deskclock/…DeskClock` e al ritorno il foglio è chiuso, senza toast. *Il pacchetto è stato riabilitato: `pm list packages -d` è tornato ai quattro di partenza.*
+- [x] **6.4** Stringhe in `it.json` **e** `en.json`, niente testo cablato — quattro chiavi nuove sotto `launcher` (`manage`, `error`, `loadFailed`, `retry`) e una sotto `apps` (`launchFailed`). Parità **letta, non guardata**: `tests/webui/test_i18n_parity.py` verde (650 → 655 chiavi per file, insiemi identici, segnaposto `{name}` uguali nelle due lingue), più un test che le cinque chiavi esistano per nome in entrambe. A schermo: `it` e `en` provate girando (le prove sopra sono in inglese, la lingua dell'emulatore)
+- [x] **6.5** `docs/using/app-launcher.md` aggiornato — **stesso percorso, stesso `# H1`**: quel file genera una rotta pubblica del sito e la sua voce di menu, e spostarlo o rinominarlo cambierebbe un URL. Riscritto il contenuto: il cassetto è il lanciatore, la scheda è la gestione, e i due limiti che 6.2 e 6.3 hanno chiuso non sono più elencati come limiti — al loro posto c'è cosa fa adesso. Aggiunti i limiti veri di oggi (app disabilitata = riga stantia, «Gestisci» e avviso che spariscono con la tastiera su, Tab che passa per tutte le righe, frequenza senza decadimento). Aggiornate le quattro righe che lo descrivevano altrove (`docs/README.md`, `webui-tour.md`, `start/launcher-setup.md` ×2, `wiki.md`); nessun file spostato, nessun link rotto
+- [x] **6.6** `ruff check jenny/ tests/ && npx pyright jenny/bus jenny/command jenny/runtime jenny/session && python3 -m pytest -q` — «All checks passed!», «0 errors, 0 warnings, 0 informations», **8865 passed, 5 skipped** in 138 s. (`pytest` nudo non gira su questa macchina: serve `python3 -m`.)
+
+**In più, e non richiesto dalle caselle:**
+
+- [x] **6.7** Un test che asserisce che **il foglio esiste**: i contract dei passi 3-5 guardano tutti il *controller*, e `LauncherController` esce in silenzio (`if (!this.sheet) return`) se i nodi non ci sono. Cancellare il blocco HTML lasciava verdi tutti gli altri test e un pulsante che non apre niente. `test_the_sheet_is_actually_in_the_page` guarda i nodi, e che stiano **dopo** `.app`
+- [x] **6.8** Il difetto che il passo 6 stava per introdurre, trovato misurando: con la tastiera su, «Gestisci» (30 px) e l'avviso (28 px) portavano la lista da 46 px a **14 px, zero righe intere** — il difetto di 5.5 rimesso in piedi da un bordo. In `.compact` spariscono entrambi: rimisurato sullo stesso schermo, lista di nuovo a 46,3 px e **una riga intera** anche a guasto acceso, e alla discesa della tastiera la striscia torna (`display: flex`, testo integro)
 
 ## Passo 7 — verifica sul telefono
 

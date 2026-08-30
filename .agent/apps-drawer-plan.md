@@ -62,13 +62,34 @@ com'è, la feature diventa **puramente additiva**: il dock — dove c'è — e l
 swipe continuano a portare alla scheda esattamente come oggi, e il rollback è
 cancellare un pulsante.
 
-> **Decisione rinviata al passo 6, non dimenticata.** Se lo slot Apps del dock
-> *debba anche lui* aprire il foglio invece di cambiare vista è una scelta che
-> dipende da un fatto non misurato (esiste, quel dock?) e che confonderebbe se
-> presa male: tocco → foglio e swipe → scheda sono due destinazioni per lo stesso
-> nome. Il passo 1 costruisce `openLauncher()` con l'apertura dal composer, che è
-> corretta comunque; agganciarci anche il dock è una riga, da scrivere quando si
-> sa. Default se nessuno decide: **non agganciarlo.**
+> **Decisa il 30/08/2026 col passo 6: no, lo slot del dock non apre il foglio.**
+> La domanda era se lo slot Apps *debba anche lui* aprire il foglio invece di
+> cambiare vista. Restano le due ragioni per cui era stata rinviata — dipende da
+> un fatto non misurato (esiste, quel dock, sul Titan 2?) e tocco → foglio con
+> swipe → scheda sarebbero due destinazioni per lo stesso nome — e il passo 6
+> ne ha aggiunta una terza, che è quella che chiude la questione: **adesso la
+> scheda ha un nome e un ruolo dichiarati.** Con la riga «Gestisci» in fondo al
+> foglio (6.1) il rapporto fra i due posti è scritto in un verso solo — dal
+> foglio si va alla scheda — e agganciare il dock lo rovescerebbe a metà: lo
+> stesso slot porterebbe a una cosa col tocco e all'altra con lo swipe, e la
+> «Gestisci» diventerebbe una strada per tornare dove il dock ti aveva appena
+> portato.
+>
+> Il costo di dire no è basso e reversibile: chi vuole il lanciatore lo ha a un
+> tocco nella riga del composer, che c'è in ogni geometria; chi vuole la scheda
+> ha il dock e lo swipe, come sempre. Il costo di dire sì sarebbe una riga di
+> codice e una regola in più da spiegare. Se un giorno si misurasse che il dock
+> sul Titan 2 c'è ed è il gesto naturale, la riga si scrive in
+> `mobile-app.js::switchMode` e questa nota si riapre.
+>
+> **Conseguenza di questa decisione, osservata:** il pulsante che apre il foglio
+> sta in `#input-bar`, che vive dentro `#view-chat`. Il modo corrente
+> all'apertura è quindi **sempre** `chat`, e la chiusura che `switchMode` fa da
+> sé (1.5) basta sempre — `switchMode` esce subito se il modo richiesto è già
+> quello corrente, ma quel caso non si raggiunge. `_openManager()` chiude
+> comunque il foglio *prima*: è una guardia su una proprietà di *dove sta un
+> pulsante*, non del cassetto, ed è verificata girando (foglio aperto con la
+> vista già su `apps`: il tocco su «Gestisci» lo chiude lo stesso).
 
 **D3 — Il foglio è un livello di `_overlayLayers()`, fra `miniapp` e `drawer`.**
 È l'innesto più redditizio del piano, perché quel registro è già letto da quattro
@@ -313,9 +334,34 @@ sopra la tastiera software (`visualViewport`).
 > quel ramo non si accende. Dettagli e misure: la
 > [lista di esecuzione](./apps-drawer-checklist.md).
 
-**Passo 6 — i bordi** *(mezza giornata)*
+**Passo 6 — i bordi** *(mezza giornata)* — **girato il 30/08/2026**
 Riga «Gestisci», stati vuoti veri (nessun risultato ≠ elenco che non si è
 caricato — oggi sono lo stesso messaggio), stringhe i18n in `it.json` e `en.json`.
+
+> **Gli stati vuoti da soli non bastavano, e il caso che li scavalca è il
+> normale.** Il passo 2 aveva già tre messaggi distinti nel foglio, ma tutti e
+> tre vivono nel ramo «la lista è vuota» — e quando il ponte nativo tace la
+> lista **non è vuota**: skill e Jenny App arrivano tutte, e mancano solo le app
+> del telefono. Nessuno stato vuoto compare, e l'unico segno è un cassetto che
+> non trova *Telefono*. Da qui l'avviso sopra la lista, che è la vera risposta a
+> 6.2; i tre messaggi restano per il caso in cui non arrivi proprio niente, e
+> sono diventati quattro (si è aggiunto «non si è potuto leggere»).
+>
+> **E il guasto non era nemmeno rappresentabile.** Il gateway rispondeva
+> `{"apps": []}` sia per un ponte rotto sia per un telefono senza app: la UI non
+> aveva *da cosa* distinguere. Ora un guasto porta `"error": "unavailable"` — e
+> l'assenza di contesto Android no, perché lì la lista è davvero vuota. Un
+> difetto latente che quel campo ha reso visibile: `loadAndroidApps` con
+> `announceRemovals` avrebbe annunciato come disinstallate **tutte** le app del
+> telefono in un colpo, perché una lista vuota per guasto è indistinguibile da
+> una lista vera in cui non c'è più niente. Ora la guardia c'è, e nella prova
+> sull'emulatore i toast erano zero.
+>
+> **Un difetto introdotto dal passo 6 stesso, visto misurando.** Con la tastiera
+> su, la riga «Gestisci» costa 30 px su 46 di lista e l'avviso ne costa 28: con
+> l'avviso a schermo la lista scendeva a **14 px, zero righe intere** — cioè
+> esattamente il difetto che 5.5 esiste per chiudere, reintrodotto da un bordo.
+> In `.compact` spariscono entrambi e tornano quando la tastiera scende.
 
 **Passo 7 — verifica sul telefono** *(mezza giornata)*
 Il piano è pieno di affermazioni sul comportamento delle gesture che **non sono

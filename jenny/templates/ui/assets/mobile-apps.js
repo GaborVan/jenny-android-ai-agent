@@ -41,6 +41,14 @@ export class AppsController {
     this._androidRefreshTimer = null;
     this._androidLoadSeq = 0;
     this._removalsAnnounced = new Set();
+    /* Quali caricamenti sono **falliti**, per lista (passo 6.2). Non è la stessa
+       domanda di `_*Loaded`, che dice solo "la risposta è arrivata": una fetch
+       andata male segna comunque la lista come caricata — altrimenti la UI
+       resterebbe a "Caricamento…" per sempre — e da lì in poi un elenco vuoto
+       per guasto e uno vuoto per davvero sono indistinguibili. È esattamente il
+       limite che `docs/using/app-launcher.md` denunciava. Qui restano separati,
+       e il cassetto ci scrive sopra un avviso invece di un "nessuna app". */
+    this._loadFailed = { skills: false, android: false, jenny: false, hidden: false };
     /* Chi vuole essere avvisato quando una delle tre liste cambia. Esiste per
        il cassetto (D5): i dati restano di questo controller — il ricaricamento
        delle app Android, l'elenco delle nascoste, `onPackageChanged`, i frame
@@ -83,8 +91,10 @@ export class AppsController {
     try {
       const data = await api.getSkills();
       this.skills = (data.skills || []).filter(s => s.source === 'workspace');
+      this._loadFailed.skills = false;
     } catch {
       this.skills = [];
+      this._loadFailed.skills = true;
     }
     this._skillsLoaded = true;
     this.render();
@@ -101,19 +111,33 @@ export class AppsController {
     const token = ++this._androidLoadSeq;
     const previous = this.androidApps;
     let apps = null;
+    /* Due modi di fallire, e vanno distinti entrambi da "non ci sono app":
+       la fetch che non arriva (gateway giù, 401) e il **ponte nativo** che non
+       risponde — che torna 200 con una lista vuota e un `error` dentro. Il
+       secondo è il caso che la documentazione denunciava: senza guardare quel
+       campo, un PackageManager muto si legge come un telefono senza app. */
+    let failed = false;
     try {
       const data = await api.getAndroidApps();
       apps = data.apps || [];
+      failed = !!data.error;
     } catch {
       apps = null;
+      failed = true;
     }
     // Le risposte possono tornare fuori ordine: se nel frattempo è partita una
     // fetch più recente, questa è vecchia e riscriverebbe la griglia con uno
     // stato stantio (proprio l'app appena disinstallata tornerebbe su).
     if (token !== this._androidLoadSeq) return;
     this.androidApps = apps || [];
+    this._loadFailed.android = failed;
     this._androidAppsLoaded = true;
-    if (announceRemovals && apps) {
+    /* `!failed` accanto ad `apps`: una lista vuota **per guasto del ponte**
+       arriva come `[]`, cioè verissima a guardarla, e senza questa guardia
+       annuncerebbe come disinstallate tutte le app del telefono in un colpo.
+       Prima del passo 6.2 non si poteva sapere: il guasto e il vuoto erano la
+       stessa risposta. */
+    if (announceRemovals && apps && !failed) {
       const present = new Set(apps.map(a => a.packageName));
       // `_removalsAnnounced` scarta le rimozioni per cui il toast è già uscito
       // dalla via del broadcast: senza questo, una fetch partita prima di quella
@@ -152,8 +176,10 @@ export class AppsController {
     try {
       const data = await api.getHiddenApps();
       this.hiddenPackages = new Set(data.packages || []);
+      this._loadFailed.hidden = false;
     } catch {
       this.hiddenPackages = new Set();
+      this._loadFailed.hidden = true;
     }
     this._hiddenLoaded = true;
     this.render();
@@ -171,8 +197,10 @@ export class AppsController {
     try {
       const data = await api.getJennyApps();
       this.jennyApps = data.apps || [];
+      this._loadFailed.jenny = false;
     } catch {
       this.jennyApps = [];
+      this._loadFailed.jenny = true;
     }
     this._jennyAppsLoaded = true;
     this.render();
@@ -207,10 +235,10 @@ export class AppsController {
    *  `activate()` la chiama e in più ridisegna; il cassetto la chiama e basta —
    *  la sua lista la ricostruisce l'ascoltatore quando le risposte arrivano. */
   ensureLoaded() {
-    if (!this._skillsLoaded) this.loadSkills();
-    if (!this._androidAppsLoaded) this.loadAndroidApps();
-    if (!this._jennyAppsLoaded) this.loadJennyApps();
-    if (!this._hiddenLoaded) this.loadHiddenApps();
+    if (!this._skillsLoaded || this._loadFailed.skills) this.loadSkills();
+    if (!this._androidAppsLoaded || this._loadFailed.android) this.loadAndroidApps();
+    if (!this._jennyAppsLoaded || this._loadFailed.jenny) this.loadJennyApps();
+    if (!this._hiddenLoaded || this._loadFailed.hidden) this.loadHiddenApps();
   }
 
   /** Vero finché una delle quattro fetch iniziali non è tornata. Distingue
@@ -218,6 +246,29 @@ export class AppsController {
   isLoadingLists() {
     return !(this._skillsLoaded && this._jennyAppsLoaded
              && this._androidAppsLoaded && this._hiddenLoaded);
+  }
+
+  /** Almeno una delle quattro liste non si è potuta leggere (6.2).
+   *
+   *  Terza risposta accanto a `isLoadingLists()` e a "l'elenco è vuoto", e le
+   *  tre non si sovrappongono: un guasto **non** lascia la UI in caricamento —
+   *  la risposta è arrivata, dice solo che è andata male — e non è nemmeno un
+   *  elenco vuoto, perché le altre liste possono esserci tutte. È il caso
+   *  peggiore da diagnosticare proprio perché sembra normale: le app Android
+   *  mancano e basta.
+   */
+  listsFailed() {
+    return Object.values(this._loadFailed).some(Boolean);
+  }
+
+  /** Riprova **solo** le liste andate male; le altre restano dove sono.
+   *
+   *  `ensureLoaded()` fa già lo stesso a ogni apertura del cassetto, quindi
+   *  chiudere e riaprire basta; questo è il pulsante per chi il foglio ce l'ha
+   *  già aperto sotto gli occhi e non deve indovinare che riaprirlo ritenta.
+   */
+  retryFailedLists() {
+    this.ensureLoaded();
   }
 
   /** Le tre liste normalizzate in righe, per il cassetto (D5: la sorgente è qui).
@@ -306,8 +357,11 @@ export class AppsController {
   activateEntry(entry) {
     if (!entry) return;
     if (entry.kind === 'android') {
-      this.launchAndroidApp(entry.id);
-      return;
+      /* **Ritornata**, non lasciata cadere: è l'unica delle tre attivazioni che
+         può fallire in modo osservabile, e il cassetto ci decide sopra se
+         chiudersi (6.3). Le altre due aprono qualcosa *sopra* il foglio e non
+         hanno un esito da aspettare. */
+      return this.launchAndroidApp(entry.id);
     }
     if (entry.kind === 'jenny') {
       // Rotta compresa: `openApp` chiede conferma e propone la riparazione in
@@ -660,11 +714,30 @@ export class AppsController {
     this._sendChatPrompt(i18n.t('apps.createAppPrompt'));
   }
 
+  /** Avvia una app Android. Ritorna **se ci è riuscita** (6.3).
+   *
+   *  Prima qui c'era un `catch` vuoto commentato "best effort", e un avvio
+   *  fallito non diceva niente: nessun toast, nessun messaggio — il difetto che
+   *  `docs/using/app-launcher.md` elencava. L'informazione c'era già e la si
+   *  buttava: l'endpoint risponde 404 quando il pacchetto non c'è più o Android
+   *  rifiuta di avviarlo, e `api.launchAndroidApp` lo alza.
+   *
+   *  Il caso vero non è esotico: una app disinstallata (o disabilitata) fra il
+   *  caricamento della lista e il tocco lascia una riga stantia, e toccarla non
+   *  faceva assolutamente niente — indistinguibile da un tocco non registrato.
+   *
+   *  L'etichetta si cerca nella lista in memoria: se il pacchetto è già sparito
+   *  di lì, il nome del pacchetto è comunque meglio di una frase senza soggetto.
+   */
   async launchAndroidApp(packageName) {
     try {
       await api.launchAndroidApp(packageName);
+      return true;
     } catch {
-      // best-effort: nothing to recover client-side if the launch failed
+      const name = this.androidApps.find(a => a.packageName === packageName)?.label
+        || packageName;
+      showToast(i18n.t('apps.launchFailed', { name }), 'error');
+      return false;
     }
   }
 

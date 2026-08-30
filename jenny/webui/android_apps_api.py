@@ -67,6 +67,14 @@ async def webui_android_apps_payload() -> dict[str, Any]:
     Returns an empty list (rather than raising) when there is no Android
     context (desktop/test runs) or the bridge call fails, so the WebUI tab
     degrades gracefully instead of erroring the whole apps view.
+
+    **Un guasto del bridge però si dichiara** (``"error": "unavailable"``, passo
+    6.2 del piano del cassetto). Senza quel campo la risposta di un ponte rotto
+    è indistinguibile da quella di un telefono senza app: la UI stampa "nessuna
+    app" in tutti e due i casi, e non c'è modo di sapere quale dei due sia — è
+    il limite che ``docs/using/app-launcher.md`` denunciava. Assenza di contesto
+    Android **non** è un errore: lì la lista è davvero vuota, e dirlo un guasto
+    accenderebbe un avviso su ogni sessione desktop.
     """
     context = get_android_context()
     if context is None:
@@ -79,7 +87,7 @@ async def webui_android_apps_payload() -> dict[str, Any]:
         apps = json.loads(raw)
     except Exception:
         logger.opt(exception=True).warning("Failed to list installed Android apps")
-        return {"apps": []}
+        return {"apps": [], "error": "unavailable"}
     return {"apps": apps}
 
 

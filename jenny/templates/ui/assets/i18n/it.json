@@ -488,7 +488,11 @@
     "clearSearch": "Pulisci la ricerca",
     "noResults": "Nessun risultato per «{query}».",
     "hasServer": "Ha un server proprio",
-    "resultsList": "Risultati"
+    "resultsList": "Risultati",
+    "error": "Non è stato possibile leggere l'elenco delle app.",
+    "loadFailed": "Elenco incompleto: qualcosa non ha risposto.",
+    "retry": "Riprova",
+    "manage": "Gestisci le app"
   },
   "apps": {
     "jennyApps": "Jenny Apps",
@@ -522,6 +526,7 @@
     "deleteSkillConfirm": "Eliminare la skill \"{name}\"?",
     "deleteAppConfirm": "Eliminare l'app \"{name}\"? Verrà rimossa definitivamente.",
     "cannotOpen": "Impossibile aprire {name}",
+    "launchFailed": "Impossibile avviare {name}: forse è stata disinstallata o disattivata.",
     "operationFailed": "Operazione non riuscita",
     "deleteFailed": "Eliminazione non riuscita",
     "appDeleted": "App eliminata",

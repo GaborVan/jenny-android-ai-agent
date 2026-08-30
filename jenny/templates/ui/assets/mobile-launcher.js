@@ -1,10 +1,11 @@
 /** Mobile Launcher — il foglio che sale dal composer.
  *
- *  Passi 1, 2, 3 e 4 del piano `.agent/apps-drawer-plan.md`: l'impianto di
- *  navigazione, le tre liste vere, il campo di ricerca con sotto la lista
- *  ordinata e attivabile col tocco, e **il modo di usarlo senza toccare lo
- *  schermo** — type-ahead, frecce, rotella, ⏎ e ⇧⏎. Resta fuori la geometria
- *  (passo 5).
+ *  Piano `.agent/apps-drawer-plan.md`, passi 1-6: l'impianto di navigazione, le
+ *  tre liste vere, il campo di ricerca con sotto la lista ordinata e attivabile
+ *  col tocco, **il modo di usarlo senza toccare lo schermo** (type-ahead,
+ *  frecce, rotella, ⏎ e ⇧⏎), la geometria che schiva la gesture di home e
+ *  sopravvive alla tastiera, e i bordi: la riga «Gestisci», gli stati vuoti
+ *  distinti e un avvio fallito che lo dice.
  *
  *  Il passo 4 è la ragione per cui la direzione *Digita* è stata scelta su un
  *  telefono con tastiera fisica: due tasti invece di sei schermate. Da qui in
@@ -81,6 +82,9 @@ export class LauncherController {
     this.search = document.getElementById('launcher-search');
     this.titleEl = document.getElementById('launcher-title');
     this.clearBtn = document.getElementById('launcher-search-clear');
+    this.statusEl = document.getElementById('launcher-status');
+    this.retryBtn = document.getElementById('launcher-status-retry');
+    this.manageBtn = document.getElementById('launcher-manage');
 
     /* Verità unica sullo stato del foglio, e la ragione per cui esiste invece
        di interrogare il DOM: `present()` deve diventare falso *nell'istante*
@@ -156,6 +160,9 @@ export class LauncherController {
 
     this.trigger = document.getElementById('btn-launcher');
     this.trigger?.addEventListener('click', () => this.app.openLauncher());
+
+    this.manageBtn?.addEventListener('click', () => this._openManager());
+    this.retryBtn?.addEventListener('click', () => this._retryFailedLists());
 
     this.search?.addEventListener('input', () => this._onQueryChanged());
     this.clearBtn?.addEventListener('click', () => {
@@ -541,6 +548,59 @@ export class LauncherController {
     this.close();
   }
 
+  /** La riga «Gestisci» (6.1, D4): il foglio lancia, la scheda gestisce.
+   *
+   *  `switchMode('apps')` chiude già il foglio da sé (1.5), e da lì si passa
+   *  sempre: verificato con un tocco vero. La chiusura esplicita qui **non è**
+   *  quindi la correzione di un difetto osservato — è la guardia sull'unico
+   *  modo in cui quella catena si spezza: `switchMode` esce subito se il modo
+   *  richiesto è già quello corrente, e allora il foglio resterebbe aperto
+   *  sopra la scheda che avrebbe dovuto mostrare — un overlay orfano, cioè
+   *  precisamente ciò che 6.1 chiede di escludere.
+   *
+   *  Oggi quel caso non si raggiunge: il pulsante che apre il foglio sta in
+   *  `#input-bar`, che vive dentro `#view-chat`, quindi il modo corrente
+   *  all'apertura è sempre `chat`. È una coincidenza di *dove sta un pulsante*,
+   *  però, non una proprietà del cassetto — e il piano stesso lascia aperta la
+   *  possibilità di aprirlo da altrove (v. la decisione sul dock). Chiudere
+   *  prima costa una riga ed è idempotente: quando la catena normale funziona,
+   *  la chiusura dentro `switchMode` diventa un giro a vuoto.
+   */
+  _openManager() {
+    this.close();
+    this.app.switchMode('apps');
+  }
+
+  /** «Riprova» dell'avviso di 6.2.
+   *
+   *  Il pulsante si spegne finché non arriva una risposta: senza, un tocco su
+   *  una rete ancora assente non produce nessun segno e sembra non aver fatto
+   *  niente — che è il difetto di 6.3, spostato di un elemento. Lo riaccende
+   *  `_syncStatus()`, che gira a ogni ridisegno della lista: alla fine di ogni
+   *  fetch, riuscita o no, e anche a ogni tasto. Riacceso troppo presto non fa
+   *  danni — un secondo tocco rifà semplicemente la stessa ritentata.
+   */
+  _retryFailedLists() {
+    if (!this._apps || !this.retryBtn) return;
+    this.retryBtn.disabled = true;
+    this._apps.retryFailedLists();
+  }
+
+  /** Mostra o nasconde l'avviso di elenco incompleto (6.2).
+   *
+   *  Il caso che lo motiva è **parziale**: il ponte nativo non risponde, le
+   *  skill e le Jenny App arrivano tutte, e mancano solo le app del telefono.
+   *  Nessuno stato vuoto comparirebbe — la lista è piena — e l'unico segno
+   *  sarebbe un cassetto che non trova Telefono. Gli stati vuoti da soli non
+   *  bastavano: coprono la lista vuota, non la lista monca.
+   */
+  _syncStatus() {
+    if (!this.statusEl) return;
+    const failed = !!this._apps && this._apps.listsFailed();
+    this.statusEl.hidden = !failed;
+    if (this.retryBtn) this.retryBtn.disabled = false;
+  }
+
   _setBackgroundInert(on) {
     const shell = document.getElementById('app');
     if (shell) shell.inert = on;
@@ -638,14 +698,22 @@ export class LauncherController {
     const apps = this._apps;
     const query = this.search?.value || '';
     this._syncHeading(query);
+    this._syncStatus();
     if (!this._entries.length) {
       this._rankedKeys = [];
       this._select(null);
       this._setListRole(false);
-      // Due stati vuoti diversi, non uno solo: "non c'è niente" e "non è
-      // ancora arrivato niente" sono la stessa schermata nella scheda di oggi,
-      // ed è un difetto noto (v. 6.2). Qui si parte già distinti.
-      const key = (!apps || apps.isLoadingLists()) ? 'launcher.loading' : 'launcher.empty';
+      /* **Tre** stati vuoti, non uno solo (6.2). "Non è ancora arrivato
+         niente", "non si è potuto leggere" e "non c'è niente" sono ancora la
+         stessa schermata nella griglia della scheda — era il limite denunciato
+         in `docs/using/app-launcher.md` — e sono tre risposte diverse: la prima
+         chiede di aspettare, la seconda di riprovare, la terza di installare
+         qualcosa. Un controller che non c'è affatto è un guasto, non
+         un'attesa: senza il primo ramo resterebbe "Caricamento…" per sempre. */
+      let key = 'launcher.empty';
+      if (!apps) key = 'launcher.error';
+      else if (apps.isLoadingLists()) key = 'launcher.loading';
+      else if (apps.listsFailed()) key = 'launcher.error';
       this.list.replaceChildren(this._note(key));
       return;
     }
@@ -903,13 +971,21 @@ export class LauncherController {
        registrare un avvio poi fallito è una posizione in classifica; il costo
        opposto è un cassetto che non impara mai le app che si usano di più. */
     this._usage.record(entry.key);
-    this._apps?.activateEntry(entry);
+    const started = this._apps?.activateEntry(entry);
     /* Una app Android se ne va con tutto il task: il foglio deve chiudersi, o
        al ritorno lo si ritroverebbe aperto sopra la conversazione senza averlo
        chiesto. Le altre due no — una Jenny App si apre *sopra* il foglio e
        Indietro ci riporta (1.7), e una skill o apre un dialog sopra il foglio o
-       cambia vista, e allora è `switchMode` a chiuderlo (1.5). */
-    if (entry.kind === 'android') this.close();
+       cambia vista, e allora è `switchMode` a chiuderlo (1.5).
+
+       **Ma solo se è partita davvero** (6.3). Una riga stantia — il pacchetto
+       disinstallato o disabilitato fra il caricamento della lista e il tocco —
+       fallisce, e chiudere il foglio su un avvio fallito lascerebbe chi guarda
+       davanti alla chat con un toast e senza più il cassetto da cui riprovare.
+       Il ritardo non costa niente nel caso normale: quando l'avvio riesce siamo
+       già in secondo piano, e il foglio si chiude dietro l'app che è salita. */
+    if (entry.kind !== 'android') return;
+    Promise.resolve(started).then((ok) => { if (ok !== false) this.close(); });
   }
 
   /** Una riga. Costruita nel DOM, non concatenando HTML: i nomi delle app

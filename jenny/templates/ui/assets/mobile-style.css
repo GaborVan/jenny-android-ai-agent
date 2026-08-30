@@ -3424,6 +3424,76 @@ body {
   color: var(--text-faint);
 }
 
+/* ── L'avviso di elenco incompleto (6.2) ──
+   Una striscia, non un blocco: dice che manca qualcosa e offre di riprovare,
+   senza prendersi lo spazio dei risultati che invece sono arrivati. Sta *fuori*
+   dalla lista perché la lista è un `listbox` e i suoi figli sono `option`: un
+   avviso là dentro si annuncerebbe come una voce da aprire. */
+.launcher-status {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0 12px 6px;
+  padding: 6px 10px;
+  border: 0.5px solid var(--error);
+  border-radius: var(--radius);
+  background: var(--overlay);
+  flex-shrink: 0;
+}
+.launcher-status[hidden] { display: none; }
+.launcher-status-icon { font-size: 13px; color: var(--error); flex-shrink: 0; }
+.launcher-status-text {
+  flex: 1; min-width: 0;
+  font-size: 11px; color: var(--text-muted);
+}
+.launcher-status-retry {
+  flex-shrink: 0;
+  padding: 3px 9px;
+  border: 0.5px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--overlay-strong);
+  color: var(--text);
+  font-size: 11px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.launcher-status-retry:disabled { opacity: 0.5; cursor: default; }
+
+/* ── La riga «Gestisci» (6.1, D4) ──
+   In fondo e fuori dalla lista: resta ferma mentre i risultati scorrono, e non
+   è una voce del `listbox` — non si apre con ⏎ e non si trova cercando, perché
+   non è una cosa da lanciare. Il filo sopra dice che il cambio di registro è
+   voluto: sopra si lancia, qui si va altrove. */
+.launcher-manage {
+  display: flex; align-items: center; gap: 8px;
+  flex-shrink: 0;
+  padding: 9px 14px;
+  border: none;
+  border-top: 0.5px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background .15s cubic-bezier(.25,.1,.25,1);
+}
+.launcher-manage:active { background: var(--overlay); }
+.launcher-manage:focus-visible { outline: none; background: var(--overlay-strong); }
+.launcher-manage span { flex: 1; text-align: left; }
+.launcher-manage i { font-size: 14px; }
+.launcher-manage-chevron { color: var(--text-faint); font-size: 13px; }
+/* Con la tastiera su, sullo schermo quadrato al foglio restano 116 px: la
+   cornice `.compact` esiste per far entrare **una riga intera** (5.5), e tutto
+   ciò che non è la lista se la riprende. Misurato con la tastiera su: la riga
+   «Gestisci» costa 30 px su 46 di lista, e l'avviso di 6.2 ne costa 28 — con
+   l'avviso a schermo la lista scende a **14 px, zero righe intere**, cioè
+   esattamente il difetto che 5.5 esiste per chiudere, reintrodotto da un
+   bordo.
+   Spariscono entrambi, e tornano appena la tastiera scende. Non si perde
+   niente: sono due informazioni secondarie rispetto al vedere ciò che si sta
+   cercando, e nel caso in cui **tutto** sia fallito la lista è vuota e il
+   guasto lo dice comunque la nota là dentro, che di cornice non ne costa. */
+.launcher-sheet.compact .launcher-manage,
+.launcher-sheet.compact .launcher-status { display: none; }
+
 /* Il pulsante che apre il cassetto, nella riga del composer. Stessa taglia di
    `.compose-send` così i tre elementi della riga restano allineati. */
 .compose-launcher {

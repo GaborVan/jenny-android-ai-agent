@@ -15,6 +15,11 @@ ottenere, e che si perderebbero senza rumore:
   ``_renderList()`` nell'ascoltatore del campo, e non si nota finché non si
   prova su un telefono con 68 voci e 47 icone base64.
 
+Col passo 6 il file ha preso anche i *bordi*: che il foglio esista davvero nella
+pagina (nessun test lo diceva, e il controller esce in silenzio se i nodi non ci
+sono), la riga «Gestisci», i quattro stati vuoti distinti, l'avviso di elenco
+incompleto e il toast di un avvio fallito.
+
 Asserzioni sul sorgente, nello stile del resto di ``tests/webui/``.
 """
 
@@ -156,9 +161,25 @@ def test_the_launch_policy_lives_with_the_data_owner() -> None:
 
 def test_only_an_android_launch_closes_the_sheet() -> None:
     """Una app Android porta via il task; una Jenny App si apre *sopra* il
-    foglio e Indietro ci riporta (1.7)."""
+    foglio e Indietro ci riporta (1.7).
+
+    Dal passo 6.3 la condizione è **doppia**: solo `android`, e solo se l'avvio
+    è riuscito. Una riga stantia — pacchetto disinstallato o disabilitato fra il
+    caricamento e il tocco — fallisce, e chiudere il foglio su quel fallimento
+    lascerebbe davanti alla chat con un toast e senza il cassetto da cui
+    riprovare.
+    """
     body = _method(_src("mobile-launcher.js"), "_activate")
-    assert "if (entry.kind === 'android') this.close();" in body
+    assert "if (entry.kind !== 'android') return;" in body, (
+        "le altre due specie non chiudono il foglio"
+    )
+    assert "this.close()" in body.split("if (entry.kind !== 'android') return;")[1], (
+        "la chiusura deve restare nel solo ramo android"
+    )
+    assert "ok !== false" in body, (
+        "senza l'esito, un avvio fallito chiude comunque il foglio: è il difetto "
+        "di 6.3 con un passo in più"
+    )
 
 
 def test_usage_is_recorded_before_the_launch() -> None:
@@ -354,6 +375,140 @@ def test_no_hardcoded_strings_in_the_sheet() -> None:
     html = (ROOT / "jenny" / "templates" / "ui" / "index.html").read_text(encoding="utf-8")
     assert 'data-i18n-placeholder="launcher.searchPlaceholder"' in html
     assert 'data-i18n-aria="launcher.clearSearch"' in html
+
+
+# ── passo 6 — i bordi ───────────────────────────────────────────────────────
+
+def test_the_sheet_is_actually_in_the_page() -> None:
+    """Nessun test lo diceva, e i contract dei passi 3-5 lo davano per scontato.
+
+    Il registro dei livelli, l'ordine fra `miniapp` e `drawer`, `present` e
+    `dismiss` sono coperti: ma tutti guardano il *controller*. Il foglio è fatto
+    di nodi che stanno in `index.html` — e `LauncherController` esce subito
+    (`if (!this.sheet) return`) se non li trova, senza un errore. Cancellare il
+    blocco HTML lascerebbe verdi tutti gli altri test e un pulsante che non apre
+    niente.
+    """
+    html = (ROOT / "jenny" / "templates" / "ui" / "index.html").read_text(encoding="utf-8")
+    for node in ('id="launcher-sheet"', 'id="launcher-scrim"', 'id="launcher-list"',
+                 'id="launcher-search"', 'id="launcher-title"', 'id="launcher-close"',
+                 'id="launcher-handle-row"', 'id="btn-launcher"'):
+        assert node in html, f"{node} manca da index.html: il foglio non esiste più"
+    # Vive *fuori* da `.app`: è ciò che gli permette di coprire il dock, di
+    # restare fuori dall'inerzia che si applica allo sfondo, e di lasciarsi
+    # sovrapporre da una mini-app aperta da lui senza trucchi di z-index.
+    assert html.index('id="launcher-sheet"') > html.index('<div class="app"'), (
+        "il foglio deve stare dopo `.app`, non dentro"
+    )
+    app = _src("mobile-app.js")
+    assert "new LauncherController(this)" in app
+    assert "name: 'launcher'" in _method(app, "_overlayLayers")
+
+
+def test_the_manage_row_leaves_the_launching_to_the_sheet() -> None:
+    """D4/6.1: il foglio lancia, la scheda gestisce.
+
+    La chiusura esplicita non è ridondante: `switchMode` esce subito quando il
+    modo richiesto è già quello corrente, e col foglio aperto *sopra la scheda
+    App* il tocco su «Gestisci» lascerebbe un overlay orfano sopra la vista che
+    avrebbe dovuto mostrare.
+    """
+    html = (ROOT / "jenny" / "templates" / "ui" / "index.html").read_text(encoding="utf-8")
+    assert 'id="launcher-manage"' in html
+    assert 'data-i18n="launcher.manage"' in html
+    # Fuori dalla lista: non è una `option` da aprire con ⏎ né da trovare
+    # cercando — è un altrove, non una cosa da lanciare.
+    assert html.index('id="launcher-manage"') > html.index('id="launcher-list"')
+    body = _method(_src("mobile-launcher.js"), "_openManager")
+    assert "this.close()" in body
+    assert "switchMode('apps')" in body
+    assert body.index("this.close()") < body.index("switchMode('apps')")
+
+
+def test_the_three_empty_states_are_three_different_sentences() -> None:
+    """6.2: "non è ancora arrivato", "non si è potuto leggere" e "non c'è
+    niente" sono tre risposte diverse — aspetta, riprova, installa qualcosa.
+    Nella scheda di oggi sono la stessa frase, ed è il limite scritto in
+    `docs/using/app-launcher.md`."""
+    render = _method(_src("mobile-launcher.js"), "_renderList")
+    for key in ("launcher.loading", "launcher.error", "launcher.empty", "launcher.noResults"):
+        assert f"'{key}'" in render, f"{key} non usata: uno stato vuoto si è confuso con un altro"
+    assert "isLoadingLists()" in render and "listsFailed()" in render
+
+
+def test_a_broken_bridge_is_not_an_empty_phone() -> None:
+    """Il caso che il documento denuncia, e che gli stati vuoti da soli **non**
+    coprono: il ponte nativo tace, skill e Jenny App arrivano tutte, e mancano
+    solo le app del telefono. La lista non è vuota — nessuno stato vuoto
+    comparirebbe — e l'unico segno sarebbe un cassetto che non trova Telefono.
+
+    Serve che l'informazione esista lungo tutta la catena: il gateway la
+    dichiara, il controller la tiene separata da "caricato", il foglio la
+    mostra.
+    """
+    server = (ROOT / "jenny" / "webui" / "android_apps_api.py").read_text(encoding="utf-8")
+    assert '{"apps": [], "error": "unavailable"}' in server, (
+        "senza il campo, la risposta di un ponte rotto è identica a quella di "
+        "un telefono senza app"
+    )
+    apps = _src("mobile-apps.js")
+    android = _method(apps, "loadAndroidApps")
+    assert "data.error" in android, "il campo arriva e viene buttato"
+    assert "announceRemovals && apps && !failed" in android, (
+        "una lista vuota per guasto annuncerebbe come disinstallate tutte le "
+        "app del telefono in un colpo"
+    )
+    assert "listsFailed()" in apps
+    launcher = _src("mobile-launcher.js")
+    assert "_syncStatus" in launcher
+    html = (ROOT / "jenny" / "templates" / "ui" / "index.html").read_text(encoding="utf-8")
+    assert 'id="launcher-status"' in html
+    # Fuori dalla lista: i figli di un `listbox` sono `option`, e un avviso là
+    # dentro si annuncerebbe come una voce da aprire.
+    assert html.index('id="launcher-status"') < html.index('id="launcher-list"')
+
+
+def test_a_failed_launch_says_something() -> None:
+    """6.3: prima qui c'era un `catch` vuoto commentato "best effort", e un
+    avvio fallito non produceva nessun segno — indistinguibile da un tocco non
+    registrato. L'informazione c'era già: l'endpoint risponde 404."""
+    body = _method(_src("mobile-apps.js"), "launchAndroidApp")
+    assert "showToast" in body
+    assert "apps.launchFailed" in body
+    assert "return false" in body and "return true" in body, (
+        "senza l'esito il cassetto non può decidere se chiudersi"
+    )
+    activate = _method(_src("mobile-apps.js"), "activateEntry")
+    assert "return this.launchAndroidApp(entry.id)" in activate, (
+        "l'esito va restituito, non lasciato cadere"
+    )
+
+
+def test_the_step_six_chrome_gets_out_of_the_way_of_the_keyboard() -> None:
+    """La cornice `.compact` esiste per far entrare **una riga intera** (5.5),
+    e i due elementi del passo 6 se la riprendono tutta: misurato con la
+    tastiera su, la riga «Gestisci» costa 30 px su 46 di lista e l'avviso 28 —
+    con l'avviso a schermo la lista scende a 14 px, cioè zero righe intere. È
+    il difetto che 5.5 ha chiuso, reintrodotto da un bordo."""
+    css = _src("mobile-style.css")
+    rule = re.search(
+        r"\.launcher-sheet\.compact \.launcher-manage,\s*\n"
+        r"\.launcher-sheet\.compact \.launcher-status \{ display: none; \}", css)
+    assert rule, "in `.compact` la riga «Gestisci» e l'avviso devono sparire"
+
+
+def test_the_new_step_six_strings_exist_in_both_locales() -> None:
+    """6.4 — niente testo cablato, e la parità si legge, non si guarda."""
+    import json
+
+    i18n_dir = ASSETS / "i18n"
+    expected = {"launcher.manage", "launcher.error", "launcher.loadFailed",
+                "launcher.retry", "apps.launchFailed"}
+    for locale in ("it", "en"):
+        data = json.loads((i18n_dir / f"{locale}.json").read_text(encoding="utf-8"))
+        flat = {f"{a}.{b}" for a, group in data.items() if isinstance(group, dict)
+                for b in group}
+        assert expected <= flat, f"chiavi mancanti in {locale}.json: {sorted(expected - flat)}"
 
 
 def test_the_search_field_does_not_autofocus() -> None:
