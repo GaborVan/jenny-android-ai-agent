@@ -44,17 +44,31 @@ un drawer con uno swipe verticale rapido.
 
 ## Le decisioni, e perché
 
-**D1 — Si apre con un tocco sullo slot del dock.** L'icona griglia è già dove il
-pollice la cerca. Cambia solo cosa fa: apre il foglio sopra la vista corrente
-invece di cambiare vista.
+**D1 (rivisto il 30/08 dopo il passo 0) — Si apre da un controllo nella riga
+del composer.** L'apertura originale era «un tocco sullo slot Apps del dock». Il
+passo 0 ha misurato che **quello slot potrebbe non essere a schermo**: v. la
+sezione «Il dock potrebbe non essere sullo schermo». Un'apertura che dipende da
+un elemento la cui esistenza non è accertata non è un'apertura. `#input-bar` c'è
+in ogni geometria — ed è dove «sale dal composer» voleva stare fin dall'inizio.
 
-**D2 — Lo slot perde `data-mode` e prende `data-action="launcher"`.** Non è
-cosmetico: `_visibleModes()`
-([`mobile-app.js:744`](../jenny/templates/ui/assets/mobile-app.js)) deriva le
-schede navigabili da `.dock-item[data-mode]`, quindi togliendo l'attributo il
-carosello orizzontale salta lo slot **gratis**, senza un caso speciale da
-ricordare. Anche il click handler di `mobile-app.js:132` smette di riguardarlo da
-solo.
+**D2 (rivisto) — Il dock non si tocca. Per niente.** La versione precedente
+toglieva `data-mode="apps"` dallo slot, così `_visibleModes()` lo perdeva e il
+carosello orizzontale lo saltava «gratis». Su un dispositivo senza dock quel
+gratis si paga caro: il carosello è **l'unica** navigazione rimasta (la media
+query nasconde `.dock`, non i `.dock-item`, e `_visibleModes()` filtra
+sull'inline style, quindi le cinque schede restano tutte nel carosello), e
+togliere l'attributo renderebbe la scheda Apps irraggiungibile. Lasciandolo
+com'è, la feature diventa **puramente additiva**: il dock — dove c'è — e lo
+swipe continuano a portare alla scheda esattamente come oggi, e il rollback è
+cancellare un pulsante.
+
+> **Decisione rinviata al passo 6, non dimenticata.** Se lo slot Apps del dock
+> *debba anche lui* aprire il foglio invece di cambiare vista è una scelta che
+> dipende da un fatto non misurato (esiste, quel dock?) e che confonderebbe se
+> presa male: tocco → foglio e swipe → scheda sono due destinazioni per lo stesso
+> nome. Il passo 1 costruisce `openLauncher()` con l'apertura dal composer, che è
+> corretta comunque; agganciarci anche il dock è una riga, da scrivere quando si
+> sa. Default se nessuno decide: **non agganciarlo.**
 
 **D3 — Il foglio è un livello di `_overlayLayers()`, fra `miniapp` e `drawer`.**
 È l'innesto più redditizio del piano, perché quel registro è già letto da quattro
@@ -104,6 +118,42 @@ vero è `WindowInsets.getMandatorySystemGestureInsets()`, che sta solo sul lato
 nativo. `JennyGestureBridge` è il posto giusto per esporlo, e la lista ci si
 distanzia sopra.
 
+> **Misurato il 30/08/2026 — su emulatore, NON sul Titan 2.** AVD `jenny_square`
+> (1440×1440 fisici, 480 dpi, `density = 3.0`, Android 17 / API 37, immagine
+> `google_apis_playstore_ps16k/arm64-v8a`). Ricrearlo: [`emulator-setup.md`](./emulator-setup.md).
+> Sonda temporanea in `MainActivity`, tag logcat `JennyInsetProbe`.
+>
+> Con **navigazione a gesture** (`navigation_mode = 2`):
+>
+> | Inset | px fisici (l,t,r,b) | dp (l,t,r,b) |
+> |---|---|---|
+> | `mandatorySystemGestureInsets` | 0, 72, 0, **96** | 0, 24, 0, **32** |
+> | `systemGestureInsets` | 90, 72, 90, 96 | 30, 24, 30, 32 |
+> | `navigationBars` | 0, 0, 0, 72 | 0, 0, 0, 24 |
+> | `systemBars` | 0, 72, 0, 72 | 0, 24, 0, 24 |
+>
+> **Il numero che serve al passo 5: 96 px fisici = 32 dp in basso.** I 30 dp
+> laterali di `systemGestureInsets` sono la zona del Back — quella che
+> `setGestureExclusion` già si riprende per la mascotte.
+>
+> Con **tre pulsanti** (`navigation_mode = 0`) l'inset obbligatorio scende a
+> combaciare *esattamente* con la barra: 144 px / 48 dp per entrambi. Cioè: la
+> WebView finisce dove comincia la zona, sovrapposizione zero. Il conflitto è
+> davvero solo un problema della modalità gesture.
+>
+> **`env(safe-area-inset-*)` vale `0px` su tutti e quattro i lati.** Non «l'inset
+> della barra invece della soglia»: *zero*. Il decor di AppCompat consuma gli
+> inset delle barre prima della WebView (WebView 1440×1296 px = 480×432 px CSS,
+> `dpr = 3`), quindi al CSS non arriva niente da cui dedurre alcunché. D8 non è
+> un'ottimizzazione: senza il ponte nativo il lato CSS è cieco.
+>
+> **Quanta WebView cade dentro la zona obbligatoria.** Schermo alto 1440 px; la
+> zona è la fascia `y ∈ [1344, 1440)`. La WebView occupa `y ∈ [72, 1368)`. Ne
+> restano dentro **24 px fisici = 8 dp = 8 px CSS** sul bordo inferiore. È quello
+> il margine che la lista del foglio deve tenersi sopra su questa geometria — non
+> i 32 dp pieni, che sono misurati dal bordo dello *schermo*, non da quello della
+> WebView.
+
 **D9 — Il ranking parte da `localStorage`.** Frequenza e recenza per chiave
 (`android:<pkg>`, `jenny:<slug>`, `skill:<nome>`). Non è un dato prezioso: se si
 perde svuotando i dati dell'app, l'ordine si riforma in qualche giorno d'uso. Se
@@ -148,21 +198,52 @@ state misurate su questo dispositivo**. Vedi sotto.
 
 ---
 
+## Il dock potrebbe non essere sullo schermo
+
+Trovato misurando, non cercandolo — e se regge, tocca D1 e D2, non il passo 5.
+
+`mobile-style.css:3387` contiene `@media (max-height: 500px) { .dock { display:
+none } }`. **Sull'emulatore quadrato la regola scatta**: la WebView è alta 432 px
+CSS in gesture (408 con tre pulsanti), `matchMedia('(max-height: 500px)')` torna
+`true`, e il `display` calcolato di `nav.dock` è `none`. Nessun JS lo riscrive:
+`mobile-app.js` tocca solo `.dock-item`, mai il `display` del contenitore.
+Controprova fatta: con `wm size 1440x2200` il viewport sale a 685 px CSS, la
+media query smette di corrispondere e il dock torna `display: flex`, alto 56 px.
+
+Il conto è aritmetico e non dipende dall'emulatore: a 480 dpi uno schermo da
+1440 px è alto **480 px CSS in tutto**, barre comprese. 480 < 500 sempre. Se il
+Titan 2 gira davvero a 480 dpi, quella media query lo prende comunque, e il dock
+non c'è.
+
+**Ma non è stato letto sul telefono.** Basta `adb shell wm density`: sopra i
+~432 dpi il dock sparisce, sotto resta. È la prima cosa da fare quando il Titan 2
+si ricollega, prima di scrivere una riga dei passi 1 e 2 — perché *«si apre con
+un tocco sullo slot del dock»* presuppone uno slot visibile.
+
+Nota a margine, dallo stesso giro: il dock è alto **56 px CSS**
+(`--dock-height`, `mobile-style.css:42`), non 43 come dicevano il piano e la
+casella 0.3.
+
+---
+
 ## Cosa NON è stabilito
 
-Tre cose, e la prima è quella che può far ricominciare da capo il passo 5.
-
-**Non si sa se il Titan 2 sia in navigazione a gesture.** Tutto il ragionamento
-sul bordo inferiore vale per la modalità gesture; con i tre pulsanti il conflitto
-non esiste proprio. Si legge in un secondo — `adb shell settings get secure
-navigation_mode`, `0` = tre pulsanti, `2` = gesture — ma **non è stato letto**,
-perché mentre il piano si scriveva non c'era nessun dispositivo collegato. Va
-letto prima del passo 5, non dopo. E si progetta comunque per il caso peggiore:
-è un'impostazione dell'utente e può cambiare senza preavviso.
+**Non si sa se il Titan 2 sia in navigazione a gesture.** ~~Non è stato letto.~~
+Sull'**emulatore** `jenny_square` la modalità di partenza dell'immagine
+android-37.0 è gesture (`navigation_mode = 2`), e l'interruttore è documentato in
+[`emulator-setup.md`](./emulator-setup.md). Sul **telefono** resta non letto:
+non era collegato nemmeno stavolta. `adb shell settings get secure
+navigation_mode` — `0` tre pulsanti, `2` gesture. Si progetta comunque per il
+caso peggiore: è un'impostazione dell'utente e può cambiare senza preavviso.
 
 **Non si sa quanto sia alta davvero la soglia della gesture di home su questo
-telefono.** D8 dice come ottenerla; nessuno l'ha ancora stampata. Finché non c'è
-quel numero, qualunque margine inferiore scritto nel CSS è indovinato.
+telefono.** ~~Nessuno l'ha stampata.~~ Ora un numero c'è: **32 dp / 96 px**, di
+cui **8 px CSS** ricadono dentro la WebView — ma su un **emulatore Android 17**,
+non sul Titan 2. Le soglie di gesture le decide la shell di sistema, e il Titan 2
+non ha quella dell'emulatore: Unihertz ci mette la propria, su un altro livello
+di Android. Il valore misurato serve a dimensionare il CSS e a scrivere il metodo
+del bridge; **non** autorizza a cablare `8px` da nessuna parte. Il punto di D8
+resta intero: si legge dal nativo a runtime, perché il numero è del dispositivo.
 
 **Non si sa se `goHome()` chiuda il foglio in modo pulito.** Il ciclo di
 `_dismissAllOverlays` chiama il livello fino a otto volte finché `present()` è
@@ -177,6 +258,8 @@ tipo di dettaglio che si vede solo a implementazione finita.
 ## Vedi anche
 
 - [`apps-drawer-checklist.md`](./apps-drawer-checklist.md) — lo stato di esecuzione
+- [`emulator-setup.md`](./emulator-setup.md) — l'AVD quadrato con cui sono stati
+  presi i numeri di D8, e come riaccenderlo
 - [`design.md`](./design.md) — vincoli di architettura
 - [`jenny-apps.md`](./jenny-apps.md) — il contratto delle mini-app che il foglio apre
 - `docs/using/app-launcher.md` — cosa fa oggi la sezione Android, e dove è onesta sui propri limiti

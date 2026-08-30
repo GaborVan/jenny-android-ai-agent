@@ -3,30 +3,40 @@
 Stato di [`apps-drawer-plan.md`](./apps-drawer-plan.md). Il ragionamento sta là,
 qui c'è solo cosa è fatto. Si spunta quando è **girato**, non quando è scritto.
 
-Ramo: da aprire. **Niente di fatto: il piano è del 30/08/2026 e nessun passo è
-partito.** Il passo 7 non è una fase finale ma un prerequisito sparso: le tre
-incognite in fondo al piano vanno chiuse *prima* del passo 5.
+Ramo: `feat/apps-drawer`, aperto. **Solo il passo 0 è girato (30/08/2026), e su
+un emulatore quadrato — il Titan 2 non era collegato.** Il passo 7 non è una fase
+finale ma un prerequisito sparso: le tre incognite in fondo al piano vanno chiuse
+*prima* del passo 5.
 
 ---
 
 ## Passo 0 — le misure che mancano *(nessun codice; sblocca il passo 5)*
 
-- [ ] **0.1** `adb shell settings get secure navigation_mode` sul Titan 2 — `0` tre pulsanti, `2` gesture. Se è `0`, il passo 5 si semplifica ma **non si salta**: è un'impostazione dell'utente
-- [ ] **0.2** Stampare `WindowInsets.getMandatorySystemGestureInsets().bottom` in dp e px fisici, e scriverlo nel piano accanto a D8
-- [ ] **0.3** Verificare che il dock di oggi (43 px, solo tap) non si becchi già la gesture di home — se se la becca, il problema esiste *prima* del cassetto e va segnalato a parte
+Girato il 30/08/2026 sull'AVD `jenny_square` (1440×1440 @ 480 dpi, Android 17 —
+v. [`emulator-setup.md`](./emulator-setup.md)). **Nessuna di queste caselle è
+stata verificata sul Titan 2.**
+
+- [ ] **0.1a** `adb shell settings get secure navigation_mode` **sul Titan 2** — `0` tre pulsanti, `2` gesture. Se è `0`, il passo 5 si semplifica ma **non si salta**: è un'impostazione dell'utente. *Telefono non collegato: non letto.*
+- [x] **0.1b** Idem **sull'emulatore**: `2` (gesture) è il default dell'immagine android-37.0. Interruttore gesture ↔ tre pulsanti documentato in `emulator-setup.md`
+- [x] **0.2** `mandatorySystemGestureInsets.bottom` stampato e scritto nel piano accanto a D8: **96 px fisici = 32 dp** in gesture, 144 px / 48 dp con tre pulsanti (dove combacia con la barra: sovrapposizione zero). Di quei 96 px, **8 px CSS** cadono dentro la WebView. *Emulatore, non Titan 2*
+- [x] **0.2b** Scoperto misurando: `env(safe-area-inset-*)` è `0px` su tutti e quattro i lati — il decor di AppCompat consuma gli inset prima della WebView. D8 non è un affinamento, è l'unica via
+- [ ] **0.3** ~~Verificare che il dock di oggi (43 px, solo tap) non si becchi già la gesture di home~~ — **la domanda è mal posta**: il dock è alto **56** px CSS, non 43, e sull'emulatore quadrato **non è affatto a schermo** (`@media (max-height: 500px)` in `mobile-style.css:3387` lo mette a `display: none`; viewport misurato 432 px CSS). Se valesse anche sul Titan 2, cadrebbero D1 e D2, non il passo 5. Da chiudere con `adb shell wm density` sul telefono — v. «Il dock potrebbe non essere sullo schermo» nel piano
+- [ ] **0.4** Rimuovere la sonda temporanea `JennyInsetProbe` da `MainActivity.kt` (metodo `logInsetProbe`, la chiamata in `onPageFinished`, gli import `ViewCompat`/`WindowInsetsCompat`) quando 5.3 la sostituisce con il metodo vero del bridge
 
 ## Passo 1 — il foglio vuoto che si apre e si chiude
 
-- [ ] **1.1** Lo slot Apps del dock: via `data-mode="apps"`, dentro `data-action="launcher"`
-- [ ] **1.2** Verificato che con quell'attributo lo slot sparisca da `_visibleModes()` e il carosello orizzontale salti da Chat a Workspace senza passare per Apps
+> D1/D2 rivisti dopo il passo 0: si apre dal composer, **il dock non si tocca**.
+
+- [ ] **1.1** Controllo nella riga del composer che chiama `openLauncher()`
+- [ ] **1.2** `data-mode="apps"` **resta** sullo slot del dock: verificato che il carosello orizzontale raggiunga ancora tutte e cinque le schede, dock a schermo o no
 - [ ] **1.3** `openLauncher()` rispetta il blocco del primo avvio come fa `switchMode` (onboarding incompleto → non si apre)
 - [ ] **1.4** Livello `launcher` in `_overlayLayers()`, **fra `miniapp` e `drawer`**, con `present` / `dismiss` / `close`
 - [ ] **1.5** `switchMode` chiude il foglio, accanto a `this.drawer.closeAll()`
 - [ ] **1.6** Indietro col foglio aperto lo chiude e non torna alla schermata precedente
 - [ ] **1.7** Indietro con una mini-app aperta **sopra** il foglio chiude prima l'app, e il foglio resta
-- [ ] **1.8** Home (foglio aperto) lo smonta — e **non** chiama `dismiss` otto volte a vuoto durante la transizione di chiusura (v. la terza incognita del piano)
+- [ ] **1.8** Home (foglio aperto) lo smonta — e **non** chiama `dismiss` otto volte a vuoto durante la transizione di chiusura
 - [ ] **1.9** Col foglio aperto, digitare non scrive più nel composer della chat: `hasOverlayAbove()` ferma `_maybeTypeAheadFocus` da solo, senza righe aggiunte in `mobile-chat.js`
-- [ ] **1.10** Girato sul telefono con contenuto finto, **prima** di scrivere il passo 2
+- [ ] **1.10** Girato sull'emulatore `jenny_square` con contenuto finto, **prima** di scrivere il passo 2
 
 ## Passo 2 — i dati
 

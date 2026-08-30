@@ -39,6 +39,9 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+// TEMPORANEO — sonda inset del passo 0 (v. logInsetProbe / JennyInsetProbe).
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import java.io.File
 import org.json.JSONObject
@@ -504,6 +507,73 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ------------------------------------------------------------------
+    // SONDA TEMPORANEA — passo 0 del piano .agent/apps-drawer-plan.md.
+    // Stampa gli inset di gesture che D8 vuole misurare. NON è API: al
+    // passo 5 diventa un metodo vero di JennyGestureBridge e questa sonda
+    // (tag JennyInsetProbe, questo metodo e la sua chiamata in
+    // onPageFinished, più gli import ViewCompat/WindowInsetsCompat) va
+    // rimossa. Cercare "JennyInsetProbe" per trovarne ogni traccia.
+    // ------------------------------------------------------------------
+    private fun logInsetProbe() {
+        val probeTag = "JennyInsetProbe"
+        val wv = webView ?: return
+        wv.postDelayed({
+            val insets = ViewCompat.getRootWindowInsets(window.decorView)
+            if (insets == null) {
+                Log.i(probeTag, "rootWindowInsets=null")
+                return@postDelayed
+            }
+            val d = resources.displayMetrics.density
+            fun dump(label: String, typeMask: Int) {
+                val i = insets.getInsets(typeMask)
+                Log.i(
+                    probeTag,
+                    "$label px(l=${i.left},t=${i.top},r=${i.right},b=${i.bottom}) " +
+                        "dp(l=${i.left / d},t=${i.top / d},r=${i.right / d},b=${i.bottom / d})"
+                )
+            }
+            Log.i(probeTag, "density=$d navMode=" + android.provider.Settings.Secure.getInt(
+                contentResolver, "navigation_mode", -1
+            ))
+            dump("mandatorySystemGestureInsets", WindowInsetsCompat.Type.mandatorySystemGestures())
+            dump("systemGestureInsets", WindowInsetsCompat.Type.systemGestures())
+            dump("navigationBars", WindowInsetsCompat.Type.navigationBars())
+            dump("systemBars", WindowInsetsCompat.Type.systemBars())
+            dump("tappableElement", WindowInsetsCompat.Type.tappableElement())
+            Log.i(probeTag, "webview px w=${wv.width} h=${wv.height}")
+            val js = """(function(){
+              var p=document.createElement('div');
+              p.style.cssText='position:fixed;left:0;bottom:0;width:1px;height:1px;'+
+                'padding-bottom:env(safe-area-inset-bottom);'+
+                'padding-top:env(safe-area-inset-top);'+
+                'padding-left:env(safe-area-inset-left);'+
+                'padding-right:env(safe-area-inset-right);';
+              document.documentElement.appendChild(p);
+              var cs=getComputedStyle(p);
+              var r={dpr:window.devicePixelRatio,
+                     innerW:window.innerWidth,innerH:window.innerHeight,
+                     vvH:(window.visualViewport?window.visualViewport.height:null),
+                     safeTop:cs.paddingTop,safeBottom:cs.paddingBottom,
+                     safeLeft:cs.paddingLeft,safeRight:cs.paddingRight};
+              r.mqMaxH500=window.matchMedia('(max-height: 500px)').matches;
+              r.dockHeightVar=getComputedStyle(document.documentElement)
+                .getPropertyValue('--dock-height').trim();
+              var dock=document.querySelector('nav.dock');
+              if(dock){var b=dock.getBoundingClientRect();var ds=getComputedStyle(dock);
+                r.dock={top:b.top,bottom:b.bottom,h:b.height,
+                        display:ds.display,padBottom:ds.paddingBottom};}
+              var shell=document.querySelector('.app');
+              if(shell){var s=shell.getBoundingClientRect();
+                r.shell={top:s.top,bottom:s.bottom,h:s.height,
+                         rows:getComputedStyle(shell).gridTemplateRows};}
+              p.remove();
+              return JSON.stringify(r);
+            })();"""
+            wv.evaluateJavascript(js) { res -> Log.i(probeTag, "css=$res") }
+        }, 1500L)
+    }
+
     /**
      * Primo anello della catena dei permessi d'avvio. Se non c'è niente da
      * chiedere (sotto API 33 il permesso non esiste, oppure è già concesso)
@@ -796,6 +866,7 @@ class MainActivity : AppCompatActivity() {
                 // Da qui in poi c'è una SPA a cui consegnare il tasto Indietro.
                 backCallback?.isEnabled = true
                 hideLoading()
+                logInsetProbe() // TEMPORANEO: sonda passo 0, v. JennyInsetProbe
             }
 
             override fun onReceivedError(
