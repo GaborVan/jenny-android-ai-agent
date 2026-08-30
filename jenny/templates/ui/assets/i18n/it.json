@@ -475,6 +475,19 @@
     "deleteProjectFailed": "Non ho potuto eliminare il progetto “{name}”. Non ho toccato niente.",
     "deletedProject": "Progetto “{name}” eliminato, conversazione compresa"
   },
+  "launcher": {
+    "title": "Apri",
+    "open": "Apri app",
+    "demoNote": "Contenuto di prova del passo 1: la lista vera arriva col passo 3.",
+    "demoName1": "Prima voce di prova",
+    "demoDesc1": "Riga finta, serve solo a dare un'altezza al foglio",
+    "demoName2": "Seconda voce di prova",
+    "demoDesc2": "Nome, descrizione e tipo: la forma che avranno le righe vere",
+    "demoName3": "Terza voce di prova",
+    "demoDesc3": "Qui ci finirà una app installata sul telefono",
+    "demoName4": "Quarta voce di prova",
+    "demoDesc4": "Quattro righe bastano a far scorrere la lista"
+  },
   "apps": {
     "jennyApps": "Jenny Apps",
     "skill": "Skill",

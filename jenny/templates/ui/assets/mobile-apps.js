@@ -413,6 +413,12 @@ export class AppsController {
     // forward history entry (we are going *back*); switchMode is only needed on
     // the off chance the app was opened from another mode.
     this.closeApp();
+    /* Col cassetto aperto, l'app è stata lanciata da lì: la destinazione del
+       ritorno è il foglio, non la scheda. Senza questa uscita anticipata lo
+       `switchMode` qui sotto chiuderebbe il foglio (v. MobileApp.switchMode),
+       e una pressione di Indietro smonterebbe due livelli invece di uno —
+       proprio ciò che l'ordine `miniapp` → `launcher` promette di non fare. */
+    if (window.mobileApp.launcher?.isOpen()) return true;
     if (window.mobileApp.currentMode !== 'apps') window.mobileApp.switchMode('apps', false);
     return true;
   }

@@ -9,6 +9,7 @@ import { i18n } from './shared/i18n.js';
 import { api } from './shared/api-client.js';
 import { ViewTitleController } from './mobile-header.js';
 import { DrawerManager } from './mobile-drawer.js';
+import { LauncherController } from './mobile-launcher.js';
 import { ChatController } from './mobile-chat.js';
 import { WorkspaceController } from './mobile-workspace.js';
 import { AppsController } from './mobile-apps.js';
@@ -55,6 +56,11 @@ class MobileApp {
     this.drawer = new DrawerManager();
     this.jenny = new JennyCompanion();
     this.uiQuery = new UiQueryResponder();
+    // Il cassetto delle app non è una vista: niente `view-*`, niente entry di
+    // history, quindi non sta fra i controller lazy. È un livello sopra la
+    // vista corrente, e il suo markup è statico — si costruisce qui, con gli
+    // altri pezzi permanenti del guscio.
+    this.launcher = new LauncherController(this);
 
     // Lazy controller factories
     this.controllerFactories = {
@@ -467,6 +473,17 @@ class MobileApp {
         close: () => { this.controllers.apps?.closeApp(); },
       },
       {
+        // Il cassetto delle app. Sta *sotto* la mini-app — un'app aperta dal
+        // foglio lo copre, e Indietro deve chiudere prima l'app — e *sopra* il
+        // drawer, che è laterale e non copre il lanciatore. `present()` legge
+        // un flag, non il DOM: il foglio resta nel DOM per i 320 ms della
+        // discesa, e su una lettura dal DOM il ciclo di _dismissAllOverlays lo
+        // richiamerebbe otto volte a vuoto.
+        name: 'launcher',
+        present: () => this.launcher.isOpen(),
+        dismiss: () => { this.launcher.dismiss(); },
+      },
+      {
         name: 'drawer',
         present: () => !!this.drawer.activeDrawer,
         dismiss: () => { this.drawer.closeAll(); },
@@ -667,6 +684,23 @@ class MobileApp {
     this.controllers.onboarding?.markRerun();
   }
 
+  /** Apre il cassetto delle app (pulsante nella riga del composer, D1).
+   *
+   *  Il blocco del primo avvio vale anche qui, con la stessa guardia di
+   *  `switchMode`: finché l'onboarding non è finito non si va da nessuna
+   *  parte, e un foglio che si apre sopra il wizard è una strada per uscirne
+   *  senza averlo finito. Si dirotta invece di ignorare, esattamente come fa
+   *  `switchMode`: durante il primo avvio la vista è già `onboarding`, quindi
+   *  a schermo non cambia niente. */
+  openLauncher() {
+    if (!localStorage.getItem('onboarding-complete') && this._firstRun) {
+      console.warn('Onboarding not complete - redirecting to onboarding');
+      this.switchMode('onboarding');
+      return;
+    }
+    this.launcher.open();
+  }
+
   switchMode(mode, pushState = true) {
     // Block ANY navigation if onboarding is not complete
     if (mode !== 'onboarding' && !localStorage.getItem('onboarding-complete') && this._firstRun) {
@@ -727,6 +761,10 @@ class MobileApp {
 
     // Close any open drawer
     this.drawer.closeAll();
+    // …e il cassetto delle app, per la stessa ragione: è ancorato alla vista
+    // che si sta lasciando, e restare aperto sopra quella nuova sarebbe un
+    // overlay orfano che nessuno ha chiesto.
+    this.launcher.close();
 
     // Update state and URL
     AppState.set('currentMode', mode);

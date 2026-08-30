@@ -3,10 +3,11 @@
 Stato di [`apps-drawer-plan.md`](./apps-drawer-plan.md). Il ragionamento sta là,
 qui c'è solo cosa è fatto. Si spunta quando è **girato**, non quando è scritto.
 
-Ramo: `feat/apps-drawer`, aperto. **Solo il passo 0 è girato (30/08/2026), e su
-un emulatore quadrato — il Titan 2 non era collegato.** Il passo 7 non è una fase
+Ramo: `feat/apps-drawer`, aperto. **Passi 0 e 1 girati (30/08/2026), e su un
+emulatore quadrato — il Titan 2 non era collegato.** Il passo 7 non è una fase
 finale ma un prerequisito sparso: le tre incognite in fondo al piano vanno chiuse
-*prima* del passo 5.
+*prima* del passo 5. Delle tre, il passo 1 ne chiude una: `goHome()` smonta il
+foglio con **una** chiamata a `dismiss`, non otto (v. 1.8).
 
 ---
 
@@ -27,16 +28,30 @@ stata verificata sul Titan 2.**
 
 > D1/D2 rivisti dopo il passo 0: si apre dal composer, **il dock non si tocca**.
 
-- [ ] **1.1** Controllo nella riga del composer che chiama `openLauncher()`
-- [ ] **1.2** `data-mode="apps"` **resta** sullo slot del dock: verificato che il carosello orizzontale raggiunga ancora tutte e cinque le schede, dock a schermo o no
-- [ ] **1.3** `openLauncher()` rispetta il blocco del primo avvio come fa `switchMode` (onboarding incompleto → non si apre)
-- [ ] **1.4** Livello `launcher` in `_overlayLayers()`, **fra `miniapp` e `drawer`**, con `present` / `dismiss` / `close`
-- [ ] **1.5** `switchMode` chiude il foglio, accanto a `this.drawer.closeAll()`
-- [ ] **1.6** Indietro col foglio aperto lo chiude e non torna alla schermata precedente
-- [ ] **1.7** Indietro con una mini-app aperta **sopra** il foglio chiude prima l'app, e il foglio resta
-- [ ] **1.8** Home (foglio aperto) lo smonta — e **non** chiama `dismiss` otto volte a vuoto durante la transizione di chiusura
-- [ ] **1.9** Col foglio aperto, digitare non scrive più nel composer della chat: `hasOverlayAbove()` ferma `_maybeTypeAheadFocus` da solo, senza righe aggiunte in `mobile-chat.js`
-- [ ] **1.10** Girato sull'emulatore `jenny_square` con contenuto finto, **prima** di scrivere il passo 2
+Girato il 30/08/2026 sull'AVD `jenny_square`, build debug installata con
+`app:installDebug`. Onboarding superato con un provider fittizio in `config.json`
+(nessuna chiave vera) — procedura in [`emulator-setup.md`](./emulator-setup.md).
+Osservazioni prese via CDP sulla WebView + screenshot; **niente è spuntato per
+ragionamento.** Nuovo modulo: `jenny/templates/ui/assets/mobile-launcher.js`.
+
+- [x] **1.1** Controllo nella riga del composer che chiama `openLauncher()` — `#btn-launcher` in `#input-row`; `adb shell input tap` sul pulsante apre il foglio (screenshot)
+- [x] **1.2** `data-mode="apps"` **resta** sullo slot del dock: sull'emulatore il dock è `display: none` (`matchMedia('(max-height: 500px)')` vero, viewport 480×432 CSS) eppure `_visibleModes()` torna tutte e cinque, e le cinque schede si raggiungono a swipe in **entrambe** le direzioni. *Nota non attribuibile al cassetto: partendo dalla tela del grafo lo swipe è mangiato da d3 e la vista non cambia — partendo dalla riga del titolo va. È il comportamento di oggi, non una regressione.*
+- [x] **1.3** `openLauncher()` rispetta il blocco del primo avvio come fa `switchMode`: con `_setFirstRunLock(true)` e nessun `onboarding-complete`, `openLauncher()` non apre e dirotta su `onboarding`; tolto il blocco, riapre. *A onboarding davvero incompleto il pulsante non è comunque a schermo: `view-chat` è nascosta.*
+- [x] **1.4** Livello `launcher` in `_overlayLayers()`, **fra `miniapp` e `drawer`**: ordine letto a runtime = `dialog, lightbox, minichat, miniapp, launcher, drawer`. Dichiara `present` e `dismiss`; **non** dichiara `close`, perché per il foglio coincide con `dismiss` e il registro lo prevede come default (`layer.close || layer.dismiss`) — un `close` identico farebbe credere a una differenza che non c'è. Lo smontaggio completo esiste ed è `LauncherController.close()`, che `dismiss()` chiama.
+- [x] **1.5** `switchMode` chiude il foglio, accanto a `this.drawer.closeAll()` — verificato su `switchMode('workspace')` e `switchMode('apps')` col foglio aperto
+- [x] **1.6** Indietro col foglio aperto lo chiude e non torna alla schermata precedente: da `workspace` con `_navPos = 1`, il tasto Indietro fisico chiude il foglio e lascia `mode = workspace`, `_navPos = 1`. Controprova: la **seconda** pressione naviga (`chat`, `_navPos = 0`), quindi la prima è stata consumata, non persa
+- [x] **1.7** Indietro con una mini-app aperta **sopra** il foglio chiude prima l'app, e il foglio resta — provato con una Jenny App di prova temporanea: livelli presenti `[miniapp, launcher]`, dopo Indietro `.app-frame-overlay` sparito e `launcher.isOpen() === true` (screenshot). **Ha richiesto una riga in `mobile-apps.js::handleBack`**: il ritorno dalla mini-app faceva `switchMode('apps')`, che per 1.5 chiude il foglio — due livelli smontati con una pressione. V. la nota qui sotto
+- [x] **1.8** Home (foglio aperto) lo smonta — e **non** chiama `dismiss` otto volte: intent Home vero (`am start -a MAIN -c HOME -n …/.MainActivity` → `onNewIntent` → `goHome()`) con un contatore temporaneo su `launcher.dismiss`: **1 chiamata**, foglio smontato, inerzia dello sfondo rilasciata. Il contatore era una patch a runtime via CDP, non una riga di sorgente: niente da togliere
+- [x] **1.9** Col foglio aperto, digitare non scrive più nel composer della chat: fuoco su `BODY`, `adb shell input text "abc"` → `#chat-input` resta vuoto. Controprova a foglio chiuso: gli stessi tre caratteri finiscono nel composer, che prende il fuoco. `mobile-chat.js` **non compare nel diff**
+- [x] **1.10** Girato sull'emulatore `jenny_square` con contenuto finto, **prima** di scrivere il passo 2
+
+> **Nota per il passo 3 — il ritorno dalla mini-app.** `AppsController.handleBack`
+> chiudeva l'app e poi *sempre* `switchMode('apps', false)`, cioè la scheda. Col
+> foglio aperto quello switch lo chiudeva (1.5), e una pressione di Indietro
+> smontava due livelli invece di uno. Ora esce prima se
+> `window.mobileApp.launcher.isOpen()`: **se l'app è stata lanciata dal foglio, si
+> torna al foglio**. Al passo 3, quando il foglio lancerà davvero, questa è la
+> regola giusta anche per le Android app.
 
 ## Passo 2 — i dati
 

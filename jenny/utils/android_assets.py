@@ -251,6 +251,7 @@ _UI_MANIFEST = [
     "assets/mobile-graph.js",
     "assets/mobile-header.js",
     "assets/mobile-jenny.js",
+    "assets/mobile-launcher.js",
     "assets/mobile-onboarding.js",
     "assets/mobile-settings.js",
     "assets/mobile-style.css",

@@ -194,6 +194,80 @@ wizard di primo avvio, non la chat.
 
 ---
 
+## Superare l'onboarding senza chiavi vere
+
+Serve a ogni verifica di UI: finché il wizard è a schermo non si arriva né alla
+chat né al composer. **Nessuna chiave API vera**: il gateway non deve rispondere,
+deve solo smettere di dirsi al primo avvio.
+
+`_is_first_run` (`webui/settings_api.py`) risponde a una domanda sola:
+`len(config.providers.providers) == 0`. Basta quindi **un provider fittizio in
+`config.json`**. La build è debug, quindi `run-as` legge e scrive i file privati
+dell'app — con i **percorsi assoluti**: `run-as … sh -c 'cat > files/…'` fallisce
+con "No such file or directory" perché la `sh` interna non eredita la cwd.
+
+```bash
+export ANDROID_SERIAL=emulator-5556
+D=/data/data/com.flagdizero.jenny/files/workspace
+adb shell am force-stop com.flagdizero.jenny
+adb shell "run-as com.flagdizero.jenny cat $D/config.json" > /tmp/cfg.json
+python3 - <<'PY'
+import json
+d = json.load(open("/tmp/cfg.json"))
+d["providers"] = {"providers": [{"name": "fake-local", "format": "openai_compat",
+                                 "api_key": "EMPTY",
+                                 "api_base": "http://127.0.0.1:1/v1"}],
+                  "default": "fake-local"}
+json.dump(d, open("/tmp/cfg.json", "w"), indent=2)
+PY
+adb shell "run-as com.flagdizero.jenny sh -c 'cat > $D/config.json'" < /tmp/cfg.json
+adb shell "run-as com.flagdizero.jenny sh -c 'chmod 600 $D/config.json'"
+```
+
+**Non basta.** `mobile-last-mode` in `localStorage` resta a `onboarding` dal
+tentativo precedente, e `init()` ci riatterra anche con `first_run: false`. Va
+riportato a `chat` (v. la sezione CDP qui sotto) **una volta sola**: dopo, l'app
+riparte in chat da sola.
+
+> **Il reload va fatto con la sua `bs`.** L'URL iniziale porta il segreto di
+> bootstrap in query (`?bs=…`), consumato da `shared/api-client.js` al caricamento
+> del modulo. Un `location.href = "/html-mobile/?mode=chat"` lo butta via: la SPA
+> resta senza token, va "offline", la cronologia non si carica e `/api/webui/*`
+> risponde 401 — con l'aria di un bug del gateway. Dopo aver scritto
+> `localStorage`, si riparte con **force-stop + monkey**, mai con un reload a mano.
+
+All'avvio l'app chiede due permessi runtime (notifiche, posizione): il primo è un
+dialog con due bottoni (`input tap 720 1008` = "Don't allow"), il secondo si
+congeda con `KEYCODE_BACK`. Ricompaiono a ogni avvio se rifiutati.
+
+## Guidare la WebView da CDP
+
+La WebView di una build debug è ispezionabile, ed è il modo più preciso di
+leggere lo stato della SPA (nessun OCR di screenshot, nessuna gesture da tarare).
+
+```bash
+adb shell cat /proc/net/unix | grep -o "webview_devtools_remote.*" | head -1
+adb forward tcp:9222 localabstract:webview_devtools_remote_<pid>
+curl -s http://127.0.0.1:9222/json/list      # il target con url html-mobile
+```
+
+Poi `Runtime.evaluate` sul `webSocketDebuggerUrl` (client `websockets` in
+Python). **Il socket porta il PID**: dopo ogni force-stop cambia, e il `forward`
+va rifatto.
+
+Da lì, per esempio: `localStorage.setItem("mobile-last-mode","chat")`,
+`window.mobileApp.currentMode`, `window.mobileApp._overlayLayers().filter(l=>l.present())`.
+
+## Una mini-app di prova
+
+`<workspace>/apps/<slug>/app.json` con `name`, `description` e **almeno una**
+`actions` (l'array vuoto è un manifest rotto). Una `kind: "storage"` con
+`op: "append"` e una `collection` basta. L'`index.html` accanto viene servito su
+`/apps/<slug>/index.html`; se risponde "Not Found" l'overlay compare comunque, il
+che è quanto serve per provare la catena di Indietro.
+
+---
+
 ## Vedi anche
 
 - [`apps-drawer-plan.md`](./apps-drawer-plan.md) — le misure raccolte qui, e cosa

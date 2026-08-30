@@ -245,13 +245,21 @@ di Android. Il valore misurato serve a dimensionare il CSS e a scrivere il metod
 del bridge; **non** autorizza a cablare `8px` da nessuna parte. Il punto di D8
 resta intero: si legge dal nativo a runtime, perché il numero è del dispositivo.
 
-**Non si sa se `goHome()` chiuda il foglio in modo pulito.** Il ciclo di
-`_dismissAllOverlays` chiama il livello fino a otto volte finché `present()` è
-vero: un foglio che si smonta con una transizione di chiusura resta `present`
-per la durata dell'animazione, esattamente come è già annotato per la mini-app
-(«l'overlay resta nel DOM per i 200 ms della dissolvenza»). O il `present()` del
-foglio ignora chi si sta chiudendo, o Home lo chiamerà otto volte a vuoto. È il
-tipo di dettaglio che si vede solo a implementazione finita.
+~~**Non si sa se `goHome()` chiuda il foglio in modo pulito.**~~ **Chiuso il
+30/08/2026 col passo 1: una chiamata, non otto.** Il rischio era reale — il ciclo
+di `_dismissAllOverlays` richiama il livello fino a otto volte finché `present()`
+è vero — e si evita in due modi che vanno tenuti *entrambi*:
+
+- il foglio **non si smonta dal DOM**: resta in pagina e commuta una classe, così
+  non c'è un intervallo in cui è ancora lì ma si sta chiudendo (è quello a
+  fregare la mini-app, che si `remove()` dopo 200 ms);
+- `present()` legge un **flag scritto sincronamente** da `close()`
+  (`LauncherController._open`), non il DOM. È la parte che sopravvive a un
+  ripensamento sull'animazione: se un domani il foglio si smontasse davvero, il
+  flag continuerebbe a rispondere giusto.
+
+Misurato con un contatore temporaneo su `dismiss` e l'intent Home vero
+(`onNewIntent` → `goHome()`): **1**.
 
 ---
 

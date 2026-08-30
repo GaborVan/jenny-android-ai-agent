@@ -168,6 +168,13 @@
             </button>
           </div>
           <div id="input-row" class="compose-row">
+            <!-- Il cassetto delle app si apre da qui, non dal dock: `#input-bar`
+                 c'è in ogni geometria, mentre lo slot del dock sparisce sotto i
+                 500 px di viewport (v. D1 in .agent/apps-drawer-plan.md). -->
+            <button id="btn-launcher" class="compose-launcher" type="button"
+                    aria-haspopup="dialog" aria-expanded="false"
+                    title="Apri app" data-i18n-title="launcher.open"
+                    aria-label="Apri app" data-i18n-aria="launcher.open"><i class="ti ti-apps"></i></button>
             <div class="compose-pill">
               <textarea id="chat-input" placeholder="Chiedi qualcosa…" rows="1" aria-label="Messaggio" data-i18n-placeholder="chat.placeholder" data-i18n-aria="chat.message"></textarea>
               <div class="input-actions" id="secondary-actions">
@@ -328,6 +335,27 @@
     <button class="oc-sheet-cancel" id="jenny-app-sheet-cancel" data-i18n="common.cancel">Annulla</button>
   </div>
 </dialog>
+
+<!-- LAUNCHER SHEET — il cassetto delle app.
+     Vive qui, fuori da `.app`, come `.app-frame-overlay`: così copre anche il
+     dock, resta fuori dall'inerzia che DrawerManager mette allo sfondo, e una
+     mini-app aperta *dal* foglio gli si sovrappone senza trucchi di z-index.
+     Contenuto costruito da assets/mobile-launcher.js. -->
+<div class="launcher-scrim" id="launcher-scrim" aria-hidden="true"></div>
+<div class="launcher-sheet" id="launcher-sheet" role="dialog" aria-modal="true"
+     aria-labelledby="launcher-title" aria-hidden="true">
+  <!-- Passo 5: da qui (maniglia + riga delle rotaie) si trascinerà il foglio.
+       La lista mai — v. D7. -->
+  <div class="launcher-handle-row" id="launcher-handle-row">
+    <div class="launcher-handle"></div>
+  </div>
+  <div class="launcher-head">
+    <span class="launcher-title" id="launcher-title" data-i18n="launcher.title">Apri</span>
+    <button class="launcher-close" id="launcher-close" type="button"
+            aria-label="Chiudi" data-i18n-aria="common.close"><i class="ti ti-x"></i></button>
+  </div>
+  <div class="launcher-list" id="launcher-list"></div>
+</div>
 
 <!-- Wiki feedback popover -->
 <div class="wiki-popover hidden" id="wiki-feedback-popover">
