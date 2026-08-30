@@ -1,9 +1,15 @@
 /** Mobile Launcher — il foglio che sale dal composer.
  *
- *  Passi 1, 2 e 3 del piano `.agent/apps-drawer-plan.md`: l'impianto di
- *  navigazione, le tre liste vere, e il campo di ricerca con sotto la lista
- *  ordinata e attivabile col tocco. Restano fuori i tasti (passo 4: ⏎, frecce,
- *  rotella, type-ahead) e la geometria (passo 5).
+ *  Passi 1, 2, 3 e 4 del piano `.agent/apps-drawer-plan.md`: l'impianto di
+ *  navigazione, le tre liste vere, il campo di ricerca con sotto la lista
+ *  ordinata e attivabile col tocco, e **il modo di usarlo senza toccare lo
+ *  schermo** — type-ahead, frecce, rotella, ⏎ e ⇧⏎. Resta fuori la geometria
+ *  (passo 5).
+ *
+ *  Il passo 4 è la ragione per cui la direzione *Digita* è stata scelta su un
+ *  telefono con tastiera fisica: due tasti invece di sei schermate. Da qui in
+ *  poi il foglio si usa senza alzare un dito — si scrive, si sceglie con le
+ *  frecce o con la rotella, si apre con ⏎.
  *
  *  Il foglio non è una vista: non sta in `controllerFactories`, non ha un
  *  `view-*` e non tocca la history. È un **livello** di
@@ -22,6 +28,7 @@
 
 import { i18n } from './shared/i18n.js';
 import { UsageRanking, rankEntries } from './shared/launcher-rank.js';
+import { isTypeAheadKey } from './shared/type-ahead.js';
 
 /* Etichetta del tipo, a destra della riga. Chiavi proprie del cassetto e non
    quelle della scheda: lì i titoli sono intestazioni di sezione (plurali,
@@ -31,6 +38,13 @@ const KIND_LABEL_KEYS = {
   jenny: 'launcher.kindJennyApp',
   android: 'launcher.kindAndroidApp',
 };
+
+/* Quanti pixel di rotella valgono un passo di selezione, quando l'evento li
+   conta in pixel (`deltaMode === 0`). Circa l'altezza di una riga: così la
+   lista sotto la selezione si muove alla stessa velocità con cui si muoverebbe
+   scorrendo, e non c'è un secondo ritmo da imparare. Con `deltaMode` a righe o
+   a pagine il valore non si usa: lì l'unità è già un passo. */
+const WHEEL_PIXELS_PER_STEP = 24;
 
 export class LauncherController {
   /** @param {object} app istanza di MobileApp (per il ritorno del fuoco). */
@@ -72,6 +86,27 @@ export class LauncherController {
        cambia (una app che si rompe, un nome che cambia lingua) si riconosce e
        si ricostruisce, e solo lei. */
     this._rows = new Map();
+    /* Le chiavi effettivamente in lista, nell'ordine in cui si vedono. È su
+       questo che si muovono ↑↓ e la rotella: leggere il DOM a ogni passo
+       darebbe la stessa risposta al prezzo di un layout, e la rotella di passi
+       ne produce a raffica. Scritto solo da `_renderList()`. */
+    this._rankedKeys = [];
+    // La riga selezionata, per chiave e non per indice: fra un tasto e l'altro
+    // la lista può essersi riordinata (un `apps_list_changed`, una app
+    // disinstallata), e un indice punterebbe a un'altra voce senza dirlo.
+    this._selectedKey = null;
+    /* La selezione è stata spostata da chi guarda, o sta solo seguendo la cima?
+       Le due cose vanno distinte perché un ricaricamento dei dati deve
+       rispettare una scelta e sovrascrivere un default — v. `_renderList`. */
+    this._selectionPinned = false;
+    /* Gli `id` delle righe, che servono ad `aria-activedescendant` e devono
+       quindi esistere nel DOM ed essere unici. Un id derivato dalla chiave
+       sarebbe più leggibile ma la chiave viene da fuori (nomi di pacchetto,
+       slug, nomi di skill): un contatore non ha caratteri da ripulire e non
+       collide. L'id vive quanto la riga in cache, cioè resta stabile. */
+    this._rowSeq = 0;
+    // Pixel di rotella non ancora spesi — v. `_onWheel`.
+    this._wheelAcc = 0;
     // Frequenza e recenza per chiave (D9). Costruito qui e non alla prima
     // apertura: leggere una riga di localStorage costa meno di decidere se
     // leggerla, e il ranking serve già al primo disegno.
@@ -96,12 +131,39 @@ export class LauncherController {
     /* Attivazione: un solo ascoltatore sulla lista, non uno per riga.
        Le righe sono centinaia e si rimettono in fila a ogni tasto; appenderci
        un listener ciascuna li moltiplicherebbe per il numero di ricostruzioni.
-       Il `click` sintetizzato da Invio/Spazio passa di qui come il tocco, così
-       l'attivazione resta un percorso solo (stessa scelta di `wireEvents`). */
+       ⏎ e Spazio non passano di qui: un `<div role="option">` non riceve il
+       click sintetizzato che un `<button>` vero riceverebbe, e darlo per
+       scontato era il difetto silenzioso del passo 3 — la riga sembrava
+       attivabile da tastiera e non lo era. Li gestisce `_onKeyDown`, che
+       finisce comunque in `_activate`: un percorso solo, dichiarato. */
     this.list?.addEventListener('click', (e) => {
       const row = e.target.closest?.('.launcher-row');
       if (row?.dataset.key) this._activate(row.dataset.key);
     });
+
+    /* Il fuoco che entra in una riga *è* una selezione: chi arriva con Tab o
+       col dito di TalkBack e poi preme ⏎ deve aprire quella riga, non quella
+       evidenziata prima. Un solo ascoltatore, per la stessa ragione del click:
+       `focusin` sale, `focus` no. */
+    this.list?.addEventListener('focusin', (e) => {
+      const row = e.target.closest?.('.launcher-row');
+      if (!row?.dataset.key) return;
+      this._selectionPinned = true;
+      this._select(row.dataset.key);
+    });
+
+    /* I tasti si ascoltano sul documento, non sul foglio: all'apertura il fuoco
+       è sul foglio, ma può finire sul `body` (una riga che sparisce sotto il
+       fuoco, un ridisegno) e da lì un ascoltatore locale non sentirebbe più
+       niente — cioè proprio quando il type-ahead serve. Lo sfondo è inerte, e
+       la guardia di `_onKeyDown` fa il resto. */
+    document.addEventListener('keydown', (e) => this._onKeyDown(e));
+
+    /* La rotella. `passive: false` perché il gesto qui **sostituisce** lo
+       scorrimento invece di accompagnarlo: si muove la selezione, e la
+       selezione si porta dietro la lista. Sul foglio intero e non sulla sola
+       lista, così funziona anche partendo dalla riga di ricerca. */
+    this.sheet.addEventListener('wheel', (e) => this._onWheel(e), { passive: false });
 
     /* I nomi dei tipi cambiano con la lingua, e questa lista la costruisce JS:
        `_applyStaticTranslations()` passa sui `data-i18n` che *sono già in
@@ -132,6 +194,19 @@ export class LauncherController {
        chiesto niente — e il costo di ricominciare è una parola, mentre il costo
        di non capire perché manca tutto è un cassetto che sembra rotto. */
     if (this.search) this.search.value = '';
+    /* E dalla prima riga. La selezione **non** è uno stato che sopravvive alla
+       chiusura, e per una ragione più forte di quella del campo: ⏎ appena
+       aperto aprirebbe quel che era evidenziato l'altra volta — cioè
+       lancerebbe qualcosa che nessuno ha scelto adesso. Azzerata qui e non in
+       `close()`, così la riga resta evidenziata mentre il foglio scende.
+
+       Via `_select(null)` e non azzerando il campo a mano: la riga di ieri è
+       ancora in cache **col suo `aria-selected` e la sua classe addosso**, e
+       dimenticarne solo la chiave la lascerebbe lì marcata per sempre. Visto
+       girare: due righe selezionate insieme nell'albero di accessibilità, e
+       nessuna delle due sbagliata a guardare il DOM. */
+    this._select(null);
+    this._selectionPinned = false;
     // Prima di mostrarlo: la lista è già quella giusta quando il foglio arriva
     // a fine corsa, e non c'è un fotogramma con dentro l'elenco di ieri.
     this._attachSource();
@@ -140,16 +215,26 @@ export class LauncherController {
     this.sheet.setAttribute('aria-hidden', 'false');
     this.scrim?.classList.add('open');
     this.trigger?.setAttribute('aria-expanded', 'true');
+    // Il campo è un `combobox` e la sua lista è a schermo per tutto il tempo in
+    // cui il foglio lo è: non c'è un popup che si apre e si chiude a parte.
+    this.search?.setAttribute('aria-expanded', 'true');
     // Lo sfondo diventa inerte in un colpo solo: niente fuoco, niente tap,
     // niente lettura TalkBack. Il foglio vive *fuori* da `.app` (in fondo al
     // <body>, come .app-frame-overlay) proprio perché questa riga possa essere
     // una riga sola — e perché una mini-app aperta sopra di esso resti viva.
     this._setBackgroundInert(true);
-    // Il fuoco entra nel foglio, altrimenti Tab ripartirebbe da dentro il
-    // contenuto appena reso inerte, cioè da nessuna parte. Sul *campo* di
-    // ricerca non ci va: alzerebbe la tastiera software e si mangerebbe il
-    // foglio (D6, type-ahead invece di autofocus — il type-ahead è del passo 4).
-    this.closeBtn?.focus?.();
+    /* Il fuoco entra nel foglio, altrimenti Tab ripartirebbe da dentro il
+       contenuto appena reso inerte, cioè da nessuna parte. Sul *campo* di
+       ricerca non ci va: alzerebbe la tastiera software e si mangerebbe il
+       foglio (D6, type-ahead invece di autofocus).
+
+       Va sul **contenitore** (`tabindex="-1"`, `role="dialog"`) e non più sulla
+       ✕ del passo 1, per due ragioni che il passo 4 ha reso vere insieme: ⏎
+       appena aperto deve aprire il primo risultato, e con il fuoco su un
+       pulsante quel ⏎ chiudeva il foglio invece; e TalkBack, entrando dal
+       dialog, ne annuncia il titolo prima del contenuto anziché leggere
+       "Chiudi" come prima cosa di un cassetto appena aperto. */
+    this.sheet.focus?.();
   }
 
   /** Chiusura completa. Idempotente: Home la chiama comunque. */
@@ -160,6 +245,7 @@ export class LauncherController {
     this.sheet.setAttribute('aria-hidden', 'true');
     this.scrim?.classList.remove('open');
     this.trigger?.setAttribute('aria-expanded', 'false');
+    this.search?.setAttribute('aria-expanded', 'false');
     this._setBackgroundInert(false);
     const previous = this._lastFocus;
     this._lastFocus = null;
@@ -168,9 +254,25 @@ export class LauncherController {
     if (previous && previous.isConnected) previous.focus?.();
   }
 
-  /** Semantica del tasto Indietro. Oggi coincide con la chiusura; al passo 4
-   *  Esc pulirà prima il campo e chiuderà solo se già vuoto. */
+  /** Semantica del tasto Indietro — **e di Esc**, che non ha un handler
+   *  proprio: `keyboard.register('escape')` lo manda in `handleHardwareBack()`,
+   *  cioè nella stessa catena di livelli. Una decisione sola per due tasti, che
+   *  sul Titan 2 stanno entrambi sotto le dita.
+   *
+   *  Un passo alla volta (4.4): prima si svuota la ricerca, poi si chiude. È
+   *  l'invariante di `handleHardwareBack` — *una pressione, un cambiamento
+   *  visibile* — e svuotare il campo lo è: la lista torna quella intera. Senza
+   *  questo, una query digitata male costerebbe chiudere e riaprire il foglio,
+   *  che è la cosa che il cassetto esiste per non far fare.
+   *
+   *  A campo vuoto il comportamento è quello del passo 1 (1.6): chiude.
+   */
   dismiss() {
+    if (this.search?.value) {
+      this.search.value = '';
+      this._onQueryChanged();
+      return;
+    }
     this.close();
   }
 
@@ -259,6 +361,9 @@ export class LauncherController {
    *  niente** (difetto 07 del rilievo). Le righe sono già nel DOM: qui si
    *  spostano, e le escluse si staccano restando in cache. */
   _onQueryChanged() {
+    // Una query nuova è una domanda nuova: la risposta migliore torna in cima e
+    // l'evidenziazione con lei (v. la regola in `_renderList`).
+    this._selectionPinned = false;
     this._renderList();
   }
 
@@ -274,6 +379,9 @@ export class LauncherController {
     const query = this.search?.value || '';
     this._syncHeading(query);
     if (!this._entries.length) {
+      this._rankedKeys = [];
+      this._select(null);
+      this._setListRole(false);
       // Due stati vuoti diversi, non uno solo: "non c'è niente" e "non è
       // ancora arrivato niente" sono la stessa schermata nella scheda di oggi,
       // ed è un difetto noto (v. 6.2). Qui si parte già distinti.
@@ -283,6 +391,9 @@ export class LauncherController {
     }
     const ranked = rankEntries(this._entries, query, this._usage, i18n.locale);
     if (!ranked.length) {
+      this._rankedKeys = [];
+      this._select(null);
+      this._setListRole(false);
       // Terzo stato, distinto dai due di sopra: le voci ci sono, è la query a
       // non trovarle. Dirlo *con dentro la query* è la differenza fra "non c'è"
       // e "non c'è **questo**".
@@ -292,11 +403,208 @@ export class LauncherController {
     /* `replaceChildren` con i nodi già esistenti: quelli che restano vengono
        spostati, non ricreati, e quelli fuori dai risultati si staccano ma
        sopravvivono in `this._rows`. Una sola scrittura sul DOM per tasto. */
+    this._setListRole(true);
     this.list.replaceChildren(...ranked.map(entry => this._rows.get(entry.key).el));
     // La lista è stata riordinata sotto il dito: si riparte dall'alto, dove sta
     // il risultato migliore. Senza questo, dopo aver scorso e poi digitato si
     // resterebbe a metà di una lista che nel frattempo si è accorciata.
     this.list.scrollTop = 0;
+    this._rankedKeys = ranked.map(entry => entry.key);
+    /* Chi comanda la selezione: finché non l'ha spostata nessuno, **segue la
+       cima**; appena qualcuno la sposta (frecce, rotella, Tab) resta dov'è
+       finché la sua voce è in lista.
+
+       La distinzione non è teorica, ed è costata due difetti visti girare:
+       senza il pin, un `apps_list_changed` mentre si sceglie riporterebbe
+       l'evidenziazione in cima sotto le dita; **con** il pin e basta, invece,
+       la prima apertura resta incollata alla riga che era in cima quando c'erano
+       solo le skill — le app Android arrivano dopo, la lista si riordina, e ci
+       si ritrova evidenziata la dodicesima voce, fuori schermo, che è quella
+       che ⏎ aprirebbe.
+
+       Digitare **non** conserva il pin: si sta rifacendo la domanda, e la
+       risposta migliore è di nuovo in cima. È come si comporta ogni cassetto
+       che si digita, e l'alternativa è ⏎ che apre qualcosa che non è più il
+       primo risultato mentre scorre via dallo schermo.
+
+       Non c'è mai "niente selezionato" con delle righe a schermo: ⏎ deve avere
+       sempre una risposta, e "apre il primo se non hai scelto" sarebbe una
+       seconda regola invisibile. Meglio una evidenziata, che si vede. */
+    const keep = this._selectionPinned && this._rankedKeys.includes(this._selectedKey);
+    // `reveal` solo se si conserva: la lista è appena tornata in cima, e una
+    // selezione conservata va riportata sotto gli occhi di chi l'aveva scelta.
+    this._select(keep ? this._selectedKey : this._rankedKeys[0], keep);
+  }
+
+  /** Un `listbox` promette che i suoi figli siano `option`, e nei tre stati
+   *  vuoti il figlio è una frase. Tenere il ruolo anche allora farebbe
+   *  annunciare "elenco, 1 voce" davanti a un messaggio che voce non è; con
+   *  `presentation` il contenitore sparisce e resta il testo, che è tutto
+   *  quello che c'è da leggere. */
+  _setListRole(hasOptions) {
+    this.list.setAttribute('role', hasOptions ? 'listbox' : 'presentation');
+  }
+
+  /* ── Selezione ─────────────────────────────────────────────────────────── */
+
+  /** Sposta l'evidenziazione sulla riga `key`.
+   *
+   *  **Non muove il fuoco**, ed è la scelta centrale del passo 4: il fuoco
+   *  resta nel campo mentre la selezione scorre, così si continua a scrivere e
+   *  la tastiera software non si abbassa a ogni freccia. Chi legge lo schermo
+   *  lo sa lo stesso, perché il campo è un `combobox` e la riga attiva gliela
+   *  dice `aria-activedescendant`.
+   *
+   *  @param {string|null} key chiave della riga, o null per nessuna selezione.
+   *  @param {boolean} reveal portarla in vista (4.3) — falso quando la
+   *         selezione si sta solo riallineando a una lista appena riscritta,
+   *         che è già scorrere in cima.
+   */
+  _select(key, reveal = false) {
+    const previous = this._selectedKey && this._rows.get(this._selectedKey)?.el;
+    if (previous) {
+      previous.classList.remove('selected');
+      previous.setAttribute('aria-selected', 'false');
+    }
+    this._selectedKey = key || null;
+    const el = key ? this._rows.get(key)?.el : null;
+    if (!el) {
+      this._selectedKey = null;
+      this.search?.removeAttribute('aria-activedescendant');
+      return;
+    }
+    el.classList.add('selected');
+    el.setAttribute('aria-selected', 'true');
+    this.search?.setAttribute('aria-activedescendant', el.id);
+    /* `block: 'nearest'` scorre di quel tanto che basta a farla rientrare: con
+       'center' ogni passo rimescolerebbe la lista sotto gli occhi, e scendere
+       di una riga sposterebbe tutte le altre di mezza schermata. È la
+       differenza fra seguire la selezione e saltare. */
+    if (reveal) el.scrollIntoView({ block: 'nearest' });
+  }
+
+  /** ↑↓ e rotella: `step` righe più in basso (positivo) o più in alto. */
+  _moveSelection(step) {
+    const keys = this._rankedKeys;
+    if (!keys.length || !step) return;
+    const current = keys.indexOf(this._selectedKey);
+    /* Niente giro completo dalla coda alla testa: in una lista di settanta
+       voci il salto disorienta più di quanto aiuti, e la rotella — che di passi
+       ne produce a raffica — lo produrrebbe di continuo senza che nessuno
+       l'abbia chiesto. Ai capi ci si ferma. */
+    const next = Math.min(keys.length - 1, Math.max(0, (current < 0 ? 0 : current + step)));
+    this._selectionPinned = true;
+    this._select(keys[next], true);
+  }
+
+  /* ── Tastiera e rotella ────────────────────────────────────────────────── */
+
+  /** Il foglio ha diritto ai tasti adesso?
+   *
+   *  A foglio aperto, e solo se non c'è un livello **sopra** di lui: una
+   *  mini-app lanciata da qui, la scheda di una skill, la minichat. Il foglio
+   *  resta aperto sotto di loro (è quello che 1.7 e 3.7 hanno verificato), e
+   *  senza questa guardia continuerebbe a rispondere a frecce e ⏎ da dietro un
+   *  overlay — la stessa classe di difetto per cui la chat ha smesso di rubare
+   *  i caratteri (1.9), rovesciata.
+   */
+  _ownsKeys() {
+    return this._open && !this.app?.hasOverlayAbove?.('launcher');
+  }
+
+  _onKeyDown(e) {
+    if (!this._ownsKeys()) return;
+    const active = document.activeElement;
+
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      // Le frecce nel campo muoverebbero il cursore fra un capo e l'altro del
+      // testo: qui il testo è una riga sola e la lista è l'unica cosa lunga.
+      e.preventDefault();
+      this._moveSelection(e.key === 'ArrowDown' ? 1 : -1);
+      return;
+    }
+
+    if (e.key === 'Enter') {
+      /* Un pulsante che ha il fuoco (la ✕, la crocetta della ricerca) si
+         attiva da sé con ⏎, ed è quello che chi ci è arrivato con Tab si
+         aspetta. Rubargli la pressione per aprire una riga che non sta
+         guardando sarebbe l'unico punto del foglio in cui il fuoco non conta. */
+      if (active?.tagName === 'BUTTON') return;
+      e.preventDefault();
+      // ⇧⏎ apre la **scheda** del risultato, non il risultato: il foglio
+      // informativo da cui si disinstalla, si nasconde, si modifica. È la
+      // pressione lunga sulla cella, sotto forma di tasto.
+      this._activateSelected(e.shiftKey);
+      return;
+    }
+
+    /* Lo spazio su una riga che ha il fuoco la attiva: è quello che un `option`
+       promette a chi naviga con TalkBack o con Tab. Non entra in conflitto col
+       type-ahead, che lo scarta apposta (v. `shared/type-ahead.js`), né col
+       campo, dove lo spazio è testo e arriva qui con `active` di tipo INPUT. */
+    if (e.key === ' ' && active?.classList?.contains('launcher-row')) {
+      e.preventDefault();
+      this._activateSelected(e.shiftKey);
+      return;
+    }
+
+    /* Type-ahead (4.1, D6). Le guardie sono quelle della chat, alla lettera,
+       perché è lo stesso hardware: `shared/type-ahead.js`. `focus()` sincrono
+       dentro il keydown — Chromium recapita l'inserimento del carattere
+       all'elemento appena messo a fuoco, quindi il primo tasto non va perso. */
+    if (!isTypeAheadKey(e, active)) return;
+    this.search?.focus();
+  }
+
+  /** La rotella di scorrimento muove la selezione (4.3).
+   *
+   *  **Quali eventi produca la rotella del Titan 2 non è accertato**: potrebbe
+   *  essere `wheel`, potrebbero essere i codici delle frecce, potrebbe essere
+   *  altro, e sull'emulatore la rotella non c'è — quindi da qui non è
+   *  verificabile in nessun modo. Le due letture più probabili sono coperte
+   *  entrambe e portano allo stesso posto: `wheel` qui, ↑↓ in `_onKeyDown`.
+   *  Resta da leggere sul telefono vero (v. il piano, «Cosa NON è stabilito»).
+   *
+   *  Il gesto **sostituisce** lo scorrimento invece di accompagnarlo: si muove
+   *  la selezione, e la selezione si porta dietro la lista con `scrollIntoView`.
+   *  Due cose che si muovono con lo stesso gesto — la lista sotto e la
+   *  selezione dentro — sarebbero due velocità da inseguire con l'occhio.
+   */
+  _onWheel(e) {
+    if (!this._ownsKeys() || !e.deltaY) return;
+    e.preventDefault();
+    // `deltaMode`: 0 = pixel, 1 = righe, 2 = pagine. Fuori dai pixel l'unità è
+    // già un passo e non c'è niente da accumulare.
+    if (e.deltaMode !== 0) {
+      this._wheelAcc = 0;
+      this._moveSelection(Math.trunc(e.deltaY) || Math.sign(e.deltaY));
+      return;
+    }
+    // Un cambio di verso azzera il residuo: altrimenti la prima passata
+    // all'indietro spenderebbe l'avanzo di quella in avanti e sembrerebbe
+    // ignorata.
+    if (Math.sign(e.deltaY) !== Math.sign(this._wheelAcc)) this._wheelAcc = 0;
+    this._wheelAcc += e.deltaY;
+    const steps = Math.trunc(this._wheelAcc / WHEEL_PIXELS_PER_STEP);
+    if (!steps) return;
+    this._wheelAcc -= steps * WHEEL_PIXELS_PER_STEP;
+    this._moveSelection(steps);
+  }
+
+  /** ⏎ / ⇧⏎ / Spazio: apre la voce selezionata, o la sua scheda. */
+  _activateSelected(wantsDetail) {
+    const key = this._selectedKey;
+    if (!key) return;
+    if (!wantsDetail) {
+      this._activate(key);
+      return;
+    }
+    const entry = this._entries.find(item => item.key === key);
+    if (!entry) return;
+    /* La scheda **non** conta come uso: è il posto dove si va per disinstallare
+       o per capire cosa sia una voce, e contarla farebbe salire in classifica
+       proprio le app di cui si dubita. Il ranking misura gli avvii. */
+    this._apps?.detailEntry(entry);
   }
 
   /** Il titolo del foglio dice in che ordine si sta guardando: a campo vuoto è
@@ -353,9 +661,27 @@ export class LauncherController {
     row.dataset.key = entry.key;
     /* Semantica giusta dalla nascita, non aggiunta dopo: le celle della scheda
        sono `<div>` a cui `wireEvents` appiccica `tabindex`/`role` a ogni
-       ridisegno. Qui la riga *è* un pulsante per TalkBack e per Tab, e il passo
-       4 ci troverà già il terreno pronto. */
-    row.setAttribute('role', 'button');
+       ridisegno (`mobile-apps.js`), ed è un rattoppo.
+
+       `option` e non `button` (4.5): una lista di risultati con una selezione
+       attiva è un `listbox` — l'elenco lo dichiara, la riga ne è una voce, e
+       `aria-selected` dice **quale**. Con `role="button"` su ogni riga quella
+       selezione non avrebbe modo di esistere per chi legge lo schermo: si
+       sentirebbero settanta pulsanti tutti uguali, e l'evidenziazione sarebbe
+       un colore e basta.
+
+       `tabindex="0"` su *tutte*, non solo sulla selezionata: il pattern con
+       fuoco mobile (`roving tabindex`) darebbe una sola fermata a Tab, e su
+       Android il gesto di scorrimento di TalkBack passa per gli elementi
+       focalizzabili. Le righe devono restare raggiungibili una per una. Chi
+       arriva col fuoco su una riga la seleziona (v. l'ascoltatore `focusin`),
+       così le due strade non si contraddicono mai.
+
+       L'`id` serve ad `aria-activedescendant`: senza, il campo non avrebbe come
+       nominare la riga attiva. */
+    row.id = `launcher-opt-${++this._rowSeq}`;
+    row.setAttribute('role', 'option');
+    row.setAttribute('aria-selected', 'false');
     row.setAttribute('tabindex', '0');
 
     const iconWrap = document.createElement('div');
@@ -372,6 +698,13 @@ export class LauncherController {
     } else {
       const glyph = document.createElement('i');
       glyph.className = `ti ${entry.glyph || 'ti-apps'}`;
+      /* Un glifo Tabler è un carattere della zona a uso privato dentro un
+         font: senza questo, il nome accessibile della riga comincia con
+         `` e TalkBack lo legge prima del nome. Misurato nell'albero di
+         accessibilità della WebView, dove la riga di una skill si annunciava
+         con un carattere di spazzatura davanti. L'icona di una app Android non
+         ha il problema perché è una `<img alt="">`, che non contribuisce. */
+      glyph.setAttribute('aria-hidden', 'true');
       iconWrap.appendChild(glyph);
     }
     row.appendChild(iconWrap);
@@ -409,6 +742,12 @@ export class LauncherController {
       const server = document.createElement('i');
       server.className = 'ti ti-cloud launcher-row-server';
       server.title = i18n.t('launcher.hasServer');
+      /* Questo glifo, a differenza di quello dell'icona, **porta
+         informazione**: non si nasconde, si nomina. Con `role="img"` e
+         un'etichetta il carattere della zona a uso privato non arriva a
+         TalkBack, che legge la frase al suo posto. */
+      server.setAttribute('role', 'img');
+      server.setAttribute('aria-label', i18n.t('launcher.hasServer'));
       row.appendChild(server);
     }
 

@@ -343,7 +343,7 @@
      Contenuto costruito da assets/mobile-launcher.js. -->
 <div class="launcher-scrim" id="launcher-scrim" aria-hidden="true"></div>
 <div class="launcher-sheet" id="launcher-sheet" role="dialog" aria-modal="true"
-     aria-labelledby="launcher-title" aria-hidden="true">
+     aria-labelledby="launcher-title" aria-hidden="true" tabindex="-1">
   <!-- Passo 5: da qui (maniglia + riga delle rotaie) si trascinerà il foglio.
        La lista mai — v. D7. -->
   <div class="launcher-handle-row" id="launcher-handle-row">
@@ -363,13 +363,23 @@
     <i class="ti ti-search launcher-search-icon"></i>
     <input class="launcher-search" id="launcher-search" type="text"
            autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false"
-           enterkeyhint="go" aria-controls="launcher-list"
+           enterkeyhint="go" role="combobox" aria-controls="launcher-list"
+           aria-expanded="false" aria-autocomplete="list" aria-haspopup="listbox"
            placeholder="Cerca app, skill…" data-i18n-placeholder="launcher.searchPlaceholder"
            aria-label="Cerca app, skill…" data-i18n-aria="launcher.searchPlaceholder">
     <button class="launcher-search-clear" id="launcher-search-clear" type="button"
             aria-label="Pulisci" data-i18n-aria="launcher.clearSearch"><i class="ti ti-x"></i></button>
   </div>
-  <div class="launcher-list" id="launcher-list"></div>
+  <!-- Passo 4 — la semantica giusta dalla nascita (4.5). La lista è un
+       `listbox` e le righe sono `option`: una lista di risultati con una
+       selezione attiva è quello, non un mucchio di pulsanti. Il campo è il
+       `combobox` che la governa, e la riga selezionata gliela dice
+       `aria-activedescendant` (scritto da JS) — così le frecce muovono la
+       selezione senza spostare il fuoco, che è ciò che tiene il campo
+       scrivibile mentre si scorre. Le righe restano comunque focalizzabili
+       una per una: con TalkBack ci si arriva a scorrimento, non a frecce. -->
+  <div class="launcher-list" id="launcher-list" role="listbox"
+       aria-label="Risultati" data-i18n-aria="launcher.resultsList"></div>
 </div>
 
 <!-- Wiki feedback popover -->

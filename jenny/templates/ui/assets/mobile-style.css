@@ -3296,6 +3296,21 @@ body {
   border-color: rgba(var(--accent-rgb), 0.7);
   background: var(--overlay-strong);
 }
+/* La riga **selezionata** (passo 4): quella che ⏎ apre. Non è il fuoco — il
+   fuoco resta nel campo mentre frecce e rotella muovono questa, ed è ciò che
+   tiene il campo scrivibile durante la scelta — quindi ha un segno proprio e
+   più marcato del `:focus-visible` qui sopra: la barretta d'accento a sinistra
+   si vede a colpo d'occhio anche mentre la lista scorre sotto la selezione.
+   `border-left` e non `box-shadow`: la lista scrolla, e un'ombra su un
+   contenitore che scorre è una ripittura in più per fotogramma. */
+.launcher-row.selected {
+  border-color: rgba(var(--accent-rgb), 0.55);
+  border-left: 2.5px solid rgb(var(--accent-rgb));
+  background: var(--overlay-strong);
+  /* I 2 px in più del bordo sinistro si tolgono dal padding: la riga non si
+     allarga e le icone restano incolonnate con quelle non selezionate. */
+  padding-left: 10px;
+}
 /* Icona piccola a sinistra — 22 px, contro il 22% di cella che la griglia di
    oggi spende per la stessa informazione (difetto 03 del rilievo). Taglia fissa
    perché le sorgenti sono due, un PNG base64 dal PackageManager e un glifo

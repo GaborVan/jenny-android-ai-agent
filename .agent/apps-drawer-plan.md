@@ -126,6 +126,31 @@ spazio, niente combo con modificatori, niente furto se si sta già scrivendo
 altrove. Sul Titan 2 questo *è* l'interazione principale; altrove il foglio resta
 un cassetto da toccare.
 
+> **Girato il 30/08/2026 col passo 4.** Le quattro guardie non sono state
+> riscritte: sono state **estratte** in `assets/shared/type-ahead.js`, un modulo
+> puro (`activeElement` si passa, non si legge da `document`) che ora ha due
+> chiamanti — `ChatController._maybeTypeAheadFocus` e il cassetto — e cinque
+> test propri sotto node. Il caso che le motiva è quello del `keydown`
+> con `key` undefined delle tastiere fisiche, ed è il primo test del file.
+>
+> **D6 ha prodotto una seconda decisione che il piano non aveva preso.** Se il
+> fuoco all'apertura non va sul campo, *dove* va? Il passo 1 lo metteva sulla
+> ✕; col ⏎ del passo 4 quella scelta si è rivelata sbagliata — con un pulsante
+> a fuoco, ⏎ chiude il foglio invece di aprire il primo risultato, e "due tasti
+> invece di sei schermate" diventa "due tasti e non succede niente". Ora va sul
+> **contenitore** (`role="dialog"`, `tabindex="-1"`), che è anche ciò che fa
+> annunciare a TalkBack il titolo del foglio invece della parola "Chiudi".
+>
+> **E una terza, che si è vista solo facendola girare: chi comanda la
+> selezione.** Finché nessuno la sposta, segue la cima; si "pinna" su un'azione
+> vera (frecce, rotella, Tab) e resta lì finché la sua voce è in lista;
+> digitare la spinna, perché una query nuova è una domanda nuova. Senza la
+> distinzione si ottiene uno dei due difetti opposti, entrambi osservati: la
+> selezione riportata in cima sotto le dita da un `apps_list_changed`, oppure —
+> col pin sempre acceso — incollata alla riga che era in cima al *primo*
+> disegno, quando c'erano solo le skill e le app Android non erano ancora
+> arrivate. Nel secondo caso ⏎ apriva la dodicesima voce, fuori schermo.
+
 **D7 — Trascina solo la maniglia.** Il foglio si chiude trascinando la maniglia e
 la riga delle rotaie. La lista mai. Nessun axis-lock, nessuna soglia di velocità
 da tarare: decide l'origine del tocco, e decide sempre allo stesso modo.
@@ -226,9 +251,20 @@ poi per frequenza e recenza; a campo vuoto, «Recenti». Righe con nome +
 descrizione, e il tipo a destra. **E le righe si attivano col tocco**: un
 cassetto le cui righe non fanno niente non si può provare davvero.
 
-**Passo 4 — tastiera e rotella** *(mezza giornata)*
+**Passo 4 — tastiera e rotella** *(mezza giornata)* — **girato il 30/08/2026**
 Type-ahead, ↑↓ e rotella muovono la selezione, ⏎ apre, ⇧⏎ apre la scheda del
-risultato, Esc pulisce e poi chiude.
+risultato, Esc pulisce e poi chiude. **Della rotella resta ignoto quali eventi
+produca sul Titan 2**: v. «Cosa NON è stabilito».
+
+> **Esc e Indietro sono lo stesso tasto, e il piano non lo diceva.**
+> `keyboard.register('escape')` manda Esc in `handleHardwareBack()`, cioè nella
+> catena dei livelli: la semantica in due tappe di 4.4 (prima svuota la
+> ricerca, poi chiude) si scrive quindi **una volta sola**, in
+> `LauncherController.dismiss()`, e vale per entrambi. Verificato su tutti e
+> due. Conseguenza che va tenuta insieme: da qui `dismiss` e `close` non
+> coincidono più, quindi il livello `launcher` deve dichiarare anche un `close`
+> proprio — il default `layer.close || layer.dismiss` farebbe fare a Home due
+> giri invece di uno, e il conto di 1.8 lo direbbe.
 
 **Passo 5 — geometria e gesture** *(mezza giornata)*
 Maniglia trascinabile, inset misurato dal nativo, foglio che si ridimensiona
@@ -317,6 +353,18 @@ non ha quella dell'emulatore: Unihertz ci mette la propria, su un altro livello
 di Android. Il valore misurato serve a dimensionare il CSS e a scrivere il metodo
 del bridge; **non** autorizza a cablare `8px` da nessuna parte. Il punto di D8
 resta intero: si legge dal nativo a runtime, perché il numero è del dispositivo.
+
+**Non si sa quali eventi produca la rotella del Titan 2.** Potrebbe essere
+`wheel`, potrebbero essere i codici delle frecce, potrebbe essere altro — e
+sull'emulatore la rotella **non c'è**, quindi da qui la domanda non si chiude in
+nessun modo. Il passo 4 copre le due letture più probabili, che portano allo
+stesso posto: ↑↓ (provate con tasti veri) e `wheel` (`LauncherController._onWheel`,
+fatto girare attraverso la pipeline di input di Chromium — non con un dito su una
+rotella). Se la rotella emette frecce funziona già; se emette `wheel`, pure.
+**Quale delle due sia vera si legge solo sul telefono**, ed è una riga di lavoro
+per il passo 7: aprire il foglio e girare la rotella guardando un registratore di
+`keydown`/`wheel`. Se non fosse nessuna delle due, il posto dove aggiungerla è
+uno solo — `_moveSelection`, che è già l'unico modo di muovere la selezione.
 
 ~~**Non si sa se `goHome()` chiuda il foglio in modo pulito.**~~ **Chiuso il
 30/08/2026 col passo 1: una chiamata, non otto.** Il rischio era reale — il ciclo

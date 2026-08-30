@@ -284,6 +284,7 @@ _UI_MANIFEST = [
     "assets/shared/telegram-pairing.js",
     "assets/shared/theme.js",
     "assets/shared/tree-renderer.js",
+    "assets/shared/type-ahead.js",
     "assets/shared/utils.js",
     "assets/shared/wiki-search.js",
     "assets/shared/ws-manager.js",

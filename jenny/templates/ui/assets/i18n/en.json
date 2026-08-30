@@ -487,7 +487,8 @@
     "searchPlaceholder": "Search apps, skills…",
     "clearSearch": "Clear search",
     "noResults": "No results for “{query}”.",
-    "hasServer": "Has its own server"
+    "hasServer": "Has its own server",
+    "resultsList": "Results"
   },
   "apps": {
     "jennyApps": "Jenny Apps",

@@ -320,6 +320,24 @@ export class AppsController {
     else this._openSkillFile(entry.id);
   }
 
+  /** Apre la *scheda* di una voce del cassetto: il foglio informativo, non la
+   *  cosa. È ⇧⏎ dal cassetto, ed è la pressione lunga dalla cella della
+   *  griglia — cioè la stessa strada già battuta, per la stessa ragione di
+   *  `activateEntry`: due copie della scelta divergerebbero al primo caso
+   *  particolare.
+   *
+   *  Le tre schede sono `<dialog>` aperte con `showModal()`, quindi vivono nel
+   *  livello `dialog`, che sta **sopra** `launcher`: si sovrappongono al foglio
+   *  e Indietro chiude prima loro, esattamente come la scheda di una skill
+   *  locked aperta col tocco (3.7).
+   */
+  detailEntry(entry) {
+    if (!entry) return;
+    if (entry.kind === 'android') this.showAndroidAppSheet(entry.id);
+    else if (entry.kind === 'jenny') this.showJennyAppSheet(entry.id);
+    else this.showSkillSheet(entry.id);
+  }
+
   render() {
     /* Prima del ritorno anticipato, e prima di toccare il DOM della scheda: il
        cassetto legge queste stesse liste anche quando `view-apps` non è mai

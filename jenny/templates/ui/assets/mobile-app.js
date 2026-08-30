@@ -482,6 +482,14 @@ class MobileApp {
         name: 'launcher',
         present: () => this.launcher.isOpen(),
         dismiss: () => { this.launcher.dismiss(); },
+        /* Dal passo 4 `dismiss` e `close` **non** coincidono più, e il default
+           `layer.close || layer.dismiss` non basta: Indietro (ed Esc, stessa
+           catena) svuota prima la ricerca e chiude solo a campo vuoto — due
+           passi, che sono giusti per una pressione dell'utente e sbagliati per
+           Home, che smonta e basta. Senza questa riga il ciclo di
+           `_dismissAllOverlays` arriverebbe comunque in fondo, ma in due giri
+           invece di uno: il conto di 1.8 lo direbbe. */
+        close: () => { this.launcher.close(); },
       },
       {
         name: 'drawer',
@@ -491,9 +499,23 @@ class MobileApp {
     ];
   }
 
-  /** True se sopra la vista corrente c'è un overlay di qualunque livello. */
-  hasOverlayAbove() {
-    return this._overlayLayers().some((layer) => layer.present());
+  /** True se sopra la vista corrente c'è un overlay.
+   *
+   *  Con `belowLayer` la domanda diventa "c'è un overlay sopra *questo*
+   *  livello?", e si guardano solo i livelli che lo precedono nella catena.
+   *  Serve a chi un livello ce l'ha: il cassetto ascolta i tasti a foglio
+   *  aperto, e senza il parametro si escluderebbe da solo — `present()` del
+   *  proprio livello è vero per definizione mentre è a schermo. Un nome
+   *  sconosciuto degrada sulla domanda originale, che è la risposta prudente:
+   *  meglio cedere i tasti che rubarli.
+   *
+   *  @param {string|null} belowLayer nome del livello di chi chiede.
+   */
+  hasOverlayAbove(belowLayer = null) {
+    const layers = this._overlayLayers();
+    const stop = belowLayer ? layers.findIndex((layer) => layer.name === belowLayer) : -1;
+    const above = stop >= 0 ? layers.slice(0, stop) : layers;
+    return above.some((layer) => layer.present());
   }
 
   /* Congeda il <dialog> più in alto con la semantica di Esc: evento `cancel`

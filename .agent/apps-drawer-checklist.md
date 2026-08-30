@@ -110,11 +110,52 @@ modulo puro `jenny/templates/ui/assets/shared/launcher-rank.js` — aggiunto a
 
 ## Passo 4 — tastiera e rotella
 
-- [ ] **4.1** Type-ahead con le stesse guardie di `_maybeTypeAheadFocus` (no spazio, no modificatori, no furto se si scrive altrove)
-- [ ] **4.2** All'apertura il campo **non** ha il fuoco (verificato su un dispositivo con tastiera software: non deve salire niente) — *scritto col passo 3 (`open()` non tocca il campo, il fuoco va sulla ✕) ma non ancora provato sul telefono*
-- [ ] **4.3** ↑↓ e rotella muovono la selezione; la riga selezionata resta in vista
-- [ ] **4.4** ⏎ apre, ⇧⏎ apre la scheda del risultato, Esc pulisce il campo e — se già vuoto — chiude il foglio
-- [ ] **4.5** Le righe restano raggiungibili con Tab e annunciate da TalkBack (le celle di oggi sono `<div>` con `tabindex` aggiunto a mano: qui si parte con la semantica giusta)
+Girato il 30/08/2026 sullo stesso AVD `jenny_square`, build debug da
+`app:installDebug`. Tasti **veri** (`adb shell input keyevent`, `input text`,
+`input keycombination`), tocchi veri sulle coordinate lette a runtime, e — per
+la casella 4.5 — l'**albero di accessibilità della WebView** letto via CDP
+(`Accessibility.getPartialAXTree`), che è quello che TalkBack consuma, non gli
+attributi nel sorgente. Nessuna casella spuntata per ragionamento. Nuovo modulo
+puro `jenny/templates/ui/assets/shared/type-ahead.js` — aggiunto a
+`_UI_MANIFEST`.
+
+- [x] **4.1** Type-ahead con le guardie di `_maybeTypeAheadFocus`, **estratte** in `shared/type-ahead.js` e usate da entrambi i chiamanti (la chat non se le riscrive: `mobile-chat.js` ora la importa). Osservato col fuoco *fuori* dal campo e un registratore di `keydown` che attribuisce ogni evento: spazio consegnato come `key: " "` → campo non focalizzato e vuoto; `ctrl+A` consegnato come `Control` + `a`+ctrl → idem; `"cal"` → il campo prende il fuoco **e tiene tutti e tre i caratteri** (il primo non si perde), titolo → «Results», lista → la sola *Calendar*. Non-regressione della chat provata sul telefono: a foglio chiuso `"ciao"` finisce ancora nel composer. Cinque test sotto node in `tests/webui/test_type_ahead_client.py`
+- [x] **4.2** All'apertura il campo **non** ha il fuoco, e la tastiera software **non sale** — osservato sull'emulatore, che la tastiera software ce l'ha: dopo il tocco sul pulsante, `mInputShown=false`, `document.activeElement` = `launcher-sheet`, campo vuoto, e lo screenshot non mostra tasti. Il fuoco va sul **contenitore** e non più sulla ✕ del passo 1: con il fuoco su un pulsante il ⏎ di 4.4 chiudeva il foglio invece di aprire il primo risultato
+- [x] **4.3** ↑↓ muovono la selezione e il fuoco **non** si sposta (resta sul campo, o sul foglio): tre ↓ → *Calendar*→*Clock*, altri dieci → *llm-wiki*, due ↑ → *Google*, con `aria-activedescendant` che segue ogni passo. La riga resta in vista senza salti: `scrollTop` 0 → 103 → 680, e la riga selezionata dentro il riquadro della lista a ogni misura (`block: 'nearest'`; due ↑ che non richiedono scorrimento lasciano `scrollTop` fermo a 680). Rotella: v. la nota in fondo
+- [x] **4.4** ⏎ apre davvero — «clock» + ⏎ → `topResumedActivity` passa a `com.google.android.deskclock/…DeskClock`, il foglio si chiude e `launcher-usage` guadagna `android:com.google.android.deskclock`. ⇧⏎ (`input keycombination SHIFT_LEFT ENTER`) apre la **scheda**: con «wiki» selezionato *llm-wiki*, compare `skill-sheet` sopra il foglio (livelli `[dialog, launcher]`, screenshot) e Indietro chiude solo quella, con la query intatta. Esc pulisce e poi chiude: 27 righe e «Most used» tornano alla prima pressione, il foglio si chiude alla seconda, la terza (a foglio chiuso) non fa niente perché si è alla radice. **E il tasto Indietro fa le stesse due tappe**, misurato a parte
+- [x] **4.5** Semantica giusta dalla nascita: `role="listbox"` sulla lista, `role="option"` sulle righe, `combobox` sul campo. Letto nell'albero di accessibilità della WebView: campo = `combobox` con `expanded`, `hasPopup: listbox`, `autocomplete: list` e `activedescendant` → la riga selezionata; lista = `listbox` "Results"; righe = `option`, tutte `focusable`, `selected` su **una** sola. Tab le raggiunge una per una (foglio → ✕ → campo → riga → riga → …) e ogni riga che prende il fuoco **diventa** la selezione
+
+> **La rotella resta l'incognita di questo passo.** Il Titan 2 ha una rotella
+> fisica e **non si sa quali eventi emetta**: `wheel`, i codici delle frecce, o
+> altro. Sull'emulatore la rotella non c'è, quindi da qui la domanda non è
+> chiudibile in nessun modo. Sono coperte le due letture più probabili, che
+> portano allo stesso posto — ↑↓ (4.3, provate) e `wheel` (`_onWheel`). Il ramo
+> `wheel` è stato fatto girare per davvero, ma attraverso la pipeline di input
+> di Chromium (`Input.dispatchMouseEvent` con `type: "mouseWheel"`), non con un
+> dito su una rotella: `deltaY: 100` = 4 righe, tre passate = 12, due passate
+> all'indietro = 8, una tacca da 8 px non muove niente e tre sì (l'accumulatore
+> di `WHEEL_PIXELS_PER_STEP`). **Che sia `wheel` quello che la rotella produce
+> resta da leggere sul telefono vero** — v. «Cosa NON è stabilito» nel piano.
+
+**Tre difetti trovati facendo girare il passo, non leggendo il codice:**
+
+- La selezione **sopravviveva alla chiusura**: riaperto il foglio, era ancora
+  sulla riga dell'altra volta — e ⏎ appena aperto avrebbe *lanciato* qualcosa
+  che nessuno aveva scelto adesso. Ora `open()` chiama `_select(null)`.
+- Azzerare la sola chiave non bastava: la riga di prima resta in cache **con la
+  sua classe e il suo `aria-selected` addosso**, e nell'albero di accessibilità
+  si vedevano **due** righe selezionate insieme.
+- La selezione restava incollata alla riga che era in cima al **primo** disegno,
+  quando c'erano solo le skill: le app Android arrivano dopo, la lista si
+  riordina, e ci si ritrovava evidenziata la dodicesima voce, fuori schermo
+  (`selected: app-creator` con `first: Camera`). Ora la selezione *segue la
+  cima* finché non la si sposta, e si "pinna" solo su un'azione vera (frecce,
+  rotella, Tab). Digitare la spinna: una query nuova è una domanda nuova.
+
+E due che l'albero di accessibilità ha reso visibili, e che a leggere il DOM non
+si vedevano: il glifo Tabler di una skill contribuiva al nome accessibile della
+riga con un carattere della zona a uso privato (`aria-hidden` ora), mentre
+quello del server — che invece porta informazione — si nomina con `aria-label`.
 
 ## Passo 5 — geometria e gesture *(bloccato dal passo 0)*
 
