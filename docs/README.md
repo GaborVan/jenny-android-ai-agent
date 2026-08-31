@@ -34,7 +34,7 @@ Start here if you just want to install and use the app.
 | [Telegram bridge](using/telegram.md) | Pairing and using the optional Telegram bridge alongside the WebUI, and what does and doesn't work over it. |
 | [Location](using/location.md) | How device location is shared with the model as context, the two-gate permission model, and the privacy trade-off. |
 | [Backup and restore](using/backup.md) | Encrypted `.jbk` backups (for disaster recovery) vs. local workspace snapshots (a time machine), and how to restore either. |
-| [Phone app launcher](using/app-launcher.md) | The Android app launcher grid in the Apps tab: opening, hiding, and uninstalling installed apps from inside Jenny. |
+| [Phone app launcher](using/app-launcher.md) | The search drawer that opens your phone's apps, mini-apps and skills from the message box, and the Apps tab where you hide and uninstall them. |
 | [Wiki](using/wiki.md) | The knowledge base Jenny compiles on request, its graph view, and the audit/feedback workflow. |
 | [Slash commands](using/slash-commands.md) | Built-in commands like `/new` and `/stop`, where each one works (this conversation, the personal chat, or inside a project), the Commands chip that lists them, and how unrecognized commands fall through to the LLM. |
 | [Troubleshooting](using/troubleshooting.md) | Diagnosing common on-device symptoms — offline dot, silent errors, missed reminders, silent Telegram, blocked URLs. |

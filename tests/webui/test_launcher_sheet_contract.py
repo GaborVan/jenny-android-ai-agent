@@ -1,0 +1,678 @@
+"""Le invarianti della riga del cassetto, lette sul sorgente.
+
+Compagno di ``test_launcher_rank_client.py``, che prova il motore sotto node.
+Qui si guardano le tre proprietà del *foglio* che il passo 3 esiste per
+ottenere, e che si perderebbero senza rumore:
+
+* **difetto 02** — la ``description`` che il gateway manda per ogni skill e
+  ogni Jenny App arriva davvero alla riga, invece di essere buttata per un
+  nome troncato;
+* **difetto 05** — un guasto compare *nella* riga e su una riga sola, non in un
+  blocco che alza la cella (nella griglia di oggi l'errore porta la riga da 100
+  a 147 px);
+* **difetto 07** — digitare **non** ricostruisce l'elenco. È il difetto più
+  facile da reintrodurre: basta chiamare ``_render()`` invece di
+  ``_renderList()`` nell'ascoltatore del campo, e non si nota finché non si
+  prova su un telefono con 68 voci e 47 icone base64.
+
+Col passo 6 il file ha preso anche i *bordi*: che il foglio esista davvero nella
+pagina (nessun test lo diceva, e il controller esce in silenzio se i nodi non ci
+sono), la riga «Gestisci», i quattro stati vuoti distinti, l'avviso di elenco
+incompleto e il toast di un avvio fallito.
+
+Asserzioni sul sorgente, nello stile del resto di ``tests/webui/``.
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+ASSETS = ROOT / "jenny" / "templates" / "ui" / "assets"
+
+
+def _src(name: str) -> str:
+    return (ASSETS / name).read_text(encoding="utf-8")
+
+
+def _method(source: str, name: str) -> str:
+    body = re.search(rf"\n  (?:async )?{name}\([^)]*\)\s*\{{(.*?)\n  \}}", source, re.S)
+    assert body, f"{name} non trovato"
+    return body.group(1)
+
+
+# ── difetto 02 — la descrizione arriva alla riga ────────────────────────────
+
+def test_the_gateway_description_reaches_the_entry() -> None:
+    body = _method(_src("mobile-apps.js"), "launcherEntries")
+    assert "app.description" in body, "la description delle Jenny App si perde"
+    assert "app.description || ''" in body, "le Jenny App portano la loro description"
+    assert "description: app.packageName" in body, (
+        "le app Android non hanno description: al suo posto il pacchetto, che è "
+        "un dato vero e si cerca"
+    )
+    assert "app.packageName" in body, (
+        "le app Android non hanno descrizione: al suo posto va il pacchetto, "
+        "che è un dato vero — non un testo inventato"
+    )
+
+
+def test_the_row_prints_the_secondary_line() -> None:
+    body = _method(_src("mobile-launcher.js"), "_buildRow")
+    assert "launcher-row-desc" in body
+    assert "entry.problem || entry.description" in body, (
+        "un guasto ha la precedenza sulla descrizione: è quello che spiega cosa fare"
+    )
+
+
+def test_the_secondary_line_is_searchable() -> None:
+    """3.1: si cerca su nome **e** descrizione. Se `searchText` non arrivasse
+    alla voce, la ricerca tornerebbe a essere solo sui nomi senza fallire."""
+    body = _method(_src("mobile-apps.js"), "launcherEntries")
+    assert body.count("searchText:") == 2, (
+        "entrambe le categorie del cassetto devono essere cercabili "
+        "(le skill non ci sono più: v. test_no_skills_in_the_drawer)"
+    )
+
+
+# ── difetto 05 — il guasto non deforma la riga ──────────────────────────────
+
+def test_the_error_line_stays_on_one_line() -> None:
+    css = _src("mobile-style.css")
+    desc = re.search(r"\.launcher-row-desc \{(.*?)\}", css, re.S)
+    assert desc, ".launcher-row-desc non trovata"
+    assert "white-space: nowrap" in desc.group(1), (
+        "senza nowrap un errore lungo va a capo e alza la riga: è il difetto 05"
+    )
+    assert "text-overflow: ellipsis" in desc.group(1)
+    assert ".launcher-row-desc--problem" in css, "il guasto non ha un colore proprio"
+
+
+def test_the_error_is_rendered_as_text_not_html() -> None:
+    """I nomi e gli errori arrivano da manifest scritti da un LLM e dal
+    PackageManager: la riga si costruisce nel DOM, mai per concatenazione."""
+    source = _src("mobile-launcher.js")
+    assert "innerHTML" not in source, "il foglio non deve mai scrivere HTML grezzo"
+    body = _method(source, "_buildRow")
+    assert body.count("textContent") >= 3
+
+
+def test_the_icon_src_accepts_only_data_images() -> None:
+    body = _method(_src("mobile-launcher.js"), "_buildRow")
+    assert "entry.icon.startsWith('data:image/')" in body, (
+        "`src` accetta anche schemi che eseguono, e questo valore viene da fuori"
+    )
+
+
+# ── difetto 07 — digitare non ricostruisce l'elenco ─────────────────────────
+
+def test_typing_reorders_and_never_rebuilds() -> None:
+    source = _src("mobile-launcher.js")
+    typing = _method(source, "_onQueryChanged")
+    assert "_renderList()" in typing
+    assert "_render()" not in typing, (
+        "il percorso del tasto non deve passare da _render(): rileggerebbe le "
+        "liste e ricostruirebbe le righe a ogni carattere (difetto 07)"
+    )
+    assert "_syncEntries" not in typing
+
+
+def test_rows_are_cached_by_key_and_reused() -> None:
+    source = _src("mobile-launcher.js")
+    sync = _method(source, "_syncEntries")
+    assert "cached.sig === sig" in sync, (
+        "senza il confronto della firma ogni apps_list_changed butterebbe via "
+        "le icone base64 già decodificate per riscriverle identiche"
+    )
+    render = _method(source, "_renderList")
+    assert "this._rows.get(entry.key).el" in render, (
+        "la lista deve rimettere in fila i nodi esistenti, non crearne di nuovi"
+    )
+
+
+def test_the_list_is_written_once_per_keystroke() -> None:
+    render = _method(_src("mobile-launcher.js"), "_renderList")
+    assert render.count("this.list.replaceChildren") == 3, (
+        "una sola scrittura per ramo (caricamento, nessun risultato, risultati)"
+    )
+    assert "appendChild" not in render, "appendere una riga per volta è N reflow"
+
+
+# ── il tocco ────────────────────────────────────────────────────────────────
+
+def test_activation_is_delegated_to_one_listener_on_the_list() -> None:
+    """Le righe si rimettono in fila a ogni tasto: un listener per riga li
+    moltiplicherebbe per il numero di ricostruzioni."""
+    source = _src("mobile-launcher.js")
+    row = _method(source, "_buildRow")
+    assert "addEventListener" not in row
+    assert "this.list?.addEventListener('click'" in source
+
+
+def test_the_launch_policy_lives_with_the_data_owner() -> None:
+    """"Aprire" significa tre cose diverse nei tre spazi di nomi, e sono già
+    decise nella scheda: una seconda copia divergerebbe al primo caso
+    particolare (una skill locked, una Jenny App rotta)."""
+    apps = _src("mobile-apps.js")
+    body = _method(apps, "activateEntry")
+    assert "this.launchAndroidApp(entry.id)" in body
+    assert "this.openApp(entry.id)" in body
+    # La politica delle skill è una sola e vive in `_openSkill`, che è anche ciò
+    # che tocca la riga della stanza Skill: la scelta fra la scheda in sola
+    # lettura e l'editor del file non ha due copie da tenere allineate.
+    assert "this._openSkill(entry.id)" in body
+    policy = _method(apps, "_openSkill")
+    assert "showSkillSheet" in policy and "_openSkillFile" in policy
+    launcher = _method(_src("mobile-launcher.js"), "_activate")
+    assert "activateEntry(entry)" in launcher
+    assert "api." not in launcher, "il foglio non parla con la rete (D5)"
+
+
+def test_only_an_android_launch_closes_the_sheet() -> None:
+    """Una app Android porta via il task; una Jenny App si apre *sopra* il
+    foglio e Indietro ci riporta (1.7).
+
+    Dal passo 6.3 la condizione è **doppia**: solo `android`, e solo se l'avvio
+    è riuscito. Una riga stantia — pacchetto disinstallato o disabilitato fra il
+    caricamento e il tocco — fallisce, e chiudere il foglio su quel fallimento
+    lascerebbe davanti alla chat con un toast e senza il cassetto da cui
+    riprovare.
+    """
+    body = _method(_src("mobile-launcher.js"), "_activate")
+    assert "if (entry.kind !== 'android') return;" in body, (
+        "le altre due specie non chiudono il foglio"
+    )
+    assert "this.close()" in body.split("if (entry.kind !== 'android') return;")[1], (
+        "la chiusura deve restare nel solo ramo android"
+    )
+    assert "ok !== false" in body, (
+        "senza l'esito, un avvio fallito chiude comunque il foglio: è il difetto "
+        "di 6.3 con un passo in più"
+    )
+
+
+def test_usage_is_recorded_before_the_launch() -> None:
+    """``launchAndroidApp`` porta via il task: dopo di lei non è detto che
+    questo JS giri ancora."""
+    body = _method(_src("mobile-launcher.js"), "_activate")
+    assert body.index("this._usage.record(") < body.index("activateEntry(entry)")
+
+
+# ── 4.5 — la semantica, dalla nascita ───────────────────────────────────────
+
+def test_rows_are_options_of_a_listbox_not_buttons() -> None:
+    """Qui la riga nasce `option` di un `listbox`, non `button`: `role="button"` su ogni riga non avrebbe modo di
+    esprimere *quale* è selezionata, e chi legge lo schermo sentirebbe settanta
+    pulsanti uguali con l'evidenziazione ridotta a un colore."""
+    body = _method(_src("mobile-launcher.js"), "_buildRow")
+    assert "setAttribute('role', 'option')" in body
+    assert "setAttribute('role', 'button')" not in body
+    assert "setAttribute('aria-selected', 'false')" in body
+    # Tutte focalizzabili, non solo la selezionata: su Android il gesto di
+    # scorrimento di TalkBack passa per gli elementi focalizzabili, e un
+    # `roving tabindex` darebbe a Tab una sola fermata su tutta la lista.
+    assert "setAttribute('tabindex', '0')" in body
+    html = (ROOT / "jenny" / "templates" / "ui" / "index.html").read_text(encoding="utf-8")
+    assert 'role="listbox"' in html, "la lista non si dichiara"
+    assert 'role="combobox"' in html, "il campo non governa la lista"
+
+
+def test_the_selection_is_announced_without_moving_focus() -> None:
+    """Il cuore del passo 4: le frecce muovono la selezione e il fuoco resta
+    nel campo — è quello che tiene il campo scrivibile mentre si sceglie. Chi
+    legge lo schermo lo sa solo grazie ad `aria-activedescendant`; senza,
+    l'unica traccia della selezione sarebbe un bordo colorato."""
+    body = _method(_src("mobile-launcher.js"), "_select")
+    assert "aria-activedescendant" in body
+    assert "aria-selected" in body
+    assert ".focus(" not in body, (
+        "spostare il fuoco a ogni freccia chiuderebbe la tastiera software e "
+        "porterebbe via il cursore dal campo"
+    )
+
+
+def test_the_selected_row_is_scrolled_into_view_without_a_jump() -> None:
+    """4.3: `block: 'nearest'` scorre quel tanto che basta. Con 'center' ogni
+    passo sposterebbe la lista di mezza schermata."""
+    body = _method(_src("mobile-launcher.js"), "_select")
+    assert "scrollIntoView({ block: 'nearest' })" in body
+
+
+def test_a_row_that_takes_focus_becomes_the_selection() -> None:
+    """Chi arriva su una riga con Tab o col dito di TalkBack e preme ⏎ deve
+    aprire *quella*, non quella evidenziata da una freccia di prima."""
+    source = _src("mobile-launcher.js")
+    assert "this.list?.addEventListener('focusin'" in source
+
+
+# ── 4.1 — il type-ahead è quello già tarato, non una seconda copia ──────────
+
+def test_the_type_ahead_guard_has_exactly_one_copy() -> None:
+    """Le quattro condizioni erano tarate su questo hardware dentro
+    `_maybeTypeAheadFocus`. Riscriverle nel cassetto avrebbe prodotto una
+    seconda versione destinata a divergere sul caso raro — che qui è il caso
+    vero: il keydown con `key` undefined delle tastiere fisiche."""
+    guard = (ASSETS / "shared" / "type-ahead.js").read_text(encoding="utf-8")
+    assert "e.key.length !== 1" in guard
+    assert "e.key === ' '" in guard
+    assert "e.metaKey || e.ctrlKey || e.altKey" in guard
+    for name in ("mobile-chat.js", "mobile-launcher.js"):
+        source = _src(name)
+        assert "isTypeAheadKey" in source, f"{name} non usa la guardia condivisa"
+        assert "e.key.length !== 1" not in source, (
+            f"{name} si è riscritto la guardia invece di importarla"
+        )
+
+
+def test_the_sheet_yields_the_keys_to_whatever_is_above_it() -> None:
+    """Il foglio resta aperto sotto una mini-app o sotto la scheda di una skill
+    (1.7, 3.7): senza la guardia continuerebbe a rispondere a frecce e ⏎ da
+    dietro un overlay. È il difetto di 1.9 rovesciato."""
+    body = _method(_src("mobile-launcher.js"), "_ownsKeys")
+    assert "hasOverlayAbove?.('launcher')" in body, (
+        "senza il nome del livello il foglio si escluderebbe da solo: "
+        "`present()` del proprio livello è vero mentre è a schermo"
+    )
+    app = _method(_src("mobile-app.js"), "hasOverlayAbove")
+    assert "belowLayer" in app
+
+
+# ── 4.4 — ⏎, ⇧⏎, Esc ────────────────────────────────────────────────────────
+
+def test_shift_enter_opens_the_card_and_does_not_count_as_a_launch() -> None:
+    """La scheda è dove si va per disinstallare o per capire cosa sia una voce:
+    contarla farebbe salire in classifica proprio quelle di cui si dubita."""
+    body = _method(_src("mobile-launcher.js"), "_activateSelected")
+    assert "detailEntry(entry)" in body
+    assert "_usage.record" not in body
+    detail = _method(_src("mobile-apps.js"), "detailEntry")
+    assert "showAndroidAppSheet" in detail
+    assert "showJennyAppSheet" in detail
+    assert "showSkillSheet" in detail
+
+
+def test_escape_and_back_clear_the_field_before_closing() -> None:
+    """Esc non ha un handler proprio: `keyboard.register('escape')` lo manda in
+    `handleHardwareBack()`, cioè nella catena dei livelli. Una decisione sola
+    per due tasti che sul Titan 2 stanno entrambi sotto le dita."""
+    body = _method(_src("mobile-launcher.js"), "dismiss")
+    assert "this.search.value = ''" in body
+    assert body.index("this.search.value = ''") < body.index("this.close()")
+
+
+def test_home_dismounts_the_sheet_in_one_call() -> None:
+    """Da quando `dismiss` fa due passi, il default `layer.close ||
+    layer.dismiss` non basta più: Home smonta e basta, e senza un `close`
+    proprio il conto di 1.8 passerebbe da una chiamata a due."""
+    layers = _method(_src("mobile-app.js"), "_overlayLayers")
+    launcher = layers[layers.index("name: 'launcher'"):]
+    assert "close: () => { this.launcher.close(); }" in launcher
+    # Home passa **solo** di lì. La seconda asserzione qui citava
+    # `LauncherController.collapseToRoot`, che `goHome` non chiama mai: itera
+    # `this.controllers`, e il foglio ne sta fuori di proposito (è un livello,
+    # non una vista). Il metodo è stato rimosso; un test che lo nominava dava
+    # per coperto un percorso inesistente.
+    assert "collapseToRoot" not in _src("mobile-launcher.js"), (
+        "il foglio non è in this.controllers: un collapseToRoot qui non lo "
+        "chiamerebbe nessuno"
+    )
+
+
+# ── tre difetti visti girare sull'emulatore, e le loro guardie ──────────────
+
+def test_reopening_the_sheet_starts_from_the_top_row() -> None:
+    """Senza questo, ⏎ appena aperto lanciava la riga evidenziata l'altra volta
+    — cioè avviava qualcosa che nessuno aveva scelto adesso. Osservato: aperto
+    il foglio, la selezione era ancora su "Google" della sessione precedente."""
+    body = _method(_src("mobile-launcher.js"), "open")
+    assert "this._select(null)" in body, (
+        "azzerare solo `_selectedKey` lascerebbe la riga di ieri marcata: la "
+        "sua classe e il suo aria-selected stanno sul nodo, non nella chiave"
+    )
+    assert "this._selectionPinned = false" in body
+
+
+def test_the_selection_follows_the_top_until_someone_moves_it() -> None:
+    """Le app Android arrivano dopo le skill: una selezione *pinnata* fin dal
+    primo disegno resta incollata a chi era in cima quando la lista era ancora
+    a metà, e si finisce con la dodicesima riga evidenziata, fuori schermo.
+    Osservato: `selected: app-creator` con `first: Camera`."""
+    render = _method(_src("mobile-launcher.js"), "_renderList")
+    assert "this._selectionPinned && this._rankedKeys.includes" in render
+    typing = _method(_src("mobile-launcher.js"), "_onQueryChanged")
+    assert "_selectionPinned = false" in typing, (
+        "una query nuova è una domanda nuova: la risposta migliore torna in cima"
+    )
+    move = _method(_src("mobile-launcher.js"), "_moveSelection")
+    assert "_selectionPinned = true" in move
+
+
+def test_the_decorative_glyph_is_not_read_aloud() -> None:
+    """I glifi Tabler sono caratteri della zona a uso privato dentro un font:
+    senza `aria-hidden` il nome accessibile della riga di una skill comincia
+    con un carattere di spazzatura — letto nell'albero di accessibilità della
+    WebView, non dedotto. L'icona di una app Android non ha il problema: è una
+    `<img alt="">`, che al nome non contribuisce."""
+    body = _method(_src("mobile-launcher.js"), "_buildRow")
+    assert "glyph.setAttribute('aria-hidden', 'true')" in body
+    # Il glifo del server invece *porta* informazione: non si nasconde, si nomina.
+    assert "server.setAttribute('aria-label'" in body
+
+
+# ── la rotella ──────────────────────────────────────────────────────────────
+
+def test_the_wheel_moves_the_selection_and_says_what_is_unverified() -> None:
+    """Quali eventi produca la rotella del Titan 2 **non è accertato**, e
+    sull'emulatore la rotella non c'è. Le due letture più probabili sono
+    coperte entrambe (`wheel` qui, ↑↓ in `_onKeyDown`); ciò che non si può
+    dire da qui va scritto dove chi legge il codice lo trova."""
+    source = _src("mobile-launcher.js")
+    body = _method(source, "_onWheel")
+    assert "_moveSelection" in body
+    assert "e.preventDefault()" in body
+    assert "deltaMode" in body, (
+        "una rotella che conta righe e una che conta pixel non si sommano"
+    )
+    assert "{ passive: false }" in source, (
+        "senza passive:false il preventDefault non ferma lo scorrimento"
+    )
+    assert "non è accertato" in source, "l'incognita della rotella non è dichiarata"
+
+
+# ── i18n ────────────────────────────────────────────────────────────────────
+
+def test_no_hardcoded_strings_in_the_sheet() -> None:
+    source = _src("mobile-launcher.js")
+    for key in ("launcher.recent", "launcher.results", "launcher.noResults"):
+        assert f"'{key}'" in source, f"{key} non usata"
+    # Il placeholder e le etichette statiche stanno nell'HTML, non nel JS.
+    html = (ROOT / "jenny" / "templates" / "ui" / "index.html").read_text(encoding="utf-8")
+    assert 'data-i18n-placeholder="launcher.searchPlaceholder"' in html
+    assert 'data-i18n-aria="launcher.clearSearch"' in html
+
+
+# ── passo 6 — i bordi ───────────────────────────────────────────────────────
+
+def test_the_sheet_is_actually_in_the_page() -> None:
+    """Nessun test lo diceva, e i contract dei passi 3-5 lo davano per scontato.
+
+    Il registro dei livelli, l'ordine fra `miniapp` e `drawer`, `present` e
+    `dismiss` sono coperti: ma tutti guardano il *controller*. Il foglio è fatto
+    di nodi che stanno in `index.html` — e `LauncherController` esce subito
+    (`if (!this.sheet) return`) se non li trova, senza un errore. Cancellare il
+    blocco HTML lascerebbe verdi tutti gli altri test e un pulsante che non apre
+    niente.
+    """
+    html = (ROOT / "jenny" / "templates" / "ui" / "index.html").read_text(encoding="utf-8")
+    for node in ('id="launcher-sheet"', 'id="launcher-scrim"', 'id="launcher-list"',
+                 'id="launcher-search"', 'id="launcher-title"', 'id="launcher-close"',
+                 'id="launcher-handle-row"'):
+        assert node in html, f"{node} manca da index.html: il foglio non esiste più"
+    # L'unico ingresso: lo slot del dock. Il pulsante nel composer è stato
+    # tolto perché esisteva in una vista sola.
+    assert 'data-opens="launcher"' in html, "senza questo il foglio non si apre da nessuna parte"
+    # Vive *fuori* da `.app`: è ciò che gli permette di coprire il dock, di
+    # restare fuori dall'inerzia che si applica allo sfondo, e di lasciarsi
+    # sovrapporre da una mini-app aperta da lui senza trucchi di z-index.
+    assert html.index('id="launcher-sheet"') > html.index('<div class="app"'), (
+        "il foglio deve stare dopo `.app`, non dentro"
+    )
+    app = _src("mobile-app.js")
+    assert "new LauncherController(this)" in app
+    assert "name: 'launcher'" in _method(app, "_overlayLayers")
+
+
+def test_the_manage_row_leaves_the_launching_to_the_sheet() -> None:
+    """D4/6.1: il foglio lancia, la scheda gestisce.
+
+    La chiusura esplicita non è ridondante: `switchMode` esce subito quando il
+    modo richiesto è già quello corrente, e col foglio aperto *sopra la scheda
+    App* il tocco su «Gestisci» lascerebbe un overlay orfano sopra la vista che
+    avrebbe dovuto mostrare.
+    """
+    html = (ROOT / "jenny" / "templates" / "ui" / "index.html").read_text(encoding="utf-8")
+    assert 'id="launcher-manage"' in html
+    assert 'data-i18n="launcher.manage"' in html
+    # Fuori dalla lista: non è una `option` da aprire con ⏎ né da trovare
+    # cercando — è un altrove, non una cosa da lanciare.
+    assert html.index('id="launcher-manage"') > html.index('id="launcher-list"')
+    body = _method(_src("mobile-launcher.js"), "_openManager")
+    assert "this.close()" in body
+    assert "switchMode('apps')" in body
+    assert body.index("this.close()") < body.index("switchMode('apps')")
+
+
+def test_the_three_empty_states_are_three_different_sentences() -> None:
+    """6.2: "non è ancora arrivato", "non si è potuto leggere" e "non c'è
+    niente" sono tre risposte diverse — aspetta, riprova, installa qualcosa.
+    Nella scheda di oggi sono la stessa frase, ed è il limite scritto in
+    `docs/using/app-launcher.md`."""
+    render = _method(_src("mobile-launcher.js"), "_renderList")
+    for key in ("launcher.loading", "launcher.error", "launcher.empty", "launcher.noResults"):
+        assert f"'{key}'" in render, f"{key} non usata: uno stato vuoto si è confuso con un altro"
+    assert "isLoadingLists()" in render and "listsFailed()" in render
+
+
+def test_a_broken_bridge_is_not_an_empty_phone() -> None:
+    """Il caso che il documento denuncia, e che gli stati vuoti da soli **non**
+    coprono: il ponte nativo tace, skill e Jenny App arrivano tutte, e mancano
+    solo le app del telefono. La lista non è vuota — nessuno stato vuoto
+    comparirebbe — e l'unico segno sarebbe un cassetto che non trova Telefono.
+
+    Serve che l'informazione esista lungo tutta la catena: il gateway la
+    dichiara, il controller la tiene separata da "caricato", il foglio la
+    mostra.
+    """
+    server = (ROOT / "jenny" / "webui" / "android_apps_api.py").read_text(encoding="utf-8")
+    assert '{"apps": [], "error": "unavailable"}' in server, (
+        "senza il campo, la risposta di un ponte rotto è identica a quella di "
+        "un telefono senza app"
+    )
+    apps = _src("mobile-apps.js")
+    android = _method(apps, "loadAndroidApps")
+    assert "data.error" in android, "il campo arriva e viene buttato"
+    assert "announceRemovals && apps && !failed" in android, (
+        "una lista vuota per guasto annuncerebbe come disinstallate tutte le "
+        "app del telefono in un colpo"
+    )
+    assert "listsFailed()" in apps
+    launcher = _src("mobile-launcher.js")
+    assert "_syncStatus" in launcher
+    html = (ROOT / "jenny" / "templates" / "ui" / "index.html").read_text(encoding="utf-8")
+    assert 'id="launcher-status"' in html
+    # Fuori dalla lista: i figli di un `listbox` sono `option`, e un avviso là
+    # dentro si annuncerebbe come una voce da aprire.
+    assert html.index('id="launcher-status"') < html.index('id="launcher-list"')
+
+
+def test_a_failed_launch_says_something() -> None:
+    """6.3: prima qui c'era un `catch` vuoto commentato "best effort", e un
+    avvio fallito non produceva nessun segno — indistinguibile da un tocco non
+    registrato. L'informazione c'era già: l'endpoint risponde 404."""
+    body = _method(_src("mobile-apps.js"), "launchAndroidApp")
+    assert "showToast" in body
+    assert "apps.launchFailed" in body
+    assert "return false" in body and "return true" in body, (
+        "senza l'esito il cassetto non può decidere se chiudersi"
+    )
+    activate = _method(_src("mobile-apps.js"), "activateEntry")
+    assert "return this.launchAndroidApp(entry.id)" in activate, (
+        "l'esito va restituito, non lasciato cadere"
+    )
+
+
+def test_the_step_six_chrome_gets_out_of_the_way_of_the_keyboard() -> None:
+    """La cornice `.compact` esiste per far entrare **una riga intera** (5.5),
+    e i due elementi del passo 6 se la riprendono tutta: misurato con la
+    tastiera su, la riga «Gestisci» costa 30 px su 46 di lista e l'avviso 28 —
+    con l'avviso a schermo la lista scende a 14 px, cioè zero righe intere. È
+    il difetto che 5.5 ha chiuso, reintrodotto da un bordo."""
+    css = _src("mobile-style.css")
+    rule = re.search(
+        r"\.launcher-sheet\.compact \.launcher-manage,\s*\n"
+        r"\.launcher-sheet\.compact \.launcher-status \{ display: none; \}", css)
+    assert rule, "in `.compact` la riga «Gestisci» e l'avviso devono sparire"
+
+
+def test_the_new_step_six_strings_exist_in_both_locales() -> None:
+    """6.4 — niente testo cablato, e la parità si legge, non si guarda."""
+    import json
+
+    i18n_dir = ASSETS / "i18n"
+    expected = {"launcher.manage", "launcher.error", "launcher.loadFailed",
+                "launcher.retry", "apps.launchFailed"}
+    for locale in ("it", "en"):
+        data = json.loads((i18n_dir / f"{locale}.json").read_text(encoding="utf-8"))
+        flat = {f"{a}.{b}" for a, group in data.items() if isinstance(group, dict)
+                for b in group}
+        assert expected <= flat, f"chiavi mancanti in {locale}.json: {sorted(expected - flat)}"
+
+
+def test_the_search_field_does_not_autofocus() -> None:
+    """D6: su un telefono con tastiera software l'autofocus alzerebbe la
+    tastiera e si mangerebbe il foglio."""
+    html = (ROOT / "jenny" / "templates" / "ui" / "index.html").read_text(encoding="utf-8")
+    field = re.search(r'<input class="launcher-search".*?>', html, re.S)
+    assert field, "campo di ricerca non trovato"
+    assert "autofocus" not in field.group(0)
+    open_body = _method(_src("mobile-launcher.js"), "open")
+    assert "this.search.focus" not in open_body
+
+
+# ── l'invariante: la lista fuori dalla fascia della gesture ─────────────────
+
+
+def test_the_gesture_margin_chain_is_unbroken() -> None:
+    """Il margine che tiene la lista fuori dalla fascia di home attraversa
+    quattro strati — metodo nativo, ponte JS, custom property, CSS — e nessuno
+    di essi conosce gli altri: sono legati solo dai nomi. Rinominarne uno da
+    una parte sola non rompeva nessun test, e il difetto sarebbe comparso solo
+    su un dispositivo in navigazione a gesture, come otto pixel di lista dentro
+    la zona in cui il tocco va alla shell (v. il passo 5 del piano: sono
+    esattamente quegli otto pixel a separare "scorre" da "l'interfaccia
+    collassa"). Questo test è il nodo che li tiene insieme.
+    """
+    kotlin = (
+        ROOT / "android/app/src/main/java/com/flagdizero/jenny/MainActivity.kt"
+    ).read_text(encoding="utf-8")
+    assert "fun getBottomGestureInset()" in kotlin
+    # Raggiunto solo per reflection: senza l'annotazione la WebView non lo vede,
+    # e R8 in release non avrebbe motivo di tenerlo.
+    head = kotlin[: kotlin.index("fun getBottomGestureInset()")]
+    assert head.rstrip().endswith("@JavascriptInterface"), (
+        "il metodo del ponte deve portare @JavascriptInterface"
+    )
+
+    js = _src("mobile-launcher.js")
+    assert "native.getBottomGestureInset()" in js, "il consumatore JS chiama il metodo nativo"
+    assert "'--gesture-inset-bottom'" in js, "e ne scrive il valore nella custom property"
+
+    css = _src("mobile-style.css")
+    assert "padding-bottom: var(--gesture-inset-bottom, 0px)" in css, (
+        "e il foglio la consuma come proprio padding inferiore"
+    )
+
+
+def test_the_margin_rounds_away_from_the_gesture_zone() -> None:
+    """`round` sbaglia per difetto metà delle volte, e per difetto vuol dire
+    dentro la fascia: a dpr 3, 25 px nativi sono 8,33 px CSS."""
+    body = _method(_src("mobile-launcher.js"), "_syncGestureInset")
+    assert "Math.ceil(px / dpr)" in body
+    assert "Math.round(px / dpr)" not in body
+
+
+def test_the_mascot_goes_under_the_scrim_with_the_sheet_open() -> None:
+    """La mascotte vive dentro `#app`, che il foglio rende `inert` — ma `inert`
+    toglie fuoco e tocchi, non l'impilamento: a z-index 120 resterebbe dipinta
+    sopra il foglio (100) e lo scrim (99), sulle righe. Difetto visto sul Titan
+    2, non sull'emulatore, dove le due cose non si sovrapponevano.
+    """
+    js = _method(_src("mobile-launcher.js"), "_setBackgroundInert")
+    assert "classList.toggle('launcher-open', on)" in js, (
+        "il segno che fa scendere la mascotte deve seguire l'inerzia dello sfondo"
+    )
+    css = _src("mobile-style.css")
+    assert ":root.launcher-open .jenny-duo { z-index: 98; }" in css
+    # 98 deve stare *sotto* lo scrim, o la correzione non serve a niente.
+    scrim = re.search(r"\.launcher-scrim\s*\{([^}]*)\}", css)
+    assert scrim and "z-index: 99" in scrim.group(1)
+
+
+def test_the_dock_apps_slot_opens_the_sheet() -> None:
+    """Lo slot Apps apre il cassetto, ma **non** perde `data-mode`.
+
+    Toglierlo lo caverebbe da `_visibleModes()` — che deriva le schede
+    navigabili da `.dock-item[data-mode]` — e la scheda Apps resterebbe
+    raggiungibile solo dal foglio. `data-opens` è additivo apposta.
+    """
+    html = (ROOT / "jenny/templates/ui/index.html").read_text(encoding="utf-8")
+    slot = re.search(r'<div class="dock-item"[^>]*data-mode="apps"[^>]*>', html)
+    assert slot, "lo slot Apps deve esistere nel dock"
+    assert 'data-opens="launcher"' in slot.group(0)
+    assert 'data-mode="apps"' in slot.group(0), "il carosello deve ancora raggiungere la scheda"
+    src = _src("mobile-app.js")
+    # L'aggancio del dock non sta in un metodo proprio: è nel costruttore.
+    # E dev'essercene **uno solo** — un secondo `forEach` con un `click` che
+    # chiama `switchMode` rimetterebbe in piedi il vecchio comportamento
+    # accanto al nuovo, e il foglio si aprirebbe *e* la vista cambierebbe.
+    handlers = re.findall(
+        r"\.dock-item\[data-mode\]'\)\.forEach\(item => \{\s*item\.addEventListener\('click'", src)
+    assert len(handlers) == 1, f"un solo aggancio al click del dock, trovati {len(handlers)}"
+    assert "item.dataset.opens === 'launcher'" in src
+    assert "this.openLauncher()" in src
+
+
+def test_the_dock_order_is_chat_wiki_apps_workspace_settings() -> None:
+    """Chat, Wiki, **Apps al centro** (è lì il pollice), File, Impostazioni. L'ordine del DOM è anche
+    quello del carosello orizzontale (`_visibleModes`), quindi è un contratto,
+    non una preferenza grafica."""
+    html = (ROOT / "jenny/templates/ui/index.html").read_text(encoding="utf-8")
+    nav = html[html.index('<nav class="dock"'):html.index("</nav>")]
+    modes = re.findall(r'data-mode="([a-z]+)"', nav)
+    modes = [m for m in modes if m != "onboarding"]  # nascosto fuori dal primo avvio
+    assert modes == ["chat", "graph", "apps", "workspace", "settings"], modes
+    assert modes[2] == "apps", "Apps deve stare al centro dei cinque"
+
+
+def test_the_wiki_slot_wears_the_graph_icon() -> None:
+    """L'icona è quella del grafo, la stessa che l'intestazione usa per la
+    stessa destinazione (`mobile-header.js`), non un libro."""
+    html = (ROOT / "jenny/templates/ui/index.html").read_text(encoding="utf-8")
+    slot = re.search(r'<div class="dock-item"[^>]*data-mode="graph"[^>]*>(.*?)</div>', html, re.S)
+    assert slot and "ti-topology-star" in slot.group(1)
+    assert "ti-book" not in slot.group(1)
+
+
+def test_the_sheet_itself_shows_no_focus_ring() -> None:
+    """Il foglio prende il fuoco all'apertura per fare da àncora a TalkBack e ai
+    tasti, ma ha `tabindex="-1"`: da tastiera non ci si arriva, quindi l'anello
+    non segnala nulla e si vede soltanto. I controlli *dentro* lo tengono."""
+    html = (ROOT / "jenny/templates/ui/index.html").read_text(encoding="utf-8")
+    sheet = re.search(r'<div class="launcher-sheet"[^>]*>', html).group(0)
+    assert 'tabindex="-1"' in sheet, "se diventasse raggiungibile con Tab, l'anello servirebbe"
+    css = _src("mobile-style.css")
+    assert ".launcher-sheet:focus,\n.launcher-sheet:focus-visible { outline: none; }" in css
+
+
+def test_no_skills_in_the_drawer() -> None:
+    """Il cassetto è un lanciatore, e le skill non si lanciano: toccarne una
+    apre una scheda o un file. Mescolarle alle app rifaceva, un livello più in
+    là, il difetto 01 del rilievo — un solo elenco per nature diverse. Restano
+    nella scheda Apps; dove vadano davvero è ancora da decidere.
+    """
+    body = _method(_src("mobile-apps.js"), "launcherEntries")
+    assert "for (const skill of this.skills)" not in body
+    assert "kind: 'skill'" not in body
+    assert "skill:${skill.name}" not in body
+    # E il foglio non deve avere più un ramo per una specie che non arriva.
+    assert "'skill'" not in _method(_src("mobile-launcher.js"), "_buildRow")
+
+
+def test_the_composer_has_no_launcher_button() -> None:
+    """Tolto: l'apertura è una sola, lo slot del dock. Un secondo ingresso che
+    esiste in una vista sola era il difetto che ha reso il cassetto
+    irraggiungibile da tutte le altre."""
+    html = (ROOT / "jenny/templates/ui/index.html").read_text(encoding="utf-8")
+    assert "btn-launcher" not in html
+    assert "btn-launcher" not in _src("mobile-launcher.js"), "niente riferimenti penzolanti"

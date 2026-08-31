@@ -109,4 +109,4 @@ A config key, `wiki.enabled` (default `true`), can disable the wiki backend enti
 - [The gardener](gardener.md) — the pass that maintains a project's pages on its own.
 - [Tour of the WebUI](webui-tour.md) — overall navigation, dock, and tab layout.
 - [Backup and restore](backup.md) — wiki content is part of your regular workspace backup.
-- [Phone app launcher](app-launcher.md) — the other under-documented corner of the Apps tab.
+- [Phone app launcher](app-launcher.md) — the app drawer, and the other corner of the Apps tab.

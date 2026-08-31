@@ -65,9 +65,18 @@ class TestWithBridge:
         _with_bridge(monkeypatch, FakeBridge(apps=apps))
         assert await api.webui_android_apps_payload() == {"apps": apps}
 
-    async def test_list_swallows_bridge_failure(self, monkeypatch):
+    async def test_list_declares_a_bridge_failure(self, monkeypatch):
+        """Un ponte rotto non è un telefono senza app, e la risposta lo dice.
+
+        Senza il campo ``error`` le due risposte sono lo stesso oggetto, e la
+        UI non ha da cosa distinguere "non c'è niente" da "non si è potuto
+        leggere" — il limite che ``docs/using/app-launcher.md`` denunciava e
+        che il passo 6.2 chiude.
+        """
         _with_bridge(monkeypatch, FakeBridge(raises=True))
-        assert await api.webui_android_apps_payload() == {"apps": []}
+        assert await api.webui_android_apps_payload() == {
+            "apps": [], "error": "unavailable",
+        }
 
     async def test_launch_passes_package_and_returns_bool(self, monkeypatch):
         bridge = FakeBridge(launched=True)

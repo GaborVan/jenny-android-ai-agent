@@ -2947,64 +2947,263 @@ body {
 }
 .apps-search input::placeholder { color: var(--text-faint); font-style: italic; }
 
-.apps-content { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
-
-/* Flat like the mockup: sections are a label + a tile grid, no card chrome. */
-.apps-section {
-  overflow: hidden;
+/* Il segmento delle tre stanze. Sta fra il titolo e la ricerca: è il primo
+   controllo che si incontra scendendo, perché decide che cosa la ricerca
+   filtrerà. */
+.apps-rooms {
+  display: flex;
+  gap: 6px;
+  padding: 8px 16px 0;
   flex-shrink: 0;
 }
 
-.apps-section-header {
+.apps-room-tab {
+  flex: 1;
+  min-height: 36px;
+  padding: 7px 8px;
+  border: 0.5px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  -webkit-tap-highlight-color: transparent;
+  transition: background .2s cubic-bezier(.25,.1,.25,1), color .2s cubic-bezier(.25,.1,.25,1), border-color .2s cubic-bezier(.25,.1,.25,1);
+}
+
+.apps-room-tab.active {
+  background: rgba(var(--accent-rgb), 0.10);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.apps-room-tab:focus-visible,
+.apps-row-main:focus-visible,
+.apps-add-row:focus-visible,
+.apps-az-letter:focus-visible,
+.app-cell:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius);
+}
+
+/* Una stanza per volta, e lo scorrimento sta **dentro** la stanza: la guida
+   A–Z della stanza Android deve restare ferma sul bordo mentre la griglia
+   scorre, e non può farlo se a scorrere è il contenitore. */
+.apps-content {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  min-height: 0;
+}
+
+.apps-room-scroll {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 12px 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* ── Righe (stanze «Jenny App» e «Skill») ── */
+
+.apps-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* La riga è un contenitore, non un pulsante: nella stanza Skill deve ospitare
+   accanto al corpo un interruttore, che un <button> non può contenere. */
+.apps-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 2px;
+  gap: 10px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  border: 0.5px solid var(--border);
+  padding-right: 12px;
+  transition: background .2s cubic-bezier(.25,.1,.25,1), border-color .2s cubic-bezier(.25,.1,.25,1);
+}
+
+.apps-row:hover { background: var(--surface-2); }
+.apps-row--broken { border-color: rgba(239,68,68,0.35); }
+
+/* Il corpo toccabile: un <button> vero, così Invio e Spazio funzionano da soli. */
+.apps-row-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0 10px 12px;
+  background: transparent;
+  border: none;
+  color: inherit;
+  font-family: var(--font-sans);
+  text-align: left;
   cursor: pointer;
-  font-size: 13px;
-  font-weight: 600;
-  user-select: none;
-  transition: color 0.2s cubic-bezier(.25,.1,.25,1);
   -webkit-tap-highlight-color: transparent;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  touch-action: manipulation;
 }
 
-.apps-section-header:hover { color: var(--text); }
+.apps-row-main:active { background: var(--hover); }
 
-.apps-section-header i:first-child { color: var(--accent); font-size: 16px; }
+.apps-row-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
 
-.apps-chevron {
-  margin-left: auto;
-  font-size: 14px;
+.apps-row-name {
+  font-size: 13px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Due righe di descrizione al massimo: è il tetto che tiene tutte le righe allo
+   stesso passo, che era il difetto 04 (100 / 118 / 147 px nella stessa vista). */
+.apps-row-desc {
+  font-size: 11px;
+  line-height: 1.3;
   color: var(--text-faint);
-  transition: transform 0.25s cubic-bezier(.34,1.56,.64,1);
-}
-
-.apps-section.collapsed .apps-chevron { transform: rotate(-90deg); }
-
-.apps-section-body {
-  padding: 10px 2px 4px;
-  transition: max-height 0.3s cubic-bezier(.25,.1,.25,1), padding 0.3s cubic-bezier(.25,.1,.25,1), opacity 0.25s cubic-bezier(.25,.1,.25,1);
-  max-height: 2000px;
-  opacity: 1;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
   overflow: hidden;
 }
 
-.apps-section.collapsed .apps-section-body {
-  max-height: 0;
-  padding-top: 0;
-  padding-bottom: 0;
-  opacity: 0;
+/* «Non può girare», che è un'altra cosa da «è spenta» (v. _buildSkillRow). */
+.apps-row-warn {
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--warning);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
+.apps-row-action {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  background: rgba(var(--accent-rgb), 0.10);
+}
+
+.apps-row-action--repair {
+  color: var(--error);
+  background: rgba(239,68,68,0.12);
+}
+
+.apps-row-toggle { flex-shrink: 0; }
+
+.apps-row-lock {
+  flex-shrink: 0;
+  font-size: 15px;
+  color: var(--text-faint);
+}
+
+.apps-group-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin: 6px 2px 0;
+}
+
+/* Banda in cima alla stanza: il guasto di una app sta qui, non dentro la sua
+   riga (difetto 05 — l'errore nella tessera alzava tutta la fila). */
+.apps-band {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.apps-band--error {
+  background: rgba(239,68,68,0.10);
+  border: 0.5px solid rgba(239,68,68,0.35);
+  color: var(--error);
+}
+
+.apps-band i { font-size: 14px; flex-shrink: 0; }
+
+/* La riga tratteggiata in fondo alla stanza. */
+.apps-add-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 1.5px dashed var(--border-strong);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-faint);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: color .2s cubic-bezier(.25,.1,.25,1), border-color .2s cubic-bezier(.25,.1,.25,1);
+  margin-top: 4px;
+}
+
+.apps-add-row:hover { color: var(--accent); border-color: rgba(var(--accent-rgb), 0.45); }
+
+.apps-note {
+  padding: 20px;
+  color: var(--text-faint);
+  font-style: italic;
+  text-align: center;
+  font-size: 12px;
+}
+
+/* ── Stanza «Android»: griglia densa + guida A–Z ── */
+
+.apps-android {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+}
+
+/* Sei colonne, non quattro: una cella da quattro sprecava 56 px di larghezza
+   per icona, e quei pixel sono quelli su cui la guida A–Z sta a destra. */
 .apps-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 16px 8px;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 14px 4px;
 }
+
 .app-cell {
   display: flex; flex-direction: column; align-items: center;
-  gap: 6px; cursor: pointer; padding: 8px 4px;
+  gap: 5px; cursor: pointer; padding: 6px 2px;
   border-radius: var(--radius);
+  background: transparent;
+  border: none;
+  font-family: var(--font-sans);
   transition: background .2s cubic-bezier(.25,.1,.25,1), transform .25s cubic-bezier(.34,1.56,.64,1);
   -webkit-tap-highlight-color: transparent;
   /* Prevent the WebView's native long-press callout (text selection /
@@ -3016,19 +3215,10 @@ body {
 }
 .app-cell:hover { transform: scale(1.05); }
 .app-cell:active { background: var(--hover); transform: scale(0.95); }
-/* Celle e intestazioni sono <div> resi attivabili da tastiera (v. wireEvents in
-   mobile-apps.js): sul Titan 2 Tab è navigazione primaria, quindi l'anello di
-   fuoco deve vedersi. */
-.app-cell:focus-visible,
-.apps-section-header:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-  border-radius: var(--radius);
-}
 .app-icon {
-  width: 48px; height: 48px; border-radius: 14px;
+  width: 40px; height: 40px; border-radius: 12px;
   display: flex; align-items: center; justify-content: center;
-  font-size: 22px;
+  font-size: 19px;
   background: var(--surface);
   color: var(--accent);
   border: 0.5px solid var(--border-strong);
@@ -3042,7 +3232,7 @@ body {
 .app-icon img {
   width: 100%; height: 100%;
   object-fit: cover;
-  border-radius: 14px;
+  border-radius: 12px;
   /* Route touch to the cell (not the img) so no native image callout starts. */
   pointer-events: none;
   -webkit-user-drag: none;
@@ -3050,8 +3240,8 @@ body {
   user-select: none;
 }
 .app-label {
-  font-size: 11px; color: var(--text-muted); text-align: center;
-  line-height: 1.2; max-width: 64px;
+  font-size: 10px; color: var(--text-muted); text-align: center;
+  line-height: 1.2; max-width: 100%;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
@@ -3067,6 +3257,44 @@ body {
   color: var(--text-faint); font-size: 10px;
 }
 .app-hidden-badge i { font-size: 10px; }
+
+/* La guida alfabetica sul bordo destro. Non scorre con la griglia: è ferma, e
+   la griglia le scorre accanto.
+
+   Allineata **in alto**, non centrata: con poche app la griglia occupa solo la
+   cima dello schermo, e una guida centrata verticalmente galleggerebbe accanto
+   al vuoto invece che accanto a ciò che indicizza (visto sul telefono, con 18
+   app: le lettere stavano a metà schermo, sotto l'ultima fila). Il
+   `padding-top` è quello di `.apps-room-scroll`, così la prima lettera parte
+   dalla prima fila. */
+.apps-az {
+  flex-shrink: 0;
+  width: 22px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 12px 0 20px;
+  gap: 1px;
+}
+
+.apps-az-letter {
+  width: 20px;
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  font-family: var(--font-sans);
+  font-size: 9px;
+  line-height: 1.15;
+  padding: 0;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.apps-az-letter:active { color: var(--accent); }
+
+/* `display: flex` sopra batte la regola dello user agent per `[hidden]`, e la
+   guida restava a schermo anche misurata inutile (visto sul telefono). */
+.apps-az[hidden] { display: none; }
 
 /* App Android context sheet — icon + label header */
 .app-sheet-head {
@@ -3084,22 +3312,6 @@ body {
 .app-sheet-name {
   font-size: 14px; font-weight: 600; color: var(--text);
   max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-
-/* App badge (skill active/idle) */
-.app-badge {
-  font-size: 9px; padding: 1px 5px; border-radius: 4px;
-  line-height: 1.3;
-}
-.ab-active { background: rgba(var(--accent-rgb), 0.15); color: var(--accent); }
-.ab-idle { background: transparent; color: var(--text-faint); }
-
-/* Broken Jenny App: readable error under the tile label */
-.app-error {
-  font-size: 9px; color: var(--error); text-align: center;
-  line-height: 1.25; max-width: 72px;
-  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
-  overflow: hidden;
 }
 
 /* ── Jenny App frame overlay ── */
@@ -3126,6 +3338,406 @@ body {
   color: var(--text-muted); font-size: 20px; padding: 4px 8px;
 }
 .app-frame-overlay iframe { flex: 1; width: 100%; border: 0; background: transparent; }
+
+/* ══ Launcher sheet — il cassetto delle app ═══════════════════════════════
+   Sale dal basso sopra la vista corrente e si apre dal pulsante nella riga del
+   composer (D1). Gli z-index sono l'ordine dichiarato in
+   `MobileApp._overlayLayers()`, non una scelta grafica: **100 sta sotto la
+   mini-app (110) e sopra il drawer (21)**, che è esattamente la posizione del
+   livello `launcher` fra `miniapp` e `drawer` (D3). Cambiarli qui senza
+   spostare il livello là rimette in piedi il difetto che quel registro unico
+   ha chiuso: una pressione di Indietro che chiude ciò che sta sotto, mentre a
+   schermo non cambia niente.
+
+   L'entrata NON usa l'easing elastico dei drawer: quello supera la posizione di
+   riposo, e su un foglio ancorato a `bottom: 0` l'oltrepasso è una fessura di
+   sfondo sotto il foglio. */
+/* Col cassetto aperto la mascotte scende sotto lo scrim: sta dentro `#app`,
+   cioè dentro lo sfondo che si sta oscurando, e a 120 resterebbe dipinta sopra
+   le righe del foglio (difetto visto sul telefono). 98 = subito sotto lo scrim.
+   Nota: sopra l'overlay di una mini-app (110) la mascotte galleggia comunque —
+   difetto preesistente a questo lavoro, non toccato qui. */
+:root.launcher-open .jenny-duo { z-index: 98; }
+
+/* Il foglio riceve il fuoco all'apertura, ma solo come àncora: `tabindex="-1"`
+   lo tiene fuori dal giro di Tab, quindi da tastiera non ci si arriva mai e
+   l'anello non segnala niente a nessuno — si vede e basta, attorno a tutto il
+   pannello, a ogni apertura. Visto sul Titan 2 (tastiera fisica collegata: la
+   scorciatoia di `:focus-visible` si comporta diversamente da un telefono
+   senza). I controlli *dentro* il foglio tengono il loro anello. */
+.launcher-sheet:focus,
+.launcher-sheet:focus-visible { outline: none; }
+
+.launcher-scrim {
+  position: fixed; inset: 0; z-index: 99;
+  background: rgba(0, 0, 0, 0.55);
+  opacity: 0; pointer-events: none;
+  transition: opacity .25s cubic-bezier(.25,.1,.25,1);
+}
+.launcher-scrim.open { opacity: 1; pointer-events: auto; }
+
+.launcher-sheet {
+  /* `bottom` e `height` li scrive JS (`LauncherController._syncViewport`); i
+     valori qui sono il ripiego di prima che l'abbia fatto — il primo
+     fotogramma, o un browser senza `visualViewport`.
+     `--launcher-kb-inset` è quanto della finestra copre la tastiera software
+     **senza averla ridimensionata** (adjustPan): lì il foglio ci si appoggia
+     sopra invece di finirci sotto. Dove la finestra si ridimensiona davvero
+     vale 0, e il foglio resta ancorato al fondo. */
+  position: fixed; left: 0; right: 0; z-index: 100;
+  bottom: var(--launcher-kb-inset, 0px);
+  height: var(--launcher-height, 66%);
+  /* Il margine di 5.2 (D8): il contenuto del foglio finisce **sopra** la fascia
+     in cui la shell di sistema riconosce la gesture di home. Il valore arriva
+     dal ponte nativo via `LauncherController._syncGestureInset()`, già in px
+     CSS: non è una costante, e dal CSS non si può leggere —
+     `env(safe-area-inset-bottom)` vale `0px`, perché il decor di AppCompat
+     consuma gli inset prima della WebView. `box-sizing: border-box` (globale)
+     fa sì che stringa la lista invece di allungare il foglio. */
+  padding-bottom: var(--gesture-inset-bottom, 0px);
+  display: flex; flex-direction: column;
+  background:
+    radial-gradient(ellipse 80% 60% at 50% 100%, rgba(var(--accent-rgb), 0.05), transparent 60%),
+    var(--surface-2);
+  border: 0.5px solid var(--border-strong);
+  border-bottom: none;
+  border-radius: 16px 16px 0 0;
+  box-shadow: 0 -16px 56px rgba(0,0,0,0.45), 0 -4px 16px rgba(0,0,0,0.25);
+  transform: translateY(100%);
+  /* Fuori schermo per solo `transform` il foglio resterebbe nella tab order e
+     leggibile da TalkBack: la visibility lo toglie, ritardata di quanto dura
+     l'uscita perché non si interpola (stesso idioma di `.drawer`). */
+  visibility: hidden;
+  transition: transform .32s cubic-bezier(.22,.61,.36,1), visibility 0s linear .32s;
+}
+.launcher-sheet.open {
+  transform: translateY(0);
+  visibility: visible;
+  transition: transform .32s cubic-bezier(.22,.61,.36,1), visibility 0s linear 0s;
+}
+/* Mentre il dito lo tiene, il foglio non si anima: segue, e basta. JS gli
+   scrive `transform` in linea a ogni `pointermove`, e con la transizione accesa
+   arriverebbe 320 ms dopo il dito. Al rilascio la classe se ne va e il tratto
+   che resta — il ritorno su, o la discesa — torna a essere del CSS. */
+.launcher-sheet.dragging { transition: none; }
+
+/* Con la tastiera software su, il fondo dello schermo è la tastiera: la fascia
+   della gesture di home non è più sotto il foglio, e quei pixel servono alla
+   lista. È una condizione diversa da `.compact` — uno schermo corto e basta dà
+   un foglio basso che **tocca ancora il fondo**, e lì la fascia c'è. */
+.launcher-sheet.kb-open { padding-bottom: 0; }
+
+/* Il foglio è troppo basso perché la cornice piena valga il suo prezzo: si
+   stringe tutto ciò che non è la lista. Il conto che decide la soglia sta in
+   `COMPACT_HEIGHT` (`mobile-launcher.js`). Si stringe, non si nasconde: la ✕ e
+   il titolo restano, e il titolo è ciò che `aria-labelledby` nomina. */
+.launcher-sheet.compact .launcher-handle-row { padding: 3px 10px 2px; }
+.launcher-sheet.compact .launcher-head { padding: 0 14px 3px; }
+.launcher-sheet.compact .launcher-search-row { padding: 4px 12px 2px; }
+.launcher-sheet.compact .launcher-search { height: 30px; }
+.launcher-sheet.compact .launcher-list { padding: 3px 12px 4px; gap: 4px; }
+/* Anche le righe stringono. Sullo schermo quadrato la tastiera si prende il 69%
+   dell'altezza, e senza questo la lista resta alta 44 px con dentro righe da 52:
+   **zero righe intere**, cioè il difetto che 5.5 esiste per chiudere, spostato
+   di un passo. Stringe l'aria, non il contenuto: nome e descrizione restano
+   dove sono. */
+.launcher-sheet.compact .launcher-row { padding: 6px 12px; }
+
+@media (prefers-reduced-motion: reduce) {
+  /* Il movimento ridotto vale anche per il trascinamento — cioè per il tratto
+     che il CSS anima da solo dopo il rilascio, perché quello sotto il dito non
+     è un'animazione ma una manipolazione diretta. Esplicito e non lasciato alla
+     regola generale in fondo al foglio: quella è una rete di sicurezza, non una
+     dichiarazione di intenti. */
+  .launcher-sheet, .launcher-sheet.open, .launcher-scrim { transition: none; }
+}
+
+/* ── La zona di trascinamento (5.1, D7) ──
+   Il foglio si trascina da qui — maniglia e riga del titolo — **e dalla lista
+   mai**. Sotto c'è una chat, dove i trascinamenti verticali sono già promessi
+   allo scroller da `setupSwipeNav`: un foglio che contendesse i verticali della
+   propria lista renderebbe lo scorrimento un tiro a indovinare.
+   `touch-action: none` è ciò che rende il gesto nostro senza doverlo strappare
+   con `preventDefault` a metà; `user-select: none` evita che trascinare sopra
+   il titolo lo selezioni. */
+.launcher-handle-row, .launcher-head {
+  touch-action: none;
+  -webkit-user-select: none; user-select: none;
+}
+
+.launcher-handle-row {
+  display: flex; justify-content: center;
+  padding: 8px 10px 6px;
+  flex-shrink: 0;
+  cursor: grab;
+}
+.launcher-sheet.dragging .launcher-handle-row { cursor: grabbing; }
+.launcher-handle {
+  width: 32px; height: 3px;
+  border-radius: 2px;
+  background: var(--border-strong);
+}
+
+.launcher-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px;
+  padding: 0 14px 8px;
+  border-bottom: 0.5px solid var(--border-strong);
+  flex-shrink: 0;
+}
+.launcher-title {
+  font-size: 11px; font-weight: 500;
+  color: var(--text-faint); letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.launcher-close {
+  width: 22px; height: 22px;
+  border-radius: var(--radius-sm);
+  border: 0.5px solid var(--border-strong);
+  background: var(--overlay); color: var(--text-faint);
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: color .2s cubic-bezier(.25,.1,.25,1), border-color .2s, background .2s;
+}
+.launcher-close:hover { color: var(--text); background: var(--overlay-strong); }
+.launcher-close i { font-size: 13px; }
+
+/* ── Il campo di ricerca ──
+   Sta fra l'intestazione e la lista, ed è il corpo del cassetto: alto quanto
+   basta per il pollice, non di più, perché ogni pixel qui è una riga in meno
+   nella lista — che è la ragione per cui il cassetto esiste. */
+.launcher-search-row {
+  position: relative;
+  display: flex; align-items: center;
+  padding: 8px 12px 4px;
+  flex-shrink: 0;
+}
+.launcher-search-icon {
+  position: absolute; left: 23px;
+  font-size: 15px; color: var(--text-faint);
+  pointer-events: none;
+}
+.launcher-search {
+  flex: 1; min-width: 0;
+  height: 36px;
+  padding: 0 32px;
+  border: 0.5px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--overlay);
+  color: var(--text);
+  font-size: 14px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color .2s cubic-bezier(.25,.1,.25,1);
+}
+.launcher-search::placeholder { color: var(--text-faint); }
+.launcher-search:focus { border-color: rgba(var(--accent-rgb), 0.55); }
+/* La ✕ compare solo quando c'è qualcosa da pulire: un pulsante sempre visibile
+   che a volte non fa niente insegna a non fidarsi dei pulsanti. Nascosta con
+   `visibility`, non `display`, così il campo non cambia larghezza sotto il dito
+   nell'istante in cui si svuota. */
+.launcher-search-clear {
+  position: absolute; right: 21px;
+  width: 22px; height: 22px;
+  border: none; border-radius: 50%;
+  background: var(--overlay-strong); color: var(--text-faint);
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  visibility: hidden; opacity: 0;
+  transition: opacity .15s cubic-bezier(.25,.1,.25,1);
+  -webkit-tap-highlight-color: transparent;
+}
+.launcher-search-clear.visible { visibility: visible; opacity: 1; }
+.launcher-search-clear i { font-size: 12px; }
+
+.launcher-list {
+  flex: 1; min-height: 0;
+  overflow-y: auto;
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 10px 12px 12px;
+  /* La lista **non arriva al fondo dello schermo**, e non per gusto: il
+     `padding-bottom` di `.launcher-sheet` la tiene sopra la fascia in cui la
+     shell riconosce la gesture di home (5.2 / D8). Una passata verso l'alto
+     partita là dentro non scorrerebbe: chiamerebbe `goHome()` — e siccome Jenny
+     è il launcher del dispositivo, non porterebbe via a un'altra app ma
+     smonterebbe tutti gli overlay e collasserebbe ogni controller. */
+}
+
+/* La riga è attivabile col tocco, e lo dice: `cursor`, stato premuto, anello di
+   fuoco. `flex-shrink: 0` perché la lista è un flex column che scorre — senza,
+   con molte voci le righe si schiaccerebbero invece di scorrere.
+   **L'altezza non dipende dal contenuto**: descrizione ed errore stanno su una
+   riga sola con l'ellissi (v. `.launcher-row-desc`), quindi una Jenny App rotta
+   non alza la propria riga né sposta le altre — è il difetto 05 del rilievo,
+   dove l'errore dentro la cella porta la riga della griglia da 100 a 147 px. */
+.launcher-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px;
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--overlay);
+  flex-shrink: 0;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background .15s cubic-bezier(.25,.1,.25,1), transform .15s cubic-bezier(.34,1.56,.64,1);
+}
+.launcher-row:active { background: var(--overlay-strong); transform: scale(0.985); }
+.launcher-row:focus-visible {
+  outline: none;
+  border-color: rgba(var(--accent-rgb), 0.7);
+  background: var(--overlay-strong);
+}
+/* La riga **selezionata** (passo 4): quella che ⏎ apre. Non è il fuoco — il
+   fuoco resta nel campo mentre frecce e rotella muovono questa, ed è ciò che
+   tiene il campo scrivibile durante la scelta — quindi ha un segno proprio e
+   più marcato del `:focus-visible` qui sopra: la barretta d'accento a sinistra
+   si vede a colpo d'occhio anche mentre la lista scorre sotto la selezione.
+   `border-left` e non `box-shadow`: la lista scrolla, e un'ombra su un
+   contenitore che scorre è una ripittura in più per fotogramma. */
+.launcher-row.selected {
+  border-color: rgba(var(--accent-rgb), 0.55);
+  border-left: 2.5px solid rgb(var(--accent-rgb));
+  background: var(--overlay-strong);
+  /* I 2 px in più del bordo sinistro si tolgono dal padding: la riga non si
+     allarga e le icone restano incolonnate con quelle non selezionate. */
+  padding-left: 10px;
+}
+/* Icona piccola a sinistra — 22 px, contro il 22% di cella che la griglia di
+   oggi spende per la stessa informazione (difetto 03 del rilievo). Taglia fissa
+   perché le sorgenti sono due, un PNG base64 dal PackageManager e un glifo
+   Tabler, e devono incolonnarsi lo stesso. */
+.launcher-row-icon {
+  width: 22px; height: 22px;
+  flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--text-muted);
+}
+.launcher-row-icon img {
+  width: 100%; height: 100%;
+  object-fit: contain;
+  border-radius: 4px;
+}
+.launcher-row-icon i { font-size: 16px; }
+
+.launcher-row-text {
+  flex: 1; min-width: 0;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.launcher-row-name {
+  font-size: 13px; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.launcher-row-desc {
+  font-size: 11px; color: var(--text-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* Il guasto al posto della descrizione, nella riga e non in un blocco che si
+   allarga: `white-space: nowrap` è ereditato da `.launcher-row-desc` e va
+   tenuto, perché è ciò che impedisce a un errore lungo di deformare la lista. */
+.launcher-row-desc--problem { color: var(--error); }
+/* Jenny App con un backend proprio (`has_server`): un glifo, non una parola —
+   la colonna di destra è già occupata dal tipo. */
+.launcher-row-server {
+  font-size: 13px; color: var(--text-faint);
+  flex-shrink: 0;
+}
+.launcher-row-kind {
+  font-size: 10px; color: var(--text-faint);
+  letter-spacing: .04em; text-transform: uppercase;
+  flex-shrink: 0;
+}
+.launcher-note {
+  margin: 6px 2px 0;
+  font-size: 11px; font-style: italic;
+  color: var(--text-faint);
+}
+
+/* ── L'avviso di elenco incompleto (6.2) ──
+   Una striscia, non un blocco: dice che manca qualcosa e offre di riprovare,
+   senza prendersi lo spazio dei risultati che invece sono arrivati. Sta *fuori*
+   dalla lista perché la lista è un `listbox` e i suoi figli sono `option`: un
+   avviso là dentro si annuncerebbe come una voce da aprire. */
+.launcher-status {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0 12px 6px;
+  padding: 6px 10px;
+  border: 0.5px solid var(--error);
+  border-radius: var(--radius);
+  background: var(--overlay);
+  flex-shrink: 0;
+}
+.launcher-status[hidden] { display: none; }
+.launcher-status-icon { font-size: 13px; color: var(--error); flex-shrink: 0; }
+.launcher-status-text {
+  flex: 1; min-width: 0;
+  font-size: 11px; color: var(--text-muted);
+}
+.launcher-status-retry {
+  flex-shrink: 0;
+  padding: 3px 9px;
+  border: 0.5px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--overlay-strong);
+  color: var(--text);
+  font-size: 11px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.launcher-status-retry:disabled { opacity: 0.5; cursor: default; }
+
+/* ── La riga «Gestisci» (6.1, D4) ──
+   In fondo e fuori dalla lista: resta ferma mentre i risultati scorrono, e non
+   è una voce del `listbox` — non si apre con ⏎ e non si trova cercando, perché
+   non è una cosa da lanciare. Il filo sopra dice che il cambio di registro è
+   voluto: sopra si lancia, qui si va altrove. */
+.launcher-manage {
+  display: flex; align-items: center; gap: 8px;
+  flex-shrink: 0;
+  padding: 9px 14px;
+  border: none;
+  border-top: 0.5px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background .15s cubic-bezier(.25,.1,.25,1);
+}
+.launcher-manage:active { background: var(--overlay); }
+.launcher-manage:focus-visible { outline: none; background: var(--overlay-strong); }
+.launcher-manage span { flex: 1; text-align: left; }
+.launcher-manage i { font-size: 14px; }
+.launcher-manage-chevron { color: var(--text-faint); font-size: 13px; }
+/* Con la tastiera su, sullo schermo quadrato al foglio restano 116 px: la
+   cornice `.compact` esiste per far entrare **una riga intera** (5.5), e tutto
+   ciò che non è la lista se la riprende. Misurato con la tastiera su: la riga
+   «Gestisci» costa 30 px su 46 di lista, e l'avviso di 6.2 ne costa 28 — con
+   l'avviso a schermo la lista scende a **14 px, zero righe intere**, cioè
+   esattamente il difetto che 5.5 esiste per chiudere, reintrodotto da un
+   bordo.
+   Spariscono entrambi, e tornano appena la tastiera scende. Non si perde
+   niente: sono due informazioni secondarie rispetto al vedere ciò che si sta
+   cercando, e nel caso in cui **tutto** sia fallito la lista è vuota e il
+   guasto lo dice comunque la nota là dentro, che di cornice non ne costa. */
+.launcher-sheet.compact .launcher-manage,
+.launcher-sheet.compact .launcher-status { display: none; }
+
+/* Il pulsante che apre il cassetto, nella riga del composer. Stessa taglia di
+   `.compose-send` così i tre elementi della riga restano allineati. */
+.compose-launcher {
+  width: 50px; height: 50px;
+  border-radius: 50%;
+  background: var(--overlay-strong);
+  border: 0.5px solid var(--border);
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--text-muted);
+  flex-shrink: 0;
+  transition: transform .25s cubic-bezier(.34,1.56,.64,1), color .3s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+.compose-launcher:active { transform: scale(0.92); }
+.compose-launcher i { font-size: 20px; }
 
 /* ── Graph ── */
 /* Colonna, non blocco: breadcrumb e barra di ricerca sono righe ad altezza
@@ -6097,6 +6709,18 @@ body {
 /* ══════════════════════════════════════════════════
    Jenny companion — mascotte sul bordo di ogni vista
    ══════════════════════════════════════════════════ */
+
+/* Nella scheda Apps la mascotte non prende i tocchi.
+   È ancorata al bordo destro a un'altezza fissa (l'offset qui sotto deriva da
+   `#input-bar`, che in questa vista non esiste nemmeno) e la sua **sagoma** —
+   non il margine trasparente, che sporge quasi tutto fuori schermo — copre i
+   ~53 px più a destra. Lì ora ci sono gli interruttori delle skill: misurato
+   sul Titan 2, tre tocchi su tre aprivano la minichat invece di spostare
+   l'interruttore.
+   Resta visibile: è identità, non decorazione, e farla sparire a ogni visita
+   sarebbe più brusco del non poterla toccare da qui. Il prezzo, detto: da
+   questa scheda il tocco sulla mascotte non apre più la minichat. */
+:root.mode-apps .jenny-duo { pointer-events: none; }
 
 .jenny-duo {
   position: absolute;
