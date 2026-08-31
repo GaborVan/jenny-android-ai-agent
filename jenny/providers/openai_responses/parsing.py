@@ -24,23 +24,55 @@ def map_finish_reason(status: str | None) -> str:
     return FINISH_REASON_MAP.get(status or "completed", "stop")
 
 
+def _as_mapping(value: Any) -> dict[str, Any] | None:
+    """*value* come dizionario, sia che arrivi dal JSON sia da un modello SDK."""
+    if isinstance(value, dict):
+        return value
+    if value is None:
+        return None
+    dump = getattr(value, "model_dump", None)
+    if callable(dump):
+        dumped = dump()
+        return dumped if isinstance(dumped, dict) else None
+    try:
+        return vars(value)
+    except TypeError:
+        return None
+
+
 def _usage_from_response_obj(response: Any) -> dict[str, int]:
     usage_raw = response.get("usage") if isinstance(response, dict) else getattr(response, "usage", None)
     if not usage_raw:
         return {}
-    if not isinstance(usage_raw, dict):
-        dump = getattr(usage_raw, "model_dump", None)
-        usage_raw = dump() if callable(dump) else vars(usage_raw)
+    usage_raw = _as_mapping(usage_raw)
+    if usage_raw is None:
+        return {}
     prompt_tokens = int(usage_raw.get("input_tokens") or usage_raw.get("prompt_tokens") or 0)
     completion_tokens = int(
         usage_raw.get("output_tokens") or usage_raw.get("completion_tokens") or 0
     )
     total_tokens = int(usage_raw.get("total_tokens") or prompt_tokens + completion_tokens)
-    return {
+    usage = {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": total_tokens,
     }
+
+    # ``cached_tokens`` sotto la chiave che l'API Responses usa. Mancava, quindi
+    # su questo endpoint il risparmio da cache risultava sempre zero — mentre il
+    # ramo Chat-Completions lo normalizza da tre posti diversi. I nomi
+    # ``prompt_tokens_details``/``cached_tokens`` restano accettati perché un
+    # gateway compatibile può rispondere con quelli su /responses.
+    for key in ("input_tokens_details", "prompt_tokens_details"):
+        details = _as_mapping(usage_raw.get(key))
+        if details and details.get("cached_tokens"):
+            usage["cached_tokens"] = int(details["cached_tokens"])
+            break
+    else:
+        if usage_raw.get("cached_tokens"):
+            usage["cached_tokens"] = int(usage_raw["cached_tokens"])
+
+    return usage
 
 
 def _parse_tool_call_arguments(args_raw: Any, name: str | None) -> Any:

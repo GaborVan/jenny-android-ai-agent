@@ -645,3 +645,78 @@ class TestConsumeSse:
 
         assert tool_calls[0].arguments == arguments
         assert type(tool_calls[0].arguments) is type(arguments)
+
+
+class TestCachedTokensOnTheResponsesPath:
+    """Il risparmio da cache non deve risultare zero su questo endpoint.
+
+    L'API Responses riporta i token in cache sotto
+    ``usage.input_tokens_details.cached_tokens``; il normalizzatore non lo
+    leggeva, quindi ogni turno su /responses dichiarava zero cache — mentre il
+    ramo Chat-Completions la normalizza da tre posti diversi.
+    """
+
+    @staticmethod
+    def _usage(usage: dict) -> dict:
+        return parse_response_output(
+            {"output": [], "status": "completed", "usage": usage}
+        ).usage
+
+    def test_input_tokens_details_is_read(self):
+        usage = self._usage({
+            "input_tokens": 1200, "output_tokens": 80, "total_tokens": 1280,
+            "input_tokens_details": {"cached_tokens": 1024},
+        })
+        assert usage["cached_tokens"] == 1024
+        assert usage["prompt_tokens"] == 1200
+
+    def test_a_compatible_gateway_may_use_the_chat_completions_name(self):
+        usage = self._usage({
+            "input_tokens": 500, "output_tokens": 20,
+            "prompt_tokens_details": {"cached_tokens": 384},
+        })
+        assert usage["cached_tokens"] == 384
+
+    def test_a_top_level_field_is_read_too(self):
+        usage = self._usage({"input_tokens": 300, "output_tokens": 10, "cached_tokens": 256})
+        assert usage["cached_tokens"] == 256
+
+    def test_no_cache_leaves_the_key_out(self):
+        """Assente e zero sono la stessa cosa: la chiave non compare.
+
+        Lo stesso fa ``_extract_usage`` sul ramo compat, e la contabilità a
+        valle distingue "nessun dato" da "zero risparmio" sulla presenza.
+        """
+        assert "cached_tokens" not in self._usage({"input_tokens": 100, "output_tokens": 5})
+        assert "cached_tokens" not in self._usage({
+            "input_tokens": 100, "output_tokens": 5,
+            "input_tokens_details": {"cached_tokens": 0},
+        })
+
+    def test_nested_details_are_unwrapped_when_they_stay_objects(self):
+        """``usage`` e i suoi dettagli possono arrivare come oggetti, non come dict.
+
+        ``parse_response_output`` srotola la risposta con ``model_dump``/``vars``,
+        ma quel passaggio non scende nei figli: ``input_tokens_details`` può
+        restare un oggetto, e letto come dict darebbe zero cache.
+        """
+        class Details:
+            def __init__(self) -> None:
+                self.cached_tokens = 777
+
+        class Usage:
+            def __init__(self) -> None:
+                self.input_tokens = 900
+                self.output_tokens = 30
+                self.total_tokens = 930
+                self.input_tokens_details = Details()
+
+        class Response:
+            def __init__(self) -> None:
+                self.output: list = []
+                self.status = "completed"
+                self.usage = Usage()
+
+        usage = parse_response_output(Response()).usage
+        assert usage["cached_tokens"] == 777
+        assert usage["prompt_tokens"] == 900
