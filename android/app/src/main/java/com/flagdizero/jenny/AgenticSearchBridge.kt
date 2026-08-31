@@ -1,6 +1,7 @@
 package com.flagdizero.jenny
 
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -35,11 +36,35 @@ class AgenticSearchBridge(context: Context) {
             "Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36"
 
-        init {
+        @Volatile
+        private var debuggingConfigured = false
+
+        /**
+         * Expose this process's WebViews to DevTools, but only on a debuggable APK.
+         *
+         * This used to run unconditionally in a static initializer, with a catch
+         * saying it was "safe to ignore on non-debuggable builds" — which
+         * described a protection that does not exist: the call does not throw on
+         * a release build, it simply enables. Every WebView in the shipped app
+         * was inspectable from any host that could reach the device's debug
+         * socket, and the hidden search WebView carries whatever the agent
+         * browses, cookies included.
+         *
+         * FLAG_DEBUGGABLE rather than BuildConfig.DEBUG: it is the property that
+         * actually decides whether the debug socket exists at all, and AGP 8 no
+         * longer generates BuildConfig unless a module asks for it.
+         */
+        fun configureWebContentsDebugging(context: Context) {
+            if (debuggingConfigured) return
+            debuggingConfigured = true
+            val debuggable =
+                (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+            if (!debuggable) return
             try {
                 WebView.setWebContentsDebuggingEnabled(true)
-            } catch (_: Exception) {
-                // safe to ignore on non-debuggable builds
+                Log.i(TAG, "WebView contents debugging enabled (debuggable build)")
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not enable WebView contents debugging: ${e.message}")
             }
         }
     }
@@ -47,6 +72,12 @@ class AgenticSearchBridge(context: Context) {
     private val handler = Handler(Looper.getMainLooper())
     private val appContext = context.applicationContext
     private var webView: WebView? = null
+
+    init {
+        // Prima che esista una WebView: il setter è di processo e va chiamato
+        // una volta sola, quindi la guardia sta nel companion.
+        configureWebContentsDebugging(appContext)
+    }
 
     private fun ensureWebView() {
         if (webView != null) return
