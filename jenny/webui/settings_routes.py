@@ -40,6 +40,13 @@ from jenny.webui.ssh_api import (
     ssh_settings_payload,
     update_ssh_settings,
 )
+from jenny.webui.worker_settings import (
+    ATLAS_REARM_KEYS,
+    GARDENER_REARM_KEYS,
+    MEMORY_REARM_KEYS,
+    update_memory_settings,
+    update_worker_settings,
+)
 
 QueryParams = dict[str, list[str]]
 
@@ -60,6 +67,7 @@ class WebUISettingsRouter:
         onboarding_event: Any | None = None,
         on_settings_changed: Callable[[], None] | None = None,
         on_telegram_changed: Callable[[], None] | None = None,
+        on_jobs_changed: Callable[[str], None] | None = None,
     ) -> None:
         self.bus = bus
         self.logger = logger
@@ -71,6 +79,12 @@ class WebUISettingsRouter:
         self._onboarding_event = onboarding_event
         self._on_settings_changed = on_settings_changed
         self._on_telegram_changed = on_telegram_changed
+        # Secondo gancio, e non un allargamento del primo:
+        # ``on_settings_changed`` ricostruisce provider e modello, questo ri-arma
+        # un job del cron. Chi cambia l'intervallo di Atlas non deve far
+        # ricostruire il provider, e chi cambia il modello non deve far ripartire
+        # gli orologi.
+        self._on_jobs_changed = on_jobs_changed
 
     async def dispatch(self, request: WsRequest, path: str) -> Response | None:
         if path == "/api/settings":
@@ -83,6 +97,10 @@ class WebUISettingsRouter:
             return await self._handle_settings_provider_delete(request)
         if path == "/api/settings/provider-models":
             return await self._handle_settings_provider_models(request)
+        if path == "/api/settings/memory/update":
+            return await self._handle_settings_memory_update(request)
+        if path == "/api/settings/workers/update":
+            return await self._handle_settings_workers_update(request)
         if path == "/api/settings/web-search/update":
             return await self._handle_settings_web_search_update(request)
         if path == "/api/settings/location/update":
@@ -139,6 +157,13 @@ class WebUISettingsRouter:
             except Exception:
                 self.logger.exception("on_settings_changed callback failed")
 
+    def _fire_jobs_changed(self, worker: str) -> None:
+        if self._on_jobs_changed:
+            try:
+                self._on_jobs_changed(worker)
+            except Exception:
+                self.logger.exception("on_jobs_changed callback failed for {}", worker)
+
     def _handle_settings(self, request: WsRequest) -> Response:
         if not self._authorized(request):
             return self._unauthorized()
@@ -165,6 +190,37 @@ class WebUISettingsRouter:
             )
         ):
             self._fire_settings_changed()
+        return self._json_response(payload)
+
+    async def _handle_settings_memory_update(self, request: WsRequest) -> Response:
+        """Le manopole di Dream e i tetti della memoria lunga."""
+        if not self._authorized(request):
+            return self._unauthorized()
+        try:
+            query = self._query(request)
+            payload = await update_memory_settings(query)
+        except WebUISettingsError as e:
+            return self._error_response(e.status, e.message)
+        # Presenza della chiave e non cambio del valore: v. il commento su
+        # ``MEMORY_REARM_KEYS``. Ri-armare a pianificazione identica non sposta
+        # la prossima scadenza; perdersi una transizione di ``enabled`` sì.
+        if any(key in query for key in MEMORY_REARM_KEYS):
+            self._fire_jobs_changed("dream")
+        return self._json_response(payload)
+
+    async def _handle_settings_workers_update(self, request: WsRequest) -> Response:
+        """Atlas, il giardiniere, e la compattazione delle chat di progetto."""
+        if not self._authorized(request):
+            return self._unauthorized()
+        try:
+            query = self._query(request)
+            payload = await update_worker_settings(query)
+        except WebUISettingsError as e:
+            return self._error_response(e.status, e.message)
+        if any(key in query for key in ATLAS_REARM_KEYS):
+            self._fire_jobs_changed("atlas")
+        if any(key in query for key in GARDENER_REARM_KEYS):
+            self._fire_jobs_changed("gardener")
         return self._json_response(payload)
 
     async def _handle_settings_provider_update(self, request: WsRequest) -> Response:

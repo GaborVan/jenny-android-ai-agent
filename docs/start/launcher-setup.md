@@ -50,12 +50,12 @@ The screenshots in this documentation, and the device the project is developed a
 
 ## The honest assessment: as a launcher, it's not a good one
 
-Judged purely as a home-screen replacement, Jenny is a weak launcher. There are no widgets, no folders, no icon packs, and no wallpaper management — none of the things a dedicated launcher app is judged on. What it has instead is a grid of your installed Android apps inside its own "Android App" section of the Apps tab (see [Phone app launcher](../using/app-launcher.md) for what that grid can and can't do), plus a theme picker and a mascot.
+Judged purely as a home-screen replacement, Jenny is a weak launcher. There are no widgets, no folders, no icon packs, and no wallpaper management — none of the things a dedicated launcher app is judged on. What it has instead is a search drawer that opens over the conversation and lists your installed Android apps alongside Jenny's own mini-apps and skills (see [Phone app launcher](../using/app-launcher.md) for what it can and can't do), plus a theme picker and a mascot.
 
 The launcher role is the *how*, not the *what*: it exists to make the agent the thing you land on, not to compete with Nova or Niagara on features. If you want both — Jenny's presence and a fully-featured launcher — treat this as an either/or per device rather than expecting Jenny to cover both jobs on your primary phone.
 
 ## Related pages
 
-- [Phone app launcher](../using/app-launcher.md) — what the Android-apps grid inside Jenny can actually do (open, uninstall, hide)
+- [Phone app launcher](../using/app-launcher.md) — the drawer that opens your apps, and the tab where you hide and uninstall them
 - [Install the APK](install.md) — permissions declared, including why there's no `CAMERA` or storage permission
 - [Introduction](introduction.md) — the "daily launcher vs. dedicated device" framing in full

@@ -46,20 +46,26 @@ def _ctx(key: str, args: str = "") -> CommandContext:
 
 
 class TestRegistration:
-    def test_is_dispatchable_with_and_without_a_project(self, router):
+    def test_the_prefix_stays_dispatchable_on_purpose(self, router):
+        """Il comando non prende argomenti, ma il prefisso resta registrato.
+
+        Serve a **intercettare** le forme vecchie (`/gardener settings`, un nome
+        di progetto): togliendolo, quelle righe non sarebbero più comandi e il
+        router le lascerebbe passare al modello come messaggi.
+        """
         assert router.is_dispatchable_command("/gardener")
         assert router.is_dispatchable_command("/gardener viaggio")
 
     def test_is_listed_among_builtin_commands(self):
-        from jenny.command.builtin import BUILTIN_COMMAND_SPECS
+        from jenny.command.specs import BUILTIN_COMMAND_SPECS
 
         specs = {spec.command: spec for spec in BUILTIN_COMMAND_SPECS}
 
         assert "/gardener" in specs
-        # Corto di proposito: il suggerimento accanto al comando nella palette, non
-        # la sua documentazione. Le forme per esteso (``off``, ``interval``, …)
-        # stanno in ``_gardener_usage()``, che `/gardener settings` stampa in coda.
-        assert specs["/gardener"].arg_hint == "[project|settings]"
+        # Niente suggerimento di argomento: il bersaglio è la conversazione in cui
+        # si è, e le manopole della passata periodica stanno in Impostazioni.
+        assert specs["/gardener"].arg_hint == ""
+        assert specs["/gardener"].scope == "project"
 
 
 @pytest.fixture()
@@ -88,11 +94,16 @@ class TestPickingTheProject:
         """Un rifiuto che dice **dove**, non solo che qui non si può: la lezione
         dei rifiuti del passo 6, e la stessa forma del rifiuto di
         ``journal_append`` fuori da un progetto. Un rifiuto che manda via a mani
-        vuote costa un altro turno."""
+        vuote costa un altro turno.
+
+        Non offre più di nominare un progetto (31/08/2026): il lavoro su un
+        progetto si fa da dentro, quindi la strada che indica è aprirlo.
+        """
         out = await cmd_gardener(_ctx("unified:default"))
 
         assert "not a project" in out.content
-        assert "/gardener <project>" in out.content
+        assert "/gardener <project>" not in out.content
+        assert "Open the project" in out.content
 
     async def test_inside_a_project_the_target_is_that_project(self, no_background):
         """Nessun argomento da scrivere: la conversazione in cui si è **è** il
@@ -102,10 +113,31 @@ class TestPickingTheProject:
         assert "viaggio-pazzo" in out.content
         assert no_background, "la passata deve partire, non solo essere annunciata"
 
-    async def test_a_named_project_wins_over_the_current_one(self, no_background):
+    async def test_naming_another_project_is_not_a_way_in(self, no_background):
+        """Era `/gardener <progetto>`: il telecomando dalla chat personale.
+
+        Il lavoro su un progetto si fa da dentro il progetto — la regola che il
+        layer dei tool aveva già (``journal_append`` fuori da uno rifiuce e non
+        ha un argomento con cui aggirarsi) e che questo comando era l'unico a
+        rompere. Da dentro un progetto, un nome non dirotta la passata su un
+        altro: non parte niente.
+        """
         out = await cmd_gardener(_ctx("project:viaggio", args="altro"))
 
-        assert "altro" in out.content
+        assert "altro" not in out.content
+        assert not no_background, "nessuna passata deve partire"
+
+    async def test_the_settings_words_say_where_the_knobs_went(self, no_background):
+        """Sette parole al posto di un nome taravano la passata periodica.
+
+        Con quelle manopole in Impostazioni resta un solo significato per il
+        comando, e chi digita la forma vecchia trova la strada invece del
+        silenzio.
+        """
+        out = await cmd_gardener(_ctx("project:viaggio", args="settings"))
+
+        assert "Settings" in out.content and "Wiki and projects" in out.content
+        assert not no_background
 
 
 class TestOutcomeMessages:

@@ -12,6 +12,7 @@ import { i18n } from './shared/i18n.js';
 import { getProviderBrand } from './shared/provider-brand.js';
 import { confirmDialog, detailDialog } from './shared/dialog.js';
 import { commandsChip } from './shared/commands-chip.js';
+import { isTypeAheadKey } from './shared/type-ahead.js';
 import {
   saActions,
   saActivityFrame,
@@ -547,20 +548,12 @@ export class ChatController {
    */
   _maybeTypeAheadFocus(e) {
     if (!this._active) return;
-    // Solo caratteri stampabili singoli. Le tastiere fisiche (Titan via bbkeyboard)
-    // possono emettere keydown con e.key undefined: il guard length===1 li scarta,
-    // come pure Enter/Escape/frecce/ecc.
-    if (!e.key || e.key.length !== 1) return;
-    // Lo spazio è escluso: non si inizia mai un messaggio con uno spazio (verrebbe
-    // comunque trimmato) ed è riservato a interazioni future con la mascotte.
-    if (e.key === ' ') return;
-    // I combo con modificatori sono scorciatoie, non testo.
-    if (e.metaKey || e.ctrlKey || e.altKey) return;
-    // Non rubare il focus se si sta già scrivendo altrove.
-    const el = document.activeElement;
-    if (el === this.input) return;
-    if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' ||
-               el.tagName === 'SELECT' || el.isContentEditable)) return;
+    // Le quattro guardie (carattere stampabile singolo, niente spazio, niente
+    // combo, nessun furto a chi sta già scrivendo) vivono in
+    // `shared/type-ahead.js`: il cassetto ha lo stesso bisogno, e una seconda
+    // copia sarebbe divergita proprio sul caso raro per cui esistono — il
+    // keydown con `key` undefined delle tastiere fisiche.
+    if (!isTypeAheadKey(e, document.activeElement)) return;
     // Né se sopra la chat c'è un overlay: la guardia percorre la stessa catena
     // di livelli del tasto Indietro (MobileApp._overlayLayers). Guardare solo
     // `dialog[open]`, come faceva prima, lasciava scoperti lightbox, minichat,

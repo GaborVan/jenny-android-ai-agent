@@ -51,6 +51,7 @@ class WebSocketDispatcher:
         webui_runtime_model_name: Callable[[], str | None] | None = None,
         onboarding_event: asyncio.Event | None = None,
         on_settings_changed: Callable[[], None] | None = None,
+        on_jobs_changed: Callable[[str], None] | None = None,
         ui_query: Any | None = None,
         get_subagent_manager: Callable[[], Any | None] | None = None,
     ):
@@ -62,6 +63,7 @@ class WebSocketDispatcher:
         self._webui_runtime_model_name = webui_runtime_model_name
         self._onboarding_event = onboarding_event
         self._on_settings_changed = on_settings_changed
+        self._on_jobs_changed = on_jobs_changed
         self._ui_query = ui_query
         self.channels: dict[str, Any] = {}
         self._dispatch_task: asyncio.Task | None = None
@@ -97,6 +99,7 @@ class WebSocketDispatcher:
             logger=logger,
             onboarding_event=self._onboarding_event,
             on_settings_changed=self._on_settings_changed,
+            on_jobs_changed=self._on_jobs_changed,
             on_telegram_changed=self._schedule_telegram_reload,
         )
         self.channels[CHANNEL_NAME] = WebSocketChannel(

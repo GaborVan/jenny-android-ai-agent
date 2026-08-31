@@ -26,7 +26,7 @@
 
 import { api } from './api-client.js';
 import { i18n } from './i18n.js';
-import { scopeChip } from './scope-chip.js';
+import { sessionManager } from './session-manager.js';
 import { claimComposeMenu, onOtherComposeMenu } from './state.js';
 
 export class CommandsChip {
@@ -45,6 +45,11 @@ export class CommandsChip {
     // leggendo è la sola bugia possibile qui, e questi due valori la evitano.
     this._commands = null;
     this._loadFailed = false;
+    // La conversazione a cui appartiene l'elenco in cache. Cambiando scope
+    // l'elenco va richiesto: dentro un progetto `/dream` non c'è, fuori non c'è
+    // `/tidy`, e servire quello di prima significherebbe offrire una voce che il
+    // dispatch rifiuta.
+    this._loadedKey = null;
     /** Lo monta chi possiede la chat: `(command) => void`. Senza, il chip è
      *  presentazione — stessa disciplina di `scopeChip.onSwitch`. */
     this.onPick = null;
@@ -137,15 +142,19 @@ export class CommandsChip {
     this.el.setAttribute('aria-expanded', 'false');
   }
 
-  /** L'elenco si chiede una volta sola: la tabella è compilata nel backend e
-   *  non cambia finché l'app è viva. Un fallimento invece si riprova, perché il
+  /** L'elenco si chiede una volta per conversazione: la tabella è compilata nel
+   *  backend e non cambia finché l'app è viva, ma **quali** voci hanno un
+   *  soggetto dipende da dove si sta scrivendo — e il filtro lo fa il server
+   *  (`ws_http._handle_webui_commands`). Un fallimento si riprova, perché il
    *  primo tentativo può cadere sul gateway che non ha ancora finito di alzarsi
    *  — il caso normale su un telefono. */
   async _load() {
-    if (this._commands !== null && !this._loadFailed) return;
+    const key = sessionManager.currentKey;
+    if (this._commands !== null && !this._loadFailed && this._loadedKey === key) return;
     try {
-      const data = await api.getCommands();
+      const data = await api.getCommands(key);
       this._commands = Array.isArray(data?.commands) ? data.commands : [];
+      this._loadedKey = key;
       this._loadFailed = false;
     } catch (err) {
       console.warn('commands list failed:', err);
@@ -167,7 +176,6 @@ export class CommandsChip {
 
   _renderMenu() {
     this.menu.innerHTML = '';
-    const inProject = scopeChip.scope?.kind === 'project';
 
     if (this._commands === null) {
       this.menu.appendChild(this._note(i18n.t('commands.loading')));
@@ -183,9 +191,11 @@ export class CommandsChip {
     this.menu.appendChild(list);
 
     for (const spec of this._commands) {
-      // `/tidy` e `/init` fuori da un progetto non hanno un soggetto: offrirli
-      // vorrebbe dire proporre due voci che non fanno niente.
-      if (spec.scope === 'project' && !inProject) continue;
+      // Nessun filtro qui: l'elenco che arriva **è** quello di questa
+      // conversazione. Un secondo filtro in questo file era una copia della
+      // regola nel posto che questo modulo esiste per non avere — e comunque
+      // cosmetica, perché non c'è autocomplete sullo `/`: la regola vera è il
+      // cancello del dispatch (`jenny/command/scope.py`).
       list.appendChild(this._item(spec));
     }
     // Un pannello che si apre vuoto si legge come rotto, e non e' quel che e'

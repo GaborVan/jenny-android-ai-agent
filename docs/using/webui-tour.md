@@ -9,7 +9,7 @@ A row of five icons pinned to the bottom of the screen switches between the app'
 | Icon | Tab | What it is |
 |---|---|---|
 | ✿ | **Chat** | The conversation with Jenny. See [Chat basics](chat.md). |
-| grid | **Apps** | Jenny Apps you've built, Skills, and a launcher grid of the apps installed on your phone. See [Mini-apps](mini-apps.md), [Skills](skills.md), [Phone app launcher](app-launcher.md). |
+| grid | **Apps** | Where you manage Jenny Apps you've built, Skills, and the apps installed on your phone — hiding, uninstalling, repairing. To *open* any of them, the drawer above the message box is quicker. See [Mini-apps](mini-apps.md), [Skills](skills.md), [Phone app launcher](app-launcher.md). |
 | book | **Wiki** | The knowledge base Jenny can compile about your notes and conversations. See [Wiki](wiki.md). |
 | folder | **Workspace** | A file browser/editor over Jenny's private working folder on the device. |
 | gear | **Settings** | Everything configurable from the app. See [Settings](../reference/settings.md). |

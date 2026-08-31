@@ -146,7 +146,9 @@ capitato di accorgersene. Due volte finora:
 - `AGENTS.md` fermo alla 0.3.0 sul Titan 2 — stessa forma, un layer sopra.
 - `agents.defaults.dream.memoryBudgetChars: 0` congelato nel `config.json` del
   device. Quando il default Python è passato da 0 a 2000 (2026-08-16) il device
-  è rimasto a 0, e l'unica via è `/dream budget memory 2000`.
+  è rimasto a 0, e l'unica via è il campo del tetto in Impostazioni → Memoria
+  (allora era `/dream budget memory 2000`, prima che quelle manopole si
+  spostassero — 31/08/2026).
 
 Conseguenza pratica: **se un valore deve raggiungere un'installazione già viva,
 serve una superficie che lo scriva** — un comando, una route, un

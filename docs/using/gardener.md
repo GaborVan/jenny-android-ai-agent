@@ -73,42 +73,31 @@ It recovers the *line*, never the page — and it is told to leave anything it i
 Normally nothing — the folder is the output, and a pass that wrote nothing leaves no trace at all. Beyond that:
 
 - Something it could not settle goes into the map's **Open** section (which every conversation in that project reads) *and* as one line in the project's `log/`.
-- After **three** consecutive passes that failed to record any progress, you get a notification: *"The gardener has failed N passes in a row on 'X': its journal is not becoming pages. Run /gardener X to see the error."* It costs no tokens and does not depend on the model, which in that situation may be exactly what is broken — and it repeats on every further failed pass rather than only at the crossing.
+- After **three** consecutive passes that failed to record any progress, you get a notification: *"The gardener has failed N passes in a row on 'X': its journal is not becoming pages. Open that project and send /gardener to see the error."* It costs no tokens and does not depend on the model, which in that situation may be exactly what is broken — and it repeats on every further failed pass rather than only at the crossing.
 
 ## Running one by hand: `/gardener`
 
-`/gardener` replies immediately with `Gardening <project>...` and posts the outcome when the pass finishes.
+Send `/gardener` **from inside the project**: it replies immediately with `Gardening <project>...` and posts the outcome when the pass finishes. It takes no arguments — the project you are in is the subject — and outside a project it is refused, with a line saying to open one.
 
-| Form | What it does |
-|---|---|
-| `/gardener` | One pass on the project you are in, now. Outside a project it refuses and tells you to name one. |
-| `/gardener <project>` | One pass on a named project. If there is no `wikis/<project>/wiki/`, it says so. |
-| `/gardener settings` | Shows how the periodic pass is set: on/off, the three numbers with their ranges and meanings, the history-compaction state, and the valid forms. |
-| `/gardener off` / `/gardener on` | Stops or starts the periodic pass. Takes effect immediately — no restart. |
-| `/gardener interval <min>` | How often it looks for work. 1–1440. |
-| `/gardener idle <min>` | Silence required in that project before a pass. 0–1440; `0` lets a pass start while you are talking. |
-| `/gardener distance <h>` | Minimum gap between two passes on one project. 0–8760; `0` lets it come straight back. |
-| `/gardener compact on\|off` | Whether a project's chat history is archived once it goes idle. **This one needs a gateway restart.** See [Projects](./projects.md#history-and-when-it-gets-compacted) before turning it on. |
+There is no way to garden a project from the personal chat. That is deliberate and it matches the tool layer, where `journal_append` outside a project refuses and has no argument for reaching one; the command used to accept a project name, and it was the only thing in the system that did.
 
 The outcome message distinguishes the ways a pass can do nothing — nothing new in the journal (no tokens spent), nothing that earned a page (journal marked read), finished without writing (journal left unread) — from the two ways it can do half the job: some writes refused, or pages written but the read-position not recorded. In both of those the pages are on disk and the journal is deliberately left unread, so the next pass sees those lines again. Re-promoting is safe by design; losing a line is not.
 
-Every write goes through the config write funnel, so a value you set is read back and kept, and a value that is already what you asked for does not rewrite `config.json` at all. Out-of-range values are refused with the range named, and the refusal says which alternative is the reversible one.
+## Setting the periodic pass
 
-A project genuinely named `settings`, `off`, `on`, `compact`, `interval`, `idle` or `distance` is shadowed by these forms; `/gardener` from inside it still works.
+Everything about the automatic pass is in **Settings → Wiki and projects**: whether it runs, how often it looks, how much silence it needs in that project's conversation, how long before it comes back to the same project — and, in the same section, whether an idle project's chat history is archived.
+
+Each control says what the value changes, and the numbers carry the ranges the schema enforces, so the field cannot offer one and the server refuse another. Every write goes through the config write funnel: a value you set is read back and kept, and setting a value to what it already is does not rewrite `config.json` at all. Turning the pass on or off, and changing the interval, re-arm the periodic job immediately — no restart.
 
 ## Turning it off
 
-```text
-/gardener off
-```
-
-That is the whole escape hatch, and it applies live — the periodic pass stops looking. `/gardener` and `/gardener <project>` still work by hand, so turning it off is not the same as losing the feature; and `/gardener on` re-arms the periodic job without a restart.
+The switch in **Settings → Wiki and projects**, and it applies live: the periodic pass stops looking. `/gardener` still works by hand from inside a project, so turning it off is not the same as losing the feature; turning it back on re-arms the job without a restart, even if the gateway started with it off.
 
 Turning the gardener off does **not** turn off capture: journal lines keep being written by the conversation itself, and they simply wait until a pass — periodic or manual — reads them. Capture is governed by the Writes/Read-only switch, not by this.
 
 ## Configuration reference
 
-Under `agents.defaults.gardener` in `config.json`, all four settable from `/gardener`:
+Under `agents.defaults.gardener` in `config.json`, all four settable from **Settings → Wiki and projects**:
 
 | Key | Meaning | Default | Range |
 |---|---|---|---|
@@ -123,7 +112,7 @@ Plus one sibling under `agents.defaults`:
 |---|---|---|
 | `compactProjectsWhenIdle` | Archive a project's chat history once it goes idle, like the personal one | `false` |
 
-An out-of-range number in a `config.json` written by an older version is **clamped to the bound**, not rejected — a stricter schema that refused it would quarantine the whole file and take your provider settings with it. There is no Settings-screen control for any of this; `/gardener` is the surface.
+An out-of-range number in a `config.json` written by an older version is **clamped to the bound**, not rejected — a stricter schema that refused it would quarantine the whole file and take your provider settings with it. That clemency is also what makes the off switch work from such a file, which is the one path that must never fail.
 
 ## See also
 

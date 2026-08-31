@@ -33,6 +33,7 @@ from jenny.runtime.cron_dispatch import (
     GARDENER_JOB_ID,
     CronDispatcher,
     refresh_gardener_job,
+    refresh_system_job,
 )
 
 _JOB = SimpleNamespace(name="gardener", id="job-gardener")
@@ -224,3 +225,54 @@ def test_re_arming_the_same_interval_does_not_push_the_next_run_away(tmp_path):
     refresh_gardener_job(cron, config=_write(interval_min=30))
 
     assert _gardener_job(cron).state.next_run_at_ms == first
+
+
+# -- e gli altri due lavoratori ----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("worker", "attr", "value", "expected_ms"),
+    [
+        ("dream", "interval_h", 4, 4 * 3_600_000),
+        ("atlas", "interval_h", 8, 8 * 3_600_000),
+        ("gardener", "interval_min", 45, 45 * 60_000),
+    ],
+)
+def test_every_periodic_worker_can_be_re_armed(tmp_path, worker, attr, value, expected_ms):
+    """Dal 31/08/2026 la controparte vale per tutti e tre, non solo per il giardiniere.
+
+    Prima esisteva solo la versione del giardiniere, perche' era l'unico con un
+    interruttore raggiungibile: le manopole di Dream stavano in ``/dream budget``,
+    che non ne aveva uno, e Atlas non aveva nessuna superficie. Portandole in
+    Impostazioni, spegnere Dream o cambiare l'intervallo di Atlas ha avuto bisogno
+    dello stesso ri-armo — altrimenti sarebbero due manopole che chiedono un
+    riavvio senza dirlo.
+    """
+    cron = _cron(tmp_path)
+    config = Config()
+    setattr(getattr(config.agents.defaults, worker), attr, value)
+    save_config(config, get_config_path())
+
+    described = refresh_system_job(cron, worker, config=config)
+
+    job = next((j for j in cron._load_store().jobs if j.id == worker), None)
+    assert job is not None and job.schedule.every_ms == expected_ms
+    assert described
+
+
+@pytest.mark.parametrize("worker", ["dream", "atlas", "gardener"])
+def test_a_worker_that_is_off_is_not_registered_and_is_not_an_error(tmp_path, worker):
+    cron = _cron(tmp_path)
+    config = Config()
+    getattr(config.agents.defaults, worker).enabled = False
+    save_config(config, get_config_path())
+
+    assert refresh_system_job(cron, worker, config=config) is None
+    assert not [j for j in cron._load_store().jobs if j.id == worker]
+
+
+def test_a_worker_nobody_registered_is_a_programming_error(tmp_path):
+    """Elenco chiuso e non un ``getattr`` sul nome: un refuso in una route
+    scriverebbe altrimenti un job di sistema che nessun dispatch sa smistare."""
+    with pytest.raises(ValueError, match="unknown system worker"):
+        refresh_system_job(_cron(tmp_path), "heartbeat")

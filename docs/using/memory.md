@@ -135,12 +135,21 @@ Note the asymmetry in that list. `WIKI.md` and the pending history are *capped* 
 | Command | What it does |
 |---------|--------------|
 | `/dream` | Runs Dream immediately instead of waiting for the next scheduled pass. Replies "Dreaming..." right away, then follows up with the outcome once it finishes (completed and how long it took, completed-but-wrote-nothing, failed, or nothing to process). When a review pass ran first, the note also says how many characters it freed, how many facts it moved into `memory/archive/` (with the ids to ask for them back), and how many writes were refused by a size budget and never landed — that last one is usually the explanation for "nothing was freed". |
-| `/dream budget` | Shows the current size of each memory file against its budget, and how often the review pass runs. |
-| `/dream budget <memory\|user\|soul> <n>` | Sets that file's budget to `n` characters. `0` disables enforcement for that file — the size is still shown, nothing is refused. |
-| `/dream budget review <n>` | Runs the review pass every `n` Dream runs. Anything below **12** is refused unless you repeat it with the confirmation phrase the refusal prints — `1` runs a review every time, which is the way to watch one happen instead of waiting a day for it. [Why there is a floor.](#the-review-cadence-has-a-floor-of-12-and-it-is-enforced) |
 | `/atlas` | Rebuilds the wiki directory now. If nothing in your wikis changed since the last run it says so and spends nothing; `/atlas force` rebuilds anyway. |
 
-`/dream budget` writes to `config.json` and takes effect on the next run — no restart. It exists because raising a default in a new version of the app does **not** reach a `config.json` that has already been written: the file wins. If you are on an install from before these settings existed, the command is the only way to change them.
+Both are verbs: they do something now, and they take no settings. Both are also **personal-chat commands** — inside a [project](./projects.md) they are refused, because a project conversation never feeds the personal memory and the wiki directory is deliberately kept out of its prompt. See [Slash commands](./slash-commands.md#where-a-command-works).
+
+## The knobs: Settings → Memory
+
+The budgets and the review cadence used to be arguments of `/dream`. They are settings, so they live in **Settings → Memory**, next to what they act on:
+
+| Control | What it does |
+|---------|--------------|
+| Periodic consolidation | Whether Dream runs on its own, and how many hours between runs. Turning it on or off applies immediately — no restart. |
+| Review pass every N runs | How often the shrinking pass runs. Below **12** the screen asks for an explicit confirmation before writing it, with the measured reason in the dialog. [Why there is a floor.](#the-review-cadence-has-a-floor-of-12-and-it-is-enforced) |
+| File budgets | One field per file — `MEMORY.md`, `USER.md`, `SOUL.md` — each shown with **what that file currently measures**, so the budget is chosen from the real number rather than guessed. `0` means measure and never refuse. |
+
+Every change goes through the config write funnel and takes effect on the next run. That surface exists because raising a default in a new version of the app does **not** reach a `config.json` that has already been written: the file wins, so there has to be a way to change it that is not a root shell.
 
 ## Configuration
 
@@ -170,29 +179,25 @@ Dream's configuration lives under `agents.defaults.dream` in `config.json`, and 
 | `memoryBudgetChars` | Target size for `memory/MEMORY.md`, in characters. Dream sees how full the file is in every prompt, and a Dream write that would push it further over the line is refused — a write that *shrinks* it is always allowed, or an over-budget file could never be pruned. `0` means "measure, don't enforce". | `3000` |
 | `userBudgetChars` | The same for `USER.md`. | `3000` |
 | `soulBudgetChars` | The same for `SOUL.md` — and it ships at `0` on purpose. That file mixes Jenny's identity, which must never be pruned, with notes that belong elsewhere, and a size limit cannot tell the two apart. The review pass reads before it decides; the limit does not. | `0` |
-| `reviewEveryRuns` | Every how many Dream runs the **review pass** runs: a pass whose only job is to make the files smaller, rather than to add to them. At the default interval, twelve runs is about once a day. **`/dream budget review` refuses anything below 12** — see below. Editing `config.json` by hand is not blocked (the schema still accepts any value from `1` up, so a restored config always loads), but 12 is the number the design assumes. | `12` |
+| `reviewEveryRuns` | Every how many Dream runs the **review pass** runs: a pass whose only job is to make the files smaller, rather than to add to them. At the default interval, twelve runs is about once a day. **Settings asks for a confirmation below 12** — see below. Editing `config.json` by hand is not blocked (the schema still accepts any value from `1` up, so a restored config always loads), but 12 is the number the design assumes. | `12` |
 
 The budgets are counted in **characters**, not tokens, because that is the only unit the model can count while it is writing.
 
 **These caps bind Dream, not Jenny.** The refusal is mounted only on the tools Dream's own runs get. The tools Jenny uses while you are talking to her carry no size guard at all, so a chat turn can write past a budget and nothing stops it — measured on a real device at 2,399 characters against a cap of 2,400. That is deliberate. A refusal in the middle of a conversation would land on the one writer that has you sitting there, and it would trade a visible failure for an invisible one: the thing you just asked Jenny to remember would quietly not be saved. So for the main agent the numbers are **advisory** — the size the review pass aims for, not a wall. They are enforced where the writer is unattended and has a review pass behind it to make room.
 
-The cost of that choice is worth knowing: a chat turn can leave a file saturated, and it is Dream that then finds no room. If you see Dream reporting that it consolidated nothing, a file already at its cap is the first thing to check — `/dream budget` shows it.
+The cost of that choice is worth knowing: a chat turn can leave a file saturated, and it is Dream that then finds no room. If you see Dream reporting that it consolidated nothing, a file already at its cap is the first thing to check — Settings → Memory shows each file's size against its budget.
 
 **Being over budget is not an error.** It means the next thing Dream wants to add has to wait for the review pass to make room — usually by *moving* something to where it belongs (a task specification to a skill file, project context to `MEMORY.md`) rather than by forgetting it.
 
 ### The review cadence has a floor of 12, and it is enforced
 
-`/dream budget review 4` does not write. The command refuses anything below **12** runs and tells you why, because below that the review passes start meeting each other: the second one lands on a file the first has already pruned, and it keeps looking for things to remove. Measured on a real device, two consecutive passes took `USER.md` from 3,524 characters to 1,626 — 31% of that on the second pass alone — and a forced pass on a later build removed five real entries: two open questions, a plan, a biographical detail and one insight.
+A cadence below **12** runs does not get written without an explicit confirmation, and the server refuses it whatever asks — the floor is not a client-side politeness. The reason is that below that the review passes start meeting each other: the second one lands on a file the first has already pruned, and it keeps looking for things to remove. Measured on a real device, two consecutive passes took `USER.md` from 3,524 characters to 1,626 — 31% of that on the second pass alone — and a forced pass on a later build removed five real entries: two open questions, a plan, a biographical detail and one insight.
 
 Losing them is no longer possible. Every entry that leaves `USER.md` or `memory/MEMORY.md` is written to `memory/archive/` before the shrinking write lands, whichever tool does the shrinking — measured over two runs at `reviewEveryRuns: 1`, ten entries were archived and nothing was lost. So the floor is not there to stop deletion any more. It is there because a faster cadence spends tokens on every Dream run, unattended, for pruning that has nothing left to prune, and 12 is the cadence the rest of the design assumes.
 
-If you want a faster cadence anyway — measuring on a real device is the reason this path exists — the refusal prints a confirmation phrase to repeat the command with:
+If you want a faster cadence anyway — measuring on a real device is the reason this path exists — typing a value below the floor in Settings → Memory raises a dialog carrying those measurements, and only an explicit yes writes it. Setting it back to 12 needs no confirmation.
 
-```
-/dream budget review 1 i-accept-back-to-back-reviews
-```
-
-It is a phrase rather than a short flag on purpose: it should be something you decide to type, not something that gets added for you. Setting it back is `/dream budget review 12`, with no phrase needed.
+It used to be a confirmation *phrase* to retype (`/dream budget review 1 i-accept-back-to-back-reviews`), for the same reason the dialog exists now: it should be something you decide, not something that gets added for you. A tap that has just read the numbers is that decision; a tap that has not is why the dialog carries them.
 
 ### The budgets bound what Dream writes, not what a turn pays
 
@@ -202,7 +207,7 @@ The reason is that a cap at injection time would be a limit with nobody behind i
 
 The other half of the reason is that these files are terminal. A truncated line in the wiki directory costs you a link, and the page it pointed at is still one `read_file` away; the tail of `USER.md` is not written down anywhere else, so a "the rest is over there" notice would have nothing to point at.
 
-What that leaves you responsible for: the system prompt is a fixed cost, so if these files ever do get big, it's the live conversation that gets compacted earlier to make room. `/dream budget` is the number to watch, and it's a number to act on rather than a wall that will act for you.
+What that leaves you responsible for: the system prompt is a fixed cost, so if these files ever do get big, it's the live conversation that gets compacted earlier to make room. The sizes in Settings → Memory are the numbers to watch, and they are numbers to act on rather than a wall that will act for you.
 
 ### Atlas
 
@@ -234,7 +239,7 @@ Which wiki supplies the entity list follows `wiki.defaultWiki` (default `main`);
 
 Related settings that shape *when* material reaches Dream in the first place (not Dream-specific, but relevant here) live under `agents.defaults` too: `idleCompactAfterMinutes` (idle-triggered compaction, default 15 minutes), `maxMessages` (default 120), and the consolidation ratio that controls how aggressively old messages are summarized (default 0.5). See [Configuration](../reference/configuration.md) for the full reference.
 
-None of this is exposed in the Settings UI today. The four budget and cadence fields have a chat surface — `/dream budget`, in the table above — and everything else, including Dream's interval and the compaction thresholds, can currently only be changed by editing `config.json` directly. The memory files themselves need no special mode to see: `SOUL.md`, `USER.md`, `memory/MEMORY.md`, and `memory/history.jsonl` are all visible from the Workspace file browser by default. The only things the file browser hides by default are dotfiles and a handful of runtime-internal paths (`config.json`, `agent/`, `cron/`, `sessions/`, `ui/`) — including the `memory/.cursor` and `memory/.dream_cursor` cursor files, which are dotfiles. Turning on **Developer mode** in Settings → System reveals those too, but it has no effect on the memory files themselves, which were never hidden.
+**Settings → Memory** covers Dream itself: the on/off switch, the interval, the review cadence, and the three file budgets with their current sizes. What is still config-only is the material *around* it — the compaction thresholds in this paragraph — which can only be changed by editing `config.json` directly. The memory files themselves need no special mode to see: `SOUL.md`, `USER.md`, `memory/MEMORY.md`, and `memory/history.jsonl` are all visible from the Workspace file browser by default. The only things the file browser hides by default are dotfiles and a handful of runtime-internal paths (`config.json`, `agent/`, `cron/`, `sessions/`, `ui/`) — including the `memory/.cursor` and `memory/.dream_cursor` cursor files, which are dotfiles. Turning on **Developer mode** in Settings → System reveals those too, but it has no effect on the memory files themselves, which were never hidden.
 
 ## Gotchas worth knowing
 

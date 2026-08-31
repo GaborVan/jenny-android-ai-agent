@@ -6,7 +6,21 @@ Typing a message that starts with `/` in the chat input can trigger a built-in c
 
 Commands are matched on the whole message (case-insensitive), either as an exact word (`/new`) or as a prefix followed by an argument (`/model fast`). If what you type doesn't match any known command, it is **not rejected** — it's forwarded to the agent as an ordinary chat message, exactly as if it had no leading slash.
 
-You can type them by hand, or pick them from the **Commands** chip in the row above the composer, next to the scope chip and the write switch. That list is built from the same table that `/help` prints, so it can't drift out of date; a command that takes an argument (`/model`, `/history`, `/goal`, …) is written into the composer for you instead of being sent immediately, so you can finish the line. Two of them — `/tidy` and `/init` — only appear when the conversation is bound to a [project](./projects.md), because outside one they have no subject. There is still no autocomplete on `/` itself.
+You can type them by hand, or pick them from the **Commands** chip in the row above the composer, next to the scope chip and the write switch. That list is built from the same table that `/help` prints, so it can't drift out of date; a command that takes an argument (`/model`, `/history`, `/goal`, …) is written into the composer for you instead of being sent immediately, so you can finish the line. There is still no autocomplete on `/` itself.
+
+## Where a command works
+
+**The subject decides.** Each command acts on one of three things, and that is what says where it can be sent from:
+
+| Acts on | Commands | Where |
+|---|---|---|
+| **this conversation** | `/new` `/stop` `/status` `/history` `/goal` `/help` | anywhere |
+| **the personal memory, or the installation** | `/dream` `/atlas` `/model` `/skill` | the personal chat only |
+| **this project** | `/gardener` `/tidy` `/init` | inside a [project](./projects.md) only |
+
+Both halves are enforced, and both are visible: the Commands chip lists what this conversation can do — entering a project *removes* `/dream` and friends as well as adding `/tidy` — and `/help` prints the same list. Sending one anyway is refused with a line that says where it does work, and the refusal comes from the command layer: it never reaches the model as a message.
+
+Two consequences worth naming. Working on a project is always done **from inside** it: no command takes a project name, the same way the journal tool has no argument to reach another project's journal. And on Telegram — always the personal conversation — the project commands simply do not exist.
 
 Two commands — `/stop` and `/status` — are handled on a "priority" fast path that runs even while a turn is actively streaming or a tool is executing. The rest wait for the current dispatch to be free, which in practice is rarely noticeable.
 
@@ -22,13 +36,15 @@ All server-side command responses below are **hardcoded in English**, regardless
 | `/model` | `[preset]` | Shows the current model/preset, or switches the active preset |
 | `/history` | `[n]` | Prints the last `n` persisted user/assistant messages (default 10, max 50) |
 | `/goal` | `<description>` | Tells the agent to treat the request as a long-running goal |
-| `/dream` | `[budget [name n]]` | Manually triggers a memory consolidation (Dream) run in the background, or reads/sets the memory-file budgets |
+| `/dream` | none | Manually triggers a memory consolidation (Dream) run in the background |
 | `/atlas` | `[force]` | Rebuilds the wiki directory (`memory/WIKI.md`) from your wikis, in the background |
-| `/gardener` | `[project\|settings\|…]` | Runs one [gardener](./gardener.md) pass on a project now, or reads and changes the periodic pass |
+| `/gardener` | none | Runs one [gardener](./gardener.md) pass on the project you are in, now |
 | `/skill` | none | Lists the currently enabled skills with their descriptions |
-| `/help` | none | Lists all of the above, plus `/init` |
+| `/help` | none | Lists the commands of this conversation |
 
-One more command, `/init`, appears in `/help` but is not in the list above because it is not a command in the same sense: inside a [project](./projects.md) it is expanded into an ordinary agent turn that reads the wiki and writes that project's `AGENTS.md`. Outside a project it refuses and tells you to pick one from the chip.
+Two more, `/tidy` and `/init`, appear in the chip and in `/help` but are not in the list above because they are not commands in the same sense: inside a [project](./projects.md) each is expanded into an ordinary agent turn — one restructures that project's wiki, the other writes its `AGENTS.md`. Outside a project they are refused like any other project command.
+
+**The knobs are not here.** Dream's budgets and review cadence, and everything about the periodic gardener pass, used to be arguments of `/dream` and `/gardener`. They are settings, so they live in **Settings** — under *Memory* and *Wiki and projects* — next to the numbers they act on. Typing the old form answers with where it went.
 
 Full details and exact output text for each command follow.
 
@@ -185,6 +201,8 @@ Dream failed after 4.2s: <error>
 
 If there's no new history to process yet (common on a fresh or short chat, since Dream only reads from `memory/history.jsonl`, which is only populated after compaction), you get a longer explanation instead, ending with suggestions like enabling `idleCompactAfterMinutes`. See [Memory, Dream and Atlas](./memory.md) for the full model.
 
+The command takes no arguments. The three file budgets, the review cadence, and Dream's own schedule are in **Settings → Memory**, which also shows what each file currently measures — the number the budget is chosen from. `/dream budget …` answers with a line saying so.
+
 ### `/atlas` — rebuild the wiki directory now
 
 Triggers Atlas, the job that compiles your wikis into `memory/WIKI.md`. Like `/dream` it acknowledges immediately:
@@ -207,20 +225,28 @@ Atlas found no wikis to map.
 
 `/atlas force` skips the change check and rebuilds regardless. It does not skip the "do you have any wikis" check — with no wikis there is nothing to compile. See [Atlas](./memory.md#atlas-the-wiki-side-of-memory).
 
-### `/gardener` — run a gardener pass, or set the periodic one
+### `/gardener` — run a gardener pass on this project
 
-Inside a [project](./projects.md), bare `/gardener` runs one [gardener](./gardener.md) pass on that project right now: it acknowledges with `Gardening <name>...` and follows up when the pass finishes. Outside a project it refuses and asks you to name one (`/gardener <project>`).
+Inside a [project](./projects.md), `/gardener` runs one [gardener](./gardener.md) pass on that project right now: it acknowledges with `Gardening <name>...` and follows up when the pass finishes. It takes no arguments — the project you are in *is* the subject.
 
-Seven words take the place of a project name and set the periodic pass instead of running anything: `settings`, `off`, `on`, `compact`, `interval`, `idle`, `distance`. So `/gardener settings` prints the current state and the valid forms, `/gardener off` stops the periodic pass (leaving the by-hand forms working), and `/gardener idle 45` changes how much silence a pass waits for. Every form and its accepted range is in [The gardener](./gardener.md#running-one-by-hand-gardener); a project actually named one of those seven words is shadowed by them, and `/gardener` from inside it still works.
+Outside a project it is refused, and the refusal says to open one. There is no way to garden a project from the personal chat: that is deliberate, and it matches the tool layer, where the journal has no argument for reaching another project either.
+
+The periodic pass — whether it runs at all, how often it looks, how much silence it waits for, how long before it returns to the same project — is in **Settings → Wiki and projects**. Turning it off there leaves `/gardener` working by hand. `/gardener settings` and the other old words answer with a line saying where they went.
+
+### `/tidy` — restructure this project's wiki
+
+Only inside a project, and like `/init` it is not answered by the command layer: it becomes a full agent turn, in this conversation, with the project's pages and your answers in hand. It splits pages that have outgrown the per-turn budget, moves prose out of an oversized map, and realigns the page list — the operation a periodic gardener pass cannot do, because it has nobody to ask. If the wiki is already in good shape it says so in one line and changes nothing.
 
 ### `/init` — write this project's instructions
 
 Only inside a project. Unlike everything else on this page it is not answered by the command layer: it is expanded into a full agent turn that reads `wiki/index.md`, the pages, the recent `log/` entries and the existing instructions file, and then writes that project's `AGENTS.md` — scope, the conventions the pages already follow, and the open questions. If the file already has content it is updated rather than replaced. What you see in the chat stays `/init`.
 
-Outside a project:
+Outside a project, the same refusal every project command gives:
 
 ```text
-`/init` only works inside a project — it writes that project's AGENTS.md. Pick one from the chip above the message box first.
+`/init` works on one project, and this conversation is not a project.
+
+Open the project — the chip above the composer does it — and send `/init` there.
 ```
 
 ### `/skill` — list enabled skills
@@ -239,7 +265,9 @@ or, if none are enabled:
 No skills available.
 ```
 
-### `/help` — list available commands
+### `/help` — list the commands of this conversation
+
+In the personal chat:
 
 ```text
 ✿ jenny commands:
@@ -249,13 +277,13 @@ No skills available.
 /model [preset] — Show or switch the active model preset.
 /history [n] — Print the last N persisted conversation messages.
 /goal <goal> — Tell the agent to treat the request as a long-running goal.
-/dream [budget [name n]] — Manually trigger memory consolidation. Add 'budget' to read the memory file sizes, or 'budget <name> <n>' to set one.
+/dream — Manually trigger memory consolidation now. The budgets and the review cadence live in Settings, under Memory.
 /atlas [force] — Rebuild the wiki directory in memory/WIKI.md. Add 'force' to skip the change check.
-/gardener [project|settings] — Turn this project's new journal lines into pages and update its map — or, with nothing new to promote, bring an oversized map back under its ceiling. Inside a project it works on that one; elsewhere name it: '/gardener <project>'. Add 'settings' to read the periodic pass, or 'off' to stop it.
 /skill — List enabled skills and their descriptions.
-/init — Inside a project: read the wiki and write its AGENTS.md.
 /help — List available slash commands.
 ```
+
+Inside a project the list is a different one, not a longer one: `/dream`, `/atlas`, `/model` and `/skill` drop out, and `/gardener`, `/tidy` and `/init` appear.
 
 ## What `/new` does and does not delete
 

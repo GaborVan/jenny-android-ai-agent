@@ -9,6 +9,7 @@ import { i18n } from './shared/i18n.js';
 import { api } from './shared/api-client.js';
 import { ViewTitleController } from './mobile-header.js';
 import { DrawerManager } from './mobile-drawer.js';
+import { LauncherController } from './mobile-launcher.js';
 import { ChatController } from './mobile-chat.js';
 import { WorkspaceController } from './mobile-workspace.js';
 import { AppsController } from './mobile-apps.js';
@@ -55,6 +56,11 @@ class MobileApp {
     this.drawer = new DrawerManager();
     this.jenny = new JennyCompanion();
     this.uiQuery = new UiQueryResponder();
+    // Il cassetto delle app non è una vista: niente `view-*`, niente entry di
+    // history, quindi non sta fra i controller lazy. È un livello sopra la
+    // vista corrente, e il suo markup è statico — si costruisce qui, con gli
+    // altri pezzi permanenti del guscio.
+    this.launcher = new LauncherController(this);
 
     // Lazy controller factories
     this.controllerFactories = {
@@ -129,7 +135,15 @@ class MobileApp {
 
     // Sidebar navigation
     document.querySelectorAll('.dock-item[data-mode]').forEach(item => {
-      item.addEventListener('click', () => this.switchMode(item.dataset.mode));
+      item.addEventListener('click', () => {
+        /* Lo slot Apps apre il cassetto invece di cambiare vista: è il gesto
+           più frequente, e cercare un lanciatore nel dock è la prima cosa che
+           si fa. `data-mode` gli resta comunque, così il carosello orizzontale
+           continua a raggiungere la scheda — che non diventa irraggiungibile,
+           solo meno immediata: dal foglio ci si arriva con «Gestisci». */
+        if (item.dataset.opens === 'launcher') this.openLauncher();
+        else this.switchMode(item.dataset.mode);
+      });
     });
 
     // Drawer open/close sync
@@ -467,6 +481,25 @@ class MobileApp {
         close: () => { this.controllers.apps?.closeApp(); },
       },
       {
+        // Il cassetto delle app. Sta *sotto* la mini-app — un'app aperta dal
+        // foglio lo copre, e Indietro deve chiudere prima l'app — e *sopra* il
+        // drawer, che è laterale e non copre il lanciatore. `present()` legge
+        // un flag, non il DOM: il foglio resta nel DOM per i 320 ms della
+        // discesa, e su una lettura dal DOM il ciclo di _dismissAllOverlays lo
+        // richiamerebbe otto volte a vuoto.
+        name: 'launcher',
+        present: () => this.launcher.isOpen(),
+        dismiss: () => { this.launcher.dismiss(); },
+        /* Dal passo 4 `dismiss` e `close` **non** coincidono più, e il default
+           `layer.close || layer.dismiss` non basta: Indietro (ed Esc, stessa
+           catena) svuota prima la ricerca e chiude solo a campo vuoto — due
+           passi, che sono giusti per una pressione dell'utente e sbagliati per
+           Home, che smonta e basta. Senza questa riga il ciclo di
+           `_dismissAllOverlays` arriverebbe comunque in fondo, ma in due giri
+           invece di uno: il conto di 1.8 lo direbbe. */
+        close: () => { this.launcher.close(); },
+      },
+      {
         name: 'drawer',
         present: () => !!this.drawer.activeDrawer,
         dismiss: () => { this.drawer.closeAll(); },
@@ -474,9 +507,23 @@ class MobileApp {
     ];
   }
 
-  /** True se sopra la vista corrente c'è un overlay di qualunque livello. */
-  hasOverlayAbove() {
-    return this._overlayLayers().some((layer) => layer.present());
+  /** True se sopra la vista corrente c'è un overlay.
+   *
+   *  Con `belowLayer` la domanda diventa "c'è un overlay sopra *questo*
+   *  livello?", e si guardano solo i livelli che lo precedono nella catena.
+   *  Serve a chi un livello ce l'ha: il cassetto ascolta i tasti a foglio
+   *  aperto, e senza il parametro si escluderebbe da solo — `present()` del
+   *  proprio livello è vero per definizione mentre è a schermo. Un nome
+   *  sconosciuto degrada sulla domanda originale, che è la risposta prudente:
+   *  meglio cedere i tasti che rubarli.
+   *
+   *  @param {string|null} belowLayer nome del livello di chi chiede.
+   */
+  hasOverlayAbove(belowLayer = null) {
+    const layers = this._overlayLayers();
+    const stop = belowLayer ? layers.findIndex((layer) => layer.name === belowLayer) : -1;
+    const above = stop >= 0 ? layers.slice(0, stop) : layers;
+    return above.some((layer) => layer.present());
   }
 
   /* Congeda il <dialog> più in alto con la semantica di Esc: evento `cancel`
@@ -603,10 +650,33 @@ class MobileApp {
 
   // Un'app di sistema è stata installata o disinstallata (kind: 'added' |
   // 'removed'). Chiamato da MainActivity, che ascolta i broadcast del
-  // PackageManager. Se la sezione App non è ancora stata aperta non c'è niente
-  // da aggiornare: la lista verrà caricata fresca alla prima attivazione.
+  // PackageManager. Se né la scheda né il cassetto sono mai stati aperti non
+  // c'è niente da aggiornare: la lista verrà caricata fresca alla prima volta.
   onPackageChanged(kind, packageName) {
     this.controllers.apps?.onPackageChanged(kind, packageName);
+  }
+
+  /** Il proprietario dei dati delle app (D5), costruito anche a scheda mai
+   *  aperta.
+   *
+   *  `switchMode` costruisce i controller pigramente, quindi finché l'utente non
+   *  entrava nella sezione App `AppsController` non esisteva — e il cassetto si
+   *  sarebbe aperto vuoto. Qui la costruzione è la stessa (`controllerFactories`
+   *  resta l'unica ricetta) ma slegata dal fatto che `view-apps` sia a schermo:
+   *  il controller scrive nel DOM della scheda, che sta in pagina fin dal boot,
+   *  nascosto. Registrarlo in `this.controllers` è la parte che conta: da lì lo
+   *  ritrova `switchMode` — che non ne costruirà un secondo — e ci arriva
+   *  `onPackageChanged`. */
+  appsController() {
+    if (!this.controllers.apps) {
+      try {
+        this.controllers.apps = this.controllerFactories.apps();
+      } catch (err) {
+        console.error('Failed to init apps controller:', err);
+        return null;
+      }
+    }
+    return this.controllers.apps;
   }
 
   /* Ingresso unico nella sezione grafo con una vista precisa.
@@ -665,6 +735,23 @@ class MobileApp {
     this.switchMode('onboarding');
     // Dopo lo switch: il controller è lazy e viene costruito lì dentro.
     this.controllers.onboarding?.markRerun();
+  }
+
+  /** Apre il cassetto delle app (pulsante nella riga del composer, D1).
+   *
+   *  Il blocco del primo avvio vale anche qui, con la stessa guardia di
+   *  `switchMode`: finché l'onboarding non è finito non si va da nessuna
+   *  parte, e un foglio che si apre sopra il wizard è una strada per uscirne
+   *  senza averlo finito. Si dirotta invece di ignorare, esattamente come fa
+   *  `switchMode`: durante il primo avvio la vista è già `onboarding`, quindi
+   *  a schermo non cambia niente. */
+  openLauncher() {
+    if (!localStorage.getItem('onboarding-complete') && this._firstRun) {
+      console.warn('Onboarding not complete - redirecting to onboarding');
+      this.switchMode('onboarding');
+      return;
+    }
+    this.launcher.open();
   }
 
   switchMode(mode, pushState = true) {
@@ -727,6 +814,20 @@ class MobileApp {
 
     // Close any open drawer
     this.drawer.closeAll();
+    // …e il cassetto delle app, per la stessa ragione: è ancorato alla vista
+    // che si sta lasciando, e restare aperto sopra quella nuova sarebbe un
+    // overlay orfano che nessuno ha chiesto.
+    this.launcher.close();
+
+    /* La modalità corrente anche su <html>: serve al CSS, che altrimenti non
+       ha modo di sapere quale vista è a schermo (le viste si mostrano con un
+       `display` inline, non con una classe che risalga). Gancio generale, non
+       un caso speciale: la prima cosa che ne ha bisogno è la mascotte, v.
+       `:root.mode-apps .jenny-duo` in mobile-style.css. */
+    document.documentElement.classList.forEach((c) => {
+      if (c.startsWith('mode-')) document.documentElement.classList.remove(c);
+    });
+    document.documentElement.classList.add(`mode-${mode}`);
 
     // Update state and URL
     AppState.set('currentMode', mode);

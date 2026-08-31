@@ -176,14 +176,17 @@ export class SettingsController {
     const d = this.data;
     if (!d) return;
 
-    // Sei sezioni tematiche, una per asse mentale: preferenze d'interfaccia,
-    // motore LLM, capacità dell'agente, canali, dati, diagnostica.
+    // Sezioni tematiche, una per asse mentale: preferenze d'interfaccia, motore
+    // LLM, capacità dell'agente, la sua memoria, i lavoratori periodici che la
+    // curano, canali, dati, diagnostica.
     this.contentEl.innerHTML = [
       this._renderConfigRecovery(d),
       this._renderCronRecovery(d),
       this._section('personalization', 'ti-palette', i18n.t('settings.personalization'), this._renderPersonalization(d)),
       this._section('models', 'ti-cpu', i18n.t('settings.model'), this._renderModelSettings(d)),
       this._section('tools', 'ti-tool', i18n.t('settings.tools'), this._renderTools(d)),
+      this._section('memory', 'ti-sparkles', i18n.t('settings.memory.title'), this._renderMemory(d)),
+      this._section('workers', 'ti-map', i18n.t('settings.workers.title'), this._renderWorkers(d)),
       this._renderBatterySection(d),
       this._section('ssh', 'ti-terminal-2', i18n.t('settings.ssh.title'), this._renderSsh()),
       this._section('telegram', 'ti-brand-telegram', i18n.t('settings.telegram.title'), this._renderTelegram()),
@@ -699,6 +702,283 @@ export class SettingsController {
         </label>
       </div>
       <p class="settings-hint" style="margin:6px 0 0;font-size:12px;color:var(--text-faint)">${i18n.t('settings.location.hint')}</p>`;
+  }
+
+  // ── Memoria e lavoratori periodici ─────────────────────────────────
+  //
+  // Dream, Atlas e il giardiniere sono i tre job di sistema. Le loro manopole
+  // stavano dentro due slash command (`/dream budget`, `/gardener settings`) e,
+  // per Atlas, in nessun posto: si editava `config.json` a mano, che è
+  // l'incidente da cui quei comandi erano nati. Un comando è un verbo; una
+  // preferenza che sopravvive al turno sta qui, con le altre diciotto.
+  //
+  // Due sezioni e non una né tre, sullo stesso confine che il resto del codice
+  // traccia già: la memoria personale da una parte, wiki e progetti dall'altra.
+
+  /* Una riga con un interruttore. Non è in `_field` perché quel helper fa un
+     input di testo; qui la label e il toggle stanno sulla stessa riga, come in
+     `_renderLocation`. */
+  _toggleRow(label, id, checked) {
+    return `<div class="settings-field settings-toggle-row">
+      <label class="settings-label">${label}</label>
+      <label class="toggle-switch">
+        <input type="checkbox" id="${id}" ${checked ? 'checked' : ''}>
+        <span class="toggle-slider"></span>
+      </label>
+    </div>`;
+  }
+
+  /* Un numero col suo range **dal server**. `min`/`max` non sono scritti qui:
+     arrivano dallo schema Python nel payload, così la tastiera numerica e il
+     rifiuto del server non possono raccontare due limiti diversi. */
+  _numberField(label, key, spec) {
+    const min = spec?.min ?? '';
+    const max = spec?.max ?? '';
+    return `<div class="settings-field">
+      <label class="settings-label">${label}</label>
+      <input type="number" class="settings-input" data-worker-key="${key}"
+        value="${escapeHtml(String(spec?.value ?? ''))}"
+        ${min === '' ? '' : `min="${min}"`} ${max === '' ? '' : `max="${max}"`}>
+    </div>`;
+  }
+
+  _hint(text) {
+    return `<p class="settings-hint">${text}</p>`;
+  }
+
+  /* La riga della pianificazione, **solo se quel lavoratore è accesso**.
+     `describe_schedule()` descrive lo schedule anche a lavoratore spento, ed è
+     giusto lato server (è la pianificazione che verrebbe armata). In interfaccia
+     però, sotto un interruttore su OFF, «ogni 30min» si legge come se stesse
+     ancora girando — visto sul telefono il 31/08/2026. Spento la riga tace: a
+     dire cosa resta possibile c'è già l'aiuto sotto. */
+  _scheduleText(enabled, schedule) {
+    return enabled ? (schedule || '') : '';
+  }
+
+  _renderMemory(d) {
+    const m = d.memory;
+    if (!m) return `<div class="settings-empty">${i18n.t('settings.memory.unavailable')}</div>`;
+    return `
+      <div class="settings-subheading">${i18n.t('settings.memory.dream')}</div>
+      ${this._toggleRow(i18n.t('settings.memory.dreamEnabled'), 'dream-enabled-toggle', m.enabled)}
+      ${this._hint(`<span id="dream-schedule">${escapeHtml(this._scheduleText(m.enabled, m.schedule))}</span>`)}
+      ${this._numberField(i18n.t('settings.memory.dreamInterval'), 'dream_interval_h', m.interval_h)}
+      ${this._numberField(i18n.t('settings.memory.reviewCadence'), 'review_every_runs', m.review_every_runs)}
+      ${this._hint(i18n.t('settings.memory.reviewHint', { floor: m.review_floor }))}
+      ${this._renderReviewState(m.review_state)}
+      <div class="settings-divider"></div>
+      <div class="settings-subheading">${i18n.t('settings.memory.budgets')}</div>
+      ${this._hint(i18n.t('settings.memory.budgetsHint'))}
+      ${this._renderBudget(m, 'MEMORY.md', 'memory_budget_chars')}
+      ${this._renderBudget(m, 'USER.md', 'user_budget_chars')}
+      ${this._renderBudget(m, 'SOUL.md', 'soul_budget_chars')}`;
+  }
+
+  /* Una riga di tetto: il nome del file, quanto misura adesso, la barra, e il
+     campo. La misura sta accanto al campo e non in un pannello a parte perché è
+     il numero su cui si decide il tetto — separarli era quel che rendeva
+     `/dream budget` due comandi invece di uno. */
+  _renderBudget(m, label, key) {
+    const spec = m[key] || {};
+    const file = (m.files || []).find(f => f.label === label);
+    const budget = spec.value || 0;
+    const chars = file ? file.chars : null;
+    const measure = this._budgetMeasure(m, label, key);
+    const pct = budget > 0 && chars != null ? Math.min(100, Math.round((chars / budget) * 100)) : 0;
+    const over = budget > 0 && chars != null && chars > budget;
+    return `<div class="settings-budget">
+      ${this._numberField(label, key, spec)}
+      <div class="settings-meter${over ? ' is-over' : ''}" data-meter="${label}">
+        <span style="width:${pct}%"></span>
+      </div>
+      <div class="settings-budget-measure" data-measure="${label}">${measure}</div>
+    </div>`;
+  }
+
+  /* La frase sotto la barra. In un metodo suo perché la scrive anche
+     `_repaintWorkerDerived`, e due copie divergerebbero al primo cambio. */
+  _budgetMeasure(m, label, key) {
+    const budget = m[key]?.value || 0;
+    const file = (m.files || []).find(f => f.label === label);
+    if (!file) return i18n.t('settings.memory.unmeasured');
+    if (!file.exists) return i18n.t('settings.memory.notYetWritten');
+    // Esiste ma non si apre: `chars` è 0 e non è vero. Misurato sul telefono
+    // con un `chmod 000` — «0 caratteri su 3.000» per un file da 2.407 byte.
+    if (file.readable === false) return i18n.t('settings.memory.unmeasured');
+    if (budget > 0) return i18n.t('settings.memory.ofBudget', { chars: file.chars, budget });
+    return i18n.t('settings.memory.measuredOnly', { chars: file.chars });
+  }
+
+  /* Quante passate dall'ultimo review, e i due contatori di stallo. Gli ultimi
+     due compaiono solo se non sono zero: nel caso normale sarebbero due righe
+     che dicono "tutto a posto", e nel caso guasto sono l'unica traccia visibile
+     che Dream sta girando senza consolidare niente. */
+  _renderReviewState(state) {
+    if (!state) return '';
+    const lines = [i18n.t('settings.memory.sinceReview', { runs: state.runs_since_review })];
+    if (state.stuck_runs) lines.push(i18n.t('settings.memory.stuckRuns', { runs: state.stuck_runs }));
+    if (state.nothing_new_runs) {
+      lines.push(i18n.t('settings.memory.nothingNewRuns', { runs: state.nothing_new_runs }));
+    }
+    return this._hint(lines.map(escapeHtml).join('<br>'));
+  }
+
+  _renderWorkers(d) {
+    const w = d.workers;
+    if (!w) return `<div class="settings-empty">${i18n.t('settings.workers.unavailable')}</div>`;
+    const atlas = w.atlas || {};
+    const gardener = w.gardener || {};
+    return `
+      <div class="settings-subheading">${i18n.t('settings.workers.atlas')}</div>
+      ${this._toggleRow(i18n.t('settings.workers.atlasEnabled'), 'atlas-enabled-toggle', atlas.enabled)}
+      ${this._hint(`<span id="atlas-schedule">${escapeHtml(this._scheduleText(atlas.enabled, atlas.schedule))}</span>`)}
+      ${this._numberField(i18n.t('settings.workers.atlasInterval'), 'atlas_interval_h', atlas.interval_h)}
+      ${this._numberField(i18n.t('settings.workers.atlasMaxContext'), 'atlas_max_context_tokens', atlas.max_context_tokens)}
+      ${this._hint(i18n.t('settings.workers.atlasHint'))}
+      <div class="settings-divider"></div>
+      <div class="settings-subheading">${i18n.t('settings.workers.gardener')}</div>
+      ${this._toggleRow(i18n.t('settings.workers.gardenerEnabled'), 'gardener-enabled-toggle', gardener.enabled)}
+      ${this._hint(`<span id="gardener-schedule">${escapeHtml(this._scheduleText(gardener.enabled, gardener.schedule))}</span>`)}
+      ${this._hint(i18n.t('settings.workers.gardenerOffHint'))}
+      ${this._numberField(i18n.t('settings.workers.gardenerInterval'), 'gardener_interval_min', gardener.interval_min)}
+      ${this._numberField(i18n.t('settings.workers.gardenerIdle'), 'gardener_idle_min', gardener.idle_min)}
+      ${this._numberField(i18n.t('settings.workers.gardenerDistance'), 'gardener_min_hours_between_passes', gardener.min_hours_between_passes)}
+      ${this._hint(i18n.t('settings.workers.gardenerNumbersHint'))}
+      <div class="settings-divider"></div>
+      <div class="settings-subheading">${i18n.t('settings.workers.compact')}</div>
+      ${this._toggleRow(i18n.t('settings.workers.compactEnabled'), 'compact-projects-toggle', w.compact_projects_when_idle)}
+      ${this._hint(i18n.t('settings.workers.compactHint'))}
+      ${this._hint(i18n.t('settings.workers.compactRestart'))}`;
+  }
+
+  /* Il cablaggio delle due sezioni. Un solo salvatore per famiglia, e il
+     rollback su errore: un toggle che resta acceso dopo un 400 è la bugia più
+     facile da raccontare in una schermata di impostazioni. */
+  _wireWorkerSettings() {
+    const toggles = [
+      ['dream-enabled-toggle', 'memory', 'dream_enabled'],
+      ['atlas-enabled-toggle', 'workers', 'atlas_enabled'],
+      ['gardener-enabled-toggle', 'workers', 'gardener_enabled'],
+      ['compact-projects-toggle', 'workers', 'compact_projects_when_idle'],
+    ];
+    for (const [id, family, key] of toggles) {
+      const el = this.contentEl.querySelector(`#${id}`);
+      if (!el) continue;
+      el.addEventListener('change', async () => {
+        const on = el.checked;
+        try {
+          await this._saveWorkerParams(family, { [key]: on ? '1' : '0' });
+        } catch (e) {
+          el.checked = !on;                       // rollback
+          showToast(e.message, 'error');
+        }
+      });
+    }
+
+    // I numeri: `change` (non `input`), come il resto della schermata — su una
+    // tastiera mobile `input` salverebbe a ogni cifra, e "4" è un valore valido
+    // sulla strada verso "45".
+    this.contentEl.querySelectorAll('[data-worker-key]').forEach(el => {
+      const key = el.dataset.workerKey;
+      const family = key.startsWith('atlas_') || key.startsWith('gardener_') || key.startsWith('compact_')
+        ? 'workers' : 'memory';
+      el.addEventListener('change', () => this._saveWorkerNumber(family, key, el));
+    });
+  }
+
+  /* Un numero, col caso speciale della cadenza di review davanti.
+     Il pavimento è del server (rifiuta senza il flag di conferma); qui c'è il
+     dialogo che quel flag lo giustifica, con dentro le misure vere. */
+  async _saveWorkerNumber(family, key, el) {
+    const previous = this._workerValue(family, key);
+    const raw = el.value.trim();
+    if (raw === '') { el.value = previous ?? ''; return; }
+    const value = Number(raw);
+    if (!Number.isInteger(value)) {
+      el.value = previous ?? '';
+      showToast(i18n.t('settings.workers.notAWholeNumber'), 'error');
+      return;
+    }
+    const params = { [key]: String(value) };
+    if (key === 'review_every_runs' && value < (this.data?.memory?.review_floor ?? 12)) {
+      const ok = await confirmDialog(i18n.t('settings.memory.reviewConfirm', {
+        runs: value,
+        floor: this.data?.memory?.review_floor ?? 12,
+      }));
+      if (!ok) { el.value = previous ?? ''; return; }
+      params.confirm_back_to_back = '1';
+    }
+    try {
+      await this._saveWorkerParams(family, params);
+    } catch (e) {
+      el.value = previous ?? '';                  // rollback
+      showToast(e.message, 'error');
+    }
+  }
+
+  _workerValue(family, key) {
+    const data = this.data || {};
+    if (family === 'memory') return data.memory?.[key]?.value;
+    if (key.startsWith('atlas_')) return data.workers?.atlas?.[key.slice(6)]?.value;
+    if (key.startsWith('gardener_')) return data.workers?.gardener?.[key.slice(9)]?.value;
+    return undefined;
+  }
+
+  /* La chiamata, più il riallineamento di quel che dipende dal valore appena
+     scritto: le due pianificazioni e le barre dei tetti. Nessun `render()`
+     intero — riscriverebbe la sezione sotto le dita di chi sta ancora
+     scrivendo, e richiuderebbe l'accordion. */
+  async _saveWorkerParams(family, params) {
+    const payload = family === 'memory'
+      ? await api.updateMemorySettings(params)
+      : await api.updateWorkerSettings(params);
+    if (payload && this.data) {
+      this.data.memory = payload.memory;
+      this.data.workers = payload.workers;
+      this._repaintWorkerDerived();
+    }
+    showToast(i18n.t(payload?.requires_restart
+      ? 'settings.workers.savedRestart'
+      : 'settings.saved'));
+    return payload;
+  }
+
+  _repaintWorkerDerived() {
+    const set = (id, text) => {
+      const el = this.contentEl.querySelector(`#${id}`);
+      if (el) el.textContent = text || '';
+    };
+    const memoryData = this.data?.memory;
+    const atlas = this.data?.workers?.atlas;
+    const gardener = this.data?.workers?.gardener;
+    set('dream-schedule', this._scheduleText(memoryData?.enabled, memoryData?.schedule));
+    set('atlas-schedule', this._scheduleText(atlas?.enabled, atlas?.schedule));
+    set('gardener-schedule', this._scheduleText(gardener?.enabled, gardener?.schedule));
+    const memory = this.data?.memory;
+    if (!memory) return;
+    /* Solo barra e misura. Riscrivere la riga intera porterebbe via l'input —
+       e con lui il suo listener di `change`, che questo metodo non rimonta: il
+       secondo salvataggio di quel campo non partirebbe mai. */
+    for (const [label, key] of [
+      ['MEMORY.md', 'memory_budget_chars'],
+      ['USER.md', 'user_budget_chars'],
+      ['SOUL.md', 'soul_budget_chars'],
+    ]) {
+      const budget = memory[key]?.value || 0;
+      const file = (memory.files || []).find(f => f.label === label);
+      const chars = file ? file.chars : null;
+      const meter = this.contentEl.querySelector(`[data-meter="${label}"]`);
+      if (meter) {
+        const pct = budget > 0 && chars != null
+          ? Math.min(100, Math.round((chars / budget) * 100)) : 0;
+        meter.classList.toggle('is-over', budget > 0 && chars != null && chars > budget);
+        const fill = meter.querySelector('span');
+        if (fill) fill.style.width = `${pct}%`;
+      }
+      const measure = this.contentEl.querySelector(`[data-measure="${label}"]`);
+      if (measure) measure.textContent = this._budgetMeasure(memory, label, key);
+    }
   }
 
   // ── SSH ────────────────────────────────────────────────────────────
@@ -1901,6 +2181,8 @@ export class SettingsController {
       if (!el) continue;
       el.addEventListener('change', () => this._debouncedSave(key, el.value));
     }
+
+    this._wireWorkerSettings();
 
     // Telegram: widget condiviso con lo step di onboarding
     const tgContainer = this.contentEl.querySelector('#settings-telegram-widget');

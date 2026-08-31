@@ -172,7 +172,7 @@ _TURN_WAKELOCK_TIMEOUT_S = 1800.0
 
 # ``/init`` non e' nel router (v. ``_expand_project_init``): il letterale sta
 # qui, e la voce che lo fa comparire in ``/help`` sta in
-# ``command/builtin.py::BUILTIN_COMMAND_SPECS``. Sono due posti, ma il secondo
+# ``command/specs.py::BUILTIN_COMMAND_SPECS``. Sono due posti, ma il secondo
 # e' solo una riga di documentazione — l'unico che decide e' questo.
 PROJECT_INIT_COMMAND = "/init"
 
@@ -1047,6 +1047,32 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             logger.opt(exception=True).error("Inseguimento del rinomino fallito per {}", key)
             return ProjectFollowOutcome(why_not="looking for it failed")
 
+    async def _refuse_out_of_scope(self, msg: InboundMessage, key: str, command: str) -> bool:
+        """``True`` se *command* qui non ha un soggetto: risponde e ferma il turno.
+
+        Il verdetto e la frase vengono da :mod:`jenny.command.scope`, come per i
+        comandi del router. ``/init`` e ``/tidy`` continuano a **espandersi** qui
+        — quella è una faccenda del turno — ma la loro *disponibilità* è la stessa
+        regola di tutti gli altri: prima erano due rifiuti scritti a mano, e la
+        tendina ne teneva una terza copia lato client.
+        """
+        from jenny.command.scope import refusal, spec_for_line
+
+        spec = spec_for_line(command)
+        if spec is None:
+            return False
+        from jenny.command.scope import available
+
+        if available(spec, key):
+            return False
+        await self.bus.publish_outbound(OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=refusal(spec, key),
+            metadata={**dict(msg.metadata or {}), "render_as": "text"},
+        ))
+        return True
+
     async def _expand_project_init(
         self, msg: InboundMessage, key: str
     ) -> InboundMessage | None:
@@ -1064,16 +1090,7 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
         avviene dopo. Nella sessione — quel che Jenny rilegge — resta invece
         l'espansione, che e' giusto: e' quello che ha davvero visto.
         """
-        if not is_project_session_key(key):
-            await self.bus.publish_outbound(OutboundMessage(
-                channel=msg.channel,
-                chat_id=msg.chat_id,
-                content=(
-                    "`/init` only works inside a project — it writes that project's "
-                    "AGENTS.md. Pick one from the chip above the message box first."
-                ),
-                metadata={**dict(msg.metadata or {}), "render_as": "text"},
-            ))
+        if await self._refuse_out_of_scope(msg, key, PROJECT_INIT_COMMAND):
             return None
         try:
             # Il nome del file **si calcola**, non si spera: su una wiki che ha
@@ -1126,16 +1143,7 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
         from jenny.agent.gardener import MAP_TARGET_CHARS, GardenerStore, page_ceiling
         from jenny.utils.wiki_paths import iter_wiki_pages, page_chars_if_over
 
-        if not is_project_session_key(key):
-            await self.bus.publish_outbound(OutboundMessage(
-                channel=msg.channel,
-                chat_id=msg.chat_id,
-                content=(
-                    "`/tidy` only works inside a project — it restructures that project's "
-                    "wiki. Pick one from the chip above the message box first."
-                ),
-                metadata={**dict(msg.metadata or {}), "render_as": "text"},
-            ))
+        if await self._refuse_out_of_scope(msg, key, PROJECT_TIDY_COMMAND):
             return None
         try:
             root = self.workspace_scopes.for_project(key).project_path
