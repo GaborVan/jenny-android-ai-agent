@@ -492,7 +492,7 @@
     "error": "Non è stato possibile leggere l'elenco delle app.",
     "loadFailed": "Elenco incompleto: qualcosa non ha risposto.",
     "retry": "Riprova",
-    "manage": "Gestisci le app"
+    "manage": "Gestisci app e skill"
   },
   "apps": {
     "jennyApps": "Jenny Apps",

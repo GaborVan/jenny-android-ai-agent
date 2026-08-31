@@ -492,7 +492,7 @@
     "error": "Could not read the list of apps.",
     "loadFailed": "Incomplete list: something did not answer.",
     "retry": "Retry",
-    "manage": "Manage apps"
+    "manage": "Manage apps & skills"
   },
   "apps": {
     "jennyApps": "Jenny Apps",
