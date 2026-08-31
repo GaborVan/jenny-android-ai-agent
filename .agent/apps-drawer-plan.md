@@ -446,6 +446,35 @@ con la tastiera fisica, questo ramo **potrebbe non accendersi mai**.
 **È la prima cosa da guardare quando il telefono è collegato** — v.
 [`apps-drawer-handover.md`](./apps-drawer-handover.md).
 
+## D1/D2 — chiusi dall'uso, il 31/08
+
+Le due decisioni sono state riviste due volte, e la seconda l'ha decisa il
+telefono in trenta secondi d'uso.
+
+**Il difetto.** D1 sceglieva il composer perché «`#input-bar` c'è in ogni
+geometria». Vero, e risolveva **l'asse sbagliato**: robusto rispetto alla
+dimensione dello schermo, non rispetto alla *vista*. `#input-bar` esiste solo
+in chat, quindi dalla scheda Apps — il primo posto dove si cerca un lanciatore —
+non c'era **nessun** modo di aprire il cassetto. Sei passi di verifica
+sull'emulatore non l'hanno visto perché ogni prova partiva dalla chat.
+
+**La decisione.** Lo slot Apps del dock **apre il foglio**. La decisione era
+rinviata al passo 6 con default «no» perché non si sapeva se quel dock fosse a
+schermo; misurato (400 dpi, viewport 574×576) il motivo è caduto. `data-mode`
+gli resta, così il carosello orizzontale continua a raggiungere la scheda: non
+diventa irraggiungibile, solo meno immediata — dal foglio ci si arriva con
+«Gestisci».
+
+**Il contrappunto del passo 6 resta vero** («tocco → foglio e swipe → scheda
+sono due destinazioni per lo stesso nome») ed è stato accettato consapevolmente:
+è un prezzo minore di «il lanciatore si apre da una vista sola».
+
+**Ordine del dock**, deciso nella stessa sessione: Wiki, Chat, **Apps al
+centro**, Workspace, Impostazioni. Apps al centro perché è lì che sta il pollice.
+L'ordine del DOM è anche quello del carosello (`_visibleModes`), quindi è un
+contratto e ha un test. Wiki porta l'icona del grafo, la stessa che
+l'intestazione usa già per la stessa destinazione.
+
 ## Cosa NON è stabilito
 
 **Non si sa se il Titan 2 sia in navigazione a gesture.** ~~Non è stato letto.~~

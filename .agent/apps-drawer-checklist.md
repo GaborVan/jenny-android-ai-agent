@@ -225,6 +225,13 @@ diretta, e resta.
 
 ## Passo 6 — i bordi
 
+> **6.1 rivista il 31/08 dall'uso sul telefono.** La decisione «il dock non si
+> aggancia» è stata **rovesciata**: `#input-bar` esiste solo in chat, quindi dal
+> resto dell'app il cassetto non si apriva affatto. Ora lo slot Apps apre il
+> foglio, sta **al centro** del dock, e il dock è riordinato (Wiki, Chat, Apps,
+> Workspace, Impostazioni) con l'icona del grafo su Wiki. V. «D1/D2 — chiusi
+> dall'uso» nel piano.
+
 Girato il 30/08/2026 sullo stesso AVD `jenny_square`, build debug da
 `app:installDebug`, navigazione a **gesture**. Tocchi veri (`adb shell input
 tap` sulle coordinate lette a runtime — attenzione: la WebView comincia a
