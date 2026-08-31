@@ -18,6 +18,23 @@ async def _wait_until(predicate, *, timeout: float = 1.0, interval: float = 0.01
     assert predicate()
 
 
+async def _settle(*, ignore: set[asyncio.Task] | None = None, timeout: float = 1.0) -> None:
+    """Cede il controllo finché non resta nessun task pendente oltre a *ignore*.
+
+    Non conta i giri di loop. Un ``for _ in range(N): await asyncio.sleep(0)``
+    non fa passare il *tempo*, solo il controllo: quanti giri servano dipende da
+    quante volte la catena di callback rimbalza, e un task che attraversa
+    ``asyncio.to_thread`` può non essere finito dopo N giri qualunque.
+    """
+    ignore = (ignore or set()) | {asyncio.current_task()}
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        pending = {t for t in asyncio.all_tasks() if t not in ignore and not t.done()}
+        if not pending:
+            return
+        await asyncio.wait(pending, timeout=max(0.0, deadline - time.monotonic()))
+
+
 def _bound_chat(chat_id: str = "chat-1") -> dict[str, str]:
     return {
         "session_key": f"websocket:{chat_id}",
@@ -806,11 +823,21 @@ async def test_concurrent_job_mutation_does_not_cancel_inflight_job(tmp_path) ->
         service.update_job(job_b.id, name="renamed")
         service.remove_job(job_b.id)
 
-        # Give the event loop a few iterations to deliver any cancellation
-        # that these calls might have scheduled against the in-flight task.
-        for _ in range(3):
-            await asyncio.sleep(0)
+        # ``Task.cancelling()`` conta le richieste di cancellazione ricevute e
+        # non si azzera quando vengono consegnate: registra quindi se
+        # ``cancel()`` sia MAI stato chiamato, senza dipendere da quando la
+        # cancellazione arriverebbe. Le asserzioni qui sono negative, e un drain
+        # a giri fissi le sostiene male: quanti giri bastino dipende dalla
+        # catena di callback, non da questo test. ``_arm_timer`` è sincrona e la
+        # sua guardia esce subito, quindi una cancellazione sarebbe già avvenuta
+        # dentro le chiamate qui sopra — questo la coglie sul fatto, invece di
+        # aspettare che si manifesti a valle.
+        assert inflight_task.cancelling() == 0
 
+        # E in più: nessun task pendente resta a poter cancellare più tardi.
+        await _settle(ignore={inflight_task})
+
+        assert inflight_task.cancelling() == 0
         assert service._timer_task is inflight_task
         assert not inflight_task.done()
         assert not inflight_task.cancelled()

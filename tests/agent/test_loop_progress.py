@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-import jenny.agent.runner as runner_module
 from jenny.agent.loop import AgentLoop
 from jenny.agent.progress_events import (
     invoke_file_edit_progress,
@@ -183,8 +182,18 @@ class TestToolEventProgress:
             return "ok"
 
         loop.tools.execute = AsyncMock(side_effect=execute)
-        prepare_tracker = MagicMock(side_effect=AssertionError("unexpected file snapshot"))
-        monkeypatch.setattr(runner_module, "prepare_file_edit_tracker", prepare_tracker)
+        # Il target è ``tool_execution``, dove la preparazione avviene davvero, e
+        # il nome è quello **plurale**. Prima la patch andava su
+        # ``runner.prepare_file_edit_tracker``: un alias che nessuno legge, di una
+        # funzione diversa da quella che questo percorso chiama. Nessuna delle
+        # due asserzioni qui sotto poteva quindi scattare — il test misurava se
+        # stesso. Il gate vero è ``on_progress_accepts_file_edit_events``, che
+        # cerca il parametro ``file_edit_events``: ``on_progress`` qui sotto non
+        # lo dichiara, ed è precisamente ciò che rende il caso interessante.
+        prepare_trackers = MagicMock(side_effect=AssertionError("unexpected file snapshot"))
+        monkeypatch.setattr(
+            "jenny.agent.tool_execution.prepare_file_edit_trackers", prepare_trackers,
+        )
 
         async def on_progress(
             content: str,
@@ -198,7 +207,7 @@ class TestToolEventProgress:
 
         assert final_content == "Done"
         assert target.read_text(encoding="utf-8") == "new\n"
-        prepare_tracker.assert_not_called()
+        prepare_trackers.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_exec_does_not_emit_file_edit_progress(self, tmp_path: Path) -> None:
