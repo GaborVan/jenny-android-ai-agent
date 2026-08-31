@@ -1,11 +1,13 @@
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 
 from jenny.providers.anthropic_provider import AnthropicProvider
 from jenny.providers.base import LLMProvider, LLMResponse
 from jenny.providers.openai_compat_provider import OpenAICompatProvider
+from jenny.providers.retry_policy import is_transient_response
 
 
 def _fake_response(
@@ -229,3 +231,118 @@ async def test_openai_compat_stream_no_partial_content_when_nothing_streamed() -
     assert response.finish_reason == "error"
     assert response.partial_content is None
     assert "connection reset mid-stream" in response.content
+
+
+class TestHTTPErrorsKeepTheirMetadata:
+    """Il percorso vero: da un errore HTTP di ``httpx`` fino alla decisione di ritentare.
+
+    I test qui sopra costruiscono l'eccezione a mano, con ``.response`` già
+    attaccata — cioè misurano il ramo dell'SDK, non quello che percorre
+    ``_http_request``. Quel ramo sollevava un ``RuntimeError`` nudo, che perdeva
+    status e header: la classificazione ripiegava sul testo, dove ``"429"`` vale
+    come marker di transitorio, e una quota esaurita veniva ritentata a vuoto.
+    """
+
+    @staticmethod
+    def _provider_answering(status: int, body: str, headers: dict[str, str] | None = None):
+        url = "https://api.example.com/v1/chat/completions"
+
+        def _build_request(method, request_url, **kwargs):
+            request = MagicMock()
+            request.url = request_url
+            return request
+
+        async def _send(request, **kwargs):
+            return httpx.Response(
+                status,
+                request=httpx.Request("POST", url),
+                text=body,
+                headers=headers or {},
+            )
+
+        client = MagicMock(spec=httpx.AsyncClient)
+        client.build_request = MagicMock(side_effect=_build_request)
+        client.send = AsyncMock(side_effect=_send)
+
+        provider = OpenAICompatProvider(
+            api_key="k", api_base="https://api.example.com/v1", default_model="m",
+        )
+        provider._http_client = client
+        return provider
+
+    async def _response_for(self, status: int, body: str, headers=None) -> LLMResponse:
+        provider = self._provider_answering(status, body, headers)
+        try:
+            await provider._http_request("/chat/completions", {"model": "m"})
+        except Exception as e:  # noqa: BLE001 — è esattamente ciò che il provider cattura
+            return OpenAICompatProvider._handle_error(e)
+        raise AssertionError("la richiesta doveva fallire")
+
+    async def test_exhausted_quota_is_not_retried(self) -> None:
+        """Un 429 da quota esaurita è terminale: ritentarlo non lo farà passare."""
+        response = await self._response_for(
+            429,
+            '{"error":{"type":"insufficient_quota","code":"insufficient_quota",'
+            '"message":"You exceeded your current quota"}}',
+        )
+
+        assert response.error_status_code == 429
+        assert response.error_type == "insufficient_quota"
+        assert is_transient_response(response) is False
+
+    async def test_real_rate_limit_is_retried_after_the_header_says(self) -> None:
+        """Un 429 di rate limit invece si ritenta, e ``Retry-After`` va rispettato."""
+        response = await self._response_for(
+            429,
+            '{"error":{"type":"rate_limit_error","message":"Rate limit reached"}}',
+            {"retry-after": "12"},
+        )
+
+        assert response.error_status_code == 429
+        assert is_transient_response(response) is True
+        assert response.retry_after == 12.0
+
+    async def test_server_error_is_retried_and_bad_key_is_not(self) -> None:
+        server = await self._response_for(500, '{"error":{"message":"internal"}}')
+        unauthorized = await self._response_for(
+            401, '{"error":{"type":"invalid_request_error","code":"invalid_api_key"}}',
+        )
+
+        assert is_transient_response(server) is True
+        assert is_transient_response(unauthorized) is False
+
+    async def test_the_message_still_names_status_and_url(self) -> None:
+        """Il corpo da solo non basta a capire *dove* ha fallito: il testo li tiene entrambi."""
+        response = await self._response_for(429, '{"error":{"code":"insufficient_quota"}}')
+
+        assert "429" in response.content
+        assert "api.example.com" in response.content
+        assert "insufficient_quota" in response.content
+
+    async def test_responses_incompatibility_can_still_fall_back(self) -> None:
+        """Il fallback Responses→Chat-Completions ha bisogno dello status per scattare.
+
+        Senza status l'endpoint Responses restava scelto anche di fronte a un 400
+        che dice "parametro sconosciuto", cioè il caso per cui il fallback esiste.
+        """
+        provider = self._provider_answering(
+            400,
+            '{"error":{"message":"Unknown parameter: max_output_tokens",'
+            '"type":"invalid_request_error"}}',
+        )
+        try:
+            await provider._http_request("/responses", {"model": "m"})
+        except Exception as e:  # noqa: BLE001
+            assert OpenAICompatProvider._should_fallback_from_responses_error(e) is True
+        else:
+            raise AssertionError("la richiesta doveva fallire")
+
+    async def test_a_quota_error_does_not_trigger_the_responses_fallback(self) -> None:
+        """Riprovare su un altro endpoint non ricarica il credito: il 429 non è incompatibilità."""
+        provider = self._provider_answering(429, '{"error":{"type":"insufficient_quota"}}')
+        try:
+            await provider._http_request("/responses", {"model": "m"})
+        except Exception as e:  # noqa: BLE001
+            assert OpenAICompatProvider._should_fallback_from_responses_error(e) is False
+        else:
+            raise AssertionError("la richiesta doveva fallire")

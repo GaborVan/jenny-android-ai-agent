@@ -17,6 +17,7 @@ from loguru import logger
 from jenny.providers.base import (
     LLMProvider,
     LLMResponse,
+    ProviderHTTPError,
     StreamTimeout,
     resolve_first_output_timeout_s,
     resolve_stream_idle_timeout_s,
@@ -202,7 +203,12 @@ class OpenAICompatProvider(ResponseParsingMixin, LLMProvider):
             candidate = _versioned_base_candidate(self._base_url()) if status == 404 else None
             if candidate is None:
                 text = await self._error_body_text(e.response, stream=stream)
-                raise RuntimeError(f"HTTP {status} from {url}: {text[:500]}") from e
+                raise ProviderHTTPError(
+                    f"HTTP {status} from {url}: {text[:500]}",
+                    status_code=status,
+                    headers=getattr(e.response, "headers", None),
+                    body=text,
+                ) from e
             await self._release(e.response)
             return await self._retry_on_versioned_base(
                 path, body, failed_url=url, base=candidate, stream=stream,
@@ -226,17 +232,25 @@ class OpenAICompatProvider(ResponseParsingMixin, LLMProvider):
             status = e.response.status_code if e.response is not None else 0
             text = await self._error_body_text(e.response, stream=stream)
             if status == 404:
-                raise RuntimeError(
+                raise ProviderHTTPError(
                     f"HTTP 404: no endpoint at {failed_url} nor at {retry_url}. "
                     "The provider's API base URL looks wrong — check it in Settings. "
-                    f"Server said: {text[:300]}"
+                    f"Server said: {text[:300]}",
+                    status_code=status,
+                    headers=getattr(e.response, "headers", None),
+                    body=text,
                 ) from e
             # Uno status diverso dal 404 dice che l'endpoint c'è: la base
             # versionata è quella giusta e va adottata anche se questa richiesta
             # fallisce per altro (chiave, modello, quota). Senza, ogni turno
             # ripagherebbe il tentativo a vuoto per poi fallire allo stesso modo.
             self._effective_base = base
-            raise RuntimeError(f"HTTP {status} from {retry_url}: {text[:500]}") from e
+            raise ProviderHTTPError(
+                f"HTTP {status} from {retry_url}: {text[:500]}",
+                status_code=status,
+                headers=getattr(e.response, "headers", None),
+                body=text,
+            ) from e
 
         logger.warning(
             "API base URL auto-corrected for this run: {} -> {}", self._base_url(), base,
@@ -586,7 +600,13 @@ class OpenAICompatProvider(ResponseParsingMixin, LLMProvider):
     @classmethod
     def _extract_error_metadata(cls, e: Exception) -> dict[str, Any]:
         response = getattr(e, "response", None)
-        headers = getattr(response, "headers", None)
+        # Gli header stanno sull'eccezione (``ProviderHTTPError``, che se li porta
+        # dietro perché la risposta a quel punto è già chiusa) oppure sulla
+        # risposta appesa dall'SDK. Nell'ordine: l'eccezione vince, è la fonte
+        # più vicina al punto in cui l'errore è stato costruito.
+        headers = getattr(e, "headers", None)
+        if headers is None:
+            headers = getattr(response, "headers", None)
         payload = (
             getattr(e, "body", None)
             or getattr(e, "doc", None)
@@ -637,19 +657,26 @@ class OpenAICompatProvider(ResponseParsingMixin, LLMProvider):
         *,
         partial_content: str | None = None,
     ) -> LLMResponse:
-        try:
-            body = (
-                getattr(e, "doc", None)
-                or getattr(e, "body", None)
-                or getattr(getattr(e, "response", None), "text", None)
-            )
-        except Exception:
-            body = None
-        body_text = body if isinstance(body, str) else str(body) if body is not None else ""
-        msg = f"Error: {body_text.strip()[:500]}" if body_text.strip() else f"Error calling LLM: {e}"
+        if isinstance(e, ProviderHTTPError):
+            # Il suo messaggio nomina già status, URL e un estratto del corpo, che
+            # è più di quanto direbbe il solo corpo: non va riscritto.
+            msg = f"Error calling LLM: {e}"
+        else:
+            try:
+                body = (
+                    getattr(e, "doc", None)
+                    or getattr(e, "body", None)
+                    or getattr(getattr(e, "response", None), "text", None)
+                )
+            except Exception:
+                body = None
+            body_text = body if isinstance(body, str) else str(body) if body is not None else ""
+            msg = f"Error: {body_text.strip()[:500]}" if body_text.strip() else f"Error calling LLM: {e}"
 
-        response = getattr(e, "response", None)
-        retry_after = LLMProvider._extract_retry_after_from_headers(getattr(response, "headers", None))
+        headers = getattr(e, "headers", None)
+        if headers is None:
+            headers = getattr(getattr(e, "response", None), "headers", None)
+        retry_after = LLMProvider._extract_retry_after_from_headers(headers)
         if retry_after is None:
             retry_after = LLMProvider._extract_retry_after(msg)
         return LLMResponse(

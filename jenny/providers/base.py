@@ -74,6 +74,33 @@ class StreamTimeout(asyncio.TimeoutError):
         self.saw_output = saw_output
 
 
+class ProviderHTTPError(RuntimeError):
+    """Errore HTTP di un provider, con addosso i metadati che lo classificano.
+
+    Esiste perché un ``RuntimeError`` nudo li perde tutti. La catena a valle —
+    ``_extract_error_metadata`` → ``is_transient_response`` — legge lo status per
+    decidere se ritentare, e senza status ripiega sul testo, dove il marker
+    ``"429"`` fa passare per transitorio anche un ``insufficient_quota`` che non
+    lo è: quella richiesta veniva ritentata a vuoto fino a esaurire i tentativi.
+    Gli attributi hanno i nomi che le eccezioni dell'SDK OpenAI espongono
+    (``status_code``, ``headers``, ``body``), così chi le legge non deve
+    distinguere le due origini.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        headers: Any = None,
+        body: Any = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.headers = headers
+        self.body = body
+
+
 def resolve_stream_idle_timeout_s(
     *,
     env_value: str | None = None,
