@@ -16,6 +16,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from jenny.providers.base import tool_arguments_object_for_replay
+from jenny.providers.message_repair import SYNTHETIC_USER_CONTENT
 
 _ALNUM = string.ascii_letters + string.digits
 
@@ -296,7 +297,7 @@ class AnthropicConversionMixin:
             and merged[0].get("role") == "assistant"
             and not AnthropicConversionMixin._has_tool_use(merged[0])
         ):
-            merged.insert(0, {"role": "user", "content": "(conversation continued)"})
+            merged.insert(0, {"role": "user", "content": SYNTHETIC_USER_CONTENT})
 
         return merged
 

@@ -149,6 +149,48 @@ class TestEnforceRoleAlternation:
         assert result[1]["role"] == "user"
         assert "Subagent completed successfully." in result[1]["content"]
 
+    def test_recovered_turn_does_not_carry_tool_calls(self):
+        """Un turno ``user`` non può portare ``tool_calls``, e quelle sono spaiate.
+
+        Il recupero riscriveva il ruolo e basta: ``tool_calls`` è fra le chiavi
+        ammesse e questa normalizzazione gira per ultima, quindi
+        ``{"role": "user", "tool_calls": [...]}`` finiva sul filo. Le chiamate
+        erano per giunta in coda, cioè senza i loro risultati: spaiate comunque.
+        """
+        msgs = [
+            {"role": "system", "content": "You are helpful."},
+            {
+                "role": "assistant",
+                "content": "Let me look that up.",
+                "tool_calls": [{"id": "c1", "function": {"name": "web_search"}}],
+            },
+        ]
+        result = LLMProvider._enforce_role_alternation(msgs)
+        assert len(result) == 2
+        assert result[1]["role"] == "user"
+        assert "tool_calls" not in result[1]
+        assert "Let me look that up." in result[1]["content"]
+
+    def test_recovered_turn_is_never_left_empty(self):
+        """Un assistant con *solo* chiamate resta senza niente da leggere.
+
+        Togliere ``tool_calls`` da ``{"content": None, "tool_calls": [...]}``
+        lascerebbe un turno vuoto, invalido quanto quello da cui si scappava.
+        """
+        msgs = [
+            {"role": "system", "content": "You are helpful."},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"id": "c1", "function": {"name": "web_search"}}],
+            },
+        ]
+        result = LLMProvider._enforce_role_alternation(msgs)
+        assert len(result) == 2
+        assert result[1]["role"] == "user"
+        assert "tool_calls" not in result[1]
+        assert result[1]["content"] == _SYNTHETIC_USER_CONTENT
+
     def test_trailing_assistant_not_recovered_when_user_message_present(self):
         """Recovery should NOT happen when a user message already exists."""
         msgs = [
