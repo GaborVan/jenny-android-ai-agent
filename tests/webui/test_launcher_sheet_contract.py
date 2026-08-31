@@ -631,3 +631,14 @@ def test_the_wiki_slot_wears_the_graph_icon() -> None:
     slot = re.search(r'<div class="dock-item"[^>]*data-mode="graph"[^>]*>(.*?)</div>', html, re.S)
     assert slot and "ti-topology-star" in slot.group(1)
     assert "ti-book" not in slot.group(1)
+
+
+def test_the_sheet_itself_shows_no_focus_ring() -> None:
+    """Il foglio prende il fuoco all'apertura per fare da àncora a TalkBack e ai
+    tasti, ma ha `tabindex="-1"`: da tastiera non ci si arriva, quindi l'anello
+    non segnala nulla e si vede soltanto. I controlli *dentro* lo tengono."""
+    html = (ROOT / "jenny/templates/ui/index.html").read_text(encoding="utf-8")
+    sheet = re.search(r'<div class="launcher-sheet"[^>]*>', html).group(0)
+    assert 'tabindex="-1"' in sheet, "se diventasse raggiungibile con Tab, l'anello servirebbe"
+    css = _src("mobile-style.css")
+    assert ".launcher-sheet:focus,\n.launcher-sheet:focus-visible { outline: none; }" in css

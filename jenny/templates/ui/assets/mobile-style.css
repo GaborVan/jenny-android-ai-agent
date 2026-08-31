@@ -3147,6 +3147,15 @@ body {
    difetto preesistente a questo lavoro, non toccato qui. */
 :root.launcher-open .jenny-duo { z-index: 98; }
 
+/* Il foglio riceve il fuoco all'apertura, ma solo come àncora: `tabindex="-1"`
+   lo tiene fuori dal giro di Tab, quindi da tastiera non ci si arriva mai e
+   l'anello non segnala niente a nessuno — si vede e basta, attorno a tutto il
+   pannello, a ogni apertura. Visto sul Titan 2 (tastiera fisica collegata: la
+   scorciatoia di `:focus-visible` si comporta diversamente da un telefono
+   senza). I controlli *dentro* il foglio tengono il loro anello. */
+.launcher-sheet:focus,
+.launcher-sheet:focus-visible { outline: none; }
+
 .launcher-scrim {
   position: fixed; inset: 0; z-index: 99;
   background: rgba(0, 0, 0, 0.55);
