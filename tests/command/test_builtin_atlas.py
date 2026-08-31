@@ -137,7 +137,28 @@ def _collect(sink: list):
     return _publish
 
 
-async def _drain() -> None:
-    """Lascia girare il task fire-and-forget creato dal comando."""
-    for _ in range(10):
-        await asyncio.sleep(0)
+async def _drain(timeout: float = 30.0) -> None:
+    """Aspetta il task fire-and-forget creato dal comando. Davvero.
+
+    Era ``for _ in range(10): await asyncio.sleep(0)``, cioè la stessa forma che
+    ha fatto rosso la CI su Dream il 28/08/2026 (v. il gemello documentato in
+    ``test_dream_command.py``): ``cmd_atlas`` fa ``asyncio.create_task`` senza
+    tenere il manico, e un ``sleep(0)`` cede il controllo ma **non** lascia
+    passare tempo — se il lavoro attraversa ``asyncio.to_thread``, dieci giri di
+    event loop non bastano su una macchina carica.
+
+    Si aspettano quindi gli oggetti giusti: i task vivi che non sono questo test.
+    Si rileggono a ogni giro perché un task può aprirne un altro. Il tetto serve
+    solo a non appendere la suite, e se scatta lo dice invece di lasciar fallire
+    un assert tre righe più in là.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    current = asyncio.current_task()
+    while True:
+        pending = [t for t in asyncio.all_tasks() if t is not current and not t.done()]
+        if not pending:
+            return
+        remaining = deadline - loop.time()
+        assert remaining > 0, f"task ancora in volo dopo {timeout}s: {pending}"
+        await asyncio.wait(pending, timeout=remaining)

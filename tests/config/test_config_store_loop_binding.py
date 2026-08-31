@@ -40,6 +40,28 @@ def _is_loop_bound(lock: asyncio.Lock) -> bool:
     return getattr(lock, "_loop", None) is not None
 
 
+async def _wait_until_queued(lock: asyncio.Lock, *, timeout: float = 1.0) -> None:
+    """Cede il controllo finché *lock* non ha un waiter in coda.
+
+    Era ``for _ in range(5): await asyncio.sleep(0)``. Cinque giri bastano oggi,
+    ma il numero non descrive niente: quanti ne servano dipende da quante volte
+    la catena rimbalza prima che il task arrivi ad ``acquire``. La condizione
+    osservabile è invece esatta, ed è quella che il test vuole davvero.
+
+    ``_waiters`` è un interno di CPython, come ``_loop`` letto qui sopra: lo si
+    usa per la stessa ragione e con la stessa riserva — se sparisce, questi test
+    devono accorgersene invece di passare a vuoto.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        waiters = getattr(lock, "_waiters", None)
+        if waiters:
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("nessuno scrittore si è accodato sul lock")
+
+
 async def _mutate_with_a_queued_writer(config_path: Path) -> None:
     """Una scrittura via ``mutate`` con un secondo scrittore in coda sul lock.
 
@@ -56,8 +78,7 @@ async def _mutate_with_a_queued_writer(config_path: Path) -> None:
         queued = asyncio.create_task(
             store.mutate(lambda _cfg: None, config_path=config_path)
         )
-        for _ in range(5):
-            await asyncio.sleep(0)  # lascia che il secondo scrittore si accodi
+        await _wait_until_queued(store._LOCK)
     await queued
 
 

@@ -40,14 +40,32 @@ async def _wait_until(predicate, *, timeout: float = 1.0, interval: float = 0.01
     assert predicate()
 
 
-async def _settle(turns: int = 5) -> None:
-    """Lascia girare il loop quel tanto che basta ai task delle sveglie.
+async def _settle(service=None, *, timeout: float = 5.0) -> None:
+    """Aspetta i task delle sveglie finché non sono finiti.
 
-    ``_set_wake_alarm`` dichiara l'obiettivo e delega l'applicazione a un task:
-    l'effetto sul bridge si vede al giro dopo, non nello stesso.
+    ``_set_wake_alarm`` dichiara l'obiettivo e delega l'applicazione a un task,
+    che ``CronService`` tiene in ``_alarm_tasks``: è quell'insieme l'oggetto da
+    aspettare, e si rilegge a ogni giro perché un task può aprirne un altro.
+
+    Contare i giri di loop reggeva solo grazie alla fixture: ``alarms``
+    sostituisce ``power.schedule_wake`` con una coroutine liscia, mentre il
+    ``power._call`` vero passa da ``asyncio.to_thread``. Con quello in mezzo,
+    cinque ``sleep(0)`` non garantiscono niente — è la forma che ha fatto rosso
+    la CI su Dream il 28/08/2026. Senza *service* resta un singolo giro di cortesia,
+    per i pochi punti che non hanno il servizio sotto mano.
     """
-    for _ in range(turns):
+    if service is None:
         await asyncio.sleep(0)
+        return
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        pending = {t for t in service._alarm_tasks if not t.done()}
+        if not pending:
+            return
+        remaining = deadline - loop.time()
+        assert remaining > 0, f"task delle sveglie ancora in volo dopo {timeout}s: {pending}"
+        await asyncio.wait(pending, timeout=remaining)
 
 
 class _Alarms:
@@ -98,7 +116,7 @@ async def test_alarm_is_armed_for_the_real_deadline(tmp_path, alarms: _Alarms) -
             message="tick",
             **_bound_chat(),
         )
-        await _settle()
+        await _settle(service)
 
         assert job.state.next_run_at_ms is not None
         assert (job.state.next_run_at_ms, power.WAKE_REQUEST_CODE_CRON) in alarms.scheduled
@@ -114,7 +132,7 @@ async def test_no_deadline_arms_no_alarm(tmp_path, alarms: _Alarms) -> None:
     service = CronService(tmp_path / "cron" / "jobs.json", max_sleep_ms=100)
     await service.start()
     try:
-        await _settle()
+        await _settle(service)
         assert alarms.scheduled == []
     finally:
         service.stop()
@@ -130,11 +148,11 @@ async def test_stop_cancels_the_alarm(tmp_path, alarms: _Alarms) -> None:
         message="tick",
         **_bound_chat(),
     )
-    await _settle()
+    await _settle(service)
     assert alarms.scheduled
 
     service.stop()
-    await _settle()
+    await _settle(service)
 
     assert alarms.cancelled == [power.WAKE_REQUEST_CODE_CRON]
 
@@ -171,7 +189,7 @@ async def test_mutation_during_an_inflight_job_leaves_the_alarm_alone(
 
         await asyncio.wait_for(entered.wait(), timeout=1.0)
         assert service._timer_active is True
-        await _settle()
+        await _settle(service)
         scheduled_before = list(alarms.scheduled)
         cancelled_before = list(alarms.cancelled)
 
@@ -181,7 +199,7 @@ async def test_mutation_during_an_inflight_job_leaves_the_alarm_alone(
             message="hello",
             **_bound_chat("b"),
         )
-        await _settle()
+        await _settle(service)
 
         assert alarms.scheduled == scheduled_before
         assert alarms.cancelled == cancelled_before
@@ -218,7 +236,7 @@ async def test_wake_tick_runs_due_jobs_like_a_timer_tick(tmp_path, alarms: _Alar
             message="tick",
             **_bound_chat(),
         )
-        await _settle()
+        await _settle(service)
         # Scadenza mancata mentre il device dormiva, senza riarmare il timer:
         # il tick di sveglia deve essere l'unica cosa che lo rimette in moto.
         job.state.next_run_at_ms = int(time.time() * 1000) - 1_000
@@ -261,7 +279,7 @@ async def test_timer_and_wake_tick_together_run_each_job_once(tmp_path, alarms: 
         assert service._timer_task is not None
         service._timer_task.cancel()
         assert power.on_wake_tick() is True
-        await _settle(2)
+        await _settle(service)
         assert service._wake_event is not None and service._wake_event.is_set()
 
         # Da qui: evento GIÀ acceso e timer a delay zero (job scaduto). I due
@@ -313,7 +331,7 @@ async def test_wake_tick_during_an_inflight_job_does_not_re_enter_it(
 
         await asyncio.wait_for(entered.wait(), timeout=1.0)
         assert power.on_wake_tick() is True
-        await _settle()
+        await _settle(service)
         assert calls == [job.id]
 
         release.set()
@@ -369,7 +387,7 @@ async def test_disabled_alarm_driven_cron_falls_back_to_pure_asyncio(
         assert recorder.cancelled == []
     finally:
         service.stop()
-        await _settle()
+        await _settle(service)
         # Nemmeno lo stop parla col bridge quando l'interruttore è giù.
         assert recorder.cancelled == []
 
