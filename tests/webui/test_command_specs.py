@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from jenny.command.builtin import BUILTIN_COMMAND_SPECS
+from jenny.command.specs import BUILTIN_COMMAND_SPECS, SCOPES
 
 _UI = Path(__file__).resolve().parents[2] / "jenny" / "templates" / "ui"
 _TABLER_CSS = (
@@ -57,9 +57,9 @@ def test_specs_are_serializable_for_the_webui() -> None:
         assert payload["title"]
         assert payload["description"]
         assert payload["icon"]
-        # Il client filtra su questo valore: uno sconosciuto nasconderebbe il
-        # comando in ogni scope, o lo mostrerebbe in tutti.
-        assert payload["scope"] in ("any", "project")
+        # Il dispatch decide su questo valore: uno sconosciuto passerebbe come
+        # ``any``, cioe' aprirebbe il comando in ogni scope in silenzio.
+        assert payload["scope"] in SCOPES
 
 
 def test_project_only_commands_are_the_ones_whose_subject_is_this_project() -> None:
@@ -99,3 +99,76 @@ def test_the_two_that_expand_in_the_turn_do_not_pass_through_the_router() -> Non
     assert not router.is_dispatchable_command(PROJECT_INIT_COMMAND)
     assert not router.is_dispatchable_command(PROJECT_TIDY_COMMAND)
     assert router.is_dispatchable_command("/gardener")
+
+
+# ── La rotta che alimenta la tendina ────────────────────────────────────────
+
+
+def _commands_route_response(session_key: str | None):
+    """La rotta vera, con le dipendenze minime che tocca."""
+    import json
+    import urllib.parse
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from websockets.http11 import Headers
+    from websockets.http11 import Request as WsRequest
+
+    from jenny.webui.ws_http import GatewayHTTPHandler
+
+    secret = "test-secret"
+    handler = GatewayHTTPHandler(
+        config=SimpleNamespace(
+            workspace=SimpleNamespace(enabled=True),
+            wiki=SimpleNamespace(enabled=True, wikis_dir="wikis"),
+            token_issue_secret=secret,
+            verbose=False,
+        ),
+        session_manager=None,
+        runtime_model_name=lambda: "test-model",
+        bus=MagicMock(),
+        media=MagicMock(),
+        workspaces=MagicMock(),
+        skills_workspace_path=Path("/tmp/skills-does-not-matter"),
+    )
+    path = "/api/webui/commands"
+    if session_key is not None:
+        path = f"{path}?key={urllib.parse.quote(session_key)}"
+    sep = "&" if "?" in path else "?"
+    request = WsRequest(path=f"{path}{sep}token={secret}", headers=Headers())
+    response = handler._handle_webui_commands(request)
+    # Un rifiuto ha un corpo di testo, non JSON (``http_utils.http_error``).
+    payload = json.loads(response.body) if response.status_code == 200 else None
+    return response, payload
+
+
+def test_the_route_serves_the_commands_of_that_conversation() -> None:
+    """Il filtro sta qui e non nel client (31/08/2026).
+
+    La tendina teneva due righe di ``if (spec.scope === 'project' && !inProject)``,
+    cioe' una seconda copia della regola; e un filtro lato client e' comunque solo
+    cosmetica, perche' non c'e' autocomplete sullo ``/``.
+    """
+    _, personal = _commands_route_response("websocket:default")
+    _, project = _commands_route_response("project:patreon")
+
+    names = lambda payload: {row["command"] for row in payload["commands"]}  # noqa: E731
+
+    assert "/dream" in names(personal) and "/tidy" not in names(personal)
+    assert "/tidy" in names(project) and "/dream" not in names(project)
+
+
+def test_the_route_without_a_key_serves_everything() -> None:
+    """Senza ``key`` e' "scope non noto", non "chat personale": un client vecchio
+    continua a vedere quel che vedeva, e il dispatch lo fermerebbe comunque."""
+    _, payload = _commands_route_response(None)
+
+    assert {row["command"] for row in payload["commands"]} == {
+        spec.command for spec in BUILTIN_COMMAND_SPECS
+    }
+
+
+def test_the_route_refuses_a_key_that_is_not_one() -> None:
+    response, _ = _commands_route_response("../../etc/passwd")
+
+    assert response.status_code == 400

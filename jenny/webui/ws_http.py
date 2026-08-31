@@ -639,12 +639,24 @@ class GatewayHTTPHandler:
         return _http_json_response({"ok": True})
 
     def _handle_webui_commands(self, request: WsRequest) -> Response:
-        """L'elenco dei comandi slash, per la tendina del composer.
+        """I comandi slash **di questa conversazione**, per la tendina del composer.
 
-        La tabella e' ``command/builtin.py::BUILTIN_COMMAND_SPECS``, cioe' la
+        La tabella e' ``command/specs.py::BUILTIN_COMMAND_SPECS``, cioe' la
         stessa che compone ``/help``: la WebUI non tiene un secondo elenco. Su
-        ``api`` e non su ``rpc`` perche' e' una lettura senza parametri (la
-        divisione sta in testa a ``assets/shared/rpc-client.js``).
+        ``api`` e non su ``rpc`` perche' e' una lettura (la divisione sta in
+        testa a ``assets/shared/rpc-client.js``).
+
+        **Il filtro e' qui e non nel client** (31/08/2026). La tendina teneva due
+        righe di `if (spec.scope === 'project' && !inProject) continue`, cioe' una
+        seconda copia della regola nel posto che quel modulo esiste per non
+        avere; e un filtro lato client e' comunque solo cosmetica — non c'e'
+        autocomplete sullo ``/``, quindi la regola vera e' il cancello del
+        dispatch (:mod:`jenny.command.scope`). Servendo l'elenco giusto, le due
+        superfici non possono divergere.
+
+        Senza ``key`` si elencano tutti: e' "scope non noto", non "chat
+        personale". Un client vecchio che non lo manda continua a vedere quel che
+        vedeva, e il dispatch lo fermerebbe comunque.
 
         Sono i comandi *predefiniti* e non "quelli registrati nel router": due
         di essi (``/tidy``, ``/init``) non passano dal router perche' si
@@ -653,10 +665,18 @@ class GatewayHTTPHandler:
         """
         if not self.check_api_secret(request):
             return _http_error(401, "Unauthorized")
-        from jenny.command.builtin import BUILTIN_COMMAND_SPECS
+        from jenny.command.scope import visible_specs
+
+        raw_key = _query_first(_parse_query(request.path), "key")
+        session_key: str | None = None
+        if raw_key:
+            decoded = _decode_api_key(raw_key)
+            if decoded is None:
+                return _http_error(400, "invalid session key")
+            session_key = self._to_core_session_key(decoded)
 
         return _http_json_response(
-            {"commands": [spec.as_dict() for spec in BUILTIN_COMMAND_SPECS]}
+            {"commands": [spec.as_dict() for spec in visible_specs(session_key)]}
         )
 
     def _handle_webui_hidden_apps(self, request: WsRequest) -> Response:

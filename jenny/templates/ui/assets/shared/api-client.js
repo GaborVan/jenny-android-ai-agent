@@ -107,11 +107,18 @@ class ApiClient {
     } catch (_) { /* mai propagare */ }
   }
 
-  /** L'elenco dei comandi slash, per la tendina del composer.
-   *  Fonte unica: `command/builtin.py::BUILTIN_COMMAND_SPECS`, la stessa da cui
-   *  esce `/help`. Il client non tiene un secondo elenco. */
-  async getCommands() {
-    const res = await this._fetch('/api/webui/commands');
+  /** I comandi slash **di questa conversazione**, per la tendina del composer.
+   *
+   *  Fonte unica: `command/specs.py::BUILTIN_COMMAND_SPECS`, la stessa da cui
+   *  esce `/help`. Il client non tiene un secondo elenco — e da quando la chiave
+   *  viaggia con la richiesta non tiene nemmeno una copia della regola su quali
+   *  voci mostrare: filtra il server (`ws_http._handle_webui_commands`). Senza
+   *  chiave l'elenco torna intero, che è il comportamento di prima. */
+  async getCommands(sessionKey) {
+    const url = sessionKey
+      ? `/api/webui/commands?key=${encodeURIComponent(sessionKey)}`
+      : '/api/webui/commands';
+    const res = await this._fetch(url);
     if (!res.ok) throw new Error(`Commands failed: ${res.status}`);
     return res.json();
   }

@@ -32,7 +32,7 @@ class TestRegistration:
         assert router.is_dispatchable_command("/atlas force")
 
     def test_is_listed_among_builtin_commands(self):
-        from jenny.command.builtin import BUILTIN_COMMAND_SPECS
+        from jenny.command.specs import BUILTIN_COMMAND_SPECS
 
         specs = {spec.command: spec for spec in BUILTIN_COMMAND_SPECS}
 

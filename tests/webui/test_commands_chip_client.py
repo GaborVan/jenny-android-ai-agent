@@ -27,7 +27,7 @@ from pathlib import Path
 
 import pytest
 
-from jenny.command.builtin import BUILTIN_COMMAND_SPECS
+from jenny.command.specs import BUILTIN_COMMAND_SPECS
 
 ASSETS = Path(__file__).resolve().parents[2] / "jenny" / "templates" / "ui" / "assets"
 CHIP_JS = ASSETS / "shared" / "commands-chip.js"
@@ -103,9 +103,18 @@ function makeEl(tag) {
 const document = { createElement: (tag) => makeEl(tag) };
 const console = { warn() {} };
 
-// Lo scope è di un altro modulo: qui è un valore, che è tutto quel che la
-// tendina ne legge.
-const scopeChip = { scope: { kind: 'personal', name: null } };
+// La conversazione aperta e il client HTTP: sono di altri due moduli, e qui
+// sono quel poco che `_load` ne legge. Lo scope **non** compare più: il filtro
+// per conversazione lo fa il server (`ws_http._handle_webui_commands`), e la
+// tendina disegna quel che riceve.
+const sessionManager = { currentKey: 'websocket:default' };
+const requests = [];
+const api = {
+  async getCommands(key) {
+    requests.push(key);
+    return { commands: SPECS };
+  },
+};
 
 function texts(el) {
   const out = [];
@@ -135,6 +144,7 @@ class Chip {
     this.onPick = (spec) => this.picked.push(spec.command);
   }
   close() {}
+  __LOAD__
   __RENDER_MENU__
   __ITEM__
   __NOTE__
@@ -230,6 +240,7 @@ def _harness() -> str:
         _HARNESS.replace("__TRANSLATIONS__", json.dumps({"it": _locale("it")}))
         .replace("__T__", _member(I18N_JS.read_text(encoding="utf-8"), "t"))
         .replace("__SPECS__", _specs_json())
+        .replace("__LOAD__", _member(src, "_load"))
         .replace("__RENDER_MENU__", _member(src, "_renderMenu"))
         .replace("__ITEM__", _member(src, "_item"))
         .replace("__NOTE__", _member(src, "_note"))
@@ -252,8 +263,13 @@ def _run_js(script: str) -> None:
 
 
 def test_every_command_the_backend_serves_gets_a_row() -> None:
-    """Nessun filtro silenzioso: quel che il server dichiara si vede."""
-    expected = [s.command for s in BUILTIN_COMMAND_SPECS if s.scope != "project"]
+    """Nessun filtro silenzioso: quel che il server serve si vede, tutto.
+
+    Dal 31/08/2026 vale alla lettera: il filtro per conversazione è del server,
+    quindi qui non c'è più niente da nascondere — e un filtro in questo file
+    sarebbe la seconda copia della regola che il modulo esiste per non tenere.
+    """
+    expected = [s.command for s in BUILTIN_COMMAND_SPECS]
     _run_js(f"""
       const chip = new Chip();
       chip._renderMenu();
@@ -297,33 +313,59 @@ def test_every_row_carries_the_icon_the_backend_declared() -> None:
     """)
 
 
-# ── 2. Lo scope ─────────────────────────────────────────────────────────────
+# ── 2. Lo scope, che è del server ───────────────────────────────────────────
 
 
-def test_project_only_commands_are_hidden_outside_a_project() -> None:
-    """`/tidy` e `/init` fuori da un progetto non hanno un soggetto."""
+def test_the_chip_draws_what_it_is_served_and_filters_nothing() -> None:
+    """Il filtro per conversazione è del server, non di qui.
+
+    Prima queste due righe vivevano nel `_renderMenu`, e c'era un motivo per
+    toglierle: **non c'è autocomplete sullo `/`**, quindi un filtro nel client
+    nasconde una voce a chi guarda il menu e non dice niente a chi digita. La
+    regola vera è il cancello del dispatch (`jenny/command/scope.py`); questa era
+    cosmetica, e una copia della regola in più da tenere allineata.
+    """
     _run_js("""
       const chip = new Chip();
+      chip._commands = [
+        { command: '/tidy', title: 'Tidy', icon: 'wand', arg_hint: '', scope: 'project' },
+        { command: '/dream', title: 'Dream', icon: 'sparkles', arg_hint: '', scope: 'personal' },
+      ];
       chip._renderMenu();
       const names = texts(chip.menu);
-      assert.equal(names.some((t) => t.startsWith('/tidy')), false);
-      assert.equal(names.some((t) => t.startsWith('/init')), false);
+      assert.ok(names.some((t) => t.startsWith('/tidy')), 'ha filtrato un project');
+      assert.ok(names.some((t) => t.startsWith('/dream')), 'ha filtrato un personal');
     """)
 
 
-def test_they_appear_inside_a_project() -> None:
-    """Controllo: nascoste, non sparite."""
+def test_the_open_conversation_travels_with_the_request() -> None:
+    """Senza la chiave il server non può filtrare, e servirebbe l'elenco intero."""
     _run_js("""
-      scopeChip.scope = { kind: 'project', name: 'patreon' };
       const chip = new Chip();
-      chip._renderMenu();
-      const names = texts(chip.menu);
-      assert.ok(names.some((t) => t.startsWith('/tidy')));
-      assert.ok(names.some((t) => t.startsWith('/init')));
+      chip._commands = null;
+      await chip._load();
+      assert.deepEqual(requests, ['websocket:default']);
     """)
 
 
-# ── 3. La prosa, e cosa succede quando manca ────────────────────────────────
+def test_changing_conversation_asks_again() -> None:
+    """L'elenco in cache appartiene a una conversazione.
+
+    Servire quello di prima dopo un cambio di scope vorrebbe dire offrire una
+    voce che il dispatch poi rifiuta — cioè la cosa che la tendina esiste per non
+    fare.
+    """
+    _run_js("""
+      const chip = new Chip();
+      chip._commands = null;
+      await chip._load();
+      await chip._load();
+      assert.equal(requests.length, 1, 'la stessa conversazione non si richiede');
+
+      sessionManager.currentKey = 'project:patreon';
+      await chip._load();
+      assert.deepEqual(requests, ['websocket:default', 'project:patreon']);
+    """)
 
 
 def test_the_description_comes_from_the_locale() -> None:

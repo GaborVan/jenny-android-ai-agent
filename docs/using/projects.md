@@ -57,7 +57,7 @@ From the chip above the message box: tap the chip, then **New project...**. Two 
 
 On success the chip drops you straight into the new project. The scaffolding — folders, `AGENTS.md`, an empty-but-structured `wiki/index.md`, today's `log/` entry — is written for you; nothing that already exists is overwritten, which is why re-running the creation on a half-built folder repairs it instead of clobbering it.
 
-Later, once the project has some pages, `/init` inside it rewrites that project's `AGENTS.md` from what the folder actually contains — its scope, the conventions the pages already follow, and the open questions. Outside a project, `/init` refuses and tells you to pick one from the chip.
+Later, once the project has some pages, `/init` inside it rewrites that project's `AGENTS.md` from what the folder actually contains — its scope, the conventions the pages already follow, and the open questions. Outside a project, `/init` refuses and tells you to open one — the chip above the composer does it.
 
 To **delete** a project, open the chip and tap the bin on its row, then confirm — the same place you created it. The confirmation names how many messages of its conversation go with it, because a project's chat is deleted together with its folder. The Workspace file browser offers the same thing from the project's folder. (Deleting the folder by hand, or over [ssh](./ssh.md), also works but leaves the conversation behind under a name that is now free — which is why the file browser refuses that route and routes you to the project delete instead.)
 
@@ -124,7 +124,7 @@ By default a project's conversation is **never** compacted for sitting idle. It 
 
 The fence is about *time*, not *length*. A project conversation that grows long enough to pressure the model's context window is still consolidated the ordinary way: the oldest slice is summarised, the summary is carried forward, and those messages stop being replayed to the model. Nothing is removed from disk on that path, and none of it reaches the personal diary.
 
-If a project's knowledge really does live in its pages, you can turn that fence off with `/gardener compact on`. Read what it costs first: after that, an idle project's conversation is archived like the personal one, and Jenny then has in context what was *written* in the wiki, not what was *said*. The visible transcript is untouched, so you can still read back — the amnesia is the agent's, not the record's. The setting is read when the agent starts, so it takes effect from the next gateway start.
+If a project's knowledge really does live in its pages, you can turn that fence off in **Settings → Wiki and projects**, under *Project history*. Read what it costs first: after that, an idle project's conversation is archived like the personal one, and Jenny then has in context what was *written* in the wiki, not what was *said*. The visible transcript is untouched, so you can still read back — the amnesia is the agent's, not the record's. The setting is read when the agent starts, so it takes effect from the next gateway start.
 
 Two gates still protect a project even with compaction on, and both are checked every time:
 

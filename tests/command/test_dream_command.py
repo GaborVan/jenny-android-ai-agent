@@ -166,7 +166,7 @@ class TestRegistration:
         assert router.is_dispatchable_command("/dream budget memory 6000")
 
     def test_the_palette_no_longer_offers_an_argument(self):
-        from jenny.command.builtin import BUILTIN_COMMAND_SPECS
+        from jenny.command.specs import BUILTIN_COMMAND_SPECS
 
         spec = {s.command: s for s in BUILTIN_COMMAND_SPECS}["/dream"]
 

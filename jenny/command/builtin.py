@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import time
 from contextlib import suppress
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from jenny import __version__
@@ -17,143 +16,6 @@ if TYPE_CHECKING:
     from jenny.agent.atlas import AtlasOutcome
     from jenny.agent.dream_review import ReviewOutcome
     from jenny.agent.gardener import GardenerOutcome
-
-
-@dataclass(frozen=True)
-class BuiltinCommandSpec:
-    """Una voce del menu comandi, piu' la riga di ``/help``.
-
-    ``icon`` e' un nome **Tabler** senza il prefisso ``ti-``: e' il font che la
-    WebUI impacchetta, e la tendina lo rende come ``ti-<icon>``. Non e' un
-    dettaglio da indovinare — fino alla 0.9.0 cinque di questi nomi erano di
-    Lucide (``square-pen``, ``sprout``, ``brush-cleaning``, ``file-pen``,
-    ``circle-help``), e nessuno se n'era accorto perche' il campo non era mai
-    stato disegnato da nessuno. Un nome che in Tabler non c'e' rende un quadrato
-    vuoto, quindi ``tests/webui/test_command_specs.py`` li confronta con il font
-    vero: aggiungendo un comando, prendere il nome da la'.
-
-    ``scope`` dice **dove** il comando fa qualcosa. ``"project"`` sono i due che
-    fuori da un progetto non hanno un soggetto (``/tidy``, ``/init``): la tendina
-    li nasconde invece di offrirli e lasciarli fallire.
-    """
-
-    command: str
-    title: str
-    description: str
-    icon: str
-    arg_hint: str = ""
-    scope: str = "any"
-
-    def as_dict(self) -> dict[str, str]:
-        return {
-            "command": self.command,
-            "title": self.title,
-            "description": self.description,
-            "icon": self.icon,
-            "arg_hint": self.arg_hint,
-            "scope": self.scope,
-        }
-
-
-BUILTIN_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
-    BuiltinCommandSpec(
-        "/new",
-        "New chat",
-        "Stop the current task and start a fresh conversation.",
-        "message-plus",
-    ),
-    BuiltinCommandSpec(
-        "/stop",
-        "Stop current task",
-        "Cancel the active agent turn for this chat.",
-        "square",
-    ),
-    BuiltinCommandSpec(
-        "/status",
-        "Show status",
-        "Display runtime, provider, and channel status.",
-        "activity",
-    ),
-    BuiltinCommandSpec(
-        "/model",
-        "Switch model preset",
-        "Show or switch the active model preset.",
-        "brain",
-        "[preset]",
-    ),
-    BuiltinCommandSpec(
-        "/history",
-        "Show conversation history",
-        "Print the last N persisted conversation messages.",
-        "history",
-        "[n]",
-    ),
-    BuiltinCommandSpec(
-        "/goal",
-        "Start long-running goal",
-        "Tell the agent to treat the request as a long-running goal.",
-        "activity",
-        "<goal>",
-    ),
-    BuiltinCommandSpec(
-        "/dream",
-        "Run Dream",
-        (
-            "Manually trigger memory consolidation now. The budgets and the review cadence "
-            "live in Settings, under Memory."
-        ),
-        "sparkles",
-    ),
-    BuiltinCommandSpec(
-        "/atlas",
-        "Run Atlas",
-        "Rebuild the wiki directory in memory/WIKI.md. Add 'force' to skip the change check.",
-        "map",
-        "[force]",
-    ),
-    BuiltinCommandSpec(
-        "/gardener",
-        "Run the gardener",
-        (
-            "Inside a project: turn its new journal lines into pages and update its map — or, "
-            "with nothing new to promote, bring an oversized map back under its ceiling. The "
-            "periodic pass is set in Settings, under Wiki and projects."
-        ),
-        "seeding",
-        scope="project",
-    ),
-    BuiltinCommandSpec(
-        "/skill",
-        "List skills",
-        "List enabled skills and their descriptions.",
-        "puzzle",
-    ),
-    BuiltinCommandSpec(
-        "/tidy",
-        "Tidy this project's wiki",
-        (
-            "Inside a project: restructure its wiki now — split what has outgrown the per-turn "
-            "budget, move prose out of an oversized map, realign the page list. Runs in this "
-            "conversation, with its pages and your answers in hand; the gardener's periodic pass "
-            "cannot do that."
-        ),
-        "wand",
-        scope="project",
-    ),
-    BuiltinCommandSpec(
-        "/init",
-        "Write this project's instructions",
-        "Inside a project: read the wiki and write its AGENTS.md.",
-        "file-pencil",
-        scope="project",
-    ),
-    BuiltinCommandSpec(
-        "/help",
-        "Show help",
-        "List available slash commands.",
-        "help-circle",
-    ),
-)
 
 
 # Quel che si risponde a chi digita una forma che non esiste piu'. **Da togliere
@@ -877,16 +739,23 @@ def _reply(msg, content: str) -> OutboundMessage:
 def _gardener_no_target() -> str:
     """«Qui non c'è niente da curare», e dove invece c'è.
 
+    **È il rifiuto canonico di scope, non una seconda frase.** Da quando il
+    cancello sta nel router (:func:`_scope_refusal`) questa strada non la
+    percorre più un messaggio dell'utente; resta come difesa dell'handler — che
+    senza una chiave di progetto prenderebbe un bersaglio dal nulla — e chiama
+    la stessa funzione, così le due porte non possono raccontare due storie.
+
     Non offre più di nominare un progetto: il lavoro su un progetto si fa da
     dentro il progetto (31/08/2026), come per ``journal_append``, che fuori da
     uno rifiuta e indica il chip sopra il composer senza avere un argomento con
     cui aggirarsi.
     """
-    return (
-        "The gardener works on one project at a time, and this conversation is not a project.\n\n"
-        "Open the project — the chip above the composer does it — and send `/gardener` there. "
-        "The periodic pass is set in Settings, under Wiki and projects."
-    )
+    from jenny.command.scope import refusal, spec_for_line
+    from jenny.session.keys import UNIFIED_SESSION_KEY
+
+    spec = spec_for_line("/gardener")
+    assert spec is not None  # è nella tabella: se non c'è, è un errore di programmazione
+    return refusal(spec, UNIFIED_SESSION_KEY)
 
 
 def _format_gardener_outcome(name: str, outcome: "GardenerOutcome") -> str:
@@ -1130,15 +999,27 @@ async def cmd_help(ctx: CommandContext) -> OutboundMessage:
     return OutboundMessage(
         channel=ctx.msg.channel,
         chat_id=ctx.msg.chat_id,
-        content=build_help_text(),
+        content=build_help_text(ctx.key),
         metadata={**dict(ctx.msg.metadata or {}), "render_as": "text"},
     )
 
 
-def build_help_text() -> str:
-    """Build canonical help text shared across channels."""
+def build_help_text(session_key: str | None = None) -> str:
+    """Build canonical help text shared across channels.
+
+    Elenca i comandi che **in questa conversazione** hanno un soggetto: dentro un
+    progetto niente ``/dream`` (la memoria personale non passa da qui) e fuori
+    niente ``/tidy``. ``None`` vuol dire "scope non noto" e mostra tutto.
+
+    Prima filtrava solo la tendina della WebUI, e le due superfici non dicevano la
+    stessa cosa: su Telegram — che e' **sempre** la sessione personale
+    (``session_key_for_channel``) — ``/help`` pubblicizzava ``/tidy`` e ``/init``,
+    che su quel canale non possono funzionare mai.
+    """
+    from jenny.command.scope import visible_specs
+
     lines = ["✿ jenny commands:"]
-    for spec in BUILTIN_COMMAND_SPECS:
+    for spec in visible_specs(session_key):
         command = spec.command
         if spec.arg_hint:
             command = f"{command} {spec.arg_hint}"
@@ -1146,8 +1027,24 @@ def build_help_text() -> str:
     return "\n".join(lines)
 
 
+def _scope_refusal(ctx: CommandContext) -> OutboundMessage | None:
+    """Il cancello di scope del router: un rifiuto, o ``None`` per procedere.
+
+    Sta qui e non in ``router.py`` perche' e' l'unico punto in cui il router deve
+    comporre un messaggio, e comporre messaggi e' di questo modulo. La decisione
+    invece e' tutta in :mod:`jenny.command.scope`.
+    """
+    from jenny.command.scope import refusal_for_line
+
+    text = refusal_for_line(ctx.raw, ctx.key)
+    return None if text is None else _reply(ctx.msg, text)
+
+
 def register_builtin_commands(router: CommandRouter) -> None:
     """Register the default set of slash commands."""
+    # Il cancello prima delle voci: un router costruito e non registrato non ha
+    # comandi, quindi non c'e' finestra in cui accetti senza controllare.
+    router.availability = _scope_refusal
     router.priority("/stop", cmd_stop)
     router.priority("/status", cmd_status)
     router.exact("/new", cmd_new)

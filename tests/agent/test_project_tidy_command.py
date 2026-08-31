@@ -111,9 +111,17 @@ async def test_outside_a_project_it_says_where_to_go(tmp_path: Path) -> None:
     """Un rifiuto che dice **dove**, non solo che qui non si può.
 
     Stessa forma del rifiuto di ``/init`` e di ``journal_append``: il progetto si
-    scelve dal chip sopra il campo del messaggio, e chi non lo sa non lo indovina
+    sceglie dal chip sopra il campo del messaggio, e chi non lo sa non lo indovina
     da «non funziona qui».
+
+    Dal 31/08/2026 la frase **è** quella di :mod:`jenny.command.scope`, la stessa
+    che il router dà a un comando fuori dal suo scope: era scritta a mano qui, un
+    secondo rifiuto a mano in ``cmd_gardener``, e una terza copia della regola nel
+    client. Il test confronta con quella funzione invece di ricopiarne il testo —
+    così cambiarla non richiede di ricordarsi di questo file.
     """
+    from jenny.command.scope import refusal, spec_for_line
+
     loop = _loop(tmp_path)
     published: list = []
     loop.bus.publish_outbound = _capture(published)
@@ -122,8 +130,11 @@ async def test_outside_a_project_it_says_where_to_go(tmp_path: Path) -> None:
 
     assert expanded is None, "None = ha già risposto, il turno non parte"
     assert len(published) == 1
-    assert "only works inside a project" in published[0].content
-    assert "chip above the message box" in published[0].content
+    spec = spec_for_line("/tidy")
+    assert spec is not None
+    assert published[0].content == refusal(spec, "websocket:default")
+    assert "not a project" in published[0].content
+    assert "chip above the composer" in published[0].content
 
 
 def _capture(sink: list):

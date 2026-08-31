@@ -32,12 +32,22 @@ class CommandRouter:
          (e.g. /stop, /restart).
       2. *exact* — exact-match commands handled inside the dispatch lock.
       3. *prefix* — longest-prefix-first match (e.g. "/team ").
+
+    Piu' un cancello, iniettato: :attr:`availability`. Il router resta senza
+    vocabolario — non sa cosa sia un progetto — e chiede a chi lo sa se questa
+    riga, in questa sessione, ha un soggetto. Chi risponde e'
+    :mod:`jenny.command.scope`, montato da ``register_builtin_commands``.
     """
 
     def __init__(self) -> None:
         self._priority: dict[str, Handler] = {}
         self._exact: dict[str, Handler] = {}
         self._prefix: list[tuple[str, Handler]] = []
+        # ``(ctx) -> OutboundMessage | None``: la risposta di rifiuto, o ``None``
+        # se il comando puo' partire. Torna un messaggio gia' composto e non un
+        # testo perche' cosi' questo modulo non deve costruire ``OutboundMessage``
+        # ne' sapere quali metadati vuole un canale.
+        self.availability: Callable[["CommandContext"], Any] | None = None
 
     def priority(self, cmd: str, handler: Handler) -> None:
         self._priority[cmd] = handler
@@ -57,6 +67,11 @@ class CommandRouter:
 
         Does NOT check priority tier.
         If this returns True, ``dispatch()`` is guaranteed to match a handler.
+
+        **Non guarda lo scope, e non e' una dimenticanza.** Un comando che qui non
+        ha un soggetto deve comunque essere *intercettato*: la risposta e' il
+        rifiuto di :attr:`availability`, non il testo che passa al modello come
+        messaggio.
         """
         cmd = text.strip().lower()
         if cmd in self._exact:
@@ -66,11 +81,17 @@ class CommandRouter:
                 return True
         return False
 
+    def _refused(self, ctx: CommandContext) -> "OutboundMessage | None":
+        """Il rifiuto di scope, se questa riga non ha un soggetto in questa sessione."""
+        if self.availability is None:
+            return None
+        return self.availability(ctx)
+
     async def dispatch_priority(self, ctx: CommandContext) -> OutboundMessage | None:
         """Dispatch a priority command. Called from run() without the lock."""
         handler = self._priority.get(ctx.raw.lower())
         if handler:
-            return await handler(ctx)
+            return self._refused(ctx) or await handler(ctx)
         return None
 
     async def dispatch(self, ctx: CommandContext) -> OutboundMessage | None:
@@ -78,10 +99,15 @@ class CommandRouter:
         cmd = ctx.raw.lower()
 
         if handler := self._exact.get(cmd):
-            return await handler(ctx)
+            return self._refused(ctx) or await handler(ctx)
 
         for pfx, handler in self._prefix:
             if cmd.startswith(pfx):
+                # Il cancello **prima** di ``ctx.args``: un rifiuto non deve
+                # lasciare il contesto mezzo preparato per un handler che non
+                # verra' chiamato.
+                if refused := self._refused(ctx):
+                    return refused
                 ctx.args = ctx.raw[len(pfx):]
                 return await handler(ctx)
 
