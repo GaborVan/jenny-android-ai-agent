@@ -1,8 +1,16 @@
 # Le manopole in Impostazioni, i comandi ai verbi — piano
 
-Stato: **proposto**, nulla implementato.
+Stato: **stadi 1-6 fatti** il 31/08/2026 sul ramo `feat/settings-consolidation`
+(`5939859`, `986927b`, `cecaf2a`). Resta lo stadio 7, la verifica sul telefono.
 Scritto: 2026-08-31.
-Lista di esecuzione: [`command-surface-checklist.md`](./command-surface-checklist.md).
+Lista di esecuzione: [`command-surface-checklist.md`](./command-surface-checklist.md), che
+porta anche le tre differenze fra il piano e quel che è atterrato.
+
+> **Due correzioni al piano, dall'esecuzione.** La tabella dei comandi è uscita da
+> `builtin.py` in un modulo suo (`command/specs.py`) — non era previsto, ed è la
+> conseguenza di avere tre consumatori che non sono gli handler. E il `## Model` di
+> `slash-commands.md:88` non è un heading orfano: è dentro un blocco di codice, cioè
+> l'output del comando. Lì non c'era niente da sistemare.
 
 ## La regola, in una riga
 
