@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import ipaddress
-import re
 import socket
 from contextlib import suppress
 from urllib.parse import urlparse
@@ -55,7 +54,6 @@ _SSH_BLOCKED_NETWORKS = [
     ipaddress.ip_network("fe80::/10"),         # link-local v6
 ]
 
-_URL_RE = re.compile(r"https?://[^\s\"'`;|<>]+", re.IGNORECASE)
 
 _allowed_networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
 

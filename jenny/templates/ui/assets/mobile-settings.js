@@ -1,7 +1,7 @@
 /** Mobile Settings Controller — accordion-based settings panel. */
 
 import { api } from './shared/api-client.js';
-import { escapeHtml, showToast } from './shared/utils.js';
+import { copyToClipboard, escapeHtml, showToast } from './shared/utils.js';
 import { i18n } from './shared/i18n.js';
 import { AppState } from './shared/state.js';
 import { confirmDialog, detailDialog } from './shared/dialog.js';
@@ -1166,23 +1166,11 @@ export class SettingsController {
   async _sshCopyPublicKey(alias) {
     const host = (this._ssh?.hosts || []).find(h => h.alias === alias);
     if (!host?.public_key) return;
-    try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(host.public_key);
-      } else {
-        // WebView senza Clipboard API: il vecchio execCommand su una textarea
-        // fuori schermo funziona ancora, ed è l'unica via che resta.
-        const area = document.createElement('textarea');
-        area.value = host.public_key;
-        area.style.position = 'fixed';
-        area.style.left = '-9999px';
-        document.body.appendChild(area);
-        area.select();
-        document.execCommand('copy');
-        area.remove();
-      }
+    // Il fallback su `execCommand` viveva qui, ed è la ragione per cui esiste
+    // `copyToClipboard`: era l'unico punto della SPA che lo faceva bene.
+    if (await copyToClipboard(host.public_key)) {
       showToast(i18n.t('settings.ssh.copied'));
-    } catch {
+    } else {
       showToast(i18n.t('settings.ssh.copyFailed'), 'error');
     }
   }

@@ -717,8 +717,4 @@ export class WikiController {
     }
     return null;
   }
-
-  handleAction(action) {
-    if (action === 'save') console.log('Save wiki page:', this.currentPath);
-  }
 }

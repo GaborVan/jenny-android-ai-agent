@@ -46,7 +46,7 @@ schermata scriva lascia il device senza nessuna superficie.
 - [x] **2.3** Misure lette **prima** di entrare in `mutate` (il lock resta preso per tutta la callback)
 - [x] **2.4** Fuori range → rifiuto che **nomina il range**; le tre frasi `out_of_range` di `_GARDENER_NUMBERS` portate in i18n, non riscritte
 - [x] **2.5** Pavimento cadenza review: `review_every_runs < 12` senza `confirm_back_to_back=1` → rifiuto, col testo misurato di `_review_cadence_refusal` **spostato** parola per parola
-- [x] **2.6** `refresh_system_job(cron, worker)` in `cron_dispatch.py` — tabella di tre righe; `refresh_gardener_job` resta come alias finché i suoi test non sono portati
+- [x] **2.6** `refresh_system_job(cron, worker)` in `cron_dispatch.py` — tabella di tre righe; `refresh_gardener_job` è stato ritirato il 31/08/2026: i suoi test chiamano ora la funzione generica
 - [x] **2.7** Gancio `on_jobs_changed(worker)` cablato nei quattro punti: `settings_routes.py`, `gateway_services.py`, `ws_http.py`, `container.py`
 - [x] **2.8** Test: ri-armo chiamato per `enabled` e intervallo di tutti e tre; **non** chiamato per `idle_min`, `min_hours_between_passes`, i tetti, `review_every_runs`, `max_context_tokens`
 - [x] **2.9** Test: spegnere il giardiniere funziona da un `config.json` con un `intervalMin` **fuori range** scritto da una versione precedente *(la clemenza di `clamp_raw`; è la sola strada per cui spegnere non deve mai fallire)*

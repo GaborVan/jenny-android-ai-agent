@@ -12,17 +12,13 @@ from typing import Any, Callable, Literal
 from loguru import logger
 
 from jenny.agent.context_governor import (
-    ANTHROPIC_CONTEXT_LIMIT_PATTERN,
-    CONTEXT_LIMIT_PATTERN,
     extract_context_limit,
     is_context_length_error,
     snip_history,
 )
 from jenny.agent.history_repair import (
     BACKFILL_CONTENT,
-    COMPACTABLE_TOOLS,
     MICROCOMPACT_KEEP_RECENT,
-    MICROCOMPACT_MIN_CHARS,
     backfill_missing_tool_results,
     drop_orphan_tool_results,
     microcompact,
@@ -35,9 +31,6 @@ from jenny.agent.response_outcome import (
     reported_completion_tokens,
 )
 from jenny.agent.tool_error_policy import (
-    SSRF_BOUNDARY_NOTE,
-    SSRF_MARKERS,
-    WORKSPACE_VIOLATION_MARKERS,
     classify_violation,
 )
 from jenny.agent.tool_execution import ToolErrorBudget, ToolExecutionMixin
@@ -48,9 +41,6 @@ from jenny.agent.usage_accounting import (
     usage_or_estimate,
 )
 from jenny.providers.base import LLMProvider, LLMResponse, ToolCallRequest
-from jenny.utils.file_edit_events import (
-    prepare_file_edit_tracker as _prepare_file_edit_tracker,
-)
 from jenny.utils.helpers import (
     build_assistant_message,
     extract_reasoning,
@@ -108,13 +98,8 @@ _TOOL_RESULT_OFFLOAD_EXEMPT_TOOLS = frozenset({"read_file"})
 # Retro-compat: costanti spostate in agent.history_repair, ri-esportate qui coi
 # vecchi nomi underscore così i call-site/test esistenti restano invariati.
 _BACKFILL_CONTENT = BACKFILL_CONTENT
-_COMPACTABLE_TOOLS = COMPACTABLE_TOOLS
 _MICROCOMPACT_KEEP_RECENT = MICROCOMPACT_KEEP_RECENT
-_MICROCOMPACT_MIN_CHARS = MICROCOMPACT_MIN_CHARS
 
-# Backward-compatible module attribute for tests/extensions that monkeypatch
-# the former single-file tracker hook. Runtime uses prepare_file_edit_trackers.
-prepare_file_edit_tracker = _prepare_file_edit_tracker
 
 
 @dataclass(slots=True)
@@ -1221,10 +1206,6 @@ class AgentRunner(RequestExecutionMixin, ToolExecutionMixin):
 
 
     # Classificazione errori di boundary estratta in ``agent/tool_error_policy.py``.
-    # Re-export sottili delle costanti: preservano i call-site interni.
-    _SSRF_MARKERS = SSRF_MARKERS
-    _SSRF_BOUNDARY_NOTE = SSRF_BOUNDARY_NOTE
-    _WORKSPACE_VIOLATION_MARKERS = WORKSPACE_VIOLATION_MARKERS
 
     def _classify_violation(
         self,
@@ -1355,10 +1336,8 @@ class AgentRunner(RequestExecutionMixin, ToolExecutionMixin):
 
     # Pattern to extract the model's actual context limit from OpenAI-style error messages.
     # e.g. "This model's maximum context length is 8192 tokens."
-    # Rilevamento context-limit estratto in ``agent/context_governor.py``.
-    # Delegatori/re-export sottili (preservano i test AgentRunner._is_context_*).
-    _CONTEXT_LIMIT_PATTERN = CONTEXT_LIMIT_PATTERN
-    _ANTHROPIC_CONTEXT_LIMIT_PATTERN = ANTHROPIC_CONTEXT_LIMIT_PATTERN
+    # Rilevamento context-limit estratto in ``agent/context_governor.py``; qui
+    # restano i delegatori, che i test di ``AgentRunner._is_context_*`` usano.
 
     @staticmethod
     def _is_context_length_error(response: LLMResponse) -> bool:

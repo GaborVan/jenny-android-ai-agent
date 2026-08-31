@@ -243,7 +243,6 @@ _UI_MANIFEST = [
     "assets/jenny-walk1.webp",
     "assets/jenny-walk2-color.webp",
     "assets/jenny-walk2.webp",
-    "assets/jenny.png",
     "assets/mobile-app.js",
     "assets/mobile-apps.js",
     "assets/mobile-chat.js",

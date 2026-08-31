@@ -7,16 +7,6 @@ from typing import Any
 
 # Trigger riconosciuti per uno snapshot. La stringa finisce nel manifest e
 # nella UI (badge tradotto via i18n lato client).
-SNAPSHOT_TRIGGERS = (
-    "auto",
-    "daily",
-    "pre_dream",
-    "shutdown",
-    "pre_restore",
-    "pre_export",
-    "import",
-    "manual",
-)
 
 
 @dataclass

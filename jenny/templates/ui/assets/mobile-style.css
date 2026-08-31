@@ -32,7 +32,6 @@
   --bubble-user-text: #141414;
   --bubble-user-border: none;
   --bubble-user-shadow: none;
-  --glow:          none;
   /* ── Structural (theme-independent defaults) ── */
   --radius:        10px;
   --radius-sm:     6px;
@@ -90,7 +89,6 @@
   --bubble-user-text: #f2ecff;
   --bubble-user-border: none;
   --bubble-user-shadow: none;
-  --glow:          0 0 12px rgba(249, 42, 173, 0.55);
 }
 
 [data-theme="kyoto"] {
@@ -124,7 +122,6 @@
   --bubble-user-text: #e5ddd0;
   --bubble-user-border: 1px solid #4a443b;
   --bubble-user-shadow: none;
-  --glow:          none;
   --radius-bubble: 2px 14px 2px 14px;
   --radius-seg:    2px;
 }
@@ -160,7 +157,6 @@
   --bubble-user-text: #221833;
   --bubble-user-border: 2.5px solid #ffffff;
   --bubble-user-shadow: 4px 4px 0 rgba(0, 0, 0, 0.4);
-  --glow:          none;
   --radius-bubble: 14px;
 }
 
@@ -196,7 +192,6 @@
   --bubble-user-text: #faf6ef;
   --bubble-user-border: none;
   --bubble-user-shadow: 3px 3px 0 rgba(27, 24, 32, 0.85);
-  --glow:          none;
   --radius-bubble: 12px 12px 2px 12px;
 }
 
@@ -231,7 +226,6 @@
   --bubble-user-text: #ffffff;
   --bubble-user-border: 1px solid #ffffff;
   --bubble-user-shadow: inset 0 2px 3px rgba(255, 255, 255, 0.7), 0 4px 10px rgba(245, 106, 181, 0.35);
-  --glow:          inset 0 2px 3px rgba(255, 255, 255, 0.6), 0 3px 8px rgba(245, 106, 181, 0.5);
   --radius-bubble: 20px 20px 6px 20px;
 }
 
@@ -266,7 +260,6 @@
   --bubble-user-text: #f4f1ec;
   --bubble-user-border: none;
   --bubble-user-shadow: none;
-  --glow:          none;
   --radius-bubble: 12px 12px 3px 12px;
 }
 
@@ -1115,14 +1108,6 @@ body {
 @keyframes viewEntrance {
   from { opacity: 0; transform: translateY(10px); }
   to   { opacity: 1; transform: translateY(0); }
-}
-@keyframes glowPulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(var(--accent-rgb), 0); }
-  50%      { box-shadow: 0 0 12px 2px rgba(var(--accent-rgb), 0.15); }
-}
-@keyframes borderSweep {
-  0%   { background-position: -200% 0; }
-  100% { background-position: 200% 0; }
 }
 
 /* ── Dock (persistent, app shell level) ── */
@@ -2653,12 +2638,6 @@ body {
   font-size: 15px;
 }
 
-/* System/error messages */
-.chat-sys {
-  font-size: 12px;
-  color: var(--accent);
-  padding: 4px 0;
-}
 
 .chat-error {
   font-family: var(--font-mono);
@@ -3722,22 +3701,6 @@ body {
 .launcher-sheet.compact .launcher-manage,
 .launcher-sheet.compact .launcher-status { display: none; }
 
-/* Il pulsante che apre il cassetto, nella riga del composer. Stessa taglia di
-   `.compose-send` così i tre elementi della riga restano allineati. */
-.compose-launcher {
-  width: 50px; height: 50px;
-  border-radius: 50%;
-  background: var(--overlay-strong);
-  border: 0.5px solid var(--border);
-  cursor: pointer;
-  display: flex; align-items: center; justify-content: center;
-  color: var(--text-muted);
-  flex-shrink: 0;
-  transition: transform .25s cubic-bezier(.34,1.56,.64,1), color .3s ease;
-  -webkit-tap-highlight-color: transparent;
-}
-.compose-launcher:active { transform: scale(0.92); }
-.compose-launcher i { font-size: 20px; }
 
 /* ── Graph ── */
 /* Colonna, non blocco: breadcrumb e barra di ricerca sono righe ad altezza

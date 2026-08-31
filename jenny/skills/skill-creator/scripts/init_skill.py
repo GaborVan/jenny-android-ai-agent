@@ -1,22 +1,19 @@
+"""Skill Initializer — crea una skill nuova da template.
+
+Non è una CLI: non c'è un blocco ``__main__``, e le due funzioni che lo
+servivano (``normalize_skill_name``, ``parse_resources``) sono state rimosse
+insieme a quello. La docstring di prima documentava comunque un uso
+``python init_skill.py <nome> --path ...`` che non esisteva più.
+
+Si chiama come modulo, ed è così che ``SKILL.md`` lo invoca::
+
+    import init_skill
+    init_skill.init_skill("skill-name", "<workspace>/skills", [], False)
 """
-Skill Initializer - Creates a new skill from template
 
-Usage (local validation):
-    python jenny/skills/skill-creator/scripts/init_skill.py <skill-name> --path <path> [--resources scripts,references,assets] [--examples]
-
-Examples:
-    python jenny/skills/skill-creator/scripts/init_skill.py my-new-skill --path skills/public
-    python jenny/skills/skill-creator/scripts/init_skill.py my-new-skill --path skills/public --resources scripts,references
-    python jenny/skills/skill-creator/scripts/init_skill.py my-api-helper --path skills/private --resources scripts --examples
-    python jenny/skills/skill-creator/scripts/init_skill.py custom-skill --path /custom/location
-"""
-
-import re
-import sys
 from pathlib import Path
 
 MAX_SKILL_NAME_LENGTH = 64
-ALLOWED_RESOURCES = {"scripts", "references", "assets"}
 
 SKILL_TEMPLATE = """---
 name: {skill_name}
@@ -196,37 +193,11 @@ Note: This is a text placeholder. Actual assets can be any file type.
 """
 
 
-def normalize_skill_name(skill_name):
-    """Normalize a skill name to lowercase hyphen-case."""
-    normalized = skill_name.strip().lower()
-    normalized = re.sub(r"[^a-z0-9]+", "-", normalized)
-    normalized = normalized.strip("-")
-    normalized = re.sub(r"-{2,}", "-", normalized)
-    return normalized
-
 
 def title_case_skill_name(skill_name):
     """Convert hyphenated skill name to Title Case for display."""
     return " ".join(word.capitalize() for word in skill_name.split("-"))
 
-
-def parse_resources(raw_resources):
-    if not raw_resources:
-        return []
-    resources = [item.strip() for item in raw_resources.split(",") if item.strip()]
-    invalid = sorted({item for item in resources if item not in ALLOWED_RESOURCES})
-    if invalid:
-        allowed = ", ".join(sorted(ALLOWED_RESOURCES))
-        print(f"[ERROR] Unknown resource type(s): {', '.join(invalid)}")
-        print(f"   Allowed: {allowed}")
-        sys.exit(1)
-    deduped = []
-    seen = set()
-    for resource in resources:
-        if resource not in seen:
-            deduped.append(resource)
-            seen.add(resource)
-    return deduped
 
 
 def create_resource_dirs(skill_dir, skill_name, skill_title, resources, include_examples):

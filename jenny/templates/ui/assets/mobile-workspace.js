@@ -123,12 +123,22 @@ const FILE_GENERIC_ICON = `<svg class="file-icon-grid" viewBox="0 0 24 24" fill=
   </g>
 </svg>`;
 
+// I valori sono ciò che CodeMirror ha davvero registrato, non il nome del
+// linguaggio: un modo sconosciuto non solleva, ripiega in silenzio sul modo
+// nullo — ed è per questo che cinque di queste voci non evidenziavano niente
+// senza che nessuno se ne accorgesse. `json`, `typescript` e `html` non hanno
+// un nome nudo ma hanno un MIME, servito da un modo che è già caricato
+// (javascript per i primi due, xml per il terzo); `rust` idem. Chi aggiunge una
+// riga qui controlli in `index.html` che quel modo sia fra gli script caricati,
+// e nel file del modo che il nome esista: `test_workspace_editor_modes.py` fa
+// entrambe le cose.
 const EXT_LANG = {
-  js: 'javascript', ts: 'typescript', py: 'python', md: 'markdown',
-  json: 'json', jsonl: 'json', html: 'html', css: 'css', sh: 'text',
+  js: 'javascript', ts: 'text/typescript', py: 'python', md: 'markdown',
+  json: 'application/json', jsonl: 'application/json',
+  html: 'text/html', css: 'css', sh: 'shell',
   yaml: 'yaml', yml: 'yaml', log: 'text', txt: 'text',
-  go: 'go', rs: 'rust', c: 'clike', cpp: 'clike', java: 'clike',
-  xml: 'xml', sql: 'sql',
+  go: 'go', rs: 'text/x-rustsrc', c: 'clike', cpp: 'clike', java: 'clike',
+  xml: 'xml',
 };
 
 // Scorciatoia per i binari ovvi: si apre direttamente l'app di sistema
