@@ -135,7 +135,15 @@ class MobileApp {
 
     // Sidebar navigation
     document.querySelectorAll('.dock-item[data-mode]').forEach(item => {
-      item.addEventListener('click', () => this.switchMode(item.dataset.mode));
+      item.addEventListener('click', () => {
+        /* Lo slot Apps apre il cassetto invece di cambiare vista: è il gesto
+           più frequente, e cercare un lanciatore nel dock è la prima cosa che
+           si fa. `data-mode` gli resta comunque, così il carosello orizzontale
+           continua a raggiungere la scheda — che non diventa irraggiungibile,
+           solo meno immediata: dal foglio ci si arriva con «Gestisci». */
+        if (item.dataset.opens === 'launcher') this.openLauncher();
+        else this.switchMode(item.dataset.mode);
+      });
     });
 
     // Drawer open/close sync

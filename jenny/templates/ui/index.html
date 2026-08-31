@@ -255,9 +255,19 @@
 
   <!-- MICRO DOCK — always visible -->
   <nav class="dock" aria-label="Navigazione" data-i18n-aria="nav.ariaLabel">
+    <!-- Ordine voluto: Wiki a sinistra, Apps **al centro** — è lo slot più
+         raggiungibile dal pollice, e su uno schermo quadrato il centro del
+         dock è il punto più comodo che ci sia. L'ordine del DOM è anche
+         quello del carosello orizzontale, che `_visibleModes()` deriva da
+         qui: spostare una voce sposta anche lo swipe. -->
+    <div class="dock-item" data-mode="graph" title="Wiki" data-i18n-title="nav.wiki"><i class="ti ti-topology-star"></i></div>
     <div class="dock-item active" data-mode="chat" title="Chat" data-i18n-title="nav.chat"><span class="dock-flower">✿</span></div>
-    <div class="dock-item" data-mode="apps" title="Apps" data-i18n-title="nav.apps"><i class="ti ti-layout-grid"></i></div>
-    <div class="dock-item" data-mode="graph" title="Wiki" data-i18n-title="nav.wiki"><i class="ti ti-book"></i></div>
+    <!-- Lo slot Apps **apre il cassetto**, non cambia vista (v. `openLauncher`
+         in mobile-app.js). `data-mode` gli resta perché il carosello deve
+         continuare a raggiungere la scheda, che è dove si gestisce
+         (disinstalla, nascondi, ripara); dal foglio ci si arriva con
+         «Gestisci». -->
+    <div class="dock-item" data-mode="apps" data-opens="launcher" title="Apps" data-i18n-title="nav.apps"><i class="ti ti-layout-grid"></i></div>
     <div class="dock-item" data-mode="workspace" title="Workspace" data-i18n-title="nav.workspace"><i class="ti ti-folder"></i></div>
     <div class="dock-item" data-mode="settings" title="Settings" data-i18n-title="nav.settings"><i class="ti ti-settings"></i></div>
     <div class="dock-item" data-mode="onboarding" title="Setup" id="nav-onboarding" style="display:none" data-i18n-title="nav.onboarding"><i class="ti ti-rocket"></i></div>

@@ -586,3 +586,48 @@ def test_the_mascot_goes_under_the_scrim_with_the_sheet_open() -> None:
     # 98 deve stare *sotto* lo scrim, o la correzione non serve a niente.
     scrim = re.search(r"\.launcher-scrim\s*\{([^}]*)\}", css)
     assert scrim and "z-index: 99" in scrim.group(1)
+
+
+def test_the_dock_apps_slot_opens_the_sheet() -> None:
+    """Lo slot Apps apre il cassetto, ma **non** perde `data-mode`.
+
+    Toglierlo lo caverebbe da `_visibleModes()` — che deriva le schede
+    navigabili da `.dock-item[data-mode]` — e la scheda Apps resterebbe
+    raggiungibile solo dal foglio. `data-opens` è additivo apposta.
+    """
+    html = (ROOT / "jenny/templates/ui/index.html").read_text(encoding="utf-8")
+    slot = re.search(r'<div class="dock-item"[^>]*data-mode="apps"[^>]*>', html)
+    assert slot, "lo slot Apps deve esistere nel dock"
+    assert 'data-opens="launcher"' in slot.group(0)
+    assert 'data-mode="apps"' in slot.group(0), "il carosello deve ancora raggiungere la scheda"
+    src = _src("mobile-app.js")
+    # L'aggancio del dock non sta in un metodo proprio: è nel costruttore.
+    # E dev'essercene **uno solo** — un secondo `forEach` con un `click` che
+    # chiama `switchMode` rimetterebbe in piedi il vecchio comportamento
+    # accanto al nuovo, e il foglio si aprirebbe *e* la vista cambierebbe.
+    handlers = re.findall(
+        r"\.dock-item\[data-mode\]'\)\.forEach\(item => \{\s*item\.addEventListener\('click'", src)
+    assert len(handlers) == 1, f"un solo aggancio al click del dock, trovati {len(handlers)}"
+    assert "item.dataset.opens === 'launcher'" in src
+    assert "this.openLauncher()" in src
+
+
+def test_the_dock_order_is_wiki_chat_apps_workspace_settings() -> None:
+    """Apps al centro (il pollice), Wiki a sinistra. L'ordine del DOM è anche
+    quello del carosello orizzontale (`_visibleModes`), quindi è un contratto,
+    non una preferenza grafica."""
+    html = (ROOT / "jenny/templates/ui/index.html").read_text(encoding="utf-8")
+    nav = html[html.index('<nav class="dock"'):html.index("</nav>")]
+    modes = re.findall(r'data-mode="([a-z]+)"', nav)
+    modes = [m for m in modes if m != "onboarding"]  # nascosto fuori dal primo avvio
+    assert modes == ["graph", "chat", "apps", "workspace", "settings"], modes
+    assert modes[2] == "apps", "Apps deve stare al centro dei cinque"
+
+
+def test_the_wiki_slot_wears_the_graph_icon() -> None:
+    """L'icona è quella del grafo, la stessa che l'intestazione usa per la
+    stessa destinazione (`mobile-header.js`), non un libro."""
+    html = (ROOT / "jenny/templates/ui/index.html").read_text(encoding="utf-8")
+    slot = re.search(r'<div class="dock-item"[^>]*data-mode="graph"[^>]*>(.*?)</div>', html, re.S)
+    assert slot and "ti-topology-star" in slot.group(1)
+    assert "ti-book" not in slot.group(1)
