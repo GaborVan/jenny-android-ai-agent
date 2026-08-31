@@ -158,7 +158,12 @@ def test_the_launch_policy_lives_with_the_data_owner() -> None:
     body = _method(apps, "activateEntry")
     assert "this.launchAndroidApp(entry.id)" in body
     assert "this.openApp(entry.id)" in body
-    assert "showSkillSheet" in body and "_openSkillFile" in body
+    # La politica delle skill è una sola e vive in `_openSkill`, che è anche ciò
+    # che tocca la riga della stanza Skill: la scelta fra la scheda in sola
+    # lettura e l'editor del file non ha due copie da tenere allineate.
+    assert "this._openSkill(entry.id)" in body
+    policy = _method(apps, "_openSkill")
+    assert "showSkillSheet" in policy and "_openSkillFile" in policy
     launcher = _method(_src("mobile-launcher.js"), "_activate")
     assert "activateEntry(entry)" in launcher
     assert "api." not in launcher, "il foglio non parla con la rete (D5)"
@@ -197,9 +202,7 @@ def test_usage_is_recorded_before_the_launch() -> None:
 # ── 4.5 — la semantica, dalla nascita ───────────────────────────────────────
 
 def test_rows_are_options_of_a_listbox_not_buttons() -> None:
-    """Le celle della scheda sono `<div>` a cui `wireEvents` appiccica
-    `tabindex`/`role` a ogni ridisegno, ed è un rattoppo. Qui la riga nasce
-    `option` di un `listbox`: `role="button"` su ogni riga non avrebbe modo di
+    """Qui la riga nasce `option` di un `listbox`, non `button`: `role="button"` su ogni riga non avrebbe modo di
     esprimere *quale* è selezionata, e chi legge lo schermo sentirebbe settanta
     pulsanti uguali con l'evidenziazione ridotta a un colore."""
     body = _method(_src("mobile-launcher.js"), "_buildRow")

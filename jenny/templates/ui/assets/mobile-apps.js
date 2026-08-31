@@ -1,4 +1,14 @@
-/** Mobile Apps Controller — Jenny Apps / Skill / App Android accordion sections. */
+/** Mobile Apps Controller — le tre stanze della scheda Apps.
+ *
+ *  La fisarmonica di prima (tre sezioni in un unico scorrimento) è stata
+ *  sostituita da un segmento in cima e **una stanza per volta**, ognuna col
+ *  layout che le serve: lista per le Jenny App, lista con interruttori per le
+ *  skill, griglia densa con guida A–Z per le app Android. È la direzione *Tre
+ *  stanze* del rilievo, e chiude quattro dei difetti che quel rilievo aveva
+ *  misurato — 5,9 schermate di scorrimento (01), tre passi di riga diversi,
+ *  l'errore di una app rotta che alza tutta la sua riga (05), le dodici icone
+ *  puzzle identiche (03).
+ */
 
 import { api } from './shared/api-client.js';
 import { escapeHtml, showToast } from './shared/utils.js';
@@ -9,23 +19,46 @@ import { currentTheme, themeTokens } from './shared/theme.js';
 import { setupLongPress } from './shared/longpress.js';
 import { advancedMode } from './shared/advanced-mode.js';
 
-const SECTIONS = [
-  { key: 'jenny', titleKey: 'apps.jennyApps', icon: 'ti-apps' },
-  { key: 'skills', titleKey: 'apps.skill', icon: 'ti-puzzle' },
-  { key: 'android', titleKey: 'apps.androidApp', icon: 'ti-apps' },
-];
+/** Le tre stanze, nell'ordine in cui stanno nel segmento. La chiave è anche
+ *  quella salvata in `localStorage`: cambiarla dimentica la stanza attiva di
+ *  chi aggiorna, non di più. */
+const ROOMS = ['jenny', 'skills', 'android'];
+
+const ROOM_LABELS = {
+  jenny: 'apps.roomJenny',
+  skills: 'apps.roomSkills',
+  android: 'apps.roomAndroid',
+};
+
+const ROOM_SEARCH_PLACEHOLDERS = {
+  jenny: 'apps.searchJenny',
+  skills: 'apps.searchSkills',
+  android: 'apps.searchAndroid',
+};
+
+const ROOM_STORAGE_KEY = 'apps-active-room';
 
 export class AppsController {
   constructor() {
     this.contentEl = document.getElementById('apps-content');
+    this.roomsEl = document.getElementById('apps-rooms');
     this.searchInput = document.getElementById('apps-search-input');
+    /* La stanza attiva si ricorda fra una visita e l'altra (difetto 07: le
+       sezioni chiuse della fisarmonica non lo erano, e ogni rientro le
+       riapriva tutte). `localStorage` può alzare eccezioni — finestra privata,
+       dati del sito bloccati — e una scheda che non si apre perché non si è
+       potuto leggere quale stanza mostrare sarebbe un guasto sproporzionato. */
+    this.activeRoom = this._loadActiveRoom();
+    this._roomTabs = null;
+    // La guida A–Z e il suo scorrevole, per la misura post-inserimento.
+    this._azRail = null;
+    this._azScroll = null;
     this.skills = [];
     this.androidApps = [];
     this.jennyApps = [];
     this._skillsLoaded = false;
     this._androidAppsLoaded = false;
     this._jennyAppsLoaded = false;
-    this.collapsedSections = new Set();
     this._openApp = null;
     // Skill in apertura nell'editor del Workspace (v. _openSkillFile): il
     // percorso ha due await, e una seconda apertura concorrente scriverebbe
@@ -85,12 +118,57 @@ export class AppsController {
           tokens: themeTokens() }, '*');
     }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
     window.addEventListener('advancedmodechange', () => this.render());
+    // Le etichette del segmento e i titoli dei gruppi si costruiscono qui, non
+    // in `index.html`: senza questo, cambiare lingua li lascerebbe indietro.
+    i18n.onLocaleChange(() => this.render());
+  }
+
+  /* ── Le stanze ─────────────────────────────────────────────────────────── */
+
+  _loadActiveRoom() {
+    try {
+      const saved = localStorage.getItem(ROOM_STORAGE_KEY);
+      if (ROOMS.includes(saved)) return saved;
+    } catch {
+      // storage non leggibile: si riparte dalla prima stanza
+    }
+    return ROOMS[0];
+  }
+
+  /** Cambia stanza. Pubblica perché è anche l'unica via da fuori (test, e un
+   *  domani un link diretto), non solo il tocco sul segmento. */
+  setRoom(room) {
+    if (!ROOMS.includes(room) || room === this.activeRoom) return;
+    this.activeRoom = room;
+    try {
+      localStorage.setItem(ROOM_STORAGE_KEY, room);
+    } catch {
+      // la stanza resta valida per questa visita, non per la prossima
+    }
+    /* Una query scritta per una stanza non vuol dire niente nell'altra: la
+       ricerca ora filtra **la stanza attiva** (prima filtrava tutte e tre
+       insieme), quindi portarsela dietro mostrerebbe una stanza vuota senza
+       una ragione visibile. */
+    if (this.searchInput) this.searchInput.value = '';
+    /* L'occhio vive solo nella stanza Android: uscendo, lo stato "mostra
+       nascoste" va spento insieme al pulsante, o al rientro l'icona direbbe
+       una cosa e la griglia un'altra. */
+    if (room !== 'android') this._showHidden = false;
+    this.render();
   }
 
   async loadSkills() {
     try {
       const data = await api.getSkills();
-      this.skills = (data.skills || []).filter(s => s.source === 'workspace');
+      /* **Tutte** le skill, non solo quelle del workspace. Il filtro che c'era
+         qui nascondeva del tutto le skill di serie: l'agente le usava, la
+         scheda non le nominava, e la sola traccia della loro esistenza era una
+         risposta che arrivava da un pezzo di macchina invisibile. La stanza
+         Skill le mostra in un gruppo a parte, col lucchetto invece
+         dell'interruttore. Restano fuori solo le `internal` — puro plumbing —
+         e solo fuori dalla Modalità avanzata: quel filtro è in
+         `_renderSkillsRoom`, dove sta anche il resto della visibilità. */
+      this.skills = data.skills || [];
       this._loadFailed.skills = false;
     } catch {
       this.skills = [];
@@ -277,7 +355,7 @@ export class AppsController {
    *  `_showHidden` della scheda è l'occhio della *gestione*, e nel foglio non
    *  c'è. Le app Android non escono finché non sono arrivate **entrambe** le
    *  liste — altrimenti sulla corsa del primo caricamento una nascosta
-   *  comparirebbe per un istante, che è la stessa guardia di `_renderAndroidGrid`.
+   *  comparirebbe per un istante, che è la stessa guardia di `_renderAndroidRoom`.
    *
    *  L'ordine è alfabetico e stabile: il cassetto lo riordina per pertinenza,
    *  frequenza e recenza (`shared/launcher-rank.js`), ma questa è la lista, non
@@ -339,7 +417,8 @@ export class AppsController {
    *
    *  Sta qui e non nel foglio perché "aprire" significa tre cose diverse nei tre
    *  spazi di nomi, e sono già decise: sono le stesse azioni del tap sulla cella
-   *  della scheda (v. `wireEvents`). Due copie di questa scelta divergerebbero
+   *  della scheda (v. `_buildJennyRow`, `_openSkill`, `_buildAndroidCell`).
+   *  Due copie di questa scelta divergerebbero
    *  al primo caso particolare — una skill locked, una Jenny App rotta — ed è
    *  esattamente dove la divergenza si nota di meno e costa di più. */
   activateEntry(entry) {
@@ -357,9 +436,46 @@ export class AppsController {
       this.openApp(entry.id);
       return;
     }
-    const skill = this.skills.find(s => s.name === entry.id);
-    if (skill?.locked && !advancedMode()) this.showSkillSheet(entry.id);
-    else this._openSkillFile(entry.id);
+    this._openSkill(entry.id);
+  }
+
+  /** Una skill è **di serie**?
+   *
+   *  Non si legge da `source`, ed è un fatto misurato che il piano non aveva:
+   *  le skill impacchettate vengono **copiate** in `workspace/skills/` al boot,
+   *  e `SkillsLoader.list_skills` guarda solo lì — quindi `source` vale
+   *  `"workspace"` per tutte, sempre, e un gruppo costruito su quel campo
+   *  resterebbe vuoto per sempre. Quel che distingue davvero una skill di serie
+   *  è la sua frontmatter: `locked` (visibile ma da non toccare) o `internal`
+   *  (puro plumbing, e fuori dalla Modalità avanzata nemmeno in lista). */
+  _skillIsBuiltIn(skill) {
+    return !!skill && (!!skill.locked || !!skill.internal);
+  }
+
+  /** Una skill si gestisce (interruttore/modifica/elimina) solo se non è
+   *  bloccata — o se si è in Modalità avanzata, che è la stessa regola che
+   *  `showSkillSheet` applicava già alle proprie azioni.
+   *
+   *  **`locked` non è un dettaglio estetico**: fuori dalla Modalità avanzata la
+   *  scheda di `cron` o di `ssh` non ha mai offerto "Disabilita", e dare a
+   *  quelle righe un interruttore vorrebbe dire poter spegnere il cron con un
+   *  tocco — una protezione che c'era, tolta per distrazione.
+   *
+   *  `source` resta nella condizione perché è la regola delle rotte del gateway
+   *  (`update_workspace_skill` e `delete_workspace_skill` guardano solo dentro
+   *  `workspace/skills/`): oggi è sempre vera, e il giorno in cui non lo fosse
+   *  più questa UI non offrirebbe un'azione che il gateway rifiuta. */
+  _skillIsManageable(skill) {
+    return !!skill && skill.source === 'workspace' && (!skill.locked || advancedMode());
+  }
+
+  /** Il tocco su una skill: il file per quelle che si possono modificare, la
+   *  scheda in sola lettura (con `user_summary`) per le altre. */
+  _openSkill(name) {
+    const skill = this.skills.find(s => s.name === name);
+    if (!skill) return;
+    if (this._skillIsManageable(skill)) this._openSkillFile(name);
+    else this.showSkillSheet(name);
   }
 
   /** Apre la *scheda* di una voce del cassetto: il foglio informativo, non la
@@ -386,175 +502,549 @@ export class AppsController {
        stata a schermo, e ogni strada che le cambia passa di qui. */
     this._emitChange();
     if (!this.contentEl) return;
+    this._renderRoomTabs();
+    this._syncSearchPlaceholder();
+    this._syncHeaderActions();
     const q = (this.searchInput?.value || '').toLowerCase().trim();
-    this.contentEl.innerHTML = SECTIONS.map(section => this._renderSection(section, q)).join('');
-    this.wireEvents();
+    /* Azzerato **prima** di costruire la stanza, non dopo: è
+       `_renderAndroidRoom` a riempire questi due, e ripulirli dopo cancellava
+       proprio ciò che aveva appena scritto — la guida restava a schermo sempre,
+       perché `_syncAzRail` trovava null e usciva. Visto sul telefono. */
+    this._azRail = null;
+    this._azScroll = null;
+    let room;
+    if (this.activeRoom === 'skills') room = this._renderSkillsRoom(q);
+    else if (this.activeRoom === 'android') room = this._renderAndroidRoom(q);
+    else room = this._renderJennyRoom(q);
+    this.contentEl.replaceChildren(room);
+    // Dopo l'inserimento: la guida A–Z si misura, e prima di stare in pagina
+    // non c'è niente da misurare (v. `_syncAzRail`).
+    this._syncAzRail();
   }
 
-  _renderSection(section, q) {
-    let bodyHtml;
-    if (section.key === 'skills') {
-      bodyHtml = this._renderSkillsGrid(this.skills.filter(s =>
-        (!q || s.name.toLowerCase().includes(q)) && (advancedMode() || !s.internal)));
-    } else if (section.key === 'android') {
-      bodyHtml = this._renderAndroidGrid(this.androidApps.filter(a => !q || a.label.toLowerCase().includes(q)));
-    } else {
-      bodyHtml = this._renderJennyGrid(this.jennyApps.filter(a => !q || (a.name || a.slug).toLowerCase().includes(q)));
+  /** Il segmento in cima. Costruito una volta sola e poi solo risincronizzato:
+   *  `render()` gira a ogni tasto digitato nel campo di ricerca, e rifare tre
+   *  pulsanti a ogni carattere è lavoro sul thread principale in cambio di
+   *  niente.
+   *
+   *  Nessun `roving tabindex`: è il pattern ARIA canonico per un `tablist`, ma
+   *  vive di frecce ←→ che qui non ci sono, e su un telefono dove Tab è
+   *  navigazione primaria lascerebbe due stanze su tre irraggiungibili. Tutte e
+   *  tre restano fermate di Tab. */
+  _renderRoomTabs() {
+    if (!this.roomsEl) return;
+    if (!this._roomTabs) {
+      this._roomTabs = new Map();
+      this.roomsEl.setAttribute('role', 'tablist');
+      this.roomsEl.dataset.i18nAria = 'apps.roomsLabel';
+      this.roomsEl.setAttribute('aria-label', i18n.t('apps.roomsLabel'));
+      const tabs = ROOMS.map(room => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'apps-room-tab';
+        btn.dataset.room = room;
+        btn.dataset.i18n = ROOM_LABELS[room];
+        btn.setAttribute('role', 'tab');
+        btn.setAttribute('aria-controls', 'apps-content');
+        btn.textContent = i18n.t(ROOM_LABELS[room]);
+        btn.addEventListener('click', () => this.setRoom(room));
+        this._roomTabs.set(room, btn);
+        return btn;
+      });
+      this.roomsEl.replaceChildren(...tabs);
+    }
+    for (const [room, btn] of this._roomTabs) {
+      const active = room === this.activeRoom;
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-selected', String(active));
+      // La lingua può essere cambiata da quando i pulsanti sono nati.
+      btn.textContent = i18n.t(ROOM_LABELS[room]);
+    }
+  }
+
+  /** Il campo di ricerca resta uno, ma dice quale stanza sta filtrando: con 47
+   *  app Android e tre elenchi diversi sotto lo stesso segnaposto, "Cerca…" non
+   *  dice dove si sta cercando. */
+  _syncSearchPlaceholder() {
+    const key = ROOM_SEARCH_PLACEHOLDERS[this.activeRoom];
+    if (!this.searchInput || !key) return;
+    this.searchInput.dataset.i18nPlaceholder = key;
+    this.searchInput.placeholder = i18n.t(key);
+  }
+
+  /** L'occhio «mostra nascoste» riguarda solo le app Android: nelle altre due
+   *  stanze non c'è niente di nascosto da mostrare, e un pulsante che non fa
+   *  niente è peggio di un pulsante che non c'è. */
+  _syncHeaderActions() {
+    const header = window.mobileApp?.header;
+    if (!header) return;
+    if (this.activeRoom === 'android') header.showAction('toggle-hidden');
+    else header.hideAction('toggle-hidden');
+  }
+
+  /* ── Mattoni comuni alle tre stanze ────────────────────────────────────── */
+
+  /** Lo scorrevole di una stanza. Lo scorrimento sta **qui dentro** e non in
+   *  `.apps-content`: la guida A–Z della stanza Android deve poter stare ferma
+   *  sul bordo mentre la griglia scorre. */
+  _roomScroll() {
+    const el = document.createElement('div');
+    el.className = 'apps-room-scroll';
+    return el;
+  }
+
+  /** Il corpo toccabile di una riga: nome, righe secondarie, azione a destra.
+   *
+   *  È un `<button>` vero e non un `<div role="button">`: Invio e Spazio
+   *  funzionano da soli, il fuoco pure, e non c'è un `tabindex` da
+   *  riappiccicare a ogni ridisegno, come faceva la fisarmonica di prima.
+   *
+   *  Tutti i testi si scrivono con `textContent`. Arrivano da manifest scritti
+   *  da un LLM e dal PackageManager: non sono roba nostra e non passano mai da
+   *  `innerHTML`. */
+  _rowMain(name, lines = [], action = null) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'apps-row-main';
+
+    const text = document.createElement('span');
+    text.className = 'apps-row-text';
+    const nameEl = document.createElement('span');
+    nameEl.className = 'apps-row-name';
+    nameEl.textContent = name;
+    text.appendChild(nameEl);
+    for (const line of lines) {
+      if (!line || !line.text) continue;
+      const lineEl = document.createElement('span');
+      lineEl.className = line.className || 'apps-row-desc';
+      lineEl.textContent = line.text;
+      text.appendChild(lineEl);
+    }
+    btn.appendChild(text);
+
+    if (action) {
+      const actionEl = document.createElement('span');
+      actionEl.className = 'apps-row-action' + (action.danger ? ' apps-row-action--repair' : '');
+      actionEl.textContent = action.label;
+      btn.appendChild(actionEl);
+    }
+    return btn;
+  }
+
+  /** La riga tratteggiata in fondo a una stanza: "Nuova app", "Nuova skill". */
+  _buildAddRow(label, onClick, id) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'apps-add-row';
+    if (id) btn.id = id;
+    const plus = document.createElement('i');
+    plus.className = 'ti ti-plus';
+    plus.setAttribute('aria-hidden', 'true');
+    const text = document.createElement('span');
+    text.textContent = label;
+    btn.append(plus, text);
+    btn.addEventListener('click', onClick);
+    return btn;
+  }
+
+  /** Il titolo di un gruppo dentro una stanza ("Tue skill", "Di serie"). */
+  _groupTitle(label) {
+    const el = document.createElement('h2');
+    el.className = 'apps-group-title';
+    el.textContent = label;
+    return el;
+  }
+
+  _note(key, params) {
+    const note = document.createElement('p');
+    note.className = 'apps-note';
+    note.textContent = i18n.t(key, params);
+    return note;
+  }
+
+  /** Una riga della stanza è pertinente alla query? Si cerca su tutti i campi
+   *  che la riga mostra, più quelli che la identificano (slug, pacchetto). */
+  _matches(q, ...fields) {
+    if (!q) return true;
+    return fields.some(field => (field || '').toLowerCase().includes(q));
+  }
+
+  /** Il caricamento non è ancora finito, o è finito male? Le due risposte non
+   *  sono la stessa cosa e non sono "non c'è niente": la prima chiede di
+   *  aspettare, la seconda di riprovare. */
+  _roomStatusNote(loadedFlag, failedFlag) {
+    if (!loadedFlag) return this._note('apps.loading');
+    if (failedFlag) return this._note('apps.loadFailed');
+    return null;
+  }
+
+  /* ── Stanza «Jenny App» ────────────────────────────────────────────────── */
+
+  /** Lista, non griglia: nome più descrizione, azione a destra.
+   *
+   *  **L'errore di una app rotta è una banda in cima alla stanza** (difetto 05).
+   *  Nella griglia stava dentro la tessera, e due righe di messaggio alzavano
+   *  quella cella da 100 a 147 px portandosi dietro tutta la fila. Qui la riga
+   *  della app rotta dice solo «ripara»; il perché sta in cima, dove si legge
+   *  senza deformare niente. */
+  _renderJennyRoom(q) {
+    const scroll = this._roomScroll();
+    const status = this._roomStatusNote(this._jennyAppsLoaded, this._loadFailed.jenny);
+    if (status) {
+      scroll.appendChild(status);
+      return scroll;
     }
 
-    const forceExpanded = q.length > 0;
-    const collapsed = !forceExpanded && this.collapsedSections.has(section.key);
+    const broken = this.jennyApps.filter(app => app.broken);
+    if (broken.length) scroll.appendChild(this._buildBrokenBand(broken));
 
-    return `<div class="apps-section${collapsed ? ' collapsed' : ''}" data-section="${section.key}">
-      <div class="apps-section-header">
-        <i class="ti ${section.icon}"></i>
-        <span>${escapeHtml(i18n.t(section.titleKey))}</span>
-        <i class="ti ti-chevron-down apps-chevron"></i>
-      </div>
-      <div class="apps-section-body">${bodyHtml}</div>
-    </div>`;
+    const filtered = this.jennyApps.filter(app =>
+      this._matches(q, app.name, app.slug, app.description, app.error));
+    if (filtered.length) {
+      const list = document.createElement('div');
+      list.className = 'apps-list';
+      for (const app of filtered) list.appendChild(this._buildJennyRow(app));
+      scroll.appendChild(list);
+    } else if (q) {
+      scroll.appendChild(this._note('apps.noResults'));
+    }
+
+    // La riga «Nuova app» non compare in coda a una ricerca senza risultati:
+    // lì la risposta è "non c'è", non "creane un'altra".
+    if (!q) {
+      scroll.appendChild(
+        this._buildAddRow(i18n.t('apps.newApp'), () => this._startAppCreation(), 'jenny-app-add'));
+    }
+    return scroll;
   }
 
-  _renderSkillsGrid(filtered) {
-    let html = '<div class="apps-grid">';
-    filtered.forEach(skill => {
-      const isActive = skill.available && !skill.disabled;
-      const badge = isActive ? 'ab-active' : 'ab-idle';
-      const badgeText = skill.disabled ? i18n.t('apps.disabled') : (skill.available ? i18n.t('apps.active') : i18n.t('apps.idle'));
-      html += `<div class="app-cell" data-skill="${escapeHtml(skill.name)}">
-        <div class="app-icon"><i class="ti ti-puzzle"></i></div>
-        <div class="app-label">${escapeHtml(skill.name)}</div>
-        <div class="app-badge ${badge}">${badgeText}</div>
-      </div>`;
+  _buildBrokenBand(broken) {
+    const band = document.createElement('div');
+    band.className = 'apps-band apps-band--error';
+    band.setAttribute('role', 'status');
+    const icon = document.createElement('i');
+    icon.className = 'ti ti-alert-triangle';
+    icon.setAttribute('aria-hidden', 'true');
+    const text = document.createElement('span');
+    text.textContent = broken.length === 1
+      ? i18n.t('apps.brokenBand', {
+        name: broken[0].name || broken[0].slug,
+        error: broken[0].error || i18n.t('apps.invalidManifest'),
+      })
+      : i18n.t('apps.brokenBandMany', { count: broken.length });
+    band.append(icon, text);
+    return band;
+  }
+
+  _buildJennyRow(app) {
+    const row = document.createElement('div');
+    row.className = 'apps-row';
+    if (app.broken) row.classList.add('apps-row--broken');
+    const main = this._rowMain(
+      app.name || app.slug,
+      [{ text: app.description || '' }],
+      app.broken
+        ? { label: i18n.t('apps.repair'), danger: true }
+        : { label: i18n.t('apps.open') },
+    );
+    main.dataset.jennySlug = app.slug;
+    main.addEventListener('click', () => {
+      if (main.dataset.longpress) { delete main.dataset.longpress; return; }
+      this.openApp(app.slug);
     });
-    html += `<div class="app-cell" id="app-add">
-      <div class="app-icon" style="border: 1.5px dashed var(--border-strong); background: transparent;">
-        <i class="ti ti-plus" style="color: var(--text-faint)"></i>
-      </div>
-      <div class="app-label" style="color: var(--text-faint)">${i18n.t('apps.newSkill')}</div>
-    </div>`;
-    html += '</div>';
-
-    if (!filtered.length && this._skillsLoaded) {
-      html += this._emptyMessage(i18n.t('apps.noResults'));
-    }
-    return html;
+    setupLongPress(main, () => this.showJennyAppSheet(app.slug));
+    row.appendChild(main);
+    return row;
   }
 
-  _renderJennyGrid(filtered) {
-    let html = '<div class="apps-grid">';
-    filtered.forEach(app => {
-      const icon = app.broken ? 'ti-alert-triangle' : (app.icon || 'ti-apps');
-      const badge = app.broken ? `<div class="app-badge ab-idle">${i18n.t('apps.broken')}</div>` : '';
-      const error = app.broken
-        ? `<div class="app-error">${escapeHtml(app.error || i18n.t('apps.invalidManifest'))}</div>` : '';
-      html += `<div class="app-cell" data-jenny-slug="${escapeHtml(app.slug)}">
-        <div class="app-icon"><i class="ti ${escapeHtml(icon)}"></i></div>
-        <div class="app-label">${escapeHtml(app.name || app.slug)}</div>
-        ${badge}${error}
-      </div>`;
+  /* ── Stanza «Skill» ────────────────────────────────────────────────────── */
+
+  /** Lista con interruttori, in due gruppi. Nessuna icona per riga: dodici
+   *  glifi puzzle identici erano il difetto 03 — non distinguevano niente e
+   *  costavano 22% della cella.
+   *
+   *  Le skill di serie ci sono, col **lucchetto** invece dell'interruttore: non
+   *  si spengono, e il gateway le rifiuterebbe comunque. Le `internal` restano
+   *  fuori dalla Modalità avanzata, come prima. */
+  _renderSkillsRoom(q) {
+    const scroll = this._roomScroll();
+    const status = this._roomStatusNote(this._skillsLoaded, this._loadFailed.skills);
+    if (status) {
+      scroll.appendChild(status);
+      return scroll;
+    }
+
+    const visible = this.skills.filter(skill =>
+      (advancedMode() || !skill.internal)
+      && this._matches(q, skill.name, skill.description, skill.unavailable_reason));
+    /* Il gruppo dice **da dove viene** la skill, non se in questo momento la si
+       può toccare: così una riga non salta da un gruppo all'altro accendendo la
+       Modalità avanzata — cambia solo il suo comando, dal lucchetto
+       all'interruttore. */
+    const mine = visible.filter(skill => !this._skillIsBuiltIn(skill));
+    const builtIn = visible.filter(skill => this._skillIsBuiltIn(skill));
+
+    if (mine.length) {
+      scroll.appendChild(this._groupTitle(i18n.t('apps.yourSkills')));
+      scroll.appendChild(this._buildSkillList(mine));
+    }
+    if (builtIn.length) {
+      scroll.appendChild(this._groupTitle(i18n.t('apps.builtInSkills')));
+      scroll.appendChild(this._buildSkillList(builtIn));
+    }
+    if (!visible.length && q) scroll.appendChild(this._note('apps.noResults'));
+
+    if (!q) {
+      scroll.appendChild(
+        this._buildAddRow(i18n.t('apps.newSkill'), () => this._startSkillCreation(), 'app-add'));
+    }
+    return scroll;
+  }
+
+  _buildSkillList(skills) {
+    const list = document.createElement('div');
+    list.className = 'apps-list';
+    for (const skill of skills) list.appendChild(this._buildSkillRow(skill));
+    return list;
+  }
+
+  /** Una riga di skill.
+   *
+   *  **Lo stato non è binario, e prima lo era.** Il badge di ieri diceva
+   *  "attiva/inattiva/disabilitata" da un solo dato mescolato, e le due cose
+   *  che possono andare storte si somigliavano solo a guardarle:
+   *
+   *  - `disabled` è una **decisione**, dell'utente, reversibile lì per lì: lo
+   *    dice l'interruttore, e toccarlo la cambia;
+   *  - `available === false` è un **impedimento**: la skill non *può* girare
+   *    (le manca un tool, una chiave, un file), e l'interruttore non c'entra —
+   *    accenderlo non la farebbe partire. Lo dice una riga in `var(--warning)`
+   *    con dentro `unavailable_reason`, che è l'unica informazione da cui si
+   *    capisce cosa fare.
+   *
+   *  Le due possono coesistere: una skill spenta *e* non disponibile mostra
+   *  l'interruttore giù e l'avviso sotto, che è la verità. */
+  _buildSkillRow(skill) {
+    const row = document.createElement('div');
+    row.className = 'apps-row';
+    const lines = [];
+    if (skill.description) lines.push({ text: skill.description });
+    if (skill.available === false) {
+      lines.push({
+        text: skill.unavailable_reason
+          ? i18n.t('apps.unavailableWhy', { reason: skill.unavailable_reason })
+          : i18n.t('apps.unavailable'),
+        className: 'apps-row-warn',
+      });
+    }
+    const main = this._rowMain(skill.name, lines);
+    main.dataset.skill = skill.name;
+    main.addEventListener('click', () => {
+      if (main.dataset.longpress) { delete main.dataset.longpress; return; }
+      this._openSkill(skill.name);
     });
-    html += `<div class="app-cell" id="jenny-app-add">
-      <div class="app-icon" style="border: 1.5px dashed var(--border-strong); background: transparent;">
-        <i class="ti ti-plus" style="color: var(--text-faint)"></i>
-      </div>
-      <div class="app-label" style="color: var(--text-faint)">${i18n.t('apps.newApp')}</div>
-    </div>`;
-    html += '</div>';
-
-    if (!filtered.length && this._jennyAppsLoaded) {
-      html += this._emptyMessage(i18n.t('apps.noResults'));
-    }
-    return html;
+    setupLongPress(main, () => this.showSkillSheet(skill.name));
+    row.append(main, this._skillIsManageable(skill)
+      ? this._buildSkillToggle(skill)
+      : this._buildSkillLock());
+    return row;
   }
 
-  _renderAndroidGrid(filtered) {
-    // Wait for the hidden-apps list before rendering any cell, so hidden apps
-    // are never shown (not even briefly) on the initial load race.
+  /** L'interruttore. Riusa `toggle-switch`/`toggle-slider` delle Impostazioni:
+   *  un secondo interruttore con un aspetto suo sarebbe una seconda cosa da
+   *  imparare per la stessa azione. */
+  _buildSkillToggle(skill) {
+    const label = document.createElement('label');
+    label.className = 'toggle-switch apps-row-toggle';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = !skill.disabled;
+    input.dataset.skillToggle = skill.name;
+    input.setAttribute('aria-label', i18n.t('apps.toggleSkill', { name: skill.name }));
+    input.addEventListener('change', () => this._onSkillToggled(skill.name, input));
+    const slider = document.createElement('span');
+    slider.className = 'toggle-slider';
+    label.append(input, slider);
+    return label;
+  }
+
+  _buildSkillLock() {
+    const lock = document.createElement('i');
+    lock.className = 'ti ti-lock apps-row-lock';
+    lock.setAttribute('role', 'img');
+    lock.setAttribute('aria-label', i18n.t('apps.builtInLocked'));
+    lock.title = i18n.t('apps.builtInLocked');
+    return lock;
+  }
+
+  /** L'interruttore è stato mosso: si scrive e si rilegge.
+   *
+   *  `loadSkills()` ridisegna, quindi in caso di successo questo nodo sparisce
+   *  e non c'è niente da rimettere a posto. In caso di errore il ridisegno
+   *  **non** avviene, e la casella va riportata dov'era: lasciarla dove l'ha
+   *  messa il dito direbbe che la skill è spenta mentre il gateway la tiene
+   *  accesa. */
+  async _onSkillToggled(name, input) {
+    const disabled = !input.checked;
+    input.disabled = true;
+    try {
+      await this._setSkillDisabled(name, disabled);
+      await this.loadSkills();
+    } catch {
+      input.checked = !disabled;
+      showToast(i18n.t('apps.operationFailed'), 'error');
+    } finally {
+      input.disabled = false;
+    }
+  }
+
+  /* ── Stanza «Android» ──────────────────────────────────────────────────── */
+
+  /** Griglia densa a sei colonne più la guida A–Z sul bordo destro.
+   *
+   *  Sei colonne e non quattro perché una cella da 4 colonne sprecava 56 px di
+   *  larghezza per icona; la guida sta a destra perché è l'unico posto dove
+   *  quello spazio orizzontale c'è davvero, e con 47 app è l'unico modo di
+   *  arrivare alla V senza sei passate di pollice. */
+  _renderAndroidRoom(q) {
+    const wrap = document.createElement('div');
+    wrap.className = 'apps-android';
+    const scroll = this._roomScroll();
+    wrap.appendChild(scroll);
+
+    /* Si aspettano **entrambe** le liste prima di disegnare una cella: sulla
+       corsa del primo caricamento una app nascosta comparirebbe per un istante.
+       Stessa guardia di `launcherEntries()`. */
     const ready = this._androidAppsLoaded && this._hiddenLoaded;
-    const visible = ready
-      ? filtered.filter(app => this._showHidden || !this.hiddenPackages.has(app.packageName))
-      : [];
-    let html = '<div class="apps-grid">';
-    visible.forEach(app => {
-      const icon = app.icon ? `<img src="${escapeHtml(app.icon)}" alt="">` : '<i class="ti ti-apps"></i>';
-      const isHidden = this.hiddenPackages.has(app.packageName);
-      const hiddenBadge = isHidden ? '<div class="app-hidden-badge"><i class="ti ti-eye-off"></i></div>' : '';
-      html += `<div class="app-cell${isHidden ? ' app-cell--hidden' : ''}" data-android-package="${escapeHtml(app.packageName)}"${app.system ? ' data-android-system="1"' : ''}>
-        <div class="app-icon">${icon}${hiddenBadge}</div>
-        <div class="app-label">${escapeHtml(app.label)}</div>
-      </div>`;
-    });
-    html += '</div>';
+    if (!ready || this._loadFailed.android) {
+      scroll.appendChild(this._note(ready ? 'apps.loadFailed' : 'apps.loading'));
+      return wrap;
+    }
+
+    const visible = this.androidApps.filter(app =>
+      (this._showHidden || !this.hiddenPackages.has(app.packageName))
+      && this._matches(q, app.label, app.packageName));
+
+    const grid = document.createElement('div');
+    grid.className = 'apps-grid';
+    /* La prima cella di ogni lettera, nell'ordine in cui compare nella griglia:
+       il ponte nativo consegna la lista già ordinata per etichetta minuscola
+       (`InstalledAppsBridge.listInstalledApps`), quindi l'ordine di inserimento
+       *è* l'ordine alfabetico e la guida non ha bisogno di riordinare niente. */
+    const anchors = new Map();
+    for (const app of visible) {
+      const cell = this._buildAndroidCell(app);
+      const letter = this._indexLetter(app.label);
+      if (!anchors.has(letter)) anchors.set(letter, cell);
+      grid.appendChild(cell);
+    }
+    scroll.appendChild(grid);
 
     if (!visible.length) {
-      html += this._emptyMessage(ready ? i18n.t('apps.noAppsFound') : i18n.t('apps.loading'));
+      scroll.appendChild(this._note(q ? 'apps.noResults' : 'apps.noAppsFound'));
+      return wrap;
     }
-    return html;
+    // Una guida con una lettera sola non guida da nessuna parte.
+    if (anchors.size > 1) {
+      this._azRail = this._buildAzRail(anchors);
+      this._azScroll = scroll;
+      wrap.appendChild(this._azRail);
+    }
+    return wrap;
   }
 
-  _emptyMessage(text) {
-    return `<div style="padding: 20px; color: var(--text-faint); font-style: italic; text-align: center;">${escapeHtml(text)}</div>`;
+  /** La guida serve solo se c'è qualcosa da scorrere.
+   *
+   *  Misurato sul telefono: con 18 app la griglia a sei colonne sta in tre file
+   *  e **non scorre affatto** — la guida sarebbe una colonna di lettere che non
+   *  portano da nessuna parte, e in cambio si prenderebbe 22 px di larghezza
+   *  alla griglia per sempre. Si misura invece di indovinare da un conteggio di
+   *  righe, perché l'altezza disponibile cambia con la tastiera e con la
+   *  geometria dello schermo.
+   *
+   *  Va chiamata **dopo** che il nodo è in pagina: prima, `scrollHeight` e
+   *  `clientHeight` valgono zero e la guida sparirebbe sempre. */
+  _syncAzRail() {
+    const rail = this._azRail;
+    const scroll = this._azScroll;
+    if (!rail || !scroll || !rail.isConnected) return;
+    rail.hidden = scroll.scrollHeight <= scroll.clientHeight;
   }
 
-  wireEvents() {
-    // Tastiera fisica (Titan 2): celle e intestazioni sono <div>, quindi senza
-    // tabindex/role non esistono né per Tab né per TalkBack e la sezione App
-    // non è utilizzabile da tastiera per nulla. Invio e Spazio sintetizzano il
-    // click, così l'attivazione resta un percorso solo.
-    this.contentEl.querySelectorAll('.app-cell, .apps-section-header').forEach(el => {
-      el.setAttribute('tabindex', '0');
-      el.setAttribute('role', 'button');
-      el.addEventListener('keydown', (e) => {
-        if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
-        e.preventDefault();  // lo Spazio scorrerebbe la lista sotto
-        el.click();
-      });
+  /** La lettera d'indice di un'etichetta. Gli accenti si piegano sulla lettera
+   *  base — "Élite" sotto E, non in un secchio suo da una voce — e tutto ciò
+   *  che lettera non è (cifre, ideogrammi, emoji) finisce sotto `#`. */
+  _indexLetter(label) {
+    const first = (label || '').trim().charAt(0);
+    if (!first) return '#';
+    const folded = first.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    const upper = folded.toLocaleUpperCase(i18n.locale).charAt(0) || '#';
+    return /\p{L}/u.test(upper) ? upper : '#';
+  }
+
+  _buildAzRail(anchors) {
+    const rail = document.createElement('div');
+    rail.className = 'apps-az';
+    rail.setAttribute('role', 'group');
+    rail.setAttribute('aria-label', i18n.t('apps.azGuide'));
+    for (const [letter, cell] of anchors) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'apps-az-letter';
+      btn.dataset.letter = letter;
+      btn.textContent = letter;
+      btn.setAttribute('aria-label', i18n.t('apps.jumpToLetter', { letter }));
+      btn.addEventListener('click', () => cell.scrollIntoView({ block: 'start' }));
+      rail.appendChild(btn);
+    }
+    return rail;
+  }
+
+  _buildAndroidCell(app) {
+    const isHidden = this.hiddenPackages.has(app.packageName);
+    const cell = document.createElement('button');
+    cell.type = 'button';
+    cell.className = 'app-cell' + (isHidden ? ' app-cell--hidden' : '');
+    cell.dataset.androidPackage = app.packageName;
+    if (app.system) cell.dataset.androidSystem = '1';
+
+    const iconWrap = document.createElement('div');
+    iconWrap.className = 'app-icon';
+    /* `src` accetta anche schemi che eseguono, e questo valore ha fatto un giro
+       fuori dal nostro codice (PackageManager → ponte → gateway → qui). Il
+       ponte consegna `data:image/png;base64,…`: tutto il resto è un glifo. */
+    if (app.icon && app.icon.startsWith('data:image/')) {
+      const img = document.createElement('img');
+      img.src = app.icon;
+      img.alt = '';
+      iconWrap.appendChild(img);
+    } else {
+      const glyph = document.createElement('i');
+      glyph.className = 'ti ti-apps';
+      glyph.setAttribute('aria-hidden', 'true');
+      iconWrap.appendChild(glyph);
+    }
+    if (isHidden) {
+      const badge = document.createElement('div');
+      badge.className = 'app-hidden-badge';
+      const eye = document.createElement('i');
+      eye.className = 'ti ti-eye-off';
+      eye.setAttribute('aria-hidden', 'true');
+      badge.appendChild(eye);
+      iconWrap.appendChild(badge);
+    }
+
+    const label = document.createElement('div');
+    label.className = 'app-label';
+    label.textContent = app.label;
+
+    cell.append(iconWrap, label);
+    cell.addEventListener('click', () => {
+      if (cell.dataset.longpress) { delete cell.dataset.longpress; return; }
+      this.launchAndroidApp(app.packageName);
     });
-    this.contentEl.querySelectorAll('.apps-section-header').forEach(header => {
-      header.setAttribute(
-        'aria-expanded',
-        String(!header.closest('.apps-section')?.classList.contains('collapsed')),
-      );
-      header.addEventListener('click', () => {
-        const section = header.closest('.apps-section');
-        const key = section?.dataset.section;
-        if (!key) return;
-        const isCollapsed = section.classList.toggle('collapsed');
-        header.setAttribute('aria-expanded', String(!isCollapsed));
-        if (isCollapsed) this.collapsedSections.add(key);
-        else this.collapsedSections.delete(key);
-      });
-    });
-    this.contentEl.querySelectorAll('.app-cell[data-skill]').forEach(cell => {
-      cell.addEventListener('click', () => {
-        if (cell.dataset.longpress) { delete cell.dataset.longpress; return; }
-        const name = cell.dataset.skill;
-        const skill = this.skills.find(s => s.name === name);
-        // Le skill "locked" aprono la scheda info (sola lettura) al tap, non
-        // l'editor del file — l'apertura diretta resta per le skill proprie
-        // dell'utente e, in Modalità avanzata, anche per quelle di sistema.
-        if (skill?.locked && !advancedMode()) this.showSkillSheet(name);
-        else this._openSkillFile(name);
-      });
-      setupLongPress(cell, () => this.showSkillSheet(cell.dataset.skill));
-    });
-    this.contentEl.querySelector('#app-add')?.addEventListener('click', () => this._startSkillCreation());
-    this.contentEl.querySelectorAll('.app-cell[data-android-package]').forEach(cell => {
-      cell.addEventListener('click', () => {
-        if (cell.dataset.longpress) { delete cell.dataset.longpress; return; }
-        this.launchAndroidApp(cell.dataset.androidPackage);
-      });
-      setupLongPress(cell, () => this.showAndroidAppSheet(cell.dataset.androidPackage));
-    });
-    this.contentEl.querySelectorAll('.app-cell[data-jenny-slug]').forEach(cell => {
-      cell.addEventListener('click', () => {
-        if (cell.dataset.longpress) { delete cell.dataset.longpress; return; }
-        this.openApp(cell.dataset.jennySlug);
-      });
-      setupLongPress(cell, () => this.showJennyAppSheet(cell.dataset.jennySlug));
-    });
-    this.contentEl.querySelector('#jenny-app-add')?.addEventListener('click', () => this._startAppCreation());
+    setupLongPress(cell, () => this.showAndroidAppSheet(app.packageName));
+    return cell;
   }
 
   // ── Jenny Apps ──
@@ -913,10 +1403,13 @@ export class AppsController {
     const actionsEl = document.getElementById('skill-sheet-actions');
     const close = () => sheet.close();
 
-    // Le skill "locked" (bundle di sistema tipo cron/llm-wiki) mostrano solo
-    // la spiegazione d'uso fuori dalla Modalità avanzata: niente azioni che
-    // permetterebbero di modificarle/disabilitarle/eliminarle per sbaglio.
-    if (skill.locked && !advancedMode()) {
+    /* Le skill "locked" (bundle di sistema tipo cron/ssh) mostrano solo la
+       spiegazione d'uso fuori dalla Modalità avanzata: niente azioni che
+       permetterebbero di modificarle/disabilitarle/eliminarle per sbaglio. La
+       regola è una sola e sta in `_skillIsManageable`, che è anche quella che
+       decide fra interruttore e lucchetto nella riga: due copie divergerebbero
+       e una delle due offrirebbe ciò che l'altra protegge. */
+    if (!this._skillIsManageable(skill)) {
       bodyEl.textContent = this._skillUserSummary(skill);
       actionsEl.innerHTML = '';
     } else {
@@ -1089,9 +1582,14 @@ export class AppsController {
     if (!res.ok) throw new Error(i18n.t('apps.deleteSkillFailed'));
   }
 
+  /** `render()` **sempre**, anche a liste non ancora arrivate: ognuna delle tre
+   *  stanze sa dire "sto caricando" da sé, e da qui passa anche la visibilità
+   *  dell'occhio nel titolo — che `header.setMode` ha appena ridisegnato
+   *  acceso. Con la vecchia guardia, entrando nella scheda prima che le fetch
+   *  tornassero l'occhio restava a schermo in una stanza che non ne ha uno. */
   activate() {
     this.ensureLoaded();
-    if (this._skillsLoaded && this._androidAppsLoaded && this._jennyAppsLoaded) this.render();
+    this.render();
   }
 
   deactivate() {

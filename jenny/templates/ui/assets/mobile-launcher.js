@@ -999,9 +999,10 @@ export class LauncherController {
     const row = document.createElement('div');
     row.className = 'launcher-row';
     row.dataset.key = entry.key;
-    /* Semantica giusta dalla nascita, non aggiunta dopo: le celle della scheda
-       sono `<div>` a cui `wireEvents` appiccica `tabindex`/`role` a ogni
-       ridisegno (`mobile-apps.js`), ed è un rattoppo.
+    /* Semantica giusta dalla nascita, non aggiunta dopo — la stessa regola che
+       la scheda Apps ha poi adottato per le sue tre stanze (`mobile-apps.js`),
+       dove le righe nascono `<button>` invece di essere `<div>` a cui si
+       riappiccicano `tabindex` e `role` a ogni ridisegno.
 
        `option` e non `button` (4.5): una lista di risultati con una selezione
        attiva è un `listbox` — l'elenco lo dichiara, la riga ne è una voce, e

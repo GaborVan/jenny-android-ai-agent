@@ -819,6 +819,16 @@ class MobileApp {
     // overlay orfano che nessuno ha chiesto.
     this.launcher.close();
 
+    /* La modalità corrente anche su <html>: serve al CSS, che altrimenti non
+       ha modo di sapere quale vista è a schermo (le viste si mostrano con un
+       `display` inline, non con una classe che risalga). Gancio generale, non
+       un caso speciale: la prima cosa che ne ha bisogno è la mascotte, v.
+       `:root.mode-apps .jenny-duo` in mobile-style.css. */
+    document.documentElement.classList.forEach((c) => {
+      if (c.startsWith('mode-')) document.documentElement.classList.remove(c);
+    });
+    document.documentElement.classList.add(`mode-${mode}`);
+
     // Update state and URL
     AppState.set('currentMode', mode);
     if (pushState) {
