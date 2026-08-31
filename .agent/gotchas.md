@@ -2,11 +2,11 @@
 
 ## Do not use `ruff format`
 
-**Do not run `ruff format`** — it destroys git blame history. Only `ruff check` should be used (CONTRIBUTING.md says the same).
+**Do not run `ruff format`** — it destroys git blame history. Only `ruff check` should be used (`docs/contribute/code-style.md` says the same; CONTRIBUTING.md does not mention ruff at all).
 
 ## Config `${VAR}` References
 
-`config/loader.py` resolves `${VAR}` patterns in `config.json` at load time. This is **not** a shell-like default-value syntax. If the environment variable is missing, `load_config` raises `ValueError` and the agent falls back to default configuration.
+`config/loader.py` resolves `${VAR}` patterns in `config.json` at load time. This is **not** a shell-like default-value syntax. Interpolation is **not** part of `load_config`: it happens later, in `resolve_config_env_vars`, called from `gateway_runtime._load_runtime_config`. A missing variable is therefore not a degraded start — the `ValueError` is re-raised as a `RuntimeError` and the **gateway fails to boot**, retrying until `MAX_RETRIES`. Expect a boot loop, not defaults.
 
 Example valid usage:
 ```json
@@ -19,7 +19,7 @@ Android is the only supported runtime target. There is no shell, no pip, and no 
 
 ## Prompt Templates
 
-Agent system prompts and scenario-specific instructions live in `jenny/templates/` as Jinja2 markdown files (`identity.md`, `platform_policy.md`, `HEARTBEAT.md`, `SOUL.md`, etc.). Changing these files alters agent behavior as directly as changing Python code. They are loaded by `utils/prompt_templates.py`.
+Agent system prompts and scenario-specific instructions live in `jenny/templates/` as Jinja2 markdown files (`agent/identity.md`, `agent/platform_policy.md`, plus the workspace seeds `HEARTBEAT.md`, `SOUL.md`, `USER.md`, `AGENTS.md` at the top level). Changing these files alters agent behavior as directly as changing Python code. They are loaded by `utils/prompt_templates.py`.
 
 Tool descriptions, skills, and replayed session history also shape model behavior. Treat changes to those surfaces like runtime code: keep them narrow, add a focused regression test when possible, and avoid teaching the model to repeat internal markers, local paths, or tool-call text.
 

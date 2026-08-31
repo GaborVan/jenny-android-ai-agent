@@ -408,7 +408,7 @@ def _alert_stuck(stuck: int) -> None:
     from jenny.webui.metadata import WEBUI_MESSAGE_SOURCE_METADATA_KEY
 
     notify_delivery(
-        f"{format_stuck_alarm(stuck)} Run /dream budget to see the sizes.",
+        f"{format_stuck_alarm(stuck)} Settings \u2192 Memory shows the sizes.",
         {WEBUI_MESSAGE_SOURCE_METADATA_KEY: {"kind": "cron", "label": "Dream"}},
     )
 

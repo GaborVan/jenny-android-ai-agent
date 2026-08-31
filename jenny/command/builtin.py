@@ -557,8 +557,8 @@ def _format_dream_refusals(outcome: "ReviewOutcome") -> str:
         return ""
     return (
         f"{refused} write(s) were refused by their size budget and never landed — "
-        "`/dream budget` shows which file is full: raise its cap or prune it, then "
-        "run `/dream` again."
+        "**Settings → Memory** shows which file is full, as a gauge against its cap: "
+        "raise it or prune the file, then run `/dream` again."
     )
 
 

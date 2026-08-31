@@ -12,15 +12,21 @@ Each skill is a folder at `workspace/skills/<name>/SKILL.md` — a markdown file
 
 To see what's currently enabled, type `/skill` in chat. It lists every enabled skill with its description — this is the fastest way to check whether a given capability is actually turned on.
 
-## Managing skills from the Apps grid
+## Managing skills from the Apps tab
 
-Skills show up as cards in the **Skill** section of the Apps tab, alongside Jenny Apps and your phone's Android apps. Each card shows a status badge: **active**, **idle**, or **disabled**.
+Skills are **rows in their own Skills room** in the Apps tab, reached by the segmented strip at the top — not cards mixed in with Jenny Apps and Android apps. They are not in the launcher drawer either: a skill isn't something you launch, so it isn't offered as one.
 
-Long-press a skill card to:
+There is no status badge. There used to be one saying *active / idle / disabled*, and it was removed on purpose, because it mixed two different things into one word:
 
-- **Edit** — open its content for editing.
-- **Enable** / **Disable** — toggling a skill off writes `disabled: true` into its frontmatter; Jenny stops seeing that skill in her context until you re-enable it.
-- **Delete** — confirms with `Delete skill "{name}"?` before removing it.
+- **`disabled` is a decision** — yours, reversible on the spot. It shows as a **toggle switch** on the row, and flipping it writes `disabled: true` into the skill's frontmatter; Jenny stops seeing that skill in her context until you flip it back.
+- **Unavailable is an impediment** — the skill *cannot* run, because it is missing a tool, a key or a file. The toggle has nothing to do with it: switching it on would not make the skill work. It shows as a separate warning-coloured line carrying the actual reason, which is the only information you can act on.
+
+The two can coexist: a skill that is both switched off and unavailable shows both. Built-in skills carry a **lock icon** instead of a toggle — they cannot be disabled from here.
+
+- **Tap** a row to open the skill's file if it is one you can edit, or a read-only card if it isn't.
+- **Long-press** a row for its informational sheet.
+- Enabling and disabling is the inline toggle; there is no context menu for it.
+- **Delete** confirms with `Delete skill "{name}"?` before removing it.
 
 To create a new one, tap **New Skill**. It opens the chat with the prompt `Hi, I want to create a new skill. Can you help me?`, and Jenny walks you through the same kind of guided conversation used for apps, using the built-in `skill-creator` skill.
 

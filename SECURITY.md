@@ -82,6 +82,44 @@ approved in the manifest. Loopback, link-local/metadata, `0.0.0.0/8` and CGNAT
 stay blocked, so an app manifest cannot use the proxy as a bridge to the
 gateway's own API, and redirects are never followed.
 
+## App updates and self-install
+
+Jenny checks for a new release **every 24 hours by default** (`updates.enabled`,
+`updates.checkIntervalH`) and can install one on request. This is the one
+outbound connection the user did not switch on, so it belongs in this list.
+
+- **What goes out**: a plain `GET` of the release's `latest.json`. No
+  identifier, no version, no headers of Jenny's own, no query string. Redirects
+  are validated per hop like every other outbound path, the response is
+  size-capped, and the version comparison happens on the device. Nothing about
+  the user or the device is transmitted.
+- **What GitHub can infer** is what any HTTP server infers from a request: an IP
+  address and a timestamp. A daily request from the same address is a weak
+  signal that the app is installed. `updates.enabled: false` stops it.
+- **Installing** needs three manifest permissions — `REQUEST_INSTALL_PACKAGES`,
+  `UPDATE_PACKAGES_WITHOUT_USER_ACTION`, `REQUEST_DELETE_PACKAGES`. None of them
+  bypasses the user: the per-app "Install unknown apps" switch is still yours to
+  grant, `UPDATE_PACKAGES_WITHOUT_USER_ACTION` only covers packages Jenny is
+  already the installer of (itself), and on Android 14+ the system answers with
+  its own confirmation prompt as the normal path. `QUERY_ALL_PACKAGES` and
+  `INSTALL_PACKAGES` are deliberately **not** declared.
+- The agent can call `install_update` itself. It is destructive by nature —
+  Android replaces the app and kills the process mid-turn — which is why the
+  tool's own description says so and the turn cannot report back.
+
+## SSH
+
+The SSH tools are in a scope of their own (`remote`) that **no agent loads by
+default**; only the `sysadmin` subagent type asks for it. Host targets go
+through `validate_ssh_target`, a third policy distinct from the two above: it
+allows RFC1918, IPv6 ULA **and** CGNAT (`100.64.0.0/10`), blocking only
+`0.0.0.0/8`, loopback and link-local/metadata. CGNAT is opened here rather than
+through `security.ssrf_whitelist` on purpose — the whitelist is global, so
+widening it for a Tailscale host would also open CGNAT to `web_fetch` and to
+Jenny Apps. What backs the extra room is not that SSH is safer: it is that an
+SSH host is typed by the user in Settings and host-key pinned before any
+connection.
+
 ## WebUI
 
 The SPA is served from the gateway to a local WebView. Defenses, in order of

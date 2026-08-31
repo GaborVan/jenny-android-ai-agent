@@ -113,32 +113,38 @@ Useful docs:
 
 ## Tools
 
-Tools are **explicitly registered**, not discovered by scanning the filesystem. `jenny/agent/tools/loader.py` imports a fixed list of 18 modules (`_HARDCODED_TOOL_MODULES`); each module declares a module-level `TOOLS = [...]` list of `Tool` subclasses. `ToolLoader.discover()` imports every module in the list, in order, and collects each module's `TOOLS`; a module with no `TOOLS` attribute at all raises at startup rather than silently contributing nothing, and a name collision between two registered tools also raises at startup instead of one silently overwriting the other.
+Tools are **explicitly registered**, not discovered by scanning the filesystem. `jenny/agent/tools/loader.py` imports a fixed list of 22 modules (`_HARDCODED_TOOL_MODULES`); each module declares a module-level `TOOLS = [...]` list of `Tool` subclasses. `ToolLoader.discover()` imports every module in the list, in order, and collects each module's `TOOLS`; a module with no `TOOLS` attribute at all raises at startup rather than silently contributing nothing, and a name collision between two registered tools also raises at startup instead of one silently overwriting the other.
 
 | # | Module | `TOOLS` | Tool area |
 |---|---|---|---|
 | 1 | `filesystem.py` | `ReadFileTool`, `WriteFileTool`, `EditFileTool`, `ListDirTool` | Read/write/edit files and list directories, workspace-scoped |
 | 2 | `python_exec.py` | `PythonExecTool` | In-process Python execution on the Chaquopy interpreter |
 | 3 | `android_web.py` | `AndroidWebSearchTool`, `AndroidWebFetchTool` | Web search/fetch via a hidden Android WebView |
-| 4 | `download.py` | `DownloadFileTool` | Downloads a URL into `workspace/downloads/`, per-hop SSRF-checked |
-| 5 | `location.py` | `GetLocationTool` | On-demand fresh GPS fix (distinct from the last-known location injected into every turn's context) |
-| 6 | `long_task.py` | `LongTaskTool`, `CompleteGoalTool` | Sustained/background goal tracking (`/goal`) |
-| 7 | `spawn.py` | `SpawnTool` | Spawns a subagent, blind to the parent conversation |
-| 8 | `cron.py` | `CronTool` | Create/list/cancel reminders and scheduled jobs |
-| 9 | `self.py` | *(none — see below)* | Declares `MyTool` but registers it manually, not through `TOOLS` |
-| 10 | `search.py` | `FindFilesTool`, `GrepTool` | Filename and content search inside the workspace |
-| 11 | `message.py` | `MessageTool` | Sends a proactive message (with attachments/buttons) outside the current turn |
-| 12 | `apply_patch.py` | `ApplyPatchTool` | Atomic multi-file patch application with rollback |
-| 13 | `exec_session.py` | `ListExecSessionsTool`, `WriteStdinTool` | Manage long-running `python_exec` sessions (poll/stdin/terminate) |
-| 14 | `introspect.py` | `GetSourceTool` | Read-only access to Jenny's own bundled Python source |
-| 15 | `diagnostics.py` | `GetRecentLogsTool` | Reads the in-memory log ring buffer |
-| 16 | `ui_view.py` | `UiViewTool` | Pull-based view of what's on screen right now; fails from Telegram, cron, or with the screen off |
-| 17 | `subagent_control.py` | `SubagentStatusTool`, `SubagentCancelTool`, `SubagentRestartTool`, `SubagentSendTool` | Drive running subagents (status/cancel/restart/send). The only module whose tools are `orchestrator`-scope **only** — never `core`, never `subagent` |
-| 18 | `ssh.py` | `SshHostsTool`, `SshExecTool`, `SshJobTool`, `SshTransferTool` | Remote machines over SSH. Scope `remote`, which no agent loads by default — only the `sysadmin` subagent type asks for it |
+| 4 | `browser.py` | `BrowserOpenTool`, `BrowserSnapshotTool`, `BrowserDoTool`, `BrowserReadTool`, `BrowserCloseTool` | An interactive second WebView with persistent cookies, for pages `web_fetch` cannot handle. Gated on the same `tools.androidWeb.enable` as search/fetch |
+| 5 | `download.py` | `DownloadFileTool` | Downloads a URL into `workspace/downloads/`, per-hop SSRF-checked |
+| 6 | `location.py` | `GetLocationTool` | On-demand fresh GPS fix (distinct from the last-known location injected into every turn's context) |
+| 7 | `long_task.py` | `LongTaskTool`, `CompleteGoalTool` | Sustained/background goal tracking (`/goal`) |
+| 8 | `spawn.py` | `SpawnTool` | Spawns a subagent, blind to the parent conversation |
+| 9 | `subagent_control.py` | `SubagentStatusTool`, `SubagentCancelTool`, `SubagentRestartTool`, `SubagentSendTool` | Drive running subagents (status/cancel/restart/send). The only module whose tools are `orchestrator`-scope **only** — never `core`, never `subagent` |
+| 10 | `cron.py` | `CronTool` | Create/list/cancel reminders and scheduled jobs |
+| 11 | `journal.py` | `JournalAppendTool` | Appends one line to the project's working journal (`raw/journal/<today>.md`). No config toggle: always registered |
+| 12 | `self.py` | *(none — see below)* | Declares `MyTool` but registers it manually, not through `TOOLS` |
+| 13 | `memory_recall.py` | `MemoryRecallTool`, `HistoryRecallTool` | Search the memory archive (`recall`) and the verbatim conversation log (`recall_history`). `core` + `orchestrator` only |
+| 14 | `search.py` | `FindFilesTool`, `GrepTool` | Filename and content search inside the workspace |
+| 15 | `message.py` | `MessageTool` | Sends a proactive message (with attachments/buttons) outside the current turn |
+| 16 | `apply_patch.py` | `ApplyPatchTool` | Atomic multi-file patch application with rollback |
+| 17 | `exec_session.py` | `ListExecSessionsTool`, `WriteStdinTool` | Manage long-running `python_exec` sessions (poll/stdin/terminate) |
+| 18 | `introspect.py` | `GetSourceTool` | Read-only access to Jenny's own bundled Python source |
+| 19 | `diagnostics.py` | `GetRecentLogsTool` | Reads the in-memory log ring buffer |
+| 20 | `ui_view.py` | `UiViewTool` | Pull-based view of what's on screen right now; fails from Telegram, cron, or with the screen off |
+| 21 | `ssh.py` | `SshHostsTool`, `SshExecTool`, `SshJobTool`, `SshTransferTool` | Remote machines over SSH. Scope `remote`, which no agent loads by default — only the `sysadmin` subagent type asks for it |
+| 22 | `app_update.py` | `UpdateStatusTool`, `InstallUpdateTool` | Report a pending app update and install it. Android-only; `install_update` kills the process by design |
 
-`self.py`'s module-level `TOOLS` list is deliberately empty. `MyTool` (the `my` introspection/self-check tool) needs a live reference to the running `AgentLoop`, which the generic loader can't provide, so it is instantiated and registered by hand in `AgentLoop._register_default_tools()` (`jenny/agent/loop.py:362-365`), gated on `tools.my.enable`.
+The numbering is the load order in `_HARDCODED_TOOL_MODULES`, which is the order `discover()` walks.
 
-`ToolLoader.discover()` therefore returns 30 tool classes across those 18 modules, plus the one manually-registered `MyTool` — 31 built-in tool classes in total. Not all of them are necessarily *registered* at runtime, and no single agent ever sees all 31: `ToolLoader.load()` filters by the caller's `scope` against each tool's `_scopes` (`core`, `orchestrator`, `subagent`, `remote`), then optionally by an `allow` list of names (that is how agent types narrow their toolset), then checks each tool's `enabled(ctx)` against the current config. The live tool count for a given install therefore depends on the config toggles *and* on which agent is asking. On top of the built-ins, Jenny Apps register their own dynamic `<slug>_<action>` tools per turn (`AppToolsSyncer`) — see [Mini-apps](../using/mini-apps.md) and [Tool reference](../reference/tools.md) for the full, toggle-aware picture.
+`self.py`'s module-level `TOOLS` list is deliberately empty. `MyTool` (the `my` introspection/self-check tool) needs a live reference to the running `AgentLoop`, which the generic loader can't provide, so it is instantiated and registered by hand in `AgentLoop._register_default_tools()`, gated on `tools.my.enable`. Two other tools reach the registry the same way and for the same reason — `memory_entry` needs the memory store, and the per-app action tool is synced per turn — so this list is not a complete inventory of the tool surface.
+
+`ToolLoader.discover()` therefore returns 40 tool classes across those 22 modules, plus the manually-registered `MyTool` — 41 built-in tool classes in total. Not all of them are necessarily *registered* at runtime, and no single agent ever sees all 41: `ToolLoader.load()` filters by the caller's `scope` against each tool's `_scopes` (`core`, `orchestrator`, `subagent`, `remote`), then optionally by an `allow` list of names (that is how agent types narrow their toolset), then checks each tool's `enabled(ctx)` against the current config. The live tool count for a given install therefore depends on the config toggles *and* on which agent is asking. On top of the built-ins, Jenny Apps register their own dynamic `<slug>_<action>` tools per turn (`AppToolsSyncer`) — see [Mini-apps](../using/mini-apps.md) and [Tool reference](../reference/tools.md) for the full, toggle-aware picture.
 
 Tool behavior is part of the model contract: user-visible tool names, schemas, and error messages should be treated as an interface — changing them affects how the model uses the tool, so keep changes intentional and covered by tests.
 

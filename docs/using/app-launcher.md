@@ -4,13 +4,14 @@ Jenny can open the other apps installed on your phone. There are two places for 
 
 ## The drawer: where you launch things
 
-Tap the grid button on the left of the message box (next to where you type) and a sheet slides up over the chat. It is a search field with a list under it — not a grid of icons — and it holds all three kinds of thing Jenny can open, mixed together:
+Tap the **grid icon in the middle of the dock** and a sheet slides up over the chat. (There used to be a second entrance, a button in the message box; it is gone — one way in that works everywhere beats two where one lies.) It is a search field with a list under it — not a grid of icons — and it holds the two kinds of thing that can actually be *launched*, mixed together:
 
 - your installed **Android apps**,
-- your **Jenny Apps** (see [Mini-apps](mini-apps.md)),
-- Jenny's **Skills** (see [Skills](skills.md)).
+- your **Jenny Apps** (see [Mini-apps](mini-apps.md)).
 
-Each row shows a name and, under it, a second line: the description for a Jenny App or a skill, the package name for an Android app. If something is broken — an invalid manifest, a skill that isn't available — that takes the second line instead, in red, so you can see what's wrong without opening anything.
+Skills are not in the drawer. They are not launchable — you don't open a skill, Jenny uses one — so they live in the Apps tab's own Skills room instead (see [Skills](skills.md)).
+
+Each row shows a name and, under it, a second line: the description for a Jenny App, the package name for an Android app. If something is broken — an invalid manifest, a skill that isn't available — that takes the second line instead, in red, so you can see what's wrong without opening anything.
 
 ### Using it
 
@@ -31,13 +32,15 @@ The drawer's list deliberately stops short of the very bottom of the screen. On 
 
 ## The Apps tab: where you manage things
 
-Open the **Apps** tab (grid icon in the dock, or swipe there) — or tap **Manage apps** at the bottom of the drawer, which takes you to the same place and closes the drawer behind you. You'll find three collapsible sections stacked vertically:
+The dock's grid icon opens the *drawer*, not this tab. To reach the tab, swipe to it, or tap **Manage apps** at the bottom of the drawer — which takes you there and closes the drawer behind you.
+
+The tab is a **segmented strip at the top with one room showing at a time**, not a stack of sections: only the open room is in the page at all.
 
 1. **Jenny Apps** — mini-apps you and Jenny build together.
-2. **Skill** — Jenny's chat skills.
-3. **Android App** — every "launchable" app installed on the phone.
+2. **Skills** — Jenny's chat skills.
+3. **Android** — every "launchable" app installed on the phone.
 
-Tap a section's header to collapse or expand it; that state is not remembered between visits to the tab.
+Which room you left open **is** remembered between visits, on the device only.
 
 The Android section lists only apps that have a launcher icon of their own — anything Android's `MAIN`/`LAUNCHER` intent filter would resolve to, the same set you'd see on a normal home screen. Background services and other UI-less packages never appear.
 
@@ -57,7 +60,7 @@ System apps (anything flagged as a system or updated-system app by Android) neve
 
 ### Search in the tab
 
-The search bar at the top of the Apps tab filters all three sections at once. Unlike the drawer, it matches only the **visible name**: searching `com.android` there will not find anything by package id. While a search is active, any section that was collapsed is forced open so its matches are visible; clearing the search restores the previous collapsed/expanded state.
+The search bar at the top of the Apps tab filters **the room you are in**, not all three — its placeholder changes with the room to say so. Unlike the drawer, it matches only the **visible name**: searching `com.android` there will not find anything by package id.
 
 Hidden apps never show up in search results unless you've already turned on "Show hidden apps".
 

@@ -2,7 +2,7 @@
 
 Every control in the Settings screen, what it does, and its default value.
 
-Settings is a single accordion of 8 sections — Personalization, Model, Tools, Background activity, SSH, Telegram, Backup & restore, System — all collapsed the first time you open the screen (Background activity opens itself when the battery-optimization exemption is missing). There is no global Save button: almost every field saves itself, with a "Saved!" toast confirming the write. A few controls (theme, mascot, Home button, language, Developer mode) live entirely on the device and never touch `config.json` at all — those are called out explicitly below.
+Settings is a single accordion of 10 sections — Personalization, Model, Tools, **Memory**, **Wiki and projects**, Background activity, SSH, Telegram, Backup & restore, System — all collapsed the first time you open the screen (Background activity opens itself when the battery-optimization exemption is missing). There is no global Save button: almost every field saves itself, with a "Saved!" toast confirming the write. A few controls (theme, mascot, Home button, language, Developer mode) live entirely on the device and never touch `config.json` at all — those are called out explicitly below.
 
 ## How saving works
 
@@ -106,6 +106,22 @@ This toggle is a software gate only — it does **not** request or manage the An
 
 Two related values exist only in `config.json`, with no UI control: `tools.location.telegram_ttl_s` (default 3600 — how long a location shared from Telegram stays valid) and `tools.location.fresh_timeout_s` (default 15 — how long Jenny waits for a fresh GPS fix). See [Location](../using/location.md).
 
+## Memory
+
+Dream's schedule and the three file budgets, all of which used to be config-only.
+
+- **On/off and cadence** — `agents.defaults.dream.enabled` and `intervalH`. The deadline survives a restart; a run missed while the app was down happens at the next tick.
+- **Three budget gauges** — `memoryBudgetChars`, `userBudgetChars`, `soulBudgetChars`, each shown as a fill against its cap, so a file that is nearly full is visible before it starts costing you entries.
+- **Review cadence** — `reviewEveryRuns`. Lowering it below **12** opens a confirmation dialog, and the dialog is the point: a forced back-to-back review pass has been measured removing real entries — two open questions, a plan, a biographical detail and an observation. The client only sends the change after you confirm.
+
+## Wiki and projects
+
+The other two periodic workers, plus one project-side switch.
+
+- **Atlas** — `enabled`, `intervalH`, and `maxContextTokens`, the cap on the block it injects into context. With no wikis present the job exits before reaching the provider.
+- **The gardener** — `enabled`, `intervalMin`, `idleMin`, `minHoursBetweenPasses`. The section carries a hint spelling out that turning it off is not uninstalling it: the wikis stay, nothing prunes them.
+- **`compactProjectsWhenIdle`** — whether idle project chats get compacted. It takes effect from the next start, which the field says on the spot rather than leaving you to wonder why nothing changed.
+
 ## Background activity
 
 Everything about Jenny surviving a screen that's been off for hours. It sits between Tools and SSH, and it opens by itself when the battery-optimization exemption is missing — that being the one thing here worth interrupting you for.
@@ -197,8 +213,6 @@ Settings intentionally does not expose everything the backend supports. The foll
 - `agents.defaults.tool_hint_max_length` — has a working update endpoint but no field in the UI (default 40, range 20–500)
 - `agents.defaults.reasoning_effort` = `adaptive` — the Advanced Parameters select saves the effort (see above), but `adaptive` is not one of the values the endpoint accepts, so that one value is config-only
 - `gateway.heartbeat.*` — the proactive Heartbeat cadence and behavior
-- `agents.defaults.dream.*` — Dream memory-consolidation schedule
-- `agents.defaults.atlas.*` — Atlas wiki-directory schedule and the token cap on the block it injects
 - `websocket.show_reasoning` — whether the "reasoning" pill is shown/recorded at all for the WebUI channel (default true); no toggle in Settings
 - `tools.*.enable` toggles for individual tools (file tools, `python_exec`, `my`, introspection, diagnostics, etc.) — only Web Search and Location get a Tools-section UI; everything else is config-only
 - `tools.location.telegram_ttl_s`, `tools.location.fresh_timeout_s` — see Location above

@@ -194,6 +194,48 @@ The frame is a recomputable refresh hint — it is never persisted to the transc
 {"event": "attached", "chat_id": "default"}
 ```
 
+**`turn_end`** — the turn is over; `latency_ms` is present when it was measured:
+
+```json
+{"event": "turn_end", "chat_id": "default", "latency_ms": 4210}
+```
+
+**`goal_status`** — a turn started or finished, as a wall-clock hint for the UI. Sent only to
+subscribers of that chat, and never retried: it is an idempotent refresh hint, so the next
+status simply replaces a pending one. `started_at` appears only with `"running"`:
+
+```json
+{"event": "goal_status", "chat_id": "default", "status": "running", "started_at": 1756640000.0}
+```
+
+**`file_edit`** — one or more file edits made during the turn, with their line counts. Also
+appended to the transcript, so a reload replays it:
+
+```json
+{"event": "file_edit", "chat_id": "default", "edits": [{"path": "SOUL.md", "added": 2, "deleted": 1, "status": "done"}]}
+```
+
+**`session_updated`** — the session changed underneath the client (compaction, rename, a
+project switch); `scope` narrows what to refresh when present:
+
+```json
+{"event": "session_updated", "chat_id": "default", "scope": "history"}
+```
+
+**`app_data_changed`** — a Jenny App's stored data changed, so an open app iframe should
+refresh itself. Broadcast to every connection, not just one chat's subscribers:
+
+```json
+{"event": "app_data_changed", "slug": "notes"}
+```
+
+**`apps_list_changed`** — an app was installed, removed or edited; the Apps view should
+re-read the list. Broadcast, and carries no payload beyond the event name:
+
+```json
+{"event": "apps_list_changed"}
+```
+
 **`error`** — soft error for malformed inbound envelopes. The connection stays open:
 
 ```json
@@ -266,6 +308,8 @@ correlate a reply to.
 |----------|----------|--------|
 | `workspace.write` | `path`, `content` | Write a workspace text file (1 MB cap). Honours `workspace.enabled` / `workspace.allow_write`. |
 | `audit.resolve` | `audit_id`, `wiki`, `resolution` | Close a wiki audit item with a resolution note. |
+| `project.create` | `name`, `seed` | Create a project chat with its seed instruction. Both are required and whitespace-collapsed. |
+| `project.delete` | `name` | Delete a project chat and its session. |
 
 **Authorization is the handshake's, not the frame's.** When `token_issue_secret` is set, only
 a connection that presented the token at handshake time may run a command, even if
@@ -281,11 +325,11 @@ All fields go under the top-level `websocket` object in `config.json`. These are
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | bool | `false` | Enable the WebSocket server. Effectively always `true` on the Android device (see above). |
+| `enabled` | bool | `false` | Enable the WebSocket server. The Android runtime writes `true` via `setdefault`, so an explicit `false` you put here survives and does disable the channel — `channels/dispatcher.py` reads it and returns. |
 | `host` | string | `"127.0.0.1"` | Bind address. Use `"0.0.0.0"` to accept external connections. Forced to `127.0.0.1` on Android. |
 | `port` | int | `8765` | Listen port. Forced to `18790` (shared with HTTP) on Android. |
 | `path` | string | `"/"` | WebSocket upgrade path. Trailing slashes are normalized (root `/` is preserved). |
-| `maxMessageBytes` | int | `37748736` | Maximum inbound message size in bytes (1 KB – 40 MB). Default (36 MB) is sized to accept up to 4 base64-encoded image attachments at 8 MB each; lower it if the channel only carries text. |
+| `maxMessageBytes` | int | `37748736` | Maximum inbound message size in bytes (1 KB – 40 MB). Default (36 MB) is sized to accept up to 4 base64-encoded image attachments at ~6 MB each after the client's Worker normalization: 4 × 6 MB × 1.37 for base64 overhead, plus envelope framing, stays under it. Lower it if the channel only carries text. |
 
 ### Authentication
 
@@ -305,6 +349,10 @@ All fields go under the top-level `websocket` object in `config.json`. These are
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `streaming` | bool | `true` | Enable streaming mode. The agent sends `delta` + `stream_end` frames instead of a single `message`. |
+| `sendProgress` | bool | `true` | Send interim progress text while a turn runs. With it off the client sees nothing until the turn produces its answer. |
+| `sendToolHints` | bool | `false` | Include one-line tool hints in that progress stream ("reading SOUL.md", "searching…"). Off by default: it is the noisiest of the four. |
+| `showReasoning` | bool | `true` | Forward `reasoning_delta` / `reasoning_end` frames when the provider exposes incremental reasoning. |
+| `sendMaxRetries` | int | `3` | Attempts the dispatcher makes for one outbound frame before dropping it. Refresh-hint frames (`goal_status`, `app_data_changed`, `apps_list_changed`) are exempt by design: the next one replaces a pending one, so retrying them is pointless. |
 
 ### Keep-alive
 

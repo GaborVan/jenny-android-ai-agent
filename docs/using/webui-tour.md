@@ -9,8 +9,8 @@ A row of five icons pinned to the bottom of the screen switches between the app'
 | Icon | Tab | What it is |
 |---|---|---|
 | ✿ | **Chat** | The conversation with Jenny. See [Chat basics](chat.md). |
-| grid | **Apps** | Where you manage Jenny Apps you've built, Skills, and the apps installed on your phone — hiding, uninstalling, repairing. To *open* any of them, the drawer above the message box is quicker. See [Mini-apps](mini-apps.md), [Skills](skills.md), [Phone app launcher](app-launcher.md). |
-| book | **Wiki** | The knowledge base Jenny can compile about your notes and conversations. See [Wiki](wiki.md). |
+| graph | **Wiki** | The knowledge base Jenny can compile about your notes and conversations. See [Wiki](wiki.md). |
+| grid | **Apps** | Tapping it **opens the launcher drawer** rather than switching view — it is the most thumb-reachable slot, and launching is what you do most. The tab itself, where you manage Jenny Apps, Skills and your phone's apps, is reached by swiping or by **Manage apps** at the bottom of the drawer. See [Mini-apps](mini-apps.md), [Skills](skills.md), [Phone app launcher](app-launcher.md). |
 | folder | **Workspace** | A file browser/editor over Jenny's private working folder on the device. |
 | gear | **Settings** | Everything configurable from the app. See [Settings](../reference/settings.md). |
 
@@ -74,7 +74,7 @@ Row by row:
 
 ### Model / Preset: currently broken, check Settings instead
 
-<!-- TODO: verify on-device (bug tracked as task_7c871f0a) -->
+<!-- TODO: verify on-device -->
 As of this writing, the **Model** row does not reliably show the model actually in use. A backend/frontend field mismatch means it typically reads as `—` when you haven't switched models at all during the current app session, and something like `Unknown / —` after you do switch. A fix is in progress, but until it lands, don't trust this row — check **Settings → Model** instead to see which provider and model are actually configured. The **Preset** row, when it does work, is meant to only appear if a model preset is active.
 
 ### Access: what "Restricted" vs "Full access" means
