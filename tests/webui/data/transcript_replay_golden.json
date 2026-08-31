@@ -1,0 +1,193 @@
+{
+  "un turno semplice: domanda, streaming, fine": [
+    {
+      "id": "<u#0>",
+      "role": "user",
+      "content": "ciao",
+      "turnId": "t1",
+      "turnPhase": "user",
+      "createdAt": 0
+    },
+    {
+      "id": "<buf#1>",
+      "role": "assistant",
+      "content": "ciao!",
+      "turnId": "t1",
+      "turnPhase": "answer",
+      "createdAt": 1,
+      "latencyMs": 1200
+    }
+  ],
+  "il ragionamento precede la risposta e va chiuso": [
+    {
+      "id": "<u#0>",
+      "role": "user",
+      "content": "pensa",
+      "turnId": "t2",
+      "turnPhase": "user",
+      "createdAt": 0
+    },
+    {
+      "id": "<as#1>",
+      "role": "assistant",
+      "content": "ecco",
+      "reasoning": "sto valutando",
+      "activitySegmentId": "<activity#2>",
+      "turnId": "t2",
+      "turnPhase": "answer",
+      "createdAt": 1
+    }
+  ],
+  "ragionamento senza risposta: il segnaposto va potato": [
+    {
+      "id": "<u#0>",
+      "role": "user",
+      "content": "?",
+      "turnId": "t3",
+      "turnPhase": "user",
+      "createdAt": 0
+    }
+  ],
+  "modifiche a file: due sullo stesso path si fondono": [
+    {
+      "id": "<u#0>",
+      "role": "user",
+      "content": "modifica",
+      "turnId": "t4",
+      "turnPhase": "user",
+      "createdAt": 0
+    },
+    {
+      "id": "<tr#1>",
+      "role": "tool",
+      "kind": "trace",
+      "content": "",
+      "traces": [],
+      "fileEdits": [
+        {
+          "path": "SOUL.md",
+          "added": 3,
+          "deleted": 1,
+          "status": "done"
+        }
+      ],
+      "activitySegmentId": "<activity#2>",
+      "turnId": "t4",
+      "turnPhase": "activity",
+      "createdAt": 1
+    },
+    {
+      "id": "<buf#3>",
+      "role": "assistant",
+      "content": "fatto",
+      "turnId": "t4",
+      "turnPhase": "answer",
+      "createdAt": 3
+    }
+  ],
+  "allegati: la media sopprime fino a turn_end": [
+    {
+      "id": "<u#0>",
+      "role": "user",
+      "content": "guarda",
+      "turnId": "t5",
+      "turnPhase": "user",
+      "createdAt": 0
+    },
+    {
+      "id": "<as#1>",
+      "role": "assistant",
+      "createdAt": 1,
+      "content": "immagine",
+      "turnId": "t5",
+      "turnPhase": "answer"
+    },
+    {
+      "id": "<buf#2>",
+      "role": "assistant",
+      "content": "ignorato",
+      "turnId": "t5",
+      "turnPhase": "answer",
+      "createdAt": 2
+    }
+  ],
+  "turno interrotto: l'assistente a metà va retrocesso": [
+    {
+      "id": "<u#0>",
+      "role": "user",
+      "content": "primo",
+      "turnId": "t6",
+      "turnPhase": "user",
+      "createdAt": 0
+    },
+    {
+      "id": "<u#1>",
+      "role": "user",
+      "content": "secondo",
+      "turnId": "t7",
+      "turnPhase": "user",
+      "createdAt": 2
+    },
+    {
+      "id": "<buf#2>",
+      "role": "assistant",
+      "content": "risposta al secondo",
+      "turnId": "t7",
+      "turnPhase": "answer",
+      "createdAt": 3
+    }
+  ],
+  "due turni di fila, ognuno col suo id": [
+    {
+      "id": "<u#0>",
+      "role": "user",
+      "content": "uno",
+      "turnId": "t8",
+      "turnPhase": "user",
+      "createdAt": 0
+    },
+    {
+      "id": "<buf#1>",
+      "role": "assistant",
+      "content": "risposta uno",
+      "turnId": "t8",
+      "turnPhase": "answer",
+      "createdAt": 1
+    },
+    {
+      "id": "<u#2>",
+      "role": "user",
+      "content": "due",
+      "turnId": "t9",
+      "turnPhase": "user",
+      "createdAt": 3
+    },
+    {
+      "id": "<buf#3>",
+      "role": "assistant",
+      "content": "risposta due",
+      "turnId": "t9",
+      "turnPhase": "answer",
+      "createdAt": 4
+    }
+  ],
+  "eventi malformati in mezzo a un turno buono": [
+    {
+      "id": "<u#0>",
+      "role": "user",
+      "content": "ok",
+      "turnId": "t10",
+      "turnPhase": "user",
+      "createdAt": 0
+    },
+    {
+      "id": "<buf#1>",
+      "role": "assistant",
+      "content": "ok",
+      "turnId": "t10",
+      "turnPhase": "answer",
+      "createdAt": 5
+    }
+  ],
+  "trascrizione vuota": []
+}

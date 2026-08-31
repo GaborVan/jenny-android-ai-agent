@@ -390,6 +390,21 @@ def replay_transcript_to_ui_messages(
     for idx, rec in enumerate(lines):
         ev = rec.get("event")
         if ev == "user":
+            # Una domanda nuova chiude il turno precedente, anche se quel turno
+            # non ha mai visto un ``turn_end`` — ed è il caso normale quando
+            # l'utente interrompe Jenny a metà risposta.
+            #
+            # Senza questo, il segnaposto in streaming del turno vecchio restava
+            # in ``buffer_message_id`` e il ``stream_end`` successivo ci scriveva
+            # dentro la risposta del turno NUOVO: quella risposta compariva
+            # **sopra** la propria domanda (il segnaposto sta a un indice più
+            # basso), e il testo parziale interrotto sparse. Si vedeva solo
+            # ricaricando una conversazione interrotta, cioè mai in un test per
+            # ramo — i rami sono giusti, è la loro interazione sullo stato
+            # condiviso che non lo era.
+            demote_interrupted_assistant(_ensure_activity_segment())
+            buffer_message_id = None
+            buffer_parts = []
             active_activity_segment_id = None
             active_file_edit_segment_id = None
             text = rec.get("text")
