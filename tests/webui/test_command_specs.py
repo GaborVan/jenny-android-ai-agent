@@ -62,12 +62,40 @@ def test_specs_are_serializable_for_the_webui() -> None:
         assert payload["scope"] in ("any", "project")
 
 
-def test_project_only_commands_are_the_two_that_expand_in_the_turn() -> None:
-    """``/tidy`` e ``/init``, e nessun altro.
+def test_project_only_commands_are_the_ones_whose_subject_is_this_project() -> None:
+    """``/tidy``, ``/init`` e ``/gardener``, e nessun altro.
 
-    Sono i due che non passano dal router perche' si espandono nel turno di un
-    progetto (``agent/loop.py``): fuori da un progetto non hanno un soggetto, e
-    offrirli comunque vorrebbe dire proporre due voci che non fanno niente.
+    Il criterio e' il **soggetto**, non il meccanismo: fuori da un progetto
+    questi tre non hanno su cosa agire, e offrirli comunque vorrebbe dire
+    proporre voci che non fanno niente.
+
+    ``/gardener`` e' entrato il 31/08/2026, quando ha smesso di accettare il nome
+    di un progetto: prendeva il bersaglio da un argomento — il telecomando dalla
+    chat personale, che il layer dei tool non ha mai avuto (``journal_append``
+    fuori da un progetto rifiuta e non ha un argomento con cui aggirarsi) — e con
+    quello via il suo soggetto e' la conversazione in cui si e'.
     """
     project_only = {spec.command for spec in BUILTIN_COMMAND_SPECS if spec.scope == "project"}
-    assert project_only == {"/tidy", "/init"}
+    assert project_only == {"/tidy", "/init", "/gardener"}
+
+
+def test_the_two_that_expand_in_the_turn_do_not_pass_through_the_router() -> None:
+    """Invariante diversa dalla precedente, e va tenuta separata.
+
+    ``/tidy`` e ``/init`` non sono comandi del router: si espandono in un turno
+    normale (``agent/loop.py::PROJECT_INIT_COMMAND``), quindi la tendina e' la
+    loro sola superficie di scoperta. ``/gardener`` invece e' un comando vero e
+    proprio con lo stesso scope: confondere le due cose e' come l'invariante
+    precedente e' diventata falsa.
+    """
+    from jenny.agent.loop import PROJECT_INIT_COMMAND, PROJECT_TIDY_COMMAND
+    from jenny.command.builtin import register_builtin_commands
+    from jenny.command.router import CommandRouter
+
+    router = CommandRouter()
+    register_builtin_commands(router)
+
+    assert {PROJECT_INIT_COMMAND, PROJECT_TIDY_COMMAND} == {"/init", "/tidy"}
+    assert not router.is_dispatchable_command(PROJECT_INIT_COMMAND)
+    assert not router.is_dispatchable_command(PROJECT_TIDY_COMMAND)
+    assert router.is_dispatchable_command("/gardener")

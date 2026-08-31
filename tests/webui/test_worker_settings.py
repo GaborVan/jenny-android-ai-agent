@@ -314,6 +314,29 @@ async def test_the_confirmation_lets_it_through(config_path) -> None:
     assert load_config(config_path).agents.defaults.dream.review_every_runs == 1
 
 
+def test_the_floor_is_twelve_and_equals_the_shipped_default() -> None:
+    """Pavimento e default devono restare lo stesso numero.
+
+    Un pavimento sotto il default sarebbe una zona in cui la manopola scrive un
+    valore che il piano della memoria non vuole; uno sopra renderebbe il default
+    stesso irraggiungibile senza conferma.
+    """
+    assert REVIEW_CADENCE_FLOOR == 12
+    assert DreamConfig().review_every_runs == REVIEW_CADENCE_FLOOR
+
+
+def test_the_schema_still_accepts_a_restored_value_below_the_floor() -> None:
+    """Il pavimento vive in questa superficie *perché* lo schema non deve alzarlo.
+
+    Un ``ge=12`` renderebbe illeggibile un ``config.json`` con
+    ``reviewEveryRuns: 1``: ``loader._load_with_recovery`` proverebbe il ``.bak``
+    — stesso valore — e poi metterebbe il file in quarantena ripartendo dai
+    default, provider e chiave API inclusi.
+    """
+    assert DreamConfig(review_every_runs=1).review_every_runs == 1
+    assert DreamConfig.model_validate({"reviewEveryRuns": 1}).review_every_runs == 1
+
+
 async def test_a_cadence_at_the_floor_needs_no_confirmation(config_path) -> None:
     await update_memory_settings({"review_every_runs": [str(REVIEW_CADENCE_FLOOR)]})
 
@@ -331,6 +354,56 @@ def test_module_never_calls_save_config_directly() -> None:
     source = Path(worker_settings.__file__).read_text("utf-8")
 
     assert "save_config" not in source
+
+
+async def test_an_unknown_config_key_survives_the_write(config_path) -> None:
+    """Il test che muore se qualcuno rimpiazza ``mutate()`` con ``save_config()``.
+
+    ``save_config`` riscrive il file intero dal dump dello schema: senza
+    ``preserve_unknown_from`` — che passa solo ``store.mutate`` — ogni chiave che
+    questa versione non conosce viene cancellata. Sono le impostazioni di una
+    versione più nuova, e su un telefono che ha aggiornato e poi è tornato
+    indietro sparirebbero al primo tocco di una di queste manopole.
+
+    Portato qui da ``tests/command/test_gardener_settings_command.py`` insieme
+    alla manopola: la promessa è del funnel, non della superficie che lo usa.
+    """
+    raw = json.loads(config_path.read_text("utf-8"))
+    raw["somethingFromANewerVersion"] = {"keep": "me"}
+    config_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+
+    await update_worker_settings({"gardener_interval_min": ["120"]})
+
+    saved = json.loads(config_path.read_text("utf-8"))
+    assert saved["somethingFromANewerVersion"] == {"keep": "me"}
+    assert saved["agents"]["defaults"]["gardener"]["intervalMin"] == 120
+
+
+async def test_the_write_keeps_the_file_private(config_path) -> None:
+    """Nel file c'è la chiave del provider: un ``config.json`` leggibile a tutti è
+    una regressione di sicurezza silenziosa. Il ``chmod 600`` lo ripristina
+    ``save_config`` in fondo al funnel — questo test copre la strada che un
+    ``chmod`` fatto a mano fuori dal funnel romperebbe (è già successo: un
+    ``sed -i`` sul telefono)."""
+    config_path.chmod(0o600)
+
+    await update_worker_settings({"gardener_interval_min": ["120"]})
+
+    assert config_path.stat().st_mode & 0o777 == 0o600
+
+
+async def test_a_read_only_request_rotates_no_backup(config_path) -> None:
+    """Una richiesta che non cambia niente non deve far ruotare il ``.bak``: il
+    backup è la rete di salvataggio di ``config.json``, e riempirlo con copie
+    identiche vuol dire perdere la sola versione che serviva."""
+    from jenny.config.loader import _backup_path
+
+    before = config_path.read_bytes()
+
+    await update_worker_settings({})
+
+    assert config_path.read_bytes() == before
+    assert not _backup_path(config_path).exists()
 
 
 # -- rotte e ri-armo ---------------------------------------------------------

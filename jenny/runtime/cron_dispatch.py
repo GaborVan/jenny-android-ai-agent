@@ -240,7 +240,8 @@ def _alert_gardener_stuck(name: str, failures: int, status: str) -> None:
 
     notify_delivery(
         f"The gardener has failed {failures} passes in a row on '{name}' ({status}): "
-        f"its journal is not becoming pages. Run /gardener {name} to see the error.",
+        f"its journal is not becoming pages. Open that project and send /gardener to see "
+        f"the error.",
         {
             WEBUI_MESSAGE_SOURCE_METADATA_KEY: {
                 "kind": "cron",
