@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -263,7 +262,7 @@ class TestDegradeToRestart:
         lineage = await _spawn_and_settle(sm, task="write the report")
         # Invecchia la storia oltre la TTL.
         sm._history.ttl_s = 0.001
-        time.sleep(0.002)
+        await asyncio.sleep(0.002)
 
         outcome = await sm.send(lineage, "change the title")
         assert outcome.mode == "restarted"
