@@ -41,6 +41,7 @@ from typing import Any
 
 from loguru import logger
 
+from jenny.channels.http_utils import FALSY_VALUES, TRUTHY_VALUES, parse_flag
 from jenny.config import store
 from jenny.config.loader import load_config
 from jenny.config.schema import AtlasConfig, Config, DreamConfig, GardenerConfig
@@ -63,8 +64,7 @@ QueryParams = dict[str, list[str]]
 # ``confirm_back_to_back``, che il client alza solo dopo un dialogo.
 REVIEW_CADENCE_FLOOR = 12
 
-_TRUTHY = ("1", "true", "yes", "on")
-_FALSY = ("0", "false", "no", "off")
+
 
 
 # ── Lettura ──────────────────────────────────────────────────────────────────
@@ -212,15 +212,14 @@ def _first(query: QueryParams, *names: str) -> str | None:
 
 def _flag(query: QueryParams, *names: str) -> bool:
     """Un flag di conferma: vero solo se dichiarato esplicitamente vero."""
-    raw = _first(query, *names)
-    return raw is not None and raw.strip().lower() in _TRUTHY
+    return parse_flag(_first(query, *names))
 
 
 def _parse_bool(raw: str, field: str) -> bool:
     value = raw.strip().lower()
-    if value in _TRUTHY:
+    if value in TRUTHY_VALUES:
         return True
-    if value in _FALSY:
+    if value in FALSY_VALUES:
         return False
     raise WebUISettingsError(f"{field} must be a boolean")
 

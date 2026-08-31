@@ -44,6 +44,7 @@ from jenny.agent.tools.ssh_transport import (
     record_host_key,
     ssh_key_path,
 )
+from jenny.channels.http_utils import parse_flag
 from jenny.config import store
 from jenny.config.loader import load_config
 from jenny.config.schema import Config
@@ -90,7 +91,7 @@ def _required(query: QueryParams, key: str) -> str:
 
 
 def _flag(query: QueryParams, key: str) -> bool:
-    return (_query_first(query, key) or "").strip().lower() in ("1", "true", "yes", "on")
+    return parse_flag(_query_first(query, key))
 
 
 def _parse_alias(query: QueryParams) -> str:

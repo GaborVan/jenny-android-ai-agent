@@ -17,6 +17,7 @@ from loguru import logger
 
 from jenny import __version__
 from jenny.agent.token_usage import token_usage_payload
+from jenny.channels.http_utils import parse_flag
 from jenny.config import store
 from jenny.config.loader import get_config_path, load_config
 from jenny.config.schema import KEEP_AWAKE_MODES, Config
@@ -1188,7 +1189,7 @@ async def update_location_settings(query: QueryParams) -> dict[str, Any]:
         enabled = _query_first(query, "enabled")
         if enabled is None:
             return False
-        value = enabled.strip().lower() in ("1", "true", "yes", "on")
+        value = parse_flag(enabled)
         if loc.enable == value:
             return False
         loc.enable = value

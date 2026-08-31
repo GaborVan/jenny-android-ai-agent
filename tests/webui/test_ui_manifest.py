@@ -198,3 +198,27 @@ def test_no_dead_token_references():
         for match in pattern.finditer(path.read_text()):
             offenders.append(f"{path.name}: {match.group(0)}")
     assert not offenders, f"references to removed CSS tokens: {offenders}"
+
+
+def test_third_party_licenses_are_actually_shipped():
+    """Ogni licenza che THIRD_PARTY_NOTICES.md promette deve finire nell'APK.
+
+    Il buco che questo chiude: la licenza di DOMPurify stava su disco e nel file
+    delle note, ma non nel manifest — quindi l'APK spediva il codice senza il
+    testo di licenza a cui le note rimandano. Le altre otto librerie
+    vendorizzate ce l'avevano. Il guard speculare qui sopra non l'ha visto
+    perché guarda solo ``.js``/``.css``/``.html``, e un ``LICENSE`` non ha
+    estensione.
+    """
+    notices = (UI_DIR.parents[2] / "THIRD_PARTY_NOTICES.md").read_text()
+    promised = sorted(set(re.findall(r"`(vendor/[^`]+/LICENSE(?:\.md|\.txt)?)`", notices)))
+    assert promised, "nessun percorso di licenza trovato in THIRD_PARTY_NOTICES.md"
+
+    manifest = set(_UI_MANIFEST)
+    missing_on_disk = [p for p in promised if not (UI_DIR / "assets" / p).is_file()]
+    unshipped = [p for p in promised if f"assets/{p}" not in manifest]
+
+    assert not missing_on_disk, f"licenze promesse dalle note e assenti su disco: {missing_on_disk}"
+    assert not unshipped, (
+        f"licenze presenti su disco ma fuori da _UI_MANIFEST, quindi non spedite: {unshipped}"
+    )

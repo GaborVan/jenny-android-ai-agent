@@ -311,6 +311,7 @@ _UI_MANIFEST = [
     "assets/vendor/codemirror@5.65.16/theme/eclipse.min.css",
     "assets/vendor/d3@7/LICENSE",
     "assets/vendor/d3@7/d3.min.js",
+    "assets/vendor/dompurify@3/LICENSE",
     "assets/vendor/dompurify@3/purify.min.js",
     "assets/vendor/fonts/LICENSE.txt",
     "assets/vendor/fonts/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa0ZL7SUc.woff2",

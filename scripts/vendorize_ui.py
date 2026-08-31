@@ -32,6 +32,7 @@ LICENSE_PATHS = {
     "marked@15.0.7": "https://cdn.jsdelivr.net/npm/marked@15.0.7/LICENSE.md",
     "mermaid@10": "https://cdn.jsdelivr.net/npm/mermaid@10/LICENSE",
     "d3@7": "https://cdn.jsdelivr.net/npm/d3@7/LICENSE",
+    "dompurify@3": "https://cdn.jsdelivr.net/npm/dompurify@3/LICENSE",
     "highlight.js@11.11.1": "https://raw.githubusercontent.com/highlightjs/cdn-release/11.11.1/LICENSE",
 }
 
