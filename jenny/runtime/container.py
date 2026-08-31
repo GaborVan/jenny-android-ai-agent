@@ -68,6 +68,29 @@ class GatewayContainer:
             return stripped or None
         return None
 
+    def _on_jobs_changed(self, worker: str) -> None:
+        """Ri-arma il job periodico di un lavoratore dopo un cambio in Impostazioni.
+
+        Gancio distinto da :meth:`_on_settings_changed`, che ricostruisce
+        provider e modello: qui non si tocca il provider, si fa vedere al cron una
+        pianificazione nuova. E serve soprattutto per il caso in cui il job **non
+        è registrato** — un gateway partito col lavoratore spento — dove il solo
+        ``enabled=True`` nel file non lo farebbe partire fino al riavvio.
+        """
+        if self.cron is None:
+            return
+        from jenny.runtime.cron_dispatch import refresh_system_job
+
+        try:
+            schedule = refresh_system_job(self.cron, worker)
+        except Exception as e:  # noqa: BLE001 — il valore è già scritto: questo è il contorno
+            logger.warning("Could not re-arm the {} cron job: {}", worker, e)
+            return
+        if schedule:
+            logger.info("{}: re-armed for {}", worker.capitalize(), schedule)
+        else:
+            logger.info("{}: disabled", worker.capitalize())
+
     def _on_settings_changed(self) -> None:
         """Hot-reload model/provider when WebUI settings change."""
         if not self._agent:
@@ -355,6 +378,7 @@ class GatewayContainer:
             webui_runtime_model_name=self._webui_runtime_model_name,
             onboarding_event=self.onboarding_event,
             on_settings_changed=self._on_settings_changed,
+            on_jobs_changed=self._on_jobs_changed,
             # Late-binding come ``get_agent`` per il cron: l'agente può essere
             # creato dopo il gateway (onboarding) e riassegnato da set_agent.
             get_subagent_manager=lambda: getattr(self._agent, "subagents", None),

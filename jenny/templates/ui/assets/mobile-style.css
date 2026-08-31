@@ -4597,6 +4597,55 @@ body {
 }
 .settings-choice-cost:empty { display: none; }
 
+/* Righe di spiegazione sotto un controllo, e il vuoto dichiarato.
+   Le due classi erano usate dal JS (`settings-empty` dal riquadro dei token) e
+   non esistevano qui: ogni spiegazione si portava dietro il proprio `style=`
+   inline, cioè tre dichiarazioni ricopiate a mano ogni volta. Le sezioni
+   Memoria e Wiki ne hanno una dozzina, e su una manopola la riga che dice cosa
+   si sta pagando conta quanto il controllo. */
+.settings-hint {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-faint);
+}
+
+.settings-empty {
+  padding: 10px 0;
+  font-size: 13px;
+  color: var(--text-faint);
+}
+
+/* Il tetto di un file di memoria: quanto è pieno adesso.
+   Un numero da solo non dice se 2.900 su 3.000 è tanto — la barra sì, ed è la
+   ragione per cui il gauge esisteva già nel testo che `/dream budget` stampava.
+   `.is-over` prende il colore d'errore perché "pieno" e "sforato" non devono
+   somigliarsi: sforato vuol dire che Dream sta rifiutando delle scritture. */
+.settings-budget { margin-top: 8px; }
+
+.settings-meter {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--overlay-strong);
+  overflow: hidden;
+}
+
+.settings-meter > span {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+  transition: width 0.3s cubic-bezier(.25,.1,.25,1);
+}
+
+.settings-meter.is-over > span { background: var(--error); }
+
+.settings-budget-measure {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
 /* Toggle switch */
 .settings-toggle-row {
   flex-direction: row;

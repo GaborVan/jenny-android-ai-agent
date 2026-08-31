@@ -252,19 +252,26 @@ def _alert_gardener_stuck(name: str, failures: int, status: str) -> None:
 
 GARDENER_JOB_ID = "gardener"
 
+# I tre lavoratori periodici, col nome del loro job e il campo di config che li
+# tara. Elenco chiuso e non un getattr sul nome: chi aggiunge un lavoratore lo
+# registra qui, e chi legge vede in tre righe quali sono.
+_SYSTEM_WORKERS: tuple[str, ...] = ("dream", "atlas", "gardener")
 
-def refresh_gardener_job(cron: "CronService", *, config: "Config | None" = None) -> str | None:
-    """Ri-arma il job periodico del giardiniere sulla config di adesso, senza riavvio.
 
-    Serve la controparte di ``_run_gardener``: la rilettura a ogni tick fa vedere
-    ``enabled``/``idle_min``/``min_hours_between_passes``, ma **non**
-    ``interval_min``. Quel numero non vive nel ``Config``: è diventato lo
-    ``schedule`` del ``CronJob`` scritto nello store del cron alla registrazione,
-    e da lì in poi nessuna lettura di ``config.json`` lo tocca.
+def refresh_system_job(
+    cron: "CronService", worker: str, *, config: "Config | None" = None
+) -> str | None:
+    """Ri-arma il job periodico di *worker* sulla config di adesso, senza riavvio.
+
+    Serve la controparte della rilettura a ogni tick: quella fa vedere i campi
+    che il dispatch legge (``enabled``, il fermo del giardiniere, la distanza fra
+    due passate), ma **non l'intervallo**. Quel numero non vive nel ``Config``: è
+    diventato lo ``schedule`` del ``CronJob`` scritto nello store del cron alla
+    registrazione, e da lì in poi nessuna lettura di ``config.json`` lo tocca.
 
     E c'è il caso peggiore, quello che rende questa funzione necessaria e non
-    comoda: ``GatewayContainer.build`` registra il job **solo se acceso**. Su un
-    gateway partito con il giardiniere spento, ``/gardener on`` scriverebbe un
+    comoda: ``GatewayContainer.build`` registra ogni job **solo se acceso**. Su un
+    gateway partito con un lavoratore spento, riaccenderlo scriverebbe un
     ``enabled=True`` che nessun job va a leggere — l'interruttore che riaccende
     resterebbe l'unico a chiedere un riavvio.
 
@@ -273,23 +280,40 @@ def refresh_gardener_job(cron: "CronService", *, config: "Config | None" = None)
     intervallo identico non sposta la prossima scadenza.
 
     Ritorna la descrizione della pianificazione armata, o ``None`` se il
-    giardiniere è spento: a spegnere non si deregistra niente — non esiste una
-    controparte di ``register_system_job`` — e il cancello è quello di dispatch in
-    ``CronDispatcher._run_gardener``.
+    lavoratore è spento: a spegnere non si deregistra niente — non esiste una
+    controparte di ``register_system_job`` — e il cancello è quello di dispatch
+    (``CronDispatcher._run_dream`` / ``_run_atlas`` / ``_run_gardener``).
+
+    **Vale per tutti e tre e non solo per il giardiniere** (31/08/2026). Prima
+    esisteva solo la versione del giardiniere, perché era l'unico con un
+    interruttore raggiungibile; portando le manopole in Impostazioni, Dream e
+    Atlas hanno guadagnato lo stesso interruttore e avevano bisogno della stessa
+    controparte.
     """
     from jenny.config.loader import load_config
     from jenny.cron.types import CronJob, CronPayload
 
-    cfg = (config or load_config()).agents.defaults.gardener
+    if worker not in _SYSTEM_WORKERS:
+        raise ValueError(f"unknown system worker {worker!r}; known: {_SYSTEM_WORKERS}")
+    cfg = getattr((config or load_config()).agents.defaults, worker)
     if not cfg.enabled:
         return None
     cron.register_system_job(CronJob(
-        id=GARDENER_JOB_ID,
-        name="gardener",
+        id=worker,
+        name=worker,
         schedule=cfg.build_schedule(),
         payload=CronPayload(kind="system_event"),
     ))
     return cfg.describe_schedule()
+
+
+def refresh_gardener_job(cron: "CronService", *, config: "Config | None" = None) -> str | None:
+    """Il caso del giardiniere di :func:`refresh_system_job`.
+
+    Resta come nome proprio perché è quello che i suoi test e i suoi chiamanti
+    conoscono; la logica è una sola.
+    """
+    return refresh_system_job(cron, GARDENER_JOB_ID, config=config)
 
 
 class CronDispatcher:

@@ -718,6 +718,35 @@ async def save_onboarding(
     }
 
 
+def _worker_settings_sections(config: Any) -> dict[str, Any]:
+    """Le due sezioni dei lavoratori periodici, o niente se non si possono leggere.
+
+    Import dentro la funzione perche' ``worker_settings`` importa da qui
+    (``WebUISettingsError``, :func:`settings_payload`): a livello di modulo
+    sarebbe un ciclo.
+
+    Il ``try`` non e' timidezza. Le due letture aprono quattro file dell'utente
+    (i tre di memoria piu' lo stato del review), e questa e' la schermata da cui
+    si spengono i lavoratori: se non si aprisse per un ``SOUL.md`` illeggibile,
+    il rimedio sarebbe fuori portata proprio quando serve. Le due funzioni sono
+    gia' fail-soft al loro interno; questo e' il secondo giro di chiave, per
+    tutto cio' che non e' la misura — uno schema che cambia, un campo rinominato.
+    """
+    try:
+        from jenny.webui.worker_settings import (
+            memory_settings_payload,
+            worker_settings_payload,
+        )
+
+        return {
+            "memory": memory_settings_payload(config),
+            "workers": worker_settings_payload(config),
+        }
+    except Exception:
+        logger.exception("could not build the worker settings sections")
+        return {"memory": None, "workers": None}
+
+
 def settings_payload(
     *,
     requires_restart: bool = False,
@@ -776,14 +805,11 @@ def settings_payload(
                 "interval_s": config.gateway.heartbeat.interval_s,
                 "keep_recent_messages": config.gateway.heartbeat.keep_recent_messages,
             },
-            "dream": {
-                "schedule": defaults.dream.describe_schedule(),
-            },
-            "atlas": {
-                "enabled": defaults.atlas.enabled,
-                "schedule": defaults.atlas.describe_schedule(),
-            },
         },
+        # Le manopole dei tre lavoratori periodici. Import locale: quel modulo
+        # importa ``WebUISettingsError`` e ``settings_payload`` da qui, quindi a
+        # livello di modulo sarebbe un ciclo.
+        **_worker_settings_sections(config),
         "usage": token_usage_payload(timezone_name=defaults.timezone),
         "advanced": {
             "workspace_sandbox": sandbox_status.as_dict(),

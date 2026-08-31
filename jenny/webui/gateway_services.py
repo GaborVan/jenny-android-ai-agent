@@ -63,6 +63,7 @@ def build_gateway_services(
     onboarding_event: Any | None = None,
     on_settings_changed: Callable[[], None] | None = None,
     on_telegram_changed: Callable[[], None] | None = None,
+    on_jobs_changed: Callable[[str], None] | None = None,
 ) -> GatewayServices:
     media = WebUIMediaGateway(
         workspace_path=workspace_path,
@@ -93,6 +94,7 @@ def build_gateway_services(
         onboarding_event=onboarding_event,
         on_settings_changed=on_settings_changed,
         on_telegram_changed=on_telegram_changed,
+        on_jobs_changed=on_jobs_changed,
     )
     return GatewayServices(
         http=http,

@@ -375,6 +375,35 @@ class ApiClient {
     return res.json();
   }
 
+  /* Le manopole di Dream e i tetti della memoria lunga. Il messaggio d'errore
+     del server è utile qui — nomina il range sforato — quindi viaggia
+     nell'errore invece di essere sostituito da uno generico. */
+  async updateMemorySettings(params) {
+    const res = await this._postWithQuery('/api/settings/memory/update', params);
+    if (!res.ok) throw new Error(await this._errorText(res, 'Memory settings update failed'));
+    return res.json();
+  }
+
+  /* Atlas, il giardiniere, e la compattazione delle chat di progetto. */
+  async updateWorkerSettings(params) {
+    const res = await this._postWithQuery('/api/settings/workers/update', params);
+    if (!res.ok) throw new Error(await this._errorText(res, 'Worker settings update failed'));
+    return res.json();
+  }
+
+  /* Il testo di un rifiuto, col ripiego sullo status. Il corpo di un 400 del
+     gateway è **testo semplice** (`http_utils.http_error`) e contiene il perché
+     — «gardener_idle_min must be between 0–1440» — che buttato via lascerebbe
+     l'utente con "update failed". Tetto sulla lunghezza: quel corpo finisce in
+     un toast, e su un 502 di mezzo potrebbe essere una pagina HTML. */
+  async _errorText(res, fallback) {
+    try {
+      const body = (await res.text()).trim();
+      if (body && body.length <= 200 && !body.startsWith('<')) return body;
+    } catch { /* corpo illeggibile: resta il ripiego */ }
+    return `${fallback}: ${res.status}`;
+  }
+
   async updateLocation(params) {
     const res = await this._postWithQuery('/api/settings/location/update', params);
     if (!res.ok) throw new Error(`Location update failed: ${res.status}`);
