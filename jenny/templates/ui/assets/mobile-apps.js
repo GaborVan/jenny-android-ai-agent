@@ -296,24 +296,12 @@ export class AppsController {
    *  pacchetto, che è un dato vero, distingue due app omonime, e si cerca
    *  ("gmail" trova *Gmail* anche da `com.google.android.gm`). */
   launcherEntries() {
+    /* Niente skill qui. Il cassetto è un **lanciatore**: le skill non si
+       lanciano — toccarne una apre una scheda o un file — e mescolarle alle
+       app faceva una lista di tre nature diverse, cioè il difetto 01 del
+       rilievo rimesso in piedi un livello più in là. Restano nella scheda
+       Apps; dove vadano davvero a stare è una decisione ancora aperta. */
     const entries = [];
-    for (const skill of this.skills) {
-      if (!advancedMode() && skill.internal) continue;
-      /* `_skillUserSummary` preferisce il riassunto localizzato delle skill
-         locked e ripiega su `description`; il suo ultimo ripiego è il *nome*,
-         che in una riga che il nome ce l'ha già sopra sarebbe solo rumore. */
-      const summary = this._skillUserSummary(skill);
-      const description = summary === skill.name ? '' : summary;
-      entries.push({
-        key: `skill:${skill.name}`, id: skill.name, kind: 'skill', name: skill.name,
-        glyph: 'ti-puzzle', icon: null,
-        description,
-        problem: skill.disabled
-          ? i18n.t('apps.disabled')
-          : (skill.available === false ? (skill.unavailable_reason || null) : null),
-        searchText: description,
-      });
-    }
     for (const app of this.jennyApps) {
       const problem = app.broken
         ? (app.error || i18n.t('apps.invalidManifest')) : null;

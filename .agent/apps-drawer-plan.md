@@ -446,6 +446,32 @@ con la tastiera fisica, questo ramo **potrebbe non accendersi mai**.
 **È la prima cosa da guardare quando il telefono è collegato** — v.
 [`apps-drawer-handover.md`](./apps-drawer-handover.md).
 
+## Rivisto ancora il 31/08, dopo averlo usato
+
+**Un ingresso solo: lo slot del dock.** Il pulsante nel composer è stato tolto.
+Averne due sembrava prudenza e invece era il difetto: quello nel composer
+esisteva in una vista sola, e la sua presenza mascherava che dal resto dell'app
+il cassetto non si aprisse.
+
+> **Conseguenza da tenere d'occhio.** Con il pulsante via, se il dock sparisse
+> il cassetto non si aprirebbe da nessuna parte — e il dock sparisce sotto i
+> 500 px di viewport (`mobile-style.css`, la media query scritta per il
+> *landscape basso*). Sul Titan 2 non capita: 574 px, misurati. Ma se un giorno
+> quel ramo si accendesse, il lanciatore diventerebbe irraggiungibile. È
+> l'unico punto in cui questa scelta è fragile.
+
+**Niente skill nel cassetto.** Le skill non si lanciano — toccarne una apre una
+scheda o un file — e tenerle in un elenco insieme alle app rifaceva, un livello
+più in là, il difetto 01 del rilievo: una lista sola per nature diverse. Il
+cassetto ora ha due categorie, entrambe lanciabili.
+
+**Dove vadano le skill è aperto.** Per ora restano nella scheda Apps, dov'erano.
+La direzione *Tre stanze* del rilievo aveva una risposta — una lista con
+interruttori, perché sono impostazioni dell'agente e non destinazioni — ma è una
+decisione da prendere guardando, non da dedurre.
+
+**Ordine del dock, finale:** Chat, Wiki, **Apps al centro**, File, Impostazioni.
+
 ## D1/D2 — chiusi dall'uso, il 31/08
 
 Le due decisioni sono state riviste due volte, e la seconda l'ha decisa il

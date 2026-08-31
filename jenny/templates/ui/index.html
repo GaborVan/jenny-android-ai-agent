@@ -168,13 +168,6 @@
             </button>
           </div>
           <div id="input-row" class="compose-row">
-            <!-- Il cassetto delle app si apre da qui, non dal dock: `#input-bar`
-                 c'è in ogni geometria, mentre lo slot del dock sparisce sotto i
-                 500 px di viewport (v. D1 in .agent/apps-drawer-plan.md). -->
-            <button id="btn-launcher" class="compose-launcher" type="button"
-                    aria-haspopup="dialog" aria-expanded="false"
-                    title="Apri app" data-i18n-title="launcher.open"
-                    aria-label="Apri app" data-i18n-aria="launcher.open"><i class="ti ti-apps"></i></button>
             <div class="compose-pill">
               <textarea id="chat-input" placeholder="Chiedi qualcosa…" rows="1" aria-label="Messaggio" data-i18n-placeholder="chat.placeholder" data-i18n-aria="chat.message"></textarea>
               <div class="input-actions" id="secondary-actions">
@@ -255,13 +248,14 @@
 
   <!-- MICRO DOCK — always visible -->
   <nav class="dock" aria-label="Navigazione" data-i18n-aria="nav.ariaLabel">
-    <!-- Ordine voluto: Wiki a sinistra, Apps **al centro** — è lo slot più
+    <!-- Ordine voluto: Chat, Wiki, Apps **al centro**, File, Impostazioni.
+         Apps al centro perché è lo slot più
          raggiungibile dal pollice, e su uno schermo quadrato il centro del
          dock è il punto più comodo che ci sia. L'ordine del DOM è anche
          quello del carosello orizzontale, che `_visibleModes()` deriva da
          qui: spostare una voce sposta anche lo swipe. -->
-    <div class="dock-item" data-mode="graph" title="Wiki" data-i18n-title="nav.wiki"><i class="ti ti-topology-star"></i></div>
     <div class="dock-item active" data-mode="chat" title="Chat" data-i18n-title="nav.chat"><span class="dock-flower">✿</span></div>
+    <div class="dock-item" data-mode="graph" title="Wiki" data-i18n-title="nav.wiki"><i class="ti ti-topology-star"></i></div>
     <!-- Lo slot Apps **apre il cassetto**, non cambia vista (v. `openLauncher`
          in mobile-app.js). `data-mode` gli resta perché il carosello deve
          continuare a raggiungere la scheda, che è dove si gestisce

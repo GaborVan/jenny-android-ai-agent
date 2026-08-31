@@ -47,8 +47,10 @@ def _method(source: str, name: str) -> str:
 def test_the_gateway_description_reaches_the_entry() -> None:
     body = _method(_src("mobile-apps.js"), "launcherEntries")
     assert "app.description" in body, "la description delle Jenny App si perde"
-    assert "_skillUserSummary(skill)" in body, (
-        "le skill hanno description e user_summary: entrambi passano da qui"
+    assert "app.description || ''" in body, "le Jenny App portano la loro description"
+    assert "description: app.packageName" in body, (
+        "le app Android non hanno description: al suo posto il pacchetto, che è "
+        "un dato vero e si cerca"
     )
     assert "app.packageName" in body, (
         "le app Android non hanno descrizione: al suo posto va il pacchetto, "
@@ -68,7 +70,10 @@ def test_the_secondary_line_is_searchable() -> None:
     """3.1: si cerca su nome **e** descrizione. Se `searchText` non arrivasse
     alla voce, la ricerca tornerebbe a essere solo sui nomi senza fallire."""
     body = _method(_src("mobile-apps.js"), "launcherEntries")
-    assert body.count("searchText:") == 3, "una delle tre categorie non è cercabile"
+    assert body.count("searchText:") == 2, (
+        "entrambe le categorie del cassetto devono essere cercabili "
+        "(le skill non ci sono più: v. test_no_skills_in_the_drawer)"
+    )
 
 
 # ── difetto 05 — il guasto non deforma la riga ──────────────────────────────
@@ -399,8 +404,11 @@ def test_the_sheet_is_actually_in_the_page() -> None:
     html = (ROOT / "jenny" / "templates" / "ui" / "index.html").read_text(encoding="utf-8")
     for node in ('id="launcher-sheet"', 'id="launcher-scrim"', 'id="launcher-list"',
                  'id="launcher-search"', 'id="launcher-title"', 'id="launcher-close"',
-                 'id="launcher-handle-row"', 'id="btn-launcher"'):
+                 'id="launcher-handle-row"'):
         assert node in html, f"{node} manca da index.html: il foglio non esiste più"
+    # L'unico ingresso: lo slot del dock. Il pulsante nel composer è stato
+    # tolto perché esisteva in una vista sola.
+    assert 'data-opens="launcher"' in html, "senza questo il foglio non si apre da nessuna parte"
     # Vive *fuori* da `.app`: è ciò che gli permette di coprire il dock, di
     # restare fuori dall'inerzia che si applica allo sfondo, e di lasciarsi
     # sovrapporre da una mini-app aperta da lui senza trucchi di z-index.
@@ -612,15 +620,15 @@ def test_the_dock_apps_slot_opens_the_sheet() -> None:
     assert "this.openLauncher()" in src
 
 
-def test_the_dock_order_is_wiki_chat_apps_workspace_settings() -> None:
-    """Apps al centro (il pollice), Wiki a sinistra. L'ordine del DOM è anche
+def test_the_dock_order_is_chat_wiki_apps_workspace_settings() -> None:
+    """Chat, Wiki, **Apps al centro** (è lì il pollice), File, Impostazioni. L'ordine del DOM è anche
     quello del carosello orizzontale (`_visibleModes`), quindi è un contratto,
     non una preferenza grafica."""
     html = (ROOT / "jenny/templates/ui/index.html").read_text(encoding="utf-8")
     nav = html[html.index('<nav class="dock"'):html.index("</nav>")]
     modes = re.findall(r'data-mode="([a-z]+)"', nav)
     modes = [m for m in modes if m != "onboarding"]  # nascosto fuori dal primo avvio
-    assert modes == ["graph", "chat", "apps", "workspace", "settings"], modes
+    assert modes == ["chat", "graph", "apps", "workspace", "settings"], modes
     assert modes[2] == "apps", "Apps deve stare al centro dei cinque"
 
 
@@ -642,3 +650,26 @@ def test_the_sheet_itself_shows_no_focus_ring() -> None:
     assert 'tabindex="-1"' in sheet, "se diventasse raggiungibile con Tab, l'anello servirebbe"
     css = _src("mobile-style.css")
     assert ".launcher-sheet:focus,\n.launcher-sheet:focus-visible { outline: none; }" in css
+
+
+def test_no_skills_in_the_drawer() -> None:
+    """Il cassetto è un lanciatore, e le skill non si lanciano: toccarne una
+    apre una scheda o un file. Mescolarle alle app rifaceva, un livello più in
+    là, il difetto 01 del rilievo — un solo elenco per nature diverse. Restano
+    nella scheda Apps; dove vadano davvero è ancora da decidere.
+    """
+    body = _method(_src("mobile-apps.js"), "launcherEntries")
+    assert "for (const skill of this.skills)" not in body
+    assert "kind: 'skill'" not in body
+    assert "skill:${skill.name}" not in body
+    # E il foglio non deve avere più un ramo per una specie che non arriva.
+    assert "'skill'" not in _method(_src("mobile-launcher.js"), "_buildRow")
+
+
+def test_the_composer_has_no_launcher_button() -> None:
+    """Tolto: l'apertura è una sola, lo slot del dock. Un secondo ingresso che
+    esiste in una vista sola era il difetto che ha reso il cassetto
+    irraggiungibile da tutte le altre."""
+    html = (ROOT / "jenny/templates/ui/index.html").read_text(encoding="utf-8")
+    assert "btn-launcher" not in html
+    assert "btn-launcher" not in _src("mobile-launcher.js"), "niente riferimenti penzolanti"

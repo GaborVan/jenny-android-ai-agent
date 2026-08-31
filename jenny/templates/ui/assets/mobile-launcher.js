@@ -158,9 +158,6 @@ export class LauncherController {
     this.closeBtn?.addEventListener('click', () => this.close());
     this.scrim?.addEventListener('click', () => this.close());
 
-    this.trigger = document.getElementById('btn-launcher');
-    this.trigger?.addEventListener('click', () => this.app.openLauncher());
-
     this.manageBtn?.addEventListener('click', () => this._openManager());
     this.retryBtn?.addEventListener('click', () => this._retryFailedLists());
 
@@ -477,7 +474,6 @@ export class LauncherController {
     this.sheet.classList.add('open');
     this.sheet.setAttribute('aria-hidden', 'false');
     this.scrim?.classList.add('open');
-    this.trigger?.setAttribute('aria-expanded', 'true');
     // Il campo è un `combobox` e la sua lista è a schermo per tutto il tempo in
     // cui il foglio lo è: non c'è un popup che si apre e si chiude a parte.
     this.search?.setAttribute('aria-expanded', 'true');
@@ -516,7 +512,6 @@ export class LauncherController {
     this.sheet.classList.remove('open');
     this.sheet.setAttribute('aria-hidden', 'true');
     this.scrim?.classList.remove('open');
-    this.trigger?.setAttribute('aria-expanded', 'false');
     this.search?.setAttribute('aria-expanded', 'false');
     this._setBackgroundInert(false);
     const previous = this._lastFocus;
