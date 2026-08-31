@@ -59,6 +59,22 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
+      # Node serve a QUESTO job, non solo al lint: una ventina di suite della
+      # WebUI eseguono il JS reale con `node` e si SALTANO se manca. Passavano
+      # solo perche' l'immagine ubuntu-latest lo include di suo — il giorno che
+      # smettesse, ~200 prove sparirebbero in verde. Il guard in
+      # tests/webui/test_node_is_available.py fallisce invece di saltare quando
+      # `CI` e' impostata, cosi' la sparizione fa rumore.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      # jsdom non e' una dipendenza del repo (non e' un progetto npm), quindi si
+      # installa qui e si rende risolvibile via NODE_PATH: e' il comando che la
+      # docstring di tests/webui/test_graph_search_contract.py indica. Senza,
+      # quel file — l'unico che copre la maschera di ricerca contro i nodi
+      # davvero disegnati — non gira mai, ne' qui ne' in locale.
+      - run: npm install --no-save jsdom
+      - run: echo "NODE_PATH=$PWD/node_modules" >> "$GITHUB_ENV"
       # CI validates the Android code path on a host runner; Android is the only supported runtime target.
       - run: pip install -e .
       - run: pip install ruff pytest pytest-asyncio

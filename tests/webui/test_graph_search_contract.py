@@ -91,8 +91,13 @@ window.SVGElement.prototype.getBBox = function () {
 
 const define = (k, v) =>
   Object.defineProperty(globalThis, k, { value: v, configurable: true, writable: true });
+// `localStorage` sta nell'elenco perché `assets/shared/state.js` lo legge
+// a load-time, non dietro una funzione: senza, l'import del controller muore
+// prima di arrivare al primo assert. jsdom lo fornisce grazie all'opzione
+// `url` sopra; i moduli lo leggono come globale nudo, non come `window.*`.
 for (const k of ['document', 'window', 'requestAnimationFrame', 'cancelAnimationFrame',
-                 'CSS', 'getComputedStyle', 'SVGElement', 'Element', 'Node', 'd3']) {
+                 'CSS', 'getComputedStyle', 'SVGElement', 'Element', 'Node', 'd3',
+                 'localStorage', 'sessionStorage']) {
   define(k, window[k]);
 }
 // Non si può aliasare window.performance: l'implementazione di jsdom rimbalza
