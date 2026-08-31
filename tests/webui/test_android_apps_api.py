@@ -38,7 +38,7 @@ class FakeBridge:
 
 def _with_bridge(monkeypatch, bridge):
     monkeypatch.setattr(api, "get_android_context", lambda: object())
-    monkeypatch.setattr(api, "_BRIDGE_INSTANCE", bridge)
+    monkeypatch.setattr(api._BRIDGE, "instance", bridge)
 
 
 class TestNoAndroidContext:

@@ -29,10 +29,10 @@ from typing import Any
 
 from loguru import logger
 
+from jenny.runtime.chaquopy_bridge import BridgeCache
 from jenny.runtime.context import get_android_context
 
-_BRIDGE_LOCK = asyncio.Lock()
-_BRIDGE_INSTANCE: Any = None
+_BRIDGE = BridgeCache("com.flagdizero.jenny.LocationBridge")
 
 # Ultimo fix GPS noto (aggiornato dal refresh fire-and-forget). Letto in modo
 # sincrono da ``location_runtime_line``.
@@ -76,9 +76,8 @@ def reset_location_state() -> None:
     ``android_entry.run_gateway`` prima del nuovo event loop (una ``asyncio.Lock``
     si lega al loop su cui è awaitata la prima volta).
     """
-    global _BRIDGE_INSTANCE, _BRIDGE_LOCK, _CURRENT, _REFRESH_INFLIGHT
-    _BRIDGE_LOCK = asyncio.Lock()
-    _BRIDGE_INSTANCE = None
+    global _CURRENT, _REFRESH_INFLIGHT
+    _BRIDGE.reset()
     _CURRENT = None
     _REFRESH_INFLIGHT = False
     _TELEGRAM.clear()
@@ -86,26 +85,18 @@ def reset_location_state() -> None:
 
 
 def _resolve_bridge_class() -> Any:
-    """Risolve la classe Kotlin ``LocationBridge`` via Chaquopy."""
-    from java import jclass  # importabile solo sotto il runtime Chaquopy
+    """Risolve la classe Kotlin ``LocationBridge`` via Chaquopy.
 
-    return jclass("com.flagdizero.jenny.LocationBridge")
+    Resta una funzione di modulo, e non una chiamata diretta a
+    ``_BRIDGE.resolve_class``: è il seam su cui i test montano il finto
+    bridge fuori dal telefono.
+    """
+    return _BRIDGE.resolve_class()
 
 
 async def _get_bridge(context: Any) -> Any:
     """Costruisce o ritorna l'istanza cachata di ``LocationBridge`` (thread-safe)."""
-    global _BRIDGE_INSTANCE
-    if _BRIDGE_INSTANCE is not None:
-        return _BRIDGE_INSTANCE
-    async with _BRIDGE_LOCK:
-        if _BRIDGE_INSTANCE is not None:
-            return _BRIDGE_INSTANCE
-        bridge_cls = _resolve_bridge_class()
-        try:
-            _BRIDGE_INSTANCE = bridge_cls(context)
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(f"Failed to construct LocationBridge: {exc}") from exc
-        return _BRIDGE_INSTANCE
+    return await _BRIDGE.get(context, resolve=_resolve_bridge_class)
 
 
 def _parse_fix(raw: Any, *, source: str) -> LocationFix | None:

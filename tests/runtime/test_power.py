@@ -507,13 +507,13 @@ class TestResetPowerState:
         await cm.__aenter__()
         assert power._REFCOUNTS == {"turn": 1}
         assert power._HELD == {"turn"}
-        power._BRIDGE_INSTANCE = bridge
+        power._BRIDGE.instance = bridge
 
         power.reset_power_state()
 
         assert power._REFCOUNTS == {}
         assert power._HELD == set()
-        assert power._BRIDGE_INSTANCE is None
+        assert power._BRIDGE.instance is None
 
         # L'uscita del blocco superstite non deve sollevare né inventare release.
         await cm.__aexit__(None, None, None)

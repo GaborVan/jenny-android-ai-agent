@@ -19,11 +19,11 @@ from typing import Any
 
 from loguru import logger
 
+from jenny.runtime.chaquopy_bridge import BridgeCache
 from jenny.runtime.context import get_android_context
 from jenny.webui.metadata import WEBUI_MESSAGE_SOURCE_METADATA_KEY
 
-_BRIDGE_LOCK = asyncio.Lock()
-_BRIDGE_INSTANCE: Any = None
+_BRIDGE = BridgeCache("com.flagdizero.jenny.NotifierBridge")
 
 _ALERT_TIMEOUT_S = 10
 _BODY_MAX_CHARS = 200
@@ -40,32 +40,22 @@ def reset_notifier_state() -> None:
     Simmetrico a ``android_apps_api.reset_installed_apps_state``; chiamato da
     ``android_entry.run_gateway``.
     """
-    global _BRIDGE_INSTANCE, _BRIDGE_LOCK
-    _BRIDGE_LOCK = asyncio.Lock()
-    _BRIDGE_INSTANCE = None
+    _BRIDGE.reset()
 
 
 def _resolve_bridge_class() -> Any:
-    """Resolve the Kotlin NotifierBridge class via Chaquopy."""
-    from java import jclass  # only importable under the Chaquopy runtime
+    """Resolve the Kotlin NotifierBridge class via Chaquopy.
 
-    return jclass("com.flagdizero.jenny.NotifierBridge")
+    Stays a module-level function rather than a direct call to
+    ``_BRIDGE.resolve_class``: it is the seam the tests replace to stand
+    in for the bridge off-device.
+    """
+    return _BRIDGE.resolve_class()
 
 
 async def _get_bridge(context: Any) -> Any:
     """Build or return a cached NotifierBridge instance (thread-safe)."""
-    global _BRIDGE_INSTANCE
-    if _BRIDGE_INSTANCE is not None:
-        return _BRIDGE_INSTANCE
-    async with _BRIDGE_LOCK:
-        if _BRIDGE_INSTANCE is not None:
-            return _BRIDGE_INSTANCE
-        bridge_cls = _resolve_bridge_class()
-        try:
-            _BRIDGE_INSTANCE = bridge_cls(context)
-        except Exception as exc:
-            raise RuntimeError(f"Failed to construct NotifierBridge: {exc}") from exc
-        return _BRIDGE_INSTANCE
+    return await _BRIDGE.get(context, resolve=_resolve_bridge_class)
 
 
 def alert_fields(content: str, metadata: dict[str, Any] | None) -> tuple[str, str, str]:
