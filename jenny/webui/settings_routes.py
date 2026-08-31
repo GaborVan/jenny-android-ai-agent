@@ -112,17 +112,17 @@ class WebUISettingsRouter:
         if path == "/api/settings/ssh":
             return self._handle_ssh_settings(request)
         if path == "/api/settings/ssh/update":
-            return await self._handle_ssh(request, update_ssh_settings, "ssh settings update")
+            return await self._handle_mutation(request, update_ssh_settings, "ssh settings update")
         if path == "/api/settings/ssh/host/save":
-            return await self._handle_ssh(request, save_ssh_host, "ssh host save")
+            return await self._handle_mutation(request, save_ssh_host, "ssh host save")
         if path == "/api/settings/ssh/host/delete":
-            return await self._handle_ssh(request, delete_ssh_host, "ssh host delete")
+            return await self._handle_mutation(request, delete_ssh_host, "ssh host delete")
         if path == "/api/settings/ssh/key/generate":
-            return await self._handle_ssh(request, generate_ssh_key, "ssh key generation")
+            return await self._handle_mutation(request, generate_ssh_key, "ssh key generation")
         if path == "/api/settings/ssh/host-key/probe":
-            return await self._handle_ssh(request, probe_ssh_host_key, "ssh host key probe")
+            return await self._handle_mutation(request, probe_ssh_host_key, "ssh host key probe")
         if path == "/api/settings/ssh/host-key/accept":
-            return await self._handle_ssh(request, accept_ssh_host_key, "ssh host key accept")
+            return await self._handle_mutation(request, accept_ssh_host_key, "ssh host key accept")
         if path == "/api/updates/check":
             return await self._handle_update_check(request)
         if path == "/api/updates/install":
@@ -169,92 +169,82 @@ class WebUISettingsRouter:
             return self._unauthorized()
         return self._json_response(settings_payload())
 
+    # I parametri di generazione vivono in provider.generation, costruito una
+    # volta in factory.make_provider: senza rebuild resterebbero scritti nel
+    # config e inerti fino al riavvio, e la UI non mostra requires_restart.
+    _GENERATION_KEYS = (
+        "model", "default_provider",
+        "max_tokens", "maxTokens",
+        "temperature",
+        "reasoning_effort", "reasoningEffort",
+    )
+
     async def _handle_settings_update(self, request: WsRequest) -> Response:
-        if not self._authorized(request):
-            return self._unauthorized()
-        try:
-            query = self._query(request)
-            payload = await update_agent_settings(query)
-        except WebUISettingsError as e:
-            return self._error_response(e.status, e.message)
-        # I parametri di generazione vivono in provider.generation, costruito una
-        # volta in factory.make_provider: senza rebuild resterebbero scritti nel
-        # config e inerti fino al riavvio, e la UI non mostra requires_restart.
-        if any(
-            key in query
-            for key in (
-                "model", "default_provider",
-                "max_tokens", "maxTokens",
-                "temperature",
-                "reasoning_effort", "reasoningEffort",
-            )
-        ):
-            self._fire_settings_changed()
-        return self._json_response(payload)
+        def after(query: QueryParams, payload: dict[str, Any]) -> None:
+            if any(key in query for key in self._GENERATION_KEYS):
+                self._fire_settings_changed()
+
+        return await self._handle_mutation(
+            request, update_agent_settings, "settings update", on_success=after,
+        )
 
     async def _handle_settings_memory_update(self, request: WsRequest) -> Response:
         """Le manopole di Dream e i tetti della memoria lunga."""
-        if not self._authorized(request):
-            return self._unauthorized()
-        try:
-            query = self._query(request)
-            payload = await update_memory_settings(query)
-        except WebUISettingsError as e:
-            return self._error_response(e.status, e.message)
-        # Presenza della chiave e non cambio del valore: v. il commento su
-        # ``MEMORY_REARM_KEYS``. Ri-armare a pianificazione identica non sposta
-        # la prossima scadenza; perdersi una transizione di ``enabled`` sì.
-        if any(key in query for key in MEMORY_REARM_KEYS):
-            self._fire_jobs_changed("dream")
-        return self._json_response(payload)
+        def after(query: QueryParams, payload: dict[str, Any]) -> None:
+            # Presenza della chiave e non cambio del valore: v. il commento su
+            # ``MEMORY_REARM_KEYS``. Ri-armare a pianificazione identica non
+            # sposta la prossima scadenza; perdersi una transizione di
+            # ``enabled`` sì.
+            if any(key in query for key in MEMORY_REARM_KEYS):
+                self._fire_jobs_changed("dream")
+
+        return await self._handle_mutation(
+            request, update_memory_settings, "memory settings update", on_success=after,
+        )
 
     async def _handle_settings_workers_update(self, request: WsRequest) -> Response:
         """Atlas, il giardiniere, e la compattazione delle chat di progetto."""
-        if not self._authorized(request):
-            return self._unauthorized()
-        try:
-            query = self._query(request)
-            payload = await update_worker_settings(query)
-        except WebUISettingsError as e:
-            return self._error_response(e.status, e.message)
-        if any(key in query for key in ATLAS_REARM_KEYS):
-            self._fire_jobs_changed("atlas")
-        if any(key in query for key in GARDENER_REARM_KEYS):
-            self._fire_jobs_changed("gardener")
-        return self._json_response(payload)
+        def after(query: QueryParams, payload: dict[str, Any]) -> None:
+            if any(key in query for key in ATLAS_REARM_KEYS):
+                self._fire_jobs_changed("atlas")
+            if any(key in query for key in GARDENER_REARM_KEYS):
+                self._fire_jobs_changed("gardener")
+
+        return await self._handle_mutation(
+            request, update_worker_settings, "worker settings update", on_success=after,
+        )
 
     async def _handle_settings_provider_update(self, request: WsRequest) -> Response:
-        if not self._authorized(request):
-            return self._unauthorized()
-        query = self._query(request)
-        data: dict[str, str] = {"name": _query_param(query, "name")}
-        if fmt := _query_param(query, "format"):
-            data["format"] = fmt
-        if api_key := _query_param(query, "api_key"):
-            data["api_key"] = api_key
-        if api_base := _query_param(query, "api_base"):
-            data["api_base"] = api_base
-        try:
-            payload = await update_provider(data)
-        except WebUISettingsError as e:
-            return self._error_response(e.status, e.message)
-        if data.get("name") and payload.get("default_provider") == data["name"]:
-            self._fire_settings_changed()
-        return self._json_response(payload)
+        async def handler(query: QueryParams) -> dict[str, Any]:
+            data: dict[str, str] = {"name": _query_param(query, "name")}
+            if fmt := _query_param(query, "format"):
+                data["format"] = fmt
+            if api_key := _query_param(query, "api_key"):
+                data["api_key"] = api_key
+            if api_base := _query_param(query, "api_base"):
+                data["api_base"] = api_base
+            return await update_provider(data)
+
+        def after(query: QueryParams, payload: dict[str, Any]) -> None:
+            name = _query_param(query, "name")
+            if name and payload.get("default_provider") == name:
+                self._fire_settings_changed()
+
+        return await self._handle_mutation(
+            request, handler, "provider update", on_success=after,
+        )
 
     async def _handle_settings_provider_delete(self, request: WsRequest) -> Response:
-        if not self._authorized(request):
-            return self._unauthorized()
-        query = self._query(request)
-        name = _query_param(query, "name")
-        data = {"name": name}
-        try:
-            payload = await delete_provider(data)
-        except WebUISettingsError as e:
-            return self._error_response(e.status, e.message)
-        if name:
-            self._fire_settings_changed()
-        return self._json_response(payload)
+        async def handler(query: QueryParams) -> dict[str, Any]:
+            return await delete_provider({"name": _query_param(query, "name")})
+
+        def after(query: QueryParams, payload: dict[str, Any]) -> None:
+            if _query_param(query, "name"):
+                self._fire_settings_changed()
+
+        return await self._handle_mutation(
+            request, handler, "provider delete", on_success=after,
+        )
 
     async def _handle_settings_provider_models(self, request: WsRequest) -> Response:
         if not self._authorized(request):
@@ -408,28 +398,39 @@ class WebUISettingsRouter:
             self.logger.exception("failed to load ssh settings")
             return self._error_response(500, "failed to load ssh settings")
 
-    async def _handle_ssh(
+    async def _handle_mutation(
         self,
         request: WsRequest,
         handler: Callable[[QueryParams], Awaitable[dict[str, Any]]],
         what: str,
+        *,
+        on_success: Callable[[QueryParams, dict[str, Any]], None] | None = None,
     ) -> Response:
-        """Tronco comune delle route SSH: auth, errori applicativi, 500 muto.
+        """Tronco comune delle route che scrivono: auth, errori applicativi, 500 muto.
 
-        Una sola funzione perché le sette route differiscono *solo* per il
-        gestore: duplicare il blocco try/except sette volte è il modo più
-        facile per lasciarne una che fa trapelare il messaggio di un'eccezione
-        inattesa nel corpo della risposta.
+        Una sola funzione perché le route differiscono *solo* per il gestore e
+        per cosa fanno dopo: duplicare il blocco try/except è il modo più facile
+        per lasciarne una che fa trapelare il messaggio di un'eccezione
+        inattesa nel corpo della risposta. Le route SSH lo usavano già; quelle
+        dei settings lo ri-scrivevano a mano senza l'ultimo ``except``, e sono
+        proprio quelle che chiamano ``store.mutate()``, cioè il disco.
+
+        ``on_success`` gira **solo** dopo un salvataggio riuscito e riceve la
+        query e il payload: è lì che vivono i rearm dei job e i rebuild del
+        provider, che non devono partire se la scrittura è fallita.
         """
         if not self._authorized(request):
             return self._unauthorized()
+        query = self._query(request)
         try:
-            payload = await handler(self._query(request))
+            payload = await handler(query)
         except WebUISettingsError as e:
             return self._error_response(e.status, e.message)
         except Exception:
             self.logger.exception("{} failed", what)
             return self._error_response(500, f"{what} failed")
+        if on_success is not None:
+            on_success(query, payload)
         return self._json_response(payload)
 
     async def _handle_onboarding_save(self, request: WsRequest) -> Response:
