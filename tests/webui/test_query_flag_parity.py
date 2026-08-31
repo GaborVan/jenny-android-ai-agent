@@ -62,12 +62,14 @@ def test_every_route_agrees_on_false(raw: str) -> None:
 
 
 def test_strict_parser_still_rejects_what_it_used_to() -> None:
-    """``worker_settings._parse_bool`` non è permissivo, e non deve diventarlo.
+    """``_parse_bool`` non è permissivo, e non deve diventarlo.
 
     Condivide le due tuple con l'helper, ma la sua semantica è un'altra: un
-    valore che non è né vero né falso è un errore, non un ``False``.
+    valore che non è né vero né falso è un errore, non un ``False``. Vive in
+    ``settings_api`` — ci si è spostato quando i nove applicatori scritti a mano
+    lì sono passati per i generalizzatori che ``worker_settings`` aveva già.
     """
-    assert worker_settings._parse_bool("on", "enabled") is True
-    assert worker_settings._parse_bool(" off ", "enabled") is False
-    with pytest.raises(worker_settings.WebUISettingsError):
-        worker_settings._parse_bool("maybe", "enabled")
+    assert settings_api._parse_bool("on", "enabled") is True
+    assert settings_api._parse_bool(" off ", "enabled") is False
+    with pytest.raises(settings_api.WebUISettingsError):
+        settings_api._parse_bool("maybe", "enabled")
