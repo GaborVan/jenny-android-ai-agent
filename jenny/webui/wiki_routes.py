@@ -21,6 +21,8 @@ from websockets.http11 import Response
 if TYPE_CHECKING:
     from jenny.webui.wiki_search import WikiSearchService
 
+from loguru import logger
+
 from jenny.channels.http_utils import (
     http_error,
     http_json_response,
@@ -170,13 +172,24 @@ class WikiRoutes:
         return self._get_workspace_root() / wikis_subdir
 
     def _check_wiki_enabled(self) -> Response | None:
+        """Verifica ``config.wiki.enabled``, fail-**closed**.
+
+        Era ``except Exception: pass``, cioè un errore di config faceva passare
+        la richiesta su tutte e otto le rotte che questo gate protegge. Terza
+        istanza della stessa forma: ``apps_routes`` l'aveva identica,
+        ``workspace_routes._require_workspace_flag`` invece risponde 503 nello
+        stesso caso e spiega nella docstring perché deve. I due esiti restano
+        distinguibili — illeggibile e spento non sono la stessa cosa.
+        """
         from jenny.config.loader import load_config
 
         try:
-            if not load_config().wiki.enabled:
-                return http_error(503, "wiki is disabled")
+            enabled = load_config().wiki.enabled
         except Exception:
-            pass
+            logger.exception("wiki gate: could not read config; refusing")
+            return http_error(503, "wiki is unavailable")
+        if not enabled:
+            return http_error(503, "wiki is disabled")
         return None
 
     # -- dispatch --

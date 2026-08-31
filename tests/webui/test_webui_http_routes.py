@@ -57,6 +57,15 @@ def _make_handler(tmp_path: Path) -> GatewayHTTPHandler:
 
 
 class TestWorkspaceDownload:
+    """Passano dal ``dispatch``, non dall'handler.
+
+    Auth, gate ``workspace.enabled`` e traduzione degli errori del filesystem
+    vivono lì per tutti e sette gli handler, invece di essere ricopiati in
+    ognuno. Chiamare l'handler nudo salterebbe esattamente ciò che questi test
+    verificano — e prima di questo cambio **nessun test di questo router
+    passava dal dispatch**, quindi il percorso di produzione non era coperto.
+    """
+
     """Regression tests for the workspace file download endpoint."""
 
     @pytest.mark.asyncio
@@ -69,7 +78,7 @@ class TestWorkspaceDownload:
 
         with patch.object(handler, "_get_workspace_root", return_value=workspace):
             request = _make_request("/api/workspace/download?path=hello.txt")
-            response = await handler.workspace_routes._download(request)
+            response = await handler.workspace_routes.dispatch(request, "/api/workspace/download")
 
         assert response.status_code == 200
         assert b"hello world" in response.body
@@ -84,7 +93,7 @@ class TestWorkspaceDownload:
 
         with patch.object(handler, "_get_workspace_root", return_value=workspace):
             request = _make_request("/api/workspace/download?path=missing.txt")
-            response = await handler.workspace_routes._download(request)
+            response = await handler.workspace_routes.dispatch(request, "/api/workspace/download")
 
         assert response.status_code == 404
 
@@ -97,7 +106,7 @@ class TestWorkspaceDownload:
 
         with patch.object(handler, "_get_workspace_root", return_value=workspace):
             request = _make_request("/api/workspace/download?path=subdir")
-            response = await handler.workspace_routes._download(request)
+            response = await handler.workspace_routes.dispatch(request, "/api/workspace/download")
 
         assert response.status_code == 400
 
@@ -109,7 +118,7 @@ class TestWorkspaceDownload:
 
         with patch.object(handler, "_get_workspace_root", return_value=workspace):
             request = _make_request("/api/workspace/download?path=../etc/passwd")
-            response = await handler.workspace_routes._download(request)
+            response = await handler.workspace_routes.dispatch(request, "/api/workspace/download")
 
         assert response.status_code == 400
 
@@ -120,7 +129,7 @@ class TestWorkspaceDownload:
         workspace.mkdir()
 
         request = _make_request("/api/workspace/download?path=test.txt", token=None)
-        response = await handler.workspace_routes._download(request)
+        response = await handler.workspace_routes.dispatch(request, "/api/workspace/download")
 
         assert response.status_code == 401
 
