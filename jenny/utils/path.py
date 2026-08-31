@@ -87,6 +87,7 @@ def atomic_write(
     *,
     fsync_file: bool = True,
     fsync_dir: bool = True,
+    chmod: int | None = None,
 ) -> None:
     """Atomically write content to path.
 
@@ -97,6 +98,16 @@ def atomic_write(
     The temp file carries a per-write unique suffix (uuid) so two concurrent
     writers targeting the same path never clobber each other's temp file; the
     final ``os.replace`` stays atomic and any orphaned temp is cleaned up.
+
+    *chmod* applica i permessi al file temporaneo **prima** della rename, non
+    dopo: il rovescio — scrivere, rinominare, poi ``chmod`` — lascia una finestra
+    in cui il file definitivo esiste con i permessi di default. È il motivo per
+    cui i due scrittori SSH (``known_hosts`` e il sidecar ``.pub``) avevano una
+    copia a mano di questa funzione: il gotcha sulle scritture atomiche dice di
+    aggiungere un argomento qui invece di scriverne una sesta copia, e questo è
+    l'argomento. Quelle copie non facevano ``fsync``, e una usava un nome
+    temporaneo fisso — cioè la collisione fra scrittori concorrenti che il
+    suffisso uuid qui sopra esiste per evitare.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -111,6 +122,8 @@ def atomic_write(
             if fsync_file:
                 f.flush()
                 os.fsync(f.fileno())
+        if chmod is not None:
+            os.chmod(tmp_path, chmod)
         os.replace(tmp_path, path)
         if fsync_dir:
             _fsync_dir(path.parent)

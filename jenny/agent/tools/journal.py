@@ -289,7 +289,7 @@ class JournalAppendTool(Tool):
                     fh.write(f"# {day.isoformat()}\n\n")
                 fh.write(entry)
         except OSError as exc:
-            logger.warning("journal_append su {} fallito: {}", page, exc)
+            logger.warning("journal_append on {} failed: {}", page, exc)
             return f"Could not append to the journal: {exc}"
 
         logger.info("journal_append: {} <- {}", page.name, line[:60])

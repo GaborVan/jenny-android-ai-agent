@@ -29,7 +29,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
-import os
 import re
 import time
 from pathlib import Path
@@ -50,6 +49,7 @@ from jenny.config.loader import load_config
 from jenny.config.schema import Config
 from jenny.config.tool_schemas import SshHostConfig
 from jenny.security.network import validate_ssh_target
+from jenny.utils.path import atomic_write
 from jenny.webui.settings_api import WebUISettingsError
 
 QueryParams = dict[str, list[str]]
@@ -481,12 +481,7 @@ def _write_public_key(alias: str, public_key: str) -> None:
     0600 anche se non è un segreto: sta nella stessa directory della privata, e
     una regola sola per quella directory è più facile da non sbagliare di due.
     """
-    path = _public_key_path(alias)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(f"{public_key.strip()}\n", "utf-8")
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
+    atomic_write(_public_key_path(alias), f"{public_key.strip()}\n", chmod=0o600)
 
 
 # -- host key ----------------------------------------------------------------

@@ -151,7 +151,7 @@ async def _watch_idle(idle_s: int) -> None:
                 return
             if time.monotonic() - _LAST_USE < idle_s:
                 continue
-            logger.info("Sessione browser chiusa dopo {:.0f}s di inattivita", idle_for)
+            logger.info("Browser session closed after {:.0f}s idle", idle_for)
             destroy_browser()
             return
 
@@ -216,11 +216,11 @@ async def _call(
             destroy_browser()
             raise
         except asyncio.TimeoutError:
-            logger.error("browser.{} in timeout dopo {}s", method, timeout + 10)
+            logger.error("browser.{} timed out after {}s", method, timeout + 10)
             destroy_browser()
             return {"error": f"browser_{method} non ha risposto entro {timeout + 10}s"}
         except Exception as exc:
-            logger.exception("browser.{} fallito", method)
+            logger.exception("browser.{} failed", method)
             destroy_browser()
             return {"error": f"browser_{method} fallito: {exc}"}
     return _decode(raw)

@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import os
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
@@ -27,38 +26,6 @@ from jenny.providers.retry_policy import (
     is_arrearage_response,
     is_transient_response,
 )
-
-STREAM_IDLE_TIMEOUT_ENV = "JENNY_STREAM_IDLE_TIMEOUT_S"
-DEFAULT_STREAM_IDLE_TIMEOUT_S = 90.0
-MAX_STREAM_IDLE_TIMEOUT_S = 3600.0
-
-FIRST_OUTPUT_TIMEOUT_ENV = "JENNY_STREAM_FIRST_OUTPUT_TIMEOUT_S"
-DEFAULT_FIRST_OUTPUT_TIMEOUT_S = 300.0
-DEFAULT_LOCAL_FIRST_OUTPUT_TIMEOUT_S = 600.0
-
-
-def _resolve_timeout_s(
-    env_name: str,
-    env_value: str | None,
-    default: float,
-    maximum: float,
-) -> float:
-    """Read a timeout from env/config text, ignoring unusable values."""
-    raw = os.environ.get(env_name) if env_value is None else env_value
-    if raw is None or not raw.strip():
-        return default
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        logger.warning("Ignoring invalid {}={!r}; using {}", env_name, raw, default)
-        return default
-    if value <= 0:
-        logger.warning("Ignoring non-positive {}={!r}; using {}", env_name, raw, default)
-        return default
-    if value > maximum:
-        logger.warning("Clamping {}={!r} to {}", env_name, raw, maximum)
-        return maximum
-    return value
 
 
 class StreamTimeout(asyncio.TimeoutError):
@@ -99,35 +66,6 @@ class ProviderHTTPError(RuntimeError):
         self.status_code = status_code
         self.headers = headers
         self.body = body
-
-
-def resolve_stream_idle_timeout_s(
-    *,
-    env_value: str | None = None,
-    default: float = DEFAULT_STREAM_IDLE_TIMEOUT_S,
-    maximum: float = MAX_STREAM_IDLE_TIMEOUT_S,
-) -> float:
-    """Return a safe streaming idle timeout from env/config text."""
-    return _resolve_timeout_s(STREAM_IDLE_TIMEOUT_ENV, env_value, default, maximum)
-
-
-def resolve_first_output_timeout_s(
-    *,
-    local: bool = False,
-    env_value: str | None = None,
-    maximum: float = MAX_STREAM_IDLE_TIMEOUT_S,
-) -> float:
-    """Return how long to wait for the model's *first* output before giving up.
-
-    Tenuto separato dall'idle inter-chunk perché le due attese non sono la
-    stessa cosa: prima del primo token il server sta macinando il prompt e il
-    silenzio è previsto (su un llama.cpp on-device i soli schemi tool valgono
-    minuti di prompt processing), mentre a stream avviato un buco lungo è un
-    blocco vero. *local* alza il default per gli endpoint in loopback, gli
-    unici che possono essere lenti così.
-    """
-    default = DEFAULT_LOCAL_FIRST_OUTPUT_TIMEOUT_S if local else DEFAULT_FIRST_OUTPUT_TIMEOUT_S
-    return _resolve_timeout_s(FIRST_OUTPUT_TIMEOUT_ENV, env_value, default, maximum)
 
 
 @dataclass

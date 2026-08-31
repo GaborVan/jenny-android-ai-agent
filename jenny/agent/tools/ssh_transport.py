@@ -12,8 +12,6 @@ entrambi i posti ed è coperto dai test.
 
 from __future__ import annotations
 
-import os
-import uuid
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
@@ -28,6 +26,7 @@ from jenny.agent.tools.ssh_backends.base import (
 from jenny.config.paths import get_ssh_dir
 from jenny.config.tool_schemas import SshHostConfig
 from jenny.security.network import validate_ssh_target
+from jenny.utils.path import atomic_write
 
 
 class SshHostUnknownError(SshError):
@@ -199,12 +198,18 @@ def forget_host(host: str, port: int) -> None:
 
 
 def _write_known_hosts(lines: list[str]) -> None:
-    path = known_hosts_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    tmp.write_text("".join(f"{line}\n" for line in lines), "utf-8")
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
+    """Riscrive ``known_hosts``, atomicamente, 0600 e con fsync.
+
+    Passa da ``atomic_write`` e non da un temp+replace a mano: quella copia non
+    faceva fsync, quindi era atomica contro un processo ucciso ma non contro un
+    calo di corrente — e qui una riga persa toglie in silenzio il pinning di una
+    host key, che è il contrario di quello che questo file serve a fare.
+    """
+    atomic_write(
+        known_hosts_path(),
+        "".join(f"{line}\n" for line in lines),
+        chmod=0o600,
+    )
 
 
 # -- risoluzione degli alias -------------------------------------------------

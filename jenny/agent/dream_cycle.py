@@ -149,14 +149,14 @@ def claim_dream_cycle() -> bool:
         running = None
     if _CYCLE_IN_FLIGHT:
         if _CYCLE_IN_FLIGHT[0] is running:
-            logger.warning("Dream: un ciclo è già in volo; questo non parte")
+            logger.warning("Dream: a cycle is already in flight; this one does not start")
             return False
         # La presa appartiene a un event loop che non è più quello corrente: il
         # ciclo che l'aveva non può riprendere, e il suo ``finally`` non girerà
         # mai. Recuperarla qui è la sola cosa che impedisce a Dream di restare
         # spento per sempre dietro un guasto invisibile.
         logger.warning(
-            "Dream: presa lasciata da un event loop che non c'è più; recuperata"
+            "Dream: lock left behind by an event loop that no longer exists; reclaimed"
         )
     _CYCLE_IN_FLIGHT[:] = [running]
     return True

@@ -174,22 +174,22 @@ def _displace_output_obstruction(target: Path) -> None:
             target.rename(candidate)
         except OSError as exc:
             logger.error(
-                "Il nome {} è occupato da un file e spostarlo in {} non è riuscito ({}): "
-                "la cartella dei risultati non esiste per questo avvio",
+                "The name {} is taken by a file and moving it to {} failed ({}): "
+                "the results folder does not exist for this start",
                 target, candidate.name, exc,
             )
             return
         logger.error(
-            "Trovato un file (non una cartella) chiamato {}: spostato in {} per liberare "
-            "la cartella dei risultati dell'agente. È lavoro prodotto, non è stato "
-            "cancellato — spostalo dentro {}/ o rinominalo.",
+            "Found a file (not a folder) named {}: moved to {} to free up the agent's "
+            "results folder. It is produced work and was not deleted — move it "
+            "into {}/ or rename it.",
             target, candidate.name, OUTPUT_SUBDIR,
         )
         return
 
     logger.error(
-        "Il nome {} è occupato e i {} nomi di ripiego sono già tutti presi: "
-        "la cartella dei risultati non esiste per questo avvio",
+        "The name {} is taken and all {} fallback names are taken too: "
+        "the results folder does not exist for this start",
         target, _MAX_DISPLACED,
     )
 
@@ -225,7 +225,7 @@ def get_output_path(workspace: Path | None = None, *, create: bool = False) -> P
         return ensure_dir(target)
     except OSError as exc:
         logger.error(
-            "Impossibile creare la cartella dei risultati {} ({}): l'avvio prosegue senza",
+            "Could not create the results folder {} ({}): starting without it",
             target, exc,
         )
         return target

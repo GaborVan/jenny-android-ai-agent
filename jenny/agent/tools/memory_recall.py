@@ -429,7 +429,7 @@ class HistoryRecallTool(Tool):
             )
         if used > _INDEX_MAX_CHARS * _INDEX_CROWDED_SHARE:
             logger.info(
-                "recall_history: indice al {:.0%} del tetto ({} voci)",
+                "recall_history: index at {:.0%} of its cap ({} entries)",
                 used / _INDEX_MAX_CHARS, len(entries),
             )
         return header + "\n\n" + "\n".join(lines)

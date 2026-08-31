@@ -283,7 +283,7 @@ class GatewayContainer:
                 self.config.workspace_path
             ):
                 logger.warning(
-                    "Rinomino di progetto ripreso e completato: {} -> {}",
+                    "Project rename resumed and completed: {} -> {}",
                     old_key, new_key,
                 )
         except Exception:

@@ -149,9 +149,9 @@ def _warn_unclassified(key: str) -> None:
     if len(_UNCLASSIFIED_WARNED) < _UNCLASSIFIED_WARN_CAP:
         _UNCLASSIFIED_WARNED.add(prefix)
     logger.warning(
-        "session key {!r} non e' in nessun vocabolario di jenny.session.keys: "
-        "classificata 'internal' (non alimenta MEMORY.md, non compare negli elenchi "
-        "user-facing). Se e' una categoria nuova, va registrata qui.",
+        "session key {!r} is in no vocabulary of jenny.session.keys: classified as "
+        "'internal' (does not feed MEMORY.md, does not appear in user-facing "
+        "lists). If it is a new category, register it here.",
         key,
     )
 

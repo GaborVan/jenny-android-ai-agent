@@ -73,7 +73,7 @@ def _rename_legacy(root: Path) -> bool:
         return False
     if target.exists():
         logger.warning(
-            "wiki {}: ha sia {} sia {}, non tocco niente — sceglierne uno butterebbe l'altro",
+            "wiki {}: has both {} and {}, leaving both alone — picking one would discard the other",
             root.name, _LEGACY, _AGENTS,
         )
         return False
@@ -102,7 +102,7 @@ def _ensure_id(root: Path) -> str | None:
             f"---\n{WIKI_ID_KEY}: {wiki_id_value}\nsummary: {_SUMMARY_PLACEHOLDER}\n---\n\n"
             f"# {_title_of(root.name)}\n",
         )
-        logger.info("wiki {}: creato {} minimo con id", root.name, _AGENTS)
+        logger.info("wiki {}: created a minimal {} carrying the id", root.name, _AGENTS)
         return wiki_id_value
 
     # «Ce l'ha già, un id?» si chiede **al lettore che lo legge**. ``wiki_id`` usa
@@ -145,7 +145,7 @@ def _ensure_id(root: Path) -> str | None:
         body_fm, body = rest[0], rest[1] if len(rest) > 1 else ""
         updated = f"{head}---\n{line}{body_fm.lstrip(chr(10))}---{body}"
     atomic_write(schema, updated)
-    logger.info("wiki {}: id scritto in {}", root.name, schema.name)
+    logger.info("wiki {}: id written to {}", root.name, schema.name)
     return wiki_id_value
 
 
@@ -160,7 +160,7 @@ def _ensure_journal(root: Path) -> bool:
     if journal.is_dir():
         return False
     journal.mkdir(parents=True, exist_ok=True)
-    logger.info("wiki {}: creato il diario in {}", root.name, journal.name)
+    logger.info("wiki {}: journal created at {}", root.name, journal.name)
     return True
 
 
@@ -196,7 +196,7 @@ def migrate_wikis(wikis_dir: Path) -> dict[str, list[str]]:
             # conto includeva le wiki che l'id ce l'avevano gia' e a cui la
             # migrazione ne stava scrivendo un altro. Il conto e' delle wiki a cui
             # e' stato **scritto** un id, e la riga adesso lo dice.
-            "Migrazione wiki: {} rinominate ({}), {} con id scritto ({}), {} col diario nuovo ({})",
+            "Wiki migration: {} renamed ({}), {} with id written ({}), {} with a new journal ({})",
             len(renamed), ", ".join(renamed) or "-",
             len(identified), ", ".join(identified) or "-",
             len(journals), ", ".join(journals) or "-",

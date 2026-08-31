@@ -245,7 +245,13 @@ class DevSshBackend:
             key.write_private_key(str(tmp))
             # 0600 PRIMA della rename: fra write e chmod il file esisterebbe
             # con i permessi di default, e su un path condiviso sarebbe una
-            # finestra di lettura per chiunque.
+            # finestra di lettura per chiunque. È lo stesso motivo per cui
+            # ``utils.path.atomic_write`` ha un argomento ``chmod=``.
+            #
+            # Qui però l'helper non si può usare, e non è una dimenticanza:
+            # ``write_private_key`` scrive il file **da sé**, quindi non esiste
+            # un ``content`` da passargli — usarlo vorrebbe dire rileggere la
+            # chiave privata in memoria per riscriverla, che è peggio di così.
             os.chmod(tmp, 0o600)
             os.replace(tmp, key_path)
             return key.export_public_key("openssh").decode().strip()

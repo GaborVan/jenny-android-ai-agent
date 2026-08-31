@@ -14,13 +14,15 @@ from typing import Any
 import httpx
 from loguru import logger
 
+from jenny.config.runtime_env import (
+    resolve_first_output_timeout_s,
+    resolve_stream_idle_timeout_s,
+)
 from jenny.providers.base import (
     LLMProvider,
     LLMResponse,
     ProviderHTTPError,
     StreamTimeout,
-    resolve_first_output_timeout_s,
-    resolve_stream_idle_timeout_s,
     tool_arguments_json_for_replay,
 )
 from jenny.providers.openai_compat_helpers import (

@@ -245,7 +245,7 @@ def follow_renamed_project(
         # (v. ``session_key_for_channel``) non e' una chat spostata, e' una chat
         # perduta con l'apparenza di un successo.
         logger.error(
-            "Spostamento rifiutato: {!r} non puo' essere la chiave di una conversazione",
+            "Move refused: {!r} cannot be a conversation key",
             new_key[:120],
         )
         return False, "the new name cannot be the name of a conversation"

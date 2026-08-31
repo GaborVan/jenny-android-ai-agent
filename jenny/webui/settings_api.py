@@ -476,6 +476,21 @@ def provider_models_payload(query: QueryParams) -> dict[str, Any]:
         headers["Authorization"] = f"Bearer {api_key}"
         models_url = f"{api_base.rstrip('/')}/models"
 
+    # Deliberatamente **senza** ``validate_url_target``, e va scritto perché chi
+    # verifica "ogni richiesta in uscita è controllata?" trova questa e non può
+    # distinguere una decisione da una dimenticanza.
+    #
+    # La destinazione è ``providers.<nome>.apiBase``, cioè un valore che l'utente
+    # ha messo in Impostazioni per parlare col *suo* provider — e su questo
+    # dispositivo quel provider può legittimamente essere un llama.cpp in
+    # loopback o un server di modelli in LAN, che è esattamente ciò che l'SSRF
+    # blocca. La stessa deroga la prendono i due provider LLM quando chiamano
+    # l'endpoint di chat: bloccare qui e non lì proteggerebbe da niente e
+    # romperebbe i modelli locali.
+    #
+    # Cosa resta a delimitarla: la rotta è dietro il token (``/api/``), non
+    # segue redirect, ha un timeout stretto, e la risposta viene solo letta per
+    # estrarne una lista di nomi di modelli.
     try:
         response = httpx.get(
             models_url,
@@ -1106,7 +1121,7 @@ async def delete_provider(data: dict[str, Any]) -> dict[str, Any]:
         # senza che nessuno lo dica e' il genere di cosa che poi si cerca per
         # mezz'ora.
         logger.info(
-            "Provider {} rimosso: {} preset non lo nominano piu' ({})",
+            "Provider {} removed: {} presets no longer name it ({})",
             name, len(repointed), ", ".join(sorted(repointed)),
         )
     return settings_payload()

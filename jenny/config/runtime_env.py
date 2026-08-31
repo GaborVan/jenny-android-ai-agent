@@ -143,3 +143,94 @@ def tool_timeout_s(default: float = 300.0) -> float:
     Env: ``JENNY_TOOL_TIMEOUT_S`` (default 300).
     """
     return _float_env("JENNY_TOOL_TIMEOUT_S", default)
+
+
+# ── Timeout di streaming dei provider ────────────────────────────────────────
+# Vivevano in ``providers/base.py``, con un parser proprio che ri-implementava
+# ``_positive_float_env``: due delle manopole operative più citate erano quindi
+# invisibili a chi legge *questo* file per sapere quali knob esistono. Il
+# ``maximum`` e l'override ``env_value`` sono venuti con loro — non sono stati
+# appiattiti, perché servono: il tetto evita che un valore fuori scala trasformi
+# una rete di sicurezza in un blocco, e l'override lascia a un valore di config
+# la precedenza sull'ambiente.
+
+STREAM_IDLE_TIMEOUT_ENV = "JENNY_STREAM_IDLE_TIMEOUT_S"
+DEFAULT_STREAM_IDLE_TIMEOUT_S = 90.0
+MAX_STREAM_IDLE_TIMEOUT_S = 3600.0
+
+FIRST_OUTPUT_TIMEOUT_ENV = "JENNY_STREAM_FIRST_OUTPUT_TIMEOUT_S"
+DEFAULT_FIRST_OUTPUT_TIMEOUT_S = 300.0
+DEFAULT_LOCAL_FIRST_OUTPUT_TIMEOUT_S = 600.0
+
+
+def _resolve_timeout_s(
+    env_name: str,
+    env_value: str | None,
+    default: float,
+    maximum: float,
+) -> float:
+    """Un timeout da testo (ambiente o config), ignorando i valori inutilizzabili."""
+    raw = os.environ.get(env_name) if env_value is None else env_value
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning("Ignoring invalid {}={!r}; using {}", env_name, raw, default)
+        return default
+    if value <= 0:
+        logger.warning("Ignoring non-positive {}={!r}; using {}", env_name, raw, default)
+        return default
+    if value > maximum:
+        logger.warning("Clamping {}={!r} to {}", env_name, raw, maximum)
+        return maximum
+    return value
+
+
+def resolve_stream_idle_timeout_s(
+    *,
+    env_value: str | None = None,
+    default: float = DEFAULT_STREAM_IDLE_TIMEOUT_S,
+    maximum: float = MAX_STREAM_IDLE_TIMEOUT_S,
+) -> float:
+    """Silenzio massimo *fra* due chunk di uno stream già avviato.
+
+    Env: ``JENNY_STREAM_IDLE_TIMEOUT_S`` (default 90, tetto 3600).
+    """
+    return _resolve_timeout_s(STREAM_IDLE_TIMEOUT_ENV, env_value, default, maximum)
+
+
+def resolve_first_output_timeout_s(
+    *,
+    local: bool = False,
+    env_value: str | None = None,
+    maximum: float = MAX_STREAM_IDLE_TIMEOUT_S,
+) -> float:
+    """Quanto aspettare il *primo* output del modello prima di rinunciare.
+
+    Tenuto separato dall'idle inter-chunk perché le due attese non sono la
+    stessa cosa: prima del primo token il server sta macinando il prompt e il
+    silenzio è previsto (su un llama.cpp on-device i soli schemi tool valgono
+    minuti di prompt processing), mentre a stream avviato un buco lungo è un
+    blocco vero. *local* alza il default per gli endpoint in loopback, gli unici
+    che possono essere lenti così.
+
+    Env: ``JENNY_STREAM_FIRST_OUTPUT_TIMEOUT_S`` (default 300, 600 in loopback).
+    """
+    default = DEFAULT_LOCAL_FIRST_OUTPUT_TIMEOUT_S if local else DEFAULT_FIRST_OUTPUT_TIMEOUT_S
+    return _resolve_timeout_s(FIRST_OUTPUT_TIMEOUT_ENV, env_value, default, maximum)
+
+
+# ── Sandbox del workspace ────────────────────────────────────────────────────
+# Solo i *nomi*: la lettura resta in ``security/workspace_access.py``, che prende
+# un ``environ`` iniettabile e ha una semantica sua (marker, provider, alias
+# legacy) che non appartiene a un modulo di parsing. Ma i nomi stanno qui, perché
+# è qui che si viene a sapere quali knob ``JENNY_*`` esistono — e uno dei tre è
+# un knob di **sicurezza** con un alias storico, cioè esattamente il dettaglio
+# che sopravvive solo se vive dove la gente lo cerca.
+
+WORKSPACE_SANDBOX_PROVIDER_ENV = "JENNY_WORKSPACE_SANDBOX_PROVIDER"
+WORKSPACE_SANDBOX_ENFORCED_ENV = "JENNY_WORKSPACE_SANDBOX_ENFORCED"
+#: Nome storico di ``WORKSPACE_SANDBOX_ENFORCED_ENV``, ancora accettato.
+WORKSPACE_SANDBOX_ENFORCED_LEGACY_ENV = "JENNY_SANDBOX_ENFORCED"
+
