@@ -4610,6 +4610,12 @@ body {
   color: var(--text-faint);
 }
 
+/* Una riga vuota non lascia un buco: la riga della pianificazione tace quando
+   quel lavoratore è spento (`_scheduleText`), e senza questo resterebbe lo
+   spazio di un paragrafo a dire niente. Stessa disciplina di
+   `.settings-choice-cost:empty`. */
+.settings-hint:empty { display: none; }
+
 .settings-empty {
   padding: 10px 0;
   font-size: 13px;
