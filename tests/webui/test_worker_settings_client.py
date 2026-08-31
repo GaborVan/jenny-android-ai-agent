@@ -134,6 +134,7 @@ _PAYLOAD = """{
 }"""
 
 _MEMBERS = (
+    "_scheduleText",
     "_wireWorkerSettings",
     "_saveWorkerNumber",
     "_saveWorkerParams",
@@ -391,3 +392,26 @@ console.log(screen._budgetMeasure(memory, 'SOUL.md', 'soul_budget_chars'));
         tmp_path,
     )
     assert "settings.memory.unmeasured" in out
+
+
+def test_a_worker_that_is_off_does_not_advertise_a_schedule(tmp_path) -> None:
+    """Sotto un interruttore su OFF, «ogni 30min» si legge come se girasse ancora.
+
+    Visto sul telefono il 31/08/2026: spegnendo il giardiniere la riga della
+    pianificazione restava. Lato server `describe_schedule()` fa bene a
+    descriverla — e' quella che verrebbe armata — ma in interfaccia, spento, la
+    riga tace: a dire cosa resta possibile c'e' gia' l'aiuto sotto.
+    """
+    out = _run(
+        """
+import { Screen } from './harness.mjs';
+const screen = new Screen({});
+console.log(JSON.stringify({
+  on: screen._scheduleText(true, 'every 30min'),
+  off: screen._scheduleText(false, 'every 30min'),
+}));
+""",
+        tmp_path,
+    )
+    assert '"on":"every 30min"' in out
+    assert '"off":""' in out

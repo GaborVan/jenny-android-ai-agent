@@ -746,13 +746,23 @@ export class SettingsController {
     return `<p class="settings-hint">${text}</p>`;
   }
 
+  /* La riga della pianificazione, **solo se quel lavoratore è accesso**.
+     `describe_schedule()` descrive lo schedule anche a lavoratore spento, ed è
+     giusto lato server (è la pianificazione che verrebbe armata). In interfaccia
+     però, sotto un interruttore su OFF, «ogni 30min» si legge come se stesse
+     ancora girando — visto sul telefono il 31/08/2026. Spento la riga tace: a
+     dire cosa resta possibile c'è già l'aiuto sotto. */
+  _scheduleText(enabled, schedule) {
+    return enabled ? (schedule || '') : '';
+  }
+
   _renderMemory(d) {
     const m = d.memory;
     if (!m) return `<div class="settings-empty">${i18n.t('settings.memory.unavailable')}</div>`;
     return `
       <div class="settings-subheading">${i18n.t('settings.memory.dream')}</div>
       ${this._toggleRow(i18n.t('settings.memory.dreamEnabled'), 'dream-enabled-toggle', m.enabled)}
-      ${this._hint(`<span id="dream-schedule">${escapeHtml(m.schedule || '')}</span>`)}
+      ${this._hint(`<span id="dream-schedule">${escapeHtml(this._scheduleText(m.enabled, m.schedule))}</span>`)}
       ${this._numberField(i18n.t('settings.memory.dreamInterval'), 'dream_interval_h', m.interval_h)}
       ${this._numberField(i18n.t('settings.memory.reviewCadence'), 'review_every_runs', m.review_every_runs)}
       ${this._hint(i18n.t('settings.memory.reviewHint', { floor: m.review_floor }))}
@@ -822,14 +832,14 @@ export class SettingsController {
     return `
       <div class="settings-subheading">${i18n.t('settings.workers.atlas')}</div>
       ${this._toggleRow(i18n.t('settings.workers.atlasEnabled'), 'atlas-enabled-toggle', atlas.enabled)}
-      ${this._hint(`<span id="atlas-schedule">${escapeHtml(atlas.schedule || '')}</span>`)}
+      ${this._hint(`<span id="atlas-schedule">${escapeHtml(this._scheduleText(atlas.enabled, atlas.schedule))}</span>`)}
       ${this._numberField(i18n.t('settings.workers.atlasInterval'), 'atlas_interval_h', atlas.interval_h)}
       ${this._numberField(i18n.t('settings.workers.atlasMaxContext'), 'atlas_max_context_tokens', atlas.max_context_tokens)}
       ${this._hint(i18n.t('settings.workers.atlasHint'))}
       <div class="settings-divider"></div>
       <div class="settings-subheading">${i18n.t('settings.workers.gardener')}</div>
       ${this._toggleRow(i18n.t('settings.workers.gardenerEnabled'), 'gardener-enabled-toggle', gardener.enabled)}
-      ${this._hint(`<span id="gardener-schedule">${escapeHtml(gardener.schedule || '')}</span>`)}
+      ${this._hint(`<span id="gardener-schedule">${escapeHtml(this._scheduleText(gardener.enabled, gardener.schedule))}</span>`)}
       ${this._hint(i18n.t('settings.workers.gardenerOffHint'))}
       ${this._numberField(i18n.t('settings.workers.gardenerInterval'), 'gardener_interval_min', gardener.interval_min)}
       ${this._numberField(i18n.t('settings.workers.gardenerIdle'), 'gardener_idle_min', gardener.idle_min)}
@@ -939,9 +949,12 @@ export class SettingsController {
       const el = this.contentEl.querySelector(`#${id}`);
       if (el) el.textContent = text || '';
     };
-    set('dream-schedule', this.data?.memory?.schedule);
-    set('atlas-schedule', this.data?.workers?.atlas?.schedule);
-    set('gardener-schedule', this.data?.workers?.gardener?.schedule);
+    const memoryData = this.data?.memory;
+    const atlas = this.data?.workers?.atlas;
+    const gardener = this.data?.workers?.gardener;
+    set('dream-schedule', this._scheduleText(memoryData?.enabled, memoryData?.schedule));
+    set('atlas-schedule', this._scheduleText(atlas?.enabled, atlas?.schedule));
+    set('gardener-schedule', this._scheduleText(gardener?.enabled, gardener?.schedule));
     const memory = this.data?.memory;
     if (!memory) return;
     /* Solo barra e misura. Riscrivere la riga intera porterebbe via l'input —
