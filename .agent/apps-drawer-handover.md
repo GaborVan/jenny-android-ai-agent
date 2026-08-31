@@ -13,6 +13,24 @@ caselle vere.
 
 ---
 
+## Stato al 31/08/2026 — cosa è già stato fatto sul telefono
+
+Sessione di prova sul Titan 2, build di release firmata da `c4a8d96`:
+
+| | esito |
+|---|---|
+| 0.1a `navigation_mode` | **2 — gesture attiva.** Il passo 5 serve davvero qui |
+| 0.3 `wm density` | **400**, non 480 → viewport 574×576 CSS → **il dock c'è** |
+| 5.4 sul dispositivo | passata da y=1330 (fondo lista) → **scorre**; da y=1435 (dentro la fascia) → **`goHome()`**. Il margine funziona |
+| 7.2 | AdAway aperta dal foglio, Indietro, conversazione dov'era |
+| 7.3 | Todo aperta, Indietro → **torna al foglio con la query intatta** |
+| tastiera software | **non compare** (tastiera fisica): il rischio `kb-open` non si materializza su questo telefono |
+| mascotte sopra il foglio | **difetto trovato e corretto** (`c4a8d96`) |
+
+**Resta aperto e serve una mano umana:** la rotella (§sotto) e 7.4, che vuole
+giorni d'uso, non un comando.
+
+
 ## 0. Prima di tutto: `kb-open` si incolla?
 
 Il punto più fragile della catena (v. la sezione omonima nel piano). Col foglio
