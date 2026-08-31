@@ -371,3 +371,23 @@ console.log(JSON.stringify(calls));
         tmp_path,
     )
     assert '"gardener_idle_min":"1000"' in out
+
+
+def test_a_file_that_cannot_be_opened_does_not_read_as_empty(tmp_path) -> None:
+    """La barra e la riga sotto non devono inventare uno zero.
+
+    Misurato sul telefono con un ``chmod 000``: il payload portava ``chars: 0``
+    per un file da 2.407 byte, e la riga diceva «0 caratteri su 3.000». Il
+    ``readable`` del server la fa diventare "non misurabile".
+    """
+    out = _run(
+        """
+import { Screen, makeEl } from './harness.mjs';
+const screen = new Screen({});
+const memory = JSON.parse(JSON.stringify(screen.data.memory));
+memory.files = [{ label: 'SOUL.md', chars: 0, budget: 3000, exists: true, readable: false }];
+console.log(screen._budgetMeasure(memory, 'SOUL.md', 'soul_budget_chars'));
+""",
+        tmp_path,
+    )
+    assert "settings.memory.unmeasured" in out

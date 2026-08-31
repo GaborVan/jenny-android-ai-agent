@@ -36,6 +36,7 @@ Due cose che questo modulo deve fare e che sono facili da perdere:
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from loguru import logger
@@ -90,9 +91,14 @@ def _memory_files() -> list[dict[str, Any]] | None:
     caratteri" sono due cose diverse, e la seconda va detta con dei numeri.
 
     L'ordine e' quello di ``budget_report`` (MEMORY, USER, SOUL) ed e' contratto.
-    ``exists`` sta accanto a ``chars`` perche' ``count_chars`` ritorna ``0`` sia
-    per un file vuoto sia per uno illeggibile: senza, "mai scritto" e "vuoto" si
-    leggerebbero uguale.
+
+    ``exists`` e ``readable`` stanno accanto a ``chars`` perche' ``count_chars``
+    ritorna ``0`` in tre casi che non si somigliano: file vuoto, file mai
+    scritto, file che non si riesce ad aprire. Il terzo, misurato sul telefono il
+    31/08/2026 con un ``chmod 000``, leggeva «0 caratteri su 3.000» per un file
+    da 2.407 byte: la schermata sopravviveva — che era il punto — ma quel numero
+    era una bugia. Con ``readable`` la UI puo' dire "non misurabile" invece di
+    inventare uno zero.
     """
     try:
         from jenny.agent.memory import MemoryStore
@@ -116,6 +122,7 @@ def _memory_files() -> list[dict[str, Any]] | None:
             "chars": entry.chars,
             "budget": entry.budget,
             "exists": entry.path.exists(),
+            "readable": os.access(entry.path, os.R_OK),
         }
         for entry in report
     ]

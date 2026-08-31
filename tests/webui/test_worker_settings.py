@@ -144,6 +144,31 @@ def test_files_are_measured_in_render_order_and_say_which_exist(config_path) -> 
     assert soul["exists"] is False and soul["chars"] == 0
 
 
+def test_a_file_that_exists_but_cannot_be_opened_is_not_reported_as_empty(
+    config_path,
+) -> None:
+    """Misurato sul telefono il 31/08/2026 con un ``chmod 000``.
+
+    ``count_chars`` ingoia l'``OSError`` e ritorna ``0``, quindi il payload
+    diceva «0 caratteri su 3.000» per un file da 2.407 byte: la schermata si
+    apriva — che era il punto — ma quel numero era una bugia. ``readable`` la
+    toglie, e la riga sotto la barra dice "non misurabile".
+    """
+    workspace = Path(load_config(config_path).workspace_path)
+    workspace.mkdir(parents=True, exist_ok=True)
+    soul = workspace / "SOUL.md"
+    soul.write_text("x" * 500, encoding="utf-8")
+    soul.chmod(0o000)
+    try:
+        files = settings_payload()["memory"]["files"]
+    finally:
+        soul.chmod(0o600)
+
+    entry = next(f for f in files if f["label"] == "SOUL.md")
+    assert entry["exists"] is True
+    assert entry["readable"] is False
+
+
 def test_a_file_that_cannot_be_measured_does_not_close_the_screen(
     config_path, monkeypatch
 ) -> None:

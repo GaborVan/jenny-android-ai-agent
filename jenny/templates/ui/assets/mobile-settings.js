@@ -793,6 +793,9 @@ export class SettingsController {
     const file = (m.files || []).find(f => f.label === label);
     if (!file) return i18n.t('settings.memory.unmeasured');
     if (!file.exists) return i18n.t('settings.memory.notYetWritten');
+    // Esiste ma non si apre: `chars` è 0 e non è vero. Misurato sul telefono
+    // con un `chmod 000` — «0 caratteri su 3.000» per un file da 2.407 byte.
+    if (file.readable === false) return i18n.t('settings.memory.unmeasured');
     if (budget > 0) return i18n.t('settings.memory.ofBudget', { chars: file.chars, budget });
     return i18n.t('settings.memory.measuredOnly', { chars: file.chars });
   }
