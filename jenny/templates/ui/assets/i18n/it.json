@@ -484,7 +484,7 @@
     "empty": "Nessuna app, Jenny App o skill da aprire.",
     "recent": "Più usate",
     "results": "Risultati",
-    "searchPlaceholder": "Cerca app, skill…",
+    "searchPlaceholder": "Cerca un'app…",
     "clearSearch": "Pulisci la ricerca",
     "noResults": "Nessun risultato per «{query}».",
     "hasServer": "Ha un server proprio",
