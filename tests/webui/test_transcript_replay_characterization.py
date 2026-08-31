@@ -99,6 +99,19 @@ SCENARIOS: dict[str, list[dict[str, Any]]] = {
         {"event": "stream_end", "text": "ok", **_turn("t10")},
         {"event": "turn_end", **_turn("t10")},
     ],
+    # Una riga corrotta deve costare quella riga, non la conversazione. Questo
+    # scenario nasce da una regressione introdotta estraendo i rami: il dispatch
+    # a dizionario faceva sollevare ``TypeError`` su un ``event`` non hashabile,
+    # dove i vecchi confronti ``==`` tolleravano tutto.
+    "event di tipo assurdo: la riga si salta, il resto vive": [
+        {"event": "user", "text": "prima", **_turn("t11")},
+        {"event": ["una", "lista"], "text": "riga corrotta"},
+        {"event": {"a": 1}, "text": "altra riga corrotta"},
+        {"event": 42, "text": "e un intero"},
+        {"event": None, "text": "e un null"},
+        {"event": "stream_end", "text": "dopo", **_turn("t11")},
+        {"event": "turn_end", **_turn("t11")},
+    ],
     "trascrizione vuota": [],
 }
 

@@ -387,269 +387,288 @@ def replay_transcript_to_ui_messages(
             **turn_fields,
         }
 
-    for idx, rec in enumerate(lines):
-        ev = rec.get("event")
-        if ev == "user":
-            # Una domanda nuova chiude il turno precedente, anche se quel turno
-            # non ha mai visto un ``turn_end`` — ed è il caso normale quando
-            # l'utente interrompe Jenny a metà risposta.
-            #
-            # Senza questo, il segnaposto in streaming del turno vecchio restava
-            # in ``buffer_message_id`` e il ``stream_end`` successivo ci scriveva
-            # dentro la risposta del turno NUOVO: quella risposta compariva
-            # **sopra** la propria domanda (il segnaposto sta a un indice più
-            # basso), e il testo parziale interrotto sparse. Si vedeva solo
-            # ricaricando una conversazione interrotta, cioè mai in un test per
-            # ramo — i rami sono giusti, è la loro interazione sullo stato
-            # condiviso che non lo era.
-            demote_interrupted_assistant(_ensure_activity_segment())
-            buffer_message_id = None
-            buffer_parts = []
-            active_activity_segment_id = None
-            active_file_edit_segment_id = None
-            text = rec.get("text")
-            text_s = text if isinstance(text, str) else ""
-            media_paths = rec.get("media_paths")
-            paths: list[str] = []
-            if isinstance(media_paths, list):
-                paths = [str(p) for p in media_paths if p]
-            media_att: list[dict[str, Any]] | None = None
-            if paths and augment_user_media is not None:
-                media_att = augment_user_media(paths)
-            row: dict[str, Any] = {
-                "id": _new_id("u", idx),
-                "role": "user",
-                "content": text_s,
-                **_turn_fields(rec, "user"),
-                "createdAt": _ts_base + idx,
-            }
-            origin = rec.get("origin")
-            if isinstance(origin, str) and origin:
-                row["origin"] = origin
-            if media_att:
-                row["media"] = media_att
-                if all(m.get("kind") == "image" for m in media_att):
-                    row["images"] = [{"url": m.get("url"), "name": m.get("name")} for m in media_att]
-            messages.append(row)
-            continue
+    def _on_user(rec: dict[str, Any], idx: int) -> None:
+        nonlocal active_activity_segment_id, active_file_edit_segment_id, buffer_message_id, buffer_parts
+        demote_interrupted_assistant(_ensure_activity_segment())
+        buffer_message_id = None
+        buffer_parts = []
+        active_activity_segment_id = None
+        active_file_edit_segment_id = None
+        text = rec.get("text")
+        text_s = text if isinstance(text, str) else ""
+        media_paths = rec.get("media_paths")
+        paths: list[str] = []
+        if isinstance(media_paths, list):
+            paths = [str(p) for p in media_paths if p]
+        media_att: list[dict[str, Any]] | None = None
+        if paths and augment_user_media is not None:
+            media_att = augment_user_media(paths)
+        row: dict[str, Any] = {
+            "id": _new_id("u", idx),
+            "role": "user",
+            "content": text_s,
+            **_turn_fields(rec, "user"),
+            "createdAt": _ts_base + idx,
+        }
+        origin = rec.get("origin")
+        if isinstance(origin, str) and origin:
+            row["origin"] = origin
+        if media_att:
+            row["media"] = media_att
+            if all(m.get("kind") == "image" for m in media_att):
+                row["images"] = [{"url": m.get("url"), "name": m.get("name")} for m in media_att]
+        messages.append(row)
+        return
 
-        if ev == "file_edit":
-            raw_edits = rec.get("edits")
-            if isinstance(raw_edits, list):
-                upsert_file_edits(
-                    [e for e in raw_edits if isinstance(e, dict)],
-                    idx,
-                    _turn_fields(rec, "activity"),
-                )
-            continue
+    def _on_file_edit(rec: dict[str, Any], idx: int) -> None:
+        raw_edits = rec.get("edits")
+        if isinstance(raw_edits, list):
+            upsert_file_edits(
+                [e for e in raw_edits if isinstance(e, dict)],
+                idx,
+                _turn_fields(rec, "activity"),
+            )
+        return
 
-        if ev == "delta":
-            if suppress_until_turn_end:
-                continue
-            chunk = rec.get("text")
-            if not isinstance(chunk, str):
-                continue
-            close_activity_for_answer()
-            turn_fields = _turn_fields(rec, "answer")
-            adopted = find_active_placeholder(messages, turn_fields) if buffer_message_id is None else None
-            if buffer_message_id is None:
-                if adopted:
-                    buffer_message_id = adopted
-                else:
-                    buffer_message_id = _new_id("buf", idx)
-                    messages.append(
-                        {
-                            "id": buffer_message_id,
-                            "role": "assistant",
-                            "content": "",
-                            "isStreaming": True,
-                            **_turn_fields(rec, "answer"),
-                            "createdAt": _ts_base + idx,
-                        },
-                    )
-            buffer_parts.append(chunk)
-            combined = "".join(buffer_parts)
-            for i, m in enumerate(messages):
-                if m.get("id") == buffer_message_id:
-                    messages[i] = {
-                        **m,
-                        "content": combined,
+    def _on_delta(rec: dict[str, Any], idx: int) -> None:
+        nonlocal buffer_message_id
+        if suppress_until_turn_end:
+            return
+        chunk = rec.get("text")
+        if not isinstance(chunk, str):
+            return
+        close_activity_for_answer()
+        turn_fields = _turn_fields(rec, "answer")
+        adopted = find_active_placeholder(messages, turn_fields) if buffer_message_id is None else None
+        if buffer_message_id is None:
+            if adopted:
+                buffer_message_id = adopted
+            else:
+                buffer_message_id = _new_id("buf", idx)
+                messages.append(
+                    {
+                        "id": buffer_message_id,
+                        "role": "assistant",
+                        "content": "",
                         "isStreaming": True,
                         **_turn_fields(rec, "answer"),
-                    }
-                    break
-            continue
+                        "createdAt": _ts_base + idx,
+                    },
+                )
+        buffer_parts.append(chunk)
+        combined = "".join(buffer_parts)
+        for i, m in enumerate(messages):
+            if m.get("id") == buffer_message_id:
+                messages[i] = {
+                    **m,
+                    "content": combined,
+                    "isStreaming": True,
+                    **_turn_fields(rec, "answer"),
+                }
+                break
+        return
 
-        if ev == "stream_end":
-            if suppress_until_turn_end:
-                buffer_message_id = None
-                buffer_parts = []
-                continue
-            final_text = rec.get("text")
-            if isinstance(final_text, str):
-                if buffer_message_id is None:
-                    buffer_message_id = _new_id("buf", idx)
-                    messages.append(
-                        {
-                            "id": buffer_message_id,
-                            "role": "assistant",
+    def _on_stream_end(rec: dict[str, Any], idx: int) -> None:
+        nonlocal buffer_message_id, buffer_parts
+        if suppress_until_turn_end:
+            buffer_message_id = None
+            buffer_parts = []
+            return
+        final_text = rec.get("text")
+        if isinstance(final_text, str):
+            if buffer_message_id is None:
+                buffer_message_id = _new_id("buf", idx)
+                messages.append(
+                    {
+                        "id": buffer_message_id,
+                        "role": "assistant",
+                        "content": final_text,
+                        "isStreaming": True,
+                        **_turn_fields(rec, "answer"),
+                        "createdAt": _ts_base + idx,
+                    },
+                )
+            else:
+                for i, m in enumerate(messages):
+                    if m.get("id") == buffer_message_id:
+                        messages[i] = {
+                            **m,
                             "content": final_text,
                             "isStreaming": True,
                             **_turn_fields(rec, "answer"),
-                            "createdAt": _ts_base + idx,
-                        },
-                    )
-                else:
-                    for i, m in enumerate(messages):
-                        if m.get("id") == buffer_message_id:
-                            messages[i] = {
-                                **m,
-                                "content": final_text,
-                                "isStreaming": True,
-                                **_turn_fields(rec, "answer"),
-                            }
-                            break
-            buffer_message_id = None
-            buffer_parts = []
-            continue
+                        }
+                        break
+        buffer_message_id = None
+        buffer_parts = []
+        return
 
-        if ev == "reasoning_delta":
-            if suppress_until_turn_end:
-                continue
-            chunk = rec.get("text")
-            if not isinstance(chunk, str) or not chunk:
-                continue
+    def _on_reasoning_delta(rec: dict[str, Any], idx: int) -> None:
+        if suppress_until_turn_end:
+            return
+        chunk = rec.get("text")
+        if not isinstance(chunk, str) or not chunk:
+            return
+        close_file_edit_phase_before_activity()
+        attach_reasoning_chunk(messages, chunk, idx, _turn_fields(rec, "reasoning"))
+        return
+
+    def _on_reasoning_end(rec: dict[str, Any], idx: int) -> None:
+        if suppress_until_turn_end:
+            return
+        close_reasoning(messages)
+        return
+
+    def _on_message(rec: dict[str, Any], idx: int) -> None:
+        nonlocal buffer_message_id, buffer_parts, suppress_until_turn_end
+        if suppress_until_turn_end and rec.get("kind") in (
+            "tool_hint",
+            "progress",
+            "reasoning",
+        ):
+            return
+        kind = rec.get("kind")
+        if kind == "reasoning":
+            line = rec.get("text")
+            if not isinstance(line, str) or not line:
+                return
             close_file_edit_phase_before_activity()
-            attach_reasoning_chunk(messages, chunk, idx, _turn_fields(rec, "reasoning"))
-            continue
-
-        if ev == "reasoning_end":
-            if suppress_until_turn_end:
-                continue
+            attach_reasoning_chunk(messages, line, idx, _turn_fields(rec, "reasoning"))
             close_reasoning(messages)
-            continue
-
-        if ev == "message":
-            if suppress_until_turn_end and rec.get("kind") in (
-                "tool_hint",
-                "progress",
-                "reasoning",
-            ):
-                continue
-            kind = rec.get("kind")
-            if kind == "reasoning":
-                line = rec.get("text")
-                if not isinstance(line, str) or not line:
-                    continue
-                close_file_edit_phase_before_activity()
-                attach_reasoning_chunk(messages, line, idx, _turn_fields(rec, "reasoning"))
-                close_reasoning(messages)
-                continue
-            if kind in ("tool_hint", "progress"):
-                structured_events = _normalize_tool_events(rec.get("tool_events"))
-                visible_structured_events = _filter_covered_file_edit_tool_events(messages, structured_events)
-                structured = _tool_trace_lines_from_events(visible_structured_events)
-                text = rec.get("text")
-                if structured:
-                    trace_lines = structured
-                elif structured_events:
-                    trace_lines = []
-                elif isinstance(text, str) and text:
-                    trace_lines = [text]
-                else:
-                    trace_lines = []
-                if not trace_lines:
-                    continue
-                segment = _ensure_activity_segment()
-                demote_interrupted_assistant(segment)
-                last = messages[-1] if messages else None
-                if (
-                    last
-                    and last.get("kind") == "trace"
-                    and not last.get("isStreaming")
-                    and (last.get("activitySegmentId") in (None, segment))
-                ):
-                    prev_traces = list(last.get("traces") or [last.get("content")])
-                    if structured:
-                        merged_traces, added = _merge_unique_tool_trace_lines(prev_traces, structured)
-                        if not added and not visible_structured_events:
-                            continue
-                    else:
-                        merged_traces = prev_traces + trace_lines
-                    merged = {
-                        **last,
-                        "traces": merged_traces,
-                        "content": merged_traces[-1],
-                        "toolEvents": _merge_tool_events(last.get("toolEvents"), visible_structured_events)
-                        if visible_structured_events
-                        else last.get("toolEvents"),
-                        "activitySegmentId": last.get("activitySegmentId") or segment,
-                        **_turn_fields(rec, "activity"),
-                    }
-                    messages[-1] = merged
-                else:
-                    messages.append(
-                        {
-                            "id": _new_id("tr", idx),
-                            "role": "tool",
-                            "kind": "trace",
-                            "content": trace_lines[-1],
-                            "traces": trace_lines,
-                            **({"toolEvents": visible_structured_events} if visible_structured_events else {}),
-                            "activitySegmentId": segment,
-                            **_turn_fields(rec, "activity"),
-                            "createdAt": _ts_base + idx,
-                        },
-                    )
-                continue
-
-            buffer_message_id = None
-            buffer_parts = []
+            return
+        if kind in ("tool_hint", "progress"):
+            structured_events = _normalize_tool_events(rec.get("tool_events"))
+            visible_structured_events = _filter_covered_file_edit_tool_events(messages, structured_events)
+            structured = _tool_trace_lines_from_events(visible_structured_events)
             text = rec.get("text")
-            content_s = text if isinstance(text, str) else ""
-            media: list[dict[str, Any]] = []
-            raw_media = rec.get("media")
-            raw_media_list = raw_media if isinstance(raw_media, list) else []
-            media_paths = [path for path in raw_media_list if isinstance(path, str) and path]
-            if media_paths and augment_assistant_media is not None:
-                media = augment_assistant_media(media_paths)
-            if not media and (not media_paths or augment_assistant_media is None):
-                media = _media_from_signed_urls(rec.get("media_urls"))
-            extra: dict[str, Any] = {"content": content_s}
-            if media:
-                extra["media"] = media
-            origin = rec.get("origin")
-            if isinstance(origin, str) and origin:
-                extra["origin"] = origin
-            lat = rec.get("latency_ms")
-            if isinstance(lat, (int, float)) and lat >= 0:
-                extra["latencyMs"] = int(lat)
-            extra.update(_turn_fields(rec, "answer"))
-            absorb_complete(extra, idx)
-            if media:
-                suppress_until_turn_end = True
-            continue
-
-        if ev == "turn_end":
-            suppress_until_turn_end = False
-            active_activity_segment_id = None
-            active_file_edit_segment_id = None
-            turn_id = rec.get("turn_id")
-            if isinstance(turn_id, str) and turn_id:
-                if turn_id in replay_turn_aliases:
-                    replay_turn_aliases.pop(turn_id, None)
+            if structured:
+                trace_lines = structured
+            elif structured_events:
+                trace_lines = []
+            elif isinstance(text, str) and text:
+                trace_lines = [text]
+            else:
+                trace_lines = []
+            if not trace_lines:
+                return
+            segment = _ensure_activity_segment()
+            demote_interrupted_assistant(segment)
+            last = messages[-1] if messages else None
+            if (
+                last
+                and last.get("kind") == "trace"
+                and not last.get("isStreaming")
+                and (last.get("activitySegmentId") in (None, segment))
+            ):
+                prev_traces = list(last.get("traces") or [last.get("content")])
+                if structured:
+                    merged_traces, added = _merge_unique_tool_trace_lines(prev_traces, structured)
+                    if not added and not visible_structured_events:
+                        return
                 else:
-                    closed_turn_ids.add(turn_id)
-            for i, m in enumerate(messages):
-                if m.get("isStreaming"):
-                    messages[i] = {**m, "isStreaming": False}
-            prune_reasoning_only()
-            lat = rec.get("latency_ms")
-            if isinstance(lat, (int, float)) and lat >= 0:
-                stamp_latency(int(lat))
-            buffer_message_id = None
-            buffer_parts = []
-            continue
+                    merged_traces = prev_traces + trace_lines
+                merged = {
+                    **last,
+                    "traces": merged_traces,
+                    "content": merged_traces[-1],
+                    "toolEvents": _merge_tool_events(last.get("toolEvents"), visible_structured_events)
+                    if visible_structured_events
+                    else last.get("toolEvents"),
+                    "activitySegmentId": last.get("activitySegmentId") or segment,
+                    **_turn_fields(rec, "activity"),
+                }
+                messages[-1] = merged
+            else:
+                messages.append(
+                    {
+                        "id": _new_id("tr", idx),
+                        "role": "tool",
+                        "kind": "trace",
+                        "content": trace_lines[-1],
+                        "traces": trace_lines,
+                        **({"toolEvents": visible_structured_events} if visible_structured_events else {}),
+                        "activitySegmentId": segment,
+                        **_turn_fields(rec, "activity"),
+                        "createdAt": _ts_base + idx,
+                    },
+                )
+            return
+
+        buffer_message_id = None
+        buffer_parts = []
+        text = rec.get("text")
+        content_s = text if isinstance(text, str) else ""
+        media: list[dict[str, Any]] = []
+        raw_media = rec.get("media")
+        raw_media_list = raw_media if isinstance(raw_media, list) else []
+        media_paths = [path for path in raw_media_list if isinstance(path, str) and path]
+        if media_paths and augment_assistant_media is not None:
+            media = augment_assistant_media(media_paths)
+        if not media and (not media_paths or augment_assistant_media is None):
+            media = _media_from_signed_urls(rec.get("media_urls"))
+        extra: dict[str, Any] = {"content": content_s}
+        if media:
+            extra["media"] = media
+        origin = rec.get("origin")
+        if isinstance(origin, str) and origin:
+            extra["origin"] = origin
+        lat = rec.get("latency_ms")
+        if isinstance(lat, (int, float)) and lat >= 0:
+            extra["latencyMs"] = int(lat)
+        extra.update(_turn_fields(rec, "answer"))
+        absorb_complete(extra, idx)
+        if media:
+            suppress_until_turn_end = True
+        return
+
+    def _on_turn_end(rec: dict[str, Any], idx: int) -> None:
+        nonlocal active_activity_segment_id, active_file_edit_segment_id, buffer_message_id, buffer_parts, suppress_until_turn_end
+        suppress_until_turn_end = False
+        active_activity_segment_id = None
+        active_file_edit_segment_id = None
+        turn_id = rec.get("turn_id")
+        if isinstance(turn_id, str) and turn_id:
+            if turn_id in replay_turn_aliases:
+                replay_turn_aliases.pop(turn_id, None)
+            else:
+                closed_turn_ids.add(turn_id)
+        for i, m in enumerate(messages):
+            if m.get("isStreaming"):
+                messages[i] = {**m, "isStreaming": False}
+        prune_reasoning_only()
+        lat = rec.get("latency_ms")
+        if isinstance(lat, (int, float)) and lat >= 0:
+            stamp_latency(int(lat))
+        buffer_message_id = None
+        buffer_parts = []
+        return
+
+    # Un ramo per tipo di evento, ciascuno leggibile per conto suo. Erano
+    # otto ``if ev == …`` dentro un ciclo di 250 righe, dove per capire cosa
+    # facesse uno bisognava scorrere gli altri sette. Il corpo è lo stesso:
+    # i ``continue`` di livello ramo sono diventati ``return`` (stesso
+    # significato — «questo record è finito»), i ``break`` erano tutti dentro
+    # cicli interni e restano dove sono.
+    handlers: dict[str, Callable[[dict[str, Any], int], None]] = {
+        "user": _on_user,
+        "file_edit": _on_file_edit,
+        "delta": _on_delta,
+        "stream_end": _on_stream_end,
+        "reasoning_delta": _on_reasoning_delta,
+        "reasoning_end": _on_reasoning_end,
+        "message": _on_message,
+        "turn_end": _on_turn_end,
+    }
+
+    for idx, rec in enumerate(lines):
+        ev = rec.get("event")
+        # ``isinstance`` prima del lookup: il vecchio ciclo confrontava con
+        # ``==``, che tollera qualunque cosa, mentre una chiave non hashabile
+        # (``"event": []``, da una riga corrotta) farebbe sollevare ``.get``.
+        # Il file sta su disco: una riga rotta deve costare quella riga, non
+        # l'intera conversazione.
+        handler = handlers.get(ev) if isinstance(ev, str) else None
+        if handler is not None:
+            handler(rec, idx)
 
     for i, m in enumerate(messages):
         if (

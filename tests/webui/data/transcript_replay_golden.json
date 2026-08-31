@@ -189,5 +189,23 @@
       "createdAt": 5
     }
   ],
+  "event di tipo assurdo: la riga si salta, il resto vive": [
+    {
+      "id": "<u#0>",
+      "role": "user",
+      "content": "prima",
+      "turnId": "t11",
+      "turnPhase": "user",
+      "createdAt": 0
+    },
+    {
+      "id": "<buf#1>",
+      "role": "assistant",
+      "content": "dopo",
+      "turnId": "t11",
+      "turnPhase": "answer",
+      "createdAt": 5
+    }
+  ],
   "trascrizione vuota": []
 }
