@@ -13,6 +13,7 @@ jobs:
   dco:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       # fetch-depth: 0 — the check walks the PR commit range, which shallow
       # clones do not contain. Still needed on checkout v7: the default is
@@ -29,6 +30,7 @@ jobs:
 
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -51,6 +53,9 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    # La suite sta in ~2 minuti in locale. Il default di GitHub è 360: un test
+    # appeso li brucerebbe tutti prima di dire com'è andata.
+    timeout-minutes: 20
     strategy:
       matrix:
         python-version: ["3.11", "3.12"]

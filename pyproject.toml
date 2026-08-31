@@ -80,6 +80,16 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# ``strict-markers``: un marker non registrato è un errore, non un avviso.
+# Verificato: senza, ``@pytest.mark.skpif`` non salta il test — lo **esegue**, e
+# passa, riportando come verificato qualcosa che non lo è.
+#
+# ``strict-config`` promuove a errore gli avvisi che escono leggendo questa
+# sezione. Provato a rompere una chiave (``testpath`` per ``testpaths``): su
+# pytest 9.1.1 non emette avviso, quindi qui non scatta. Resta perché costa zero
+# e copre gli avvisi che *vengono* emessi — non perché sia stato dimostrato su
+# questo albero.
+addopts = ["--strict-markers", "--strict-config"]
 
 [tool.coverage.run]
 source = ["jenny"]
