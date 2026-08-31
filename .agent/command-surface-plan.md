@@ -1,7 +1,8 @@
 # Le manopole in Impostazioni, i comandi ai verbi — piano
 
-Stato: **stadi 1-6 fatti** il 31/08/2026 sul ramo `feat/settings-consolidation`
-(`5939859`, `986927b`, `cecaf2a`). Resta lo stadio 7, la verifica sul telefono.
+Stato: **fatto**, tutti e sette gli stadi, il 31/08/2026 sul ramo
+`feat/settings-consolidation` (`5939859`, `986927b`, `cecaf2a`, piu' i due rimedi nati dalla
+verifica sul telefono). Il device ha rimesso i suoi valori di partenza.
 Scritto: 2026-08-31.
 Lista di esecuzione: [`command-surface-checklist.md`](./command-surface-checklist.md), che
 porta anche le tre differenze fra il piano e quel che è atterrato.

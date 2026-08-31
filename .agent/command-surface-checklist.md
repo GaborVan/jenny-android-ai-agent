@@ -102,13 +102,38 @@ schermata scriva lascia il device senza nessuna superficie.
 - [x] **6.5** `docs/using/projects.md`:127 · `docs/reference/configuration.md`:93,104 · `docs/internals/privacy.md`:38
 - [x] **6.6** `.agent/gotchas.md`:149 annotato come la strada di allora *(non riscrivere la storia)*
 
-## Stadio 7 — sul telefono
+## Stadio 7 — sul telefono *(fatto il 31/08/2026, PID 18795 → 19980)*
 
-- [ ] **7.1** La schermata si apre con un `SOUL.md` illeggibile
-- [ ] **7.2** Giardiniere spento dalla UI → `config.json` lo dice **e** il job si ri-arma senza riavvio (riga di log)
-- [ ] **7.3** Dream spento e riacceso *(percorso che prima non esisteva: il più a rischio)*
-- [ ] **7.4** Atlas spento e riacceso
-- [ ] **7.5** Cadenza a 1: il dialogo compare, senza conferma non parte niente
-- [ ] **7.6** I tetti mostrano le dimensioni vere; `0` si legge come «misura»
-- [ ] **7.7** `compact` alzato: la nota del riavvio è sul posto, non in un toast
-- [ ] **7.8** `/dream budget` e `/gardener settings` battuti a memoria rispondono la riga di migrazione
+Build `assembleRelease` (l'APK sul telefono e' firmato release, `installDebug` non
+entrerebbe), quattro installazioni: la prima per gli otto controlli, le altre tre per i due
+difetti trovati qui e per il buco che il rimedio lasciava.
+
+
+- [x] **7.1** La schermata si apre con un `SOUL.md` illeggibile
+- [x] **7.2** Giardiniere spento dalla UI → `config.json` lo dice **e** il job si ri-arma senza riavvio (riga di log)
+- [x] **7.3** Dream spento e riacceso *(percorso che prima non esisteva: il più a rischio)*
+- [x] **7.4** Atlas spento e riacceso
+- [x] **7.5** Cadenza a 1: il dialogo compare, senza conferma non parte niente
+- [x] **7.6** I tetti mostrano le dimensioni vere; `0` si legge come «misura»
+- [x] **7.7** `compact` alzato: la nota del riavvio è sul posto, non in un toast
+- [x] **7.8** `/dream budget` e `/gardener settings` battuti a memoria rispondono la riga di migrazione
+
+### I due difetti che solo il telefono ha mostrato
+
+- **`436218c`** — un file di memoria illeggibile leggeva «0 caratteri su 3.000». Con un
+  `chmod 000` su `SOUL.md` la schermata si apriva (era il punto del fail-soft) ma il numero
+  era falso: `count_chars` ingoia l'`OSError` e ritorna `0`, che e' anche quel che danno un
+  file vuoto e uno mai scritto. Ora c'e' `readable` accanto a `exists`.
+- **`0e8ab76`** — spegnendo il giardiniere, la riga «every 30min, on projects idle 30min…»
+  restava sotto un interruttore su OFF. Spento la riga tace; e il paragrafo vuoto non lascia
+  un buco (`.settings-hint:empty`).
+
+### Un effetto collaterale, da mettere a verbale
+
+La prima passata della sonda WS mandava frame **senza `"type": "message"`**, e quel percorso
+ignora il `chat_id`: le righe finivano nella chat personale invece che in `project:adhd`.
+Cosi' `/dream` e `/atlas` sono partiti per davvero — una consolidazione (`MEMORY.md` da 2.132
+a 2.147 byte) e una ricompilazione della rubrica in 9,5s. Nessuna perdita (il checkpoint
+pre-Dream lo prende il container) e sono i due job che avrebbero girato da soli entro poche
+ore, ma sono token spesi e un cursore avanzato che nessuno aveva chiesto. **Il frame va
+tipizzato**, o si sta misurando un'altra conversazione.
