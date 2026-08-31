@@ -51,23 +51,41 @@ class AppsRoutes:
         self._log = log
 
     def _check_apps_enabled(self) -> Response | None:
+        """Verifica ``config.apps.enabled``, fail-**closed**.
+
+        Un ``except: pass`` faceva passare la richiesta quando ``load_config()``
+        solleva, e questo gate protegge anche ``_static``, che serve byte
+        arbitrari da ``workspace/apps/<slug>/app/``: un errore di config
+        scavalcava in silenzio una feature dichiarata spenta. Il gemello in
+        ``workspace_routes._require_workspace_flag`` risponde 503 nello stesso
+        caso, con una docstring che spiega perché deve. Il token resta comunque
+        richiesto, quindi era una falla di policy, non di autenticazione.
+        """
         from jenny.config.loader import load_config
 
         try:
-            if not load_config().apps.enabled:
-                return http_error(503, "apps are disabled")
+            enabled = load_config().apps.enabled
         except Exception:
-            pass
+            self._log.exception("apps gate: could not read config; refusing")
+            return http_error(503, "apps are unavailable")
+        if not enabled:
+            return http_error(503, "apps are disabled")
         return None
 
     def _apps_config_values(self) -> tuple[float, int]:
+        """I due limiti del runtime app, con i default che vengono dallo schema.
+
+        I valori non si riscrivono a mano: duplicarli qui li fa divergere dallo
+        schema alla prima modifica di uno dei due.
+        """
         from jenny.config.loader import load_config
+        from jenny.config.schema import AppsConfig
 
         try:
             apps = load_config().apps
-            return apps.http_timeout_s, apps.max_collection_bytes
         except Exception:
-            return 20.0, 5_000_000
+            apps = AppsConfig()
+        return apps.http_timeout_s, apps.max_collection_bytes
 
     async def dispatch(self, request: WsRequest, path: str) -> Response | None:
         if path.startswith("/apps/"):

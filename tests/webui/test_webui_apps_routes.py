@@ -231,3 +231,44 @@ class TestAppStatic:
             response = handler.apps_routes._static(
                 _make_request("/apps/Bad_Slug/index.html"), "/apps/Bad_Slug/index.html")
         assert response.status_code == 400
+
+
+class TestAppsGateFailsClosed:
+    """Un errore di config non deve scavalcare una feature dichiarata spenta.
+
+    ``_check_apps_enabled`` faceva ``except Exception: pass``, e quel gate
+    protegge anche ``_static``, che serve byte arbitrari da
+    ``workspace/apps/<slug>/app/``. Il gemello in
+    ``workspace_routes._require_workspace_flag`` risponde 503 nello stesso caso,
+    con una docstring che spiega perché deve.
+    """
+
+    async def test_a_broken_config_refuses_instead_of_passing(self, tmp_path):
+        handler = _make_handler(tmp_path)
+        workspace = _make_workspace(tmp_path)
+
+        def boom():
+            raise ValueError("config.json is not valid JSON")
+
+        with patch("jenny.config.loader.load_config", side_effect=boom), \
+                patch.object(handler, "_get_workspace_root", return_value=workspace):
+            static = handler.apps_routes._static(
+                _make_request("/apps/note/index.html"), "/apps/note/index.html")
+            listing = handler.apps_routes._list(_make_request("/api/webui/apps"))
+
+        assert static.status_code == 503
+        assert listing.status_code == 503
+        # Il messaggio dell'eccezione non deve finire nel corpo.
+        assert b"not valid JSON" not in static.body
+
+    async def test_the_disabled_flag_still_says_disabled(self, tmp_path):
+        """Il caso spento resta distinguibile da quello illeggibile."""
+        handler = _make_handler(tmp_path)
+        apps_off = SimpleNamespace(enabled=False, http_timeout_s=20.0, max_collection_bytes=1)
+
+        with patch("jenny.config.loader.load_config",
+                   return_value=SimpleNamespace(apps=apps_off)):
+            response = handler.apps_routes._list(_make_request("/api/webui/apps"))
+
+        assert response.status_code == 503
+        assert b"disabled" in response.body
