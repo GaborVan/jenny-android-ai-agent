@@ -19,11 +19,11 @@ Girato il 30/08/2026 sull'AVD `jenny_square` (1440×1440 @ 480 dpi, Android 17 �
 v. [`emulator-setup.md`](./emulator-setup.md)). **Nessuna di queste caselle è
 stata verificata sul Titan 2.**
 
-- [ ] **0.1a** `adb shell settings get secure navigation_mode` **sul Titan 2** — `0` tre pulsanti, `2` gesture. Se è `0`, il passo 5 si semplifica ma **non si salta**: è un'impostazione dell'utente. *Telefono non collegato: non letto.*
+- [x] **0.1a** `settings get secure navigation_mode` **sul Titan 2** → **2 (gesture)**, letto il 31/08/2026. La navigazione a gesture è attiva: tutto il passo 5 è necessario su questo telefono, non teorico
 - [x] **0.1b** Idem **sull'emulatore**: `2` (gesture) è il default dell'immagine android-37.0. Interruttore gesture ↔ tre pulsanti documentato in `emulator-setup.md`
 - [x] **0.2** `mandatorySystemGestureInsets.bottom` stampato e scritto nel piano accanto a D8: **96 px fisici = 32 dp** in gesture, 144 px / 48 dp con tre pulsanti (dove combacia con la barra: sovrapposizione zero). Di quei 96 px, **8 px CSS** cadono dentro la WebView. *Emulatore, non Titan 2*
 - [x] **0.2b** Scoperto misurando: `env(safe-area-inset-*)` è `0px` su tutti e quattro i lati — il decor di AppCompat consuma gli inset prima della WebView. D8 non è un affinamento, è l'unica via
-- [ ] **0.3** ~~Verificare che il dock di oggi (43 px, solo tap) non si becchi già la gesture di home~~ — **la domanda è mal posta**: il dock è alto **56** px CSS, non 43, e sull'emulatore quadrato **non è affatto a schermo** (`@media (max-height: 500px)` in `mobile-style.css:3387` lo mette a `display: none`; viewport misurato 432 px CSS). Se valesse anche sul Titan 2, cadrebbero D1 e D2, non il passo 5. Da chiudere con `adb shell wm density` sul telefono — v. «Il dock potrebbe non essere sullo schermo» nel piano
+- [x] **0.3** **Il dock c'è.** `wm size` 1436x1440, `wm density` **400** (non 480: l'AVD era stato creato a occhio) → **574x576 px CSS**, sopra la soglia dei 500, quindi `@media (max-height: 500px)` **non** scatta. Confermato a schermo. Cade la preoccupazione del passo 0; D2 resta per la ragione del passo 6
 - [x] **0.4** Sonda `JennyInsetProbe` rimossa dal codice col passo 5: `logInsetProbe` e la sua chiamata in `onPageFinished` sostituite da `refreshGestureInsets()`, il commento «TEMPORANEO» sull'import via. Gli import `ViewCompat`/`WindowInsetsCompat` **restano**, perché ora servono al metodo vero. `grep -rn JennyInsetProbe` non trova più niente fuori da questi due file di piano, dove è il verbale di una misura fatta
 
 ## Passo 1 — il foglio vuoto che si apre e si chiude
@@ -245,6 +245,16 @@ leggere lo stato. Nessun modulo JS nuovo, quindi `_UI_MANIFEST` non cambia.
 
 ## Passo 7 — verifica sul telefono
 
+> **Girato sul Titan 2 il 31/08/2026**, build di release firmata, PID annotato.
+> **5.4 riconfermato sul dispositivo vero**: passata verso l'alto da y=1330
+> (ultimo pixel della lista) → la lista scorre, foglio aperto; **la stessa
+> passata da y=1435, dentro la fascia obbligatoria → `goHome()`, tutto smontato.**
+> Il margine fa il suo lavoro su questo telefono, non solo sull'emulatore.
+> **Difetto trovato solo qui:** la mascotte (z-index 120) restava dipinta sopra
+> il foglio (100) e le sue righe — `inert` toglie i tocchi, non l'impilamento.
+> Corretto; preesistente in forma identica sopra l'overlay delle mini-app (110),
+> **non toccato**.
+
 **Il telefono non era collegato** (30/08/2026): 7.2, 7.3 e 7.4 restano aperte per
 definizione. Fatto tutto ciò che non lo richiede — v.
 [`apps-drawer-handover.md`](./apps-drawer-handover.md) per la sequenza esatta da
@@ -253,6 +263,6 @@ eseguire quando il Titan 2 si ricollega.
 - [x] **7.1** Build di release su worktree pulito (Chaquopy impacchetta l'albero di lavoro, non HEAD) — `git status` pulito, `ANDROID_HOME=$HOME/Library/Android/sdk ./gradlew app:assembleRelease` da `<worktree>/android`: **BUILD SUCCESSFUL in 48s**. L'unico `[jenny] WARNING` dell'output intero (non del `tail`) è quello atteso della firma assente: `keystore.properties` è gitignored e nel worktree non c'è, quindi esce `app-release-unsigned.apk` (75,7 MB) — che va benissimo, perché qui non si installava niente. Gli altri WARNING sono le regole ProGuard delle librerie (costruttore di default implicito) e un `setPassword` deprecato in `SshBridge.kt`: entrambi preesistenti, nessuno tocca il cassetto
 - [x] **7.1b** **R8 non ha mangiato il metodo nuovo del ponte** — la prova che i passi 0-6, tutti su build *debug*, non potevano dare: `isMinifyEnabled = true` vale solo in release, e `getBottomGestureInset()` è raggiunto **solo per reflection** da `@JavascriptInterface`. Letto nel dex vero (`unzip classes.dex` + `dexdump` di build-tools 37.0.0, `apkanalyzer` non è installato in questo SDK): il metodo c'è come `com.flagdizero.jenny.MainActivity$JennyGestureBridge.getBottomGestureInset:()I`, `PUBLIC FINAL`, **col nome non offuscato** e dentro la classe non rinominata; `dexdump -a` mostra su di lui `VISIBILITY_RUNTIME Landroid/webkit/JavascriptInterface;`, che è ciò che la WebView cerca a runtime. Il corpo legge il campo `@Volatile` via `access$getBottomGestureInsetPx$p`. Lo tiene in vita `-keep class com.flagdizero.jenny.** { *; }` (`proguard-rules.pro:5`), **ma la regola non è la verifica**: qui è stato letto nell'APK
 - [x] **7.1c** Suite anche sulla **versione del dispositivo** (3.11, come Chaquopy; qui `python3` è 3.14) — venv `python3.11 -m venv` con `pip install -e <worktree>` (verificato che `jenny.__file__` punti al *worktree*, non all'albero principale) e pytest lanciato **da dentro** il worktree: **8864 passed, 6 skipped**. Su 3.14 nello stesso albero: **8865 passed, 5 skipped**. La differenza è **una sola** ed è dichiarata: `test_python_exec_sandbox.py:654 — onexc esiste da 3.12`, cioè una guardia di versione, non un guasto. Gli altri cinque skip sono identici sulle due versioni. *Niente che somigli al 12/08/2026 (161 failed / 137 errors su 3.11).* Con loro: `ruff check jenny/ tests/` → «All checks passed!», `npx pyright jenny/bus jenny/command jenny/runtime jenny/session` → «0 errors»
-- [ ] **7.2** Aprire un'app Android dal foglio, tornare indietro, e ritrovare la conversazione dov'era
+- [x] **7.2** Aperto AdAway dal foglio sul Titan 2, Indietro, conversazione ritrovata dov'era (v. §Prova sul dispositivo)
 - [ ] **7.3** Aprire una Jenny App dal foglio e verificare la catena Indietro completa: schermata interna → app → foglio → chat
 - [ ] **7.4** Una sessione d'uso vera, e poi guardare se l'ordine della lista somiglia a come si usa davvero il telefono

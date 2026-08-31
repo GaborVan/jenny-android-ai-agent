@@ -569,3 +569,20 @@ def test_the_margin_rounds_away_from_the_gesture_zone() -> None:
     body = _method(_src("mobile-launcher.js"), "_syncGestureInset")
     assert "Math.ceil(px / dpr)" in body
     assert "Math.round(px / dpr)" not in body
+
+
+def test_the_mascot_goes_under_the_scrim_with_the_sheet_open() -> None:
+    """La mascotte vive dentro `#app`, che il foglio rende `inert` — ma `inert`
+    toglie fuoco e tocchi, non l'impilamento: a z-index 120 resterebbe dipinta
+    sopra il foglio (100) e lo scrim (99), sulle righe. Difetto visto sul Titan
+    2, non sull'emulatore, dove le due cose non si sovrapponevano.
+    """
+    js = _method(_src("mobile-launcher.js"), "_setBackgroundInert")
+    assert "classList.toggle('launcher-open', on)" in js, (
+        "il segno che fa scendere la mascotte deve seguire l'inerzia dello sfondo"
+    )
+    css = _src("mobile-style.css")
+    assert ":root.launcher-open .jenny-duo { z-index: 98; }" in css
+    # 98 deve stare *sotto* lo scrim, o la correzione non serve a niente.
+    scrim = re.search(r"\.launcher-scrim\s*\{([^}]*)\}", css)
+    assert scrim and "z-index: 99" in scrim.group(1)

@@ -3140,6 +3140,13 @@ body {
    L'entrata NON usa l'easing elastico dei drawer: quello supera la posizione di
    riposo, e su un foglio ancorato a `bottom: 0` l'oltrepasso è una fessura di
    sfondo sotto il foglio. */
+/* Col cassetto aperto la mascotte scende sotto lo scrim: sta dentro `#app`,
+   cioè dentro lo sfondo che si sta oscurando, e a 120 resterebbe dipinta sopra
+   le righe del foglio (difetto visto sul telefono). 98 = subito sotto lo scrim.
+   Nota: sopra l'overlay di una mini-app (110) la mascotte galleggia comunque —
+   difetto preesistente a questo lavoro, non toccato qui. */
+:root.launcher-open .jenny-duo { z-index: 98; }
+
 .launcher-scrim {
   position: fixed; inset: 0; z-index: 99;
   background: rgba(0, 0, 0, 0.55);
