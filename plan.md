@@ -1,11 +1,16 @@
 # Plan — fixing what the 2026-08-11 device investigation surfaced
 
-Status: **proposed**, nothing implemented yet.
+Status: **done**, landed 2026-08-12. This document is kept as the record of the work and its reasoning, not as a queue. It said *proposed, nothing implemented yet* for nineteen days after the fact, which on a public repo reads as an authoritative statement that a sandbox escape (B4) and a gateway-killing crash (B1) are open and unowned. They are not. The `file:line` citations throughout have drifted since — `python_exec.py` went from ~800 lines to ~3,350 — so treat them as pointers to a subject, not to a location.
 Owner: unassigned.
 Written: 2026-08-11.
 
 > Not under `docs/` on purpose: `docs/**` is published by `flagdizero/jenny-site`.
-> `roadmap/` is gitignored and local-only, by design.
+> `roadmap/` is gitignored and local-only, by design — so **every `roadmap/` link
+> below is unreachable to anyone who clones this repo**, and so are the ~79
+> citations of those files in module docstrings under `jenny/` and `tests/`.
+> That is a standing decision to revisit, not an oversight: either the directory
+> gets tracked (the repo already tracks 18 plans under `.agent/`) or the
+> citations should name something a reader can open.
 
 ## The roadmap index
 
@@ -580,7 +585,7 @@ and should not ride in the same build as a crash fix you want to be able to attr
 
 # Round 2 — what the post-implementation review found
 
-Status: **in progress**, 2026-08-12.
+Status: **done**, 2026-08-12.
 
 `jenny/agent/tools/python_exec.py` was rewritten five times in one night (B1 → B4 → B5 → B4b
 → B12) by five agents, none of whom could see the others' work. Each verified its own slice

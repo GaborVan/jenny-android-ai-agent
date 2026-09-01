@@ -11,6 +11,10 @@ from typing import Any
 import httpx
 from loguru import logger
 
+from jenny.config.runtime_env import (
+    resolve_first_output_timeout_s,
+    resolve_stream_idle_timeout_s,
+)
 from jenny.providers.anthropic_conversion import (
     AnthropicConversionMixin,
     _gen_tool_id,
@@ -23,8 +27,6 @@ from jenny.providers.base import (
     LLMResponse,
     ToolCallRequest,
     parse_tool_arguments,
-    resolve_first_output_timeout_s,
-    resolve_stream_idle_timeout_s,
 )
 from jenny.providers.body_merge import deep_merge
 from jenny.providers.endpoint_budget import is_local_endpoint, request_timeout_s

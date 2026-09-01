@@ -64,6 +64,24 @@ def sanitize_empty_content(messages: list[dict[str, Any]]) -> list[dict[str, Any
     return result
 
 
+def _as_user_turn(msg: dict[str, Any]) -> dict[str, Any]:
+    """Il messaggio *msg* riscritto come turno ``user`` valido.
+
+    ``tool_calls`` va tolto, non solo perché nessun provider lo accetta su un
+    turno ``user``, ma perché quelle chiamate sono in coda: i loro risultati non
+    sono mai arrivati, quindi restano comunque spaiate. Toglierle può però
+    lasciare un turno senza niente da leggere — un assistant che aveva *solo*
+    chiamate ha ``content`` vuoto o ``None`` — e un turno vuoto è invalido
+    quanto quello da cui si scappava: in quel caso subentra il testo sintetico.
+    """
+    recovered = {k: v for k, v in msg.items() if k != "tool_calls"}
+    recovered["role"] = "user"
+    content = recovered.get("content")
+    if not content:
+        recovered["content"] = SYNTHETIC_USER_CONTENT
+    return recovered
+
+
 def enforce_role_alternation(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Merge consecutive same-role messages and drop trailing assistant messages.
 
@@ -114,9 +132,7 @@ def enforce_role_alternation(messages: list[dict[str, Any]]) -> list[dict[str, A
         and last_popped is not None
         and not any(m.get("role") in ("user", "tool") for m in merged)
     ):
-        recovered = dict(last_popped)
-        recovered["role"] = "user"
-        merged.append(recovered)
+        merged.append(_as_user_turn(last_popped))
 
     # Safety net: ensure the first non-system message is not a bare assistant
     # message (GLM rejects system→assistant with 1214). Can happen when upstream

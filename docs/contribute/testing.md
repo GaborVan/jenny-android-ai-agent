@@ -22,7 +22,7 @@ pytest tests/config/ -v
 
 ### Coverage
 
-CI additionally runs with `pytest-cov` (`--cov=jenny --cov-report=term-missing:skip-covered`). Coverage is **informational only** — there is no blocking threshold; it exists to make undercovered modules visible, not to fail a build over a percentage.
+CI runs plain `pytest -q`. Coverage was **removed** from it, and `pytest-cov` is not even installed there: the `python_exec` sandbox intercepts every path operation for the duration of an `execute` and refuses the ones outside the workspace, the coverage tracer's own path reads fall inside that window, and the tests asserting a clean record fail. Widening the sandbox's exemption to accommodate the tracer would weaken a security boundary on a platform we do not ship, so the measurement went instead — it had kept CI red for three releases. `[tool.coverage.*]` stays in `pyproject.toml` for a local `pytest -q --cov=jenny`, where you can see those failures and know to ignore them.
 
 ## Linting
 
@@ -54,7 +54,7 @@ One command, straight from `AGENTS.md`, runs everything CI runs before a PR is c
 ruff check jenny/ tests/ && npx pyright jenny/bus jenny/command jenny/runtime jenny/session && pytest -q
 ```
 
-Run this before committing or opening a PR. It's exactly the lint + blocking-type-check + test sequence, without the coverage report or the non-blocking full-perimeter pyright pass (those two are visibility-only in CI, not gates).
+Run this before committing or opening a PR. It's exactly the lint + blocking-type-check + test sequence, without the non-blocking full-perimeter pyright pass (visibility-only in CI, not a gate).
 
 ## What CI actually runs
 
@@ -64,7 +64,7 @@ Run this before committing or opening a PR. It's exactly the lint + blocking-typ
 |---|---|
 | `dco` | Verifies every commit in the PR carries a matching `Signed-off-by:` line (`scripts/check_dco.sh`). See [`CONTRIBUTING.md`](../../CONTRIBUTING.md) for the sign-off requirement — a PR with unsigned commits cannot merge. |
 | `lint` | `ruff check jenny/ tests/`, then the blocking pyright subset, then the non-blocking full-perimeter pyright pass (`\|\| true`). |
-| `test` | `pytest -q --cov=jenny --cov-report=term-missing:skip-covered`, run twice as a matrix across Python 3.11 and 3.12. |
+| `test` | `pytest -q`, run twice as a matrix across Python 3.11 and 3.12. Also installs `cryptography`, `asyncssh`, node and jsdom — see below. |
 
 CI validates the Android code path on a plain host runner (installing `jenny` with `pip install -e .`) rather than inside an actual Android build — Android is the only supported runtime target for the shipped app, but the Python side of the codebase is what CI exercises directly.
 

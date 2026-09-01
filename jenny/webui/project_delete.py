@@ -144,8 +144,8 @@ def delete_project(
     late = delete_project_traces(workspace, key)
     if late:
         logger.warning(
-            "Tracce ricomparse durante la cancellazione di {} e rimosse alla seconda "
-            "passata: {}", name, ", ".join(late)
+            "Traces reappeared while deleting {} and were removed on the second "
+            "pass: {}", name, ", ".join(late)
         )
         removed = [*removed, *late]
 

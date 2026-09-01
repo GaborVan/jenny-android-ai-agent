@@ -29,7 +29,7 @@ Only `app/` is web-served (`/apps/<slug>/<rel>` maps to `apps/<slug>/app/<rel>`)
 AGENT.md and `data/` are never reachable over HTTP — data flows only through actions.
 
 Apps live in `workspace/apps/`, **not** `workspace/ui/` — the latter is re-extracted from the
-package on every startup (`jenny/utils/helpers.py::_sync_workspace_templates_impl`) and
+package on every startup (`jenny/utils/helpers.py::sync_workspace_templates`) and
 would be overwritten. Apps are user content; `ui/` is bundled content.
 
 Boundary with skills: if it needs a screen, it's an app; if it only lives in chat, it's a

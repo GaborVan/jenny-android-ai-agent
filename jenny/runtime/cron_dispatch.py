@@ -308,13 +308,6 @@ def refresh_system_job(
     return cfg.describe_schedule()
 
 
-def refresh_gardener_job(cron: "CronService", *, config: "Config | None" = None) -> str | None:
-    """Il caso del giardiniere di :func:`refresh_system_job`.
-
-    Resta come nome proprio perché è quello che i suoi test e i suoi chiamanti
-    conoscono; la logica è una sola.
-    """
-    return refresh_system_job(cron, GARDENER_JOB_ID, config=config)
 
 
 class CronDispatcher:

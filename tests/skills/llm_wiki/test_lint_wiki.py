@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import importlib.util
 import re
-import sys
 import unicodedata
 from pathlib import Path
 
@@ -34,8 +33,13 @@ _SCRIPTS_DIR = (
 
 @pytest.fixture(scope="module")
 def lint_wiki():
-    """Carica `lint_wiki.py` come modulo (la dir non è un package importabile)."""
-    sys.path.insert(0, str(_SCRIPTS_DIR))
+    """Carica `lint_wiki.py` come modulo (la dir non è un package importabile).
+
+    Senza toccare ``sys.path``: ``spec_from_file_location`` non lo consulta, e
+    per i moduli fratelli ci pensa lo script stesso — ``lint_wiki.py`` si inserisce
+    la propria directory in testa prima di importarli. L'``insert`` che stava
+    qui non serviva a nulla e restava in piedi per tutta la sessione.
+    """
     spec = importlib.util.spec_from_file_location(
         "lint_wiki", _SCRIPTS_DIR / "lint_wiki.py"
     )

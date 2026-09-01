@@ -781,8 +781,8 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
 
         name = key[len(PROJECT_SESSION_PREFIX):]
         logger.warning(
-            "Progetto reincarnato: la sessione {} appartiene alla wiki {}, la cartella "
-            "ora e' {}; turno rifiutato", key, recorded, current,
+            "Reincarnated project: session {} belongs to wiki {}, the folder "
+            "is now {}; turn refused", key, recorded, current,
         )
         await self.bus.publish_outbound(OutboundMessage(
             channel=msg.channel,
@@ -857,7 +857,7 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             # iniettare questo messaggio nel turno in volo vorrebbe dire darlo a
             # un turno che non puo' scrivere da nessuna parte.
             logger.info(
-                "Riparazione del rinomino rinviata: {} ha un turno in volo", key
+                "Rename repair deferred: {} has a turn in flight", key
             )
             await self.bus.publish_outbound(OutboundMessage(
                 channel=msg.channel,
@@ -1026,8 +1026,8 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             if not is_valid_project_name(target.name):
                 shown = _shown_folder_name(target.name)
                 logger.warning(
-                    "Rinomino non inseguito: {} e' ora {!r}, che non puo' essere il nome "
-                    "di un progetto; le tracce restano sotto il nome vecchio",
+                    "Rename not followed: {} is now {!r}, which cannot be a project "
+                    "name; traces stay under the old name",
                     key, shown,
                 )
                 return ProjectFollowOutcome(

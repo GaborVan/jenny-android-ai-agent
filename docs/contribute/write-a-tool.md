@@ -36,7 +36,11 @@ One module can declare more than one tool in its `TOOLS` list — `filesystem.py
 ToolLoadError: Tool name collision: '<name>' from <ClassName> conflicts with an already-registered tool.
 ```
 
-There is no silent overwrite and no skip-and-log — this used to be a warning that clobbered the earlier registration, which is exactly the kind of bug that's invisible until the wrong tool runs. Pick a name that doesn't already exist in another module (`grep -rn '    name = "' jenny/agent/tools/` is a quick way to check).
+There is no silent overwrite and no skip-and-log — this used to be a warning that clobbered the earlier registration, which is exactly the kind of bug that's invisible until the wrong tool runs. Pick a name that doesn't already exist in another module. The obvious grep is not enough — most tools declare `name` as a `@property`, so `grep -rn '    name = "'` finds only about a third of them. This catches both shapes:
+
+```bash
+grep -rnE '^ +(name = "|def name)' jenny/agent/tools/
+```
 
 `ToolLoadError` (a `RuntimeError` subclass, defined in `loader.py`) marks the failures the loader treats as **fatal**, and it is never caught by the loader:
 
@@ -118,16 +122,20 @@ Piece by piece:
 
 `DownloadFileTool` (`jenny/agent/tools/download.py`) is a second useful reference: it shows a tool that owns an injectable `httpx.AsyncClient` (`__init__(self, workspace, client=None)`) purely so tests can pass an `httpx.MockTransport` instead of hitting the network — a pattern worth copying for any tool that talks to the outside world.
 
-## Scopes: core vs. subagent
+## Scopes: there are four, not two
 
-`_scopes` on the class controls which registries a tool ends up in:
+`_scopes` on the class controls which registries a tool ends up in. **Getting this wrong is the most common way to ship a tool that appears to work and is invisible to the agent the user talks to**, so it is worth reading before you copy a neighbour's value.
 
-- **`"core"`** — the main agent loop, i.e. the conversation the user is actually having.
-- **`"subagent"`** — spawned subagents (`spawn` tool, `jenny/agent/subagent.py`), which run with a *separate* `ToolRegistry` built via `ToolLoader().load(ctx, registry, scope="subagent")`.
+- **`"orchestrator"`** — the main agent loop **as it actually runs**. `AgentLoop.tool_scope` returns `"orchestrator"` whenever `agents.defaults.orchestratorMode` is true, which is the default. This is the scope the conversation you are having loads.
+- **`"core"`** — the same main loop with `orchestratorMode` set to `false`: the historical, wider scope. It is not the default any more.
+- **`"subagent"`** — spawned subagents (`spawn`, `jenny/agent/subagent.py`), which run with a *separate* `ToolRegistry` built via `ToolLoader().load(ctx, registry, scope="subagent")`, narrowed further by the agent type's `allow` list.
+- **`"remote"`** — the four SSH tools, and nothing else. **No agent loads it by default**; only the `sysadmin` subagent type asks for it.
 
-A tool with `_scopes = {"core", "subagent"}` (the common case for read/write file tools, search, download, location, exec sessions, ...) is available in both. A handful of tools are intentionally core-only — `spawn` itself doesn't register inside a subagent (no recursive spawning), and things tied to the primary conversation (e.g. `message`, `cron`) generally aren't handed to subagents either. If you don't set `_scopes` at all, the tool defaults to core-only.
+So a tool with `_scopes = {"core", "subagent"}` — the common case for the write-side file tools, `python_exec`, search, download, exec sessions and the `browser_*` family — is **not** available to the default orchestrator: the work reaches it by delegation instead. If you want the agent the user talks to to have your tool, `"orchestrator"` has to be in the set.
 
-Subagents are blind to the main conversation history and get their own scoped `ToolsConfig` (see `AgentLoop._build_subagent_context` / `jenny/agent/subagent.py`) — keep that in mind if your tool's `enabled()`/`create()` assumes the full config shape.
+`Tool._scopes` defaults to `{"core"}` (`jenny/agent/tools/base.py`), which with the shipped default config means **no agent at all** — so leaving it unset is almost never what you want.
+
+Subagents are blind to the main conversation history and get their own scoped `ToolsConfig` — the scoped load is `loader.load(ctx, registry, scope="subagent", allow=…)` in `jenny/agent/subagent.py`. Keep that in mind if your tool's `enabled()`/`create()` assumes the full config shape.
 
 ## The config toggle pattern
 

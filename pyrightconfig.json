@@ -1,7 +1,8 @@
 {
   // pyright "basic" static type-check. Zero runtime impact: this only gates CI.
   //
-  // Adoption model (see migliorie/architettura.md §T0 and migliorie/manutenibilita.md §1):
+  // Adoption model (the two `migliorie/*.md` notes this used to cite never existed in this
+  // repo; the model itself is described below and in docs/contribute/code-style.md):
   //   - This config defines the FULL perimeter ("jenny" minus templates/skills). Running
   //     `npx pyright` against it is NON-blocking visibility: it surfaces the residual errors
   //     we intend to tighten over time.

@@ -1148,7 +1148,7 @@ class TestTheRun:
         # Le pagine sono su disco; il cursore no.
         assert page.is_file()
         assert read_state(root).cursor == {}
-        assert any("cursore non è stato registrato" in line for line in errors)
+        assert any("cursor was not recorded" in line for line in errors)
         # E anche questa uscita ripulisce la propria traccia.
         assert not oldest.exists()
 
@@ -1493,7 +1493,7 @@ class TestYieldingToTheUser:
         assert read_state(root).cursor == {}
         # E il motivo è detto, non dedotto.
         assert "the user's own turn on viaggio started" in outcome.detail
-        assert any("ha ceduto il passo all'utente" in line for line in warnings)
+        assert any("yielded to the user" in line for line in warnings)
 
     async def test_the_model_is_told_why_it_cannot_write(self, tmp_path, bound):
         """Il rifiuto arriva al modello come frase, non come silenzio: è l'unico

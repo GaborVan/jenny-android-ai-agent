@@ -336,9 +336,8 @@ def last_user_message_ms(session: Session | None) -> int | None:
     # ciclo: ``jenny.cron.session_turns`` importa ``jenny.session.keys``, che
     # esegue ``jenny/session/__init__.py``, che carica questo modulo, che tornerebbe
     # su ``session_turns`` ancora a metà inizializzazione. Misurato il 2026-08-17: a
-    # freddo ``import jenny.cron.session_turns`` e ``from jenny.cron import
-    # CronService`` fallivano entrambi, e la suite era verde perché una raccolta
-    # completa carica ``jenny.session`` per prima.
+    # freddo ``import jenny.cron.session_turns`` falliva, e la suite era verde perché
+    # una raccolta completa carica ``jenny.session`` per prima.
     #
     # L'alternativa era rendere pigro ``jenny/session/__init__.py``, e costa più di
     # quanto sembri: una ``__getattr__`` di modulo fa diventare ``Any`` ogni

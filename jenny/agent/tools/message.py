@@ -177,10 +177,6 @@ class MessageTool(Tool, ContextAware):
             "message_turn_flags",
             default=_NO_TURN_FLAGS,
         )
-        self._suppress_delivery_var: ContextVar[bool] = ContextVar(
-            "message_suppress_delivery",
-            default=False,
-        )
 
     @classmethod
     def create(cls, ctx: Any) -> Tool:
@@ -210,14 +206,6 @@ class MessageTool(Tool, ContextAware):
         visibili al turno che l'ha creato.
         """
         self._turn_flags.set({"sent_in_turn": False})
-
-    def set_suppress_delivery(self, active: bool):
-        """Acknowledge but don't deliver tool sends (heartbeat internal check)."""
-        return self._suppress_delivery_var.set(active)
-
-    def reset_suppress_delivery(self, token) -> None:
-        """Restore previous delivery-suppression state."""
-        self._suppress_delivery_var.reset(token)
 
     @property
     def _sent_in_turn(self) -> bool:
@@ -431,10 +419,6 @@ class MessageTool(Tool, ContextAware):
             buttons=buttons or [],
             metadata=metadata,
         )
-
-        if self._suppress_delivery_var.get():
-            logger.debug("MessageTool: delivery suppressed during internal check")
-            return f"Message acknowledged for {channel}:{chat_id} (not delivered)"
 
         try:
             await self._send_callback(msg)

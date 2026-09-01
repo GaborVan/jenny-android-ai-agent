@@ -399,3 +399,68 @@ async def test_settings_update_fires_on_settings_changed_for_generation_params(
         )
         assert response.status_code == 200, field
         on_changed.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Il tronco condiviso: nessuna rotta di scrittura fa trapelare un'eccezione
+# ---------------------------------------------------------------------------
+
+# Le cinque rotte che scrivevano passando da un try/except scritto a mano, senza
+# l'``except Exception`` che la docstring del tronco SSH dice di non dimenticare.
+# Tutte e cinque chiamano ``store.mutate()``, cioè il disco: una config corrotta
+# o un errore di scrittura risaliva oltre ``dispatch`` — che ha solo un
+# ``finally`` — fino all'hook di handshake di ``websockets``.
+_WRITING_ROUTES = [
+    ("/api/settings/update", "update_agent_settings"),
+    ("/api/settings/memory/update", "update_memory_settings"),
+    ("/api/settings/workers/update", "update_worker_settings"),
+    ("/api/settings/provider/update?name=p", "update_provider"),
+    ("/api/settings/provider/delete?name=p", "delete_provider"),
+]
+
+
+@pytest.mark.parametrize(("path", "target"), _WRITING_ROUTES)
+async def test_writing_routes_turn_an_unexpected_error_into_a_mute_500(
+    config_path, monkeypatch: pytest.MonkeyPatch, path: str, target: str,
+) -> None:
+    async def boom(*args, **kwargs):
+        raise RuntimeError("kaboom: /Users/someone/workspace/config.json")
+
+    monkeypatch.setattr(f"jenny.webui.settings_routes.{target}", boom)
+    router = _router()
+
+    response = await router.dispatch(_request(path), path.split("?", 1)[0])
+
+    assert response.status_code == 500
+    # Il messaggio non deve finire nel corpo: qui porterebbe un percorso del
+    # filesystem, che è esattamente ciò che la docstring del tronco teme.
+    assert b"kaboom" not in response.body
+    assert b"config.json" not in response.body
+
+
+@pytest.mark.parametrize(
+    ("path", "target", "worker"),
+    [
+        ("/api/settings/memory/update?enabled=true", "update_memory_settings", "dream"),
+        ("/api/settings/workers/update?atlas_enabled=true", "update_worker_settings", "atlas"),
+    ],
+)
+async def test_a_failed_write_does_not_rearm_any_job(
+    config_path, monkeypatch: pytest.MonkeyPatch, path: str, target: str, worker: str,
+) -> None:
+    """Il rearm segue il salvataggio, non la richiesta.
+
+    Ri-armare un job su una scrittura fallita annuncerebbe una pianificazione
+    che il config non contiene.
+    """
+    async def boom(*args, **kwargs):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(f"jenny.webui.settings_routes.{target}", boom)
+    on_jobs_changed = MagicMock()
+    router = _router(on_jobs_changed=on_jobs_changed)
+
+    response = await router.dispatch(_request(path), path.split("?", 1)[0])
+
+    assert response.status_code == 500
+    on_jobs_changed.assert_not_called()

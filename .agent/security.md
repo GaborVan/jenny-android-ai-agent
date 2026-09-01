@@ -96,7 +96,18 @@ receive the skills index at all, which is a third narrowing and a separate decis
 
 All outbound HTTP requests from agent tools must pass through `validate_url_target` (`security/network.py`). By default it blocks loopback, RFC1918 private addresses, CGNAT ranges, link-local ranges, and cloud metadata endpoints (including `169.254.169.254`).
 
-The only escape hatch is `configure_ssrf_whitelist(cidrs)`, which reads from `config.tools.ssrf_whitelist` at load time.
+The only escape hatch is `configure_ssrf_whitelist(cidrs)`, which reads from `config.security.ssrf_whitelist` at load time (`config/loader.py`); `config.tools.ssrf_whitelist` no longer exists, so writing it is silently dropped.
+
+**La regola dice «dai tool dell'agente», e due percorsi non sono tool.** I
+provider LLM chiamano l'endpoint di chat, e la rotta `/api/settings/provider/models`
+chiama `<apiBase>/models`, entrambi **senza** `validate_url_target`. È voluto:
+`apiBase` è un valore che l'utente ha scritto in Impostazioni per parlare col suo
+provider, e su questo dispositivo può essere un `llama.cpp` in loopback o un
+server di modelli in LAN — cioè precisamente ciò che l'SSRF blocca. Bloccare la
+lista modelli lasciando passare la chat non proteggerebbe da niente e romperebbe
+i modelli locali. Quello che delimita la deroga: token sull'`/api/`, nessun
+redirect seguito, timeout stretto, e della risposta si legge solo l'elenco dei
+nomi.
 
 **Rule**: Do not add direct `httpx.get` / `requests.get` calls in tools. Route through the existing web fetch utilities or replicate the `validate_url_target` check.
 

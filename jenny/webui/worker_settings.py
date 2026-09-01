@@ -41,10 +41,18 @@ from typing import Any
 
 from loguru import logger
 
+from jenny.channels.http_utils import parse_flag
 from jenny.config import store
 from jenny.config.loader import load_config
 from jenny.config.schema import AtlasConfig, Config, DreamConfig, GardenerConfig
-from jenny.webui.settings_api import WebUISettingsError, settings_payload
+from jenny.webui.settings_api import (
+    WebUISettingsError,
+    _apply_bool,
+    _apply_int,
+    _bounds,
+    _parse_int,
+    settings_payload,
+)
 
 QueryParams = dict[str, list[str]]
 
@@ -63,19 +71,12 @@ QueryParams = dict[str, list[str]]
 # ``confirm_back_to_back``, che il client alza solo dopo un dialogo.
 REVIEW_CADENCE_FLOOR = 12
 
-_TRUTHY = ("1", "true", "yes", "on")
-_FALSY = ("0", "false", "no", "off")
+
 
 
 # ── Lettura ──────────────────────────────────────────────────────────────────
 
 
-def _bounds(model: type, attr: str) -> tuple[int | None, int | None]:
-    """I bound che lo schema impone a *attr*, letti dallo schema stesso."""
-    field = model.model_fields[attr]
-    low = getattr(field, "ge", None)
-    high = getattr(field, "le", None)
-    return (int(low) if low is not None else None, int(high) if high is not None else None)
 
 
 def _number(model: type, attr: str, value: Any) -> dict[str, Any]:
@@ -212,64 +213,15 @@ def _first(query: QueryParams, *names: str) -> str | None:
 
 def _flag(query: QueryParams, *names: str) -> bool:
     """Un flag di conferma: vero solo se dichiarato esplicitamente vero."""
-    raw = _first(query, *names)
-    return raw is not None and raw.strip().lower() in _TRUTHY
+    return parse_flag(_first(query, *names))
 
 
-def _parse_bool(raw: str, field: str) -> bool:
-    value = raw.strip().lower()
-    if value in _TRUTHY:
-        return True
-    if value in _FALSY:
-        return False
-    raise WebUISettingsError(f"{field} must be a boolean")
 
 
-def _parse_int(raw: str, field: str, model: type, attr: str) -> int:
-    """Un intero dentro i bound dello schema, o un rifiuto che **nomina il range**.
-
-    Il range nel messaggio non e' cortesia: e' l'unico modo in cui chi ha appena
-    sforato scopre quale sia il valore ammesso, e la prosa che spiega *perche'*
-    quel tetto esista sta nei file i18n accanto al campo.
-    """
-    try:
-        value = int(raw.strip())
-    except ValueError:
-        raise WebUISettingsError(f"{field} must be a whole number") from None
-    low, high = _bounds(model, attr)
-    if (low is not None and value < low) or (high is not None and value > high):
-        span = f"{low}" if high is None else f"{low}–{high}"
-        raise WebUISettingsError(f"{field} must be between {span}")
-    return value
 
 
-def _apply_int(
-    query: QueryParams,
-    target: Any,
-    attr: str,
-    model: type,
-    *names: str,
-) -> bool:
-    """Scrive un intero su *target* se la query lo porta. ``True`` = cambiato."""
-    raw = _first(query, *names)
-    if raw is None:
-        return False
-    value = _parse_int(raw, names[0], model, attr)
-    if int(getattr(target, attr)) == value:
-        return False
-    setattr(target, attr, value)
-    return True
 
 
-def _apply_bool(query: QueryParams, target: Any, attr: str, *names: str) -> bool:
-    raw = _first(query, *names)
-    if raw is None:
-        return False
-    value = _parse_bool(raw, names[0])
-    if bool(getattr(target, attr)) == value:
-        return False
-    setattr(target, attr, value)
-    return True
 
 
 # Le chiavi che, se presenti, chiedono un ri-armo del job di quel lavoratore.

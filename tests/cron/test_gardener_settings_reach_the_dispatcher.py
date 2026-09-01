@@ -15,7 +15,7 @@ Le due metà sono due perché i valori vivono in due posti:
   di ``_run_dream``, stessa ragione);
 * ``interval_min`` **non** sta più nel ``Config`` al momento del tick: è diventato
   lo ``schedule`` del ``CronJob`` nello store del cron, e nessuna rilettura di
-  ``config.json`` lo tocca. Lì serve ``refresh_gardener_job``.
+  ``config.json`` lo tocca. Lì serve ``refresh_system_job`` con ``GARDENER_JOB_ID``.
 """
 
 from __future__ import annotations
@@ -32,7 +32,6 @@ from jenny.cron.service import CronService
 from jenny.runtime.cron_dispatch import (
     GARDENER_JOB_ID,
     CronDispatcher,
-    refresh_gardener_job,
     refresh_system_job,
 )
 
@@ -175,10 +174,10 @@ def test_a_new_interval_arms_the_job_without_a_restart(tmp_path):
     interval 120`` confermerebbe un numero che nessuno applica.
     """
     cron = _cron(tmp_path)
-    refresh_gardener_job(cron, config=_write(interval_min=30))
+    refresh_system_job(cron, GARDENER_JOB_ID, config=_write(interval_min=30))
     assert _gardener_job(cron).schedule.every_ms == 30 * 60_000
 
-    described = refresh_gardener_job(cron, config=_write(interval_min=120))
+    described = refresh_system_job(cron, GARDENER_JOB_ID, config=_write(interval_min=120))
 
     assert _gardener_job(cron).schedule.every_ms == 120 * 60_000
     assert described is not None and "120min" in described
@@ -195,7 +194,7 @@ def test_turning_it_on_registers_the_job_a_disabled_startup_never_created(tmp_pa
     cron = _cron(tmp_path)
     assert _gardener_job(cron) is None
 
-    refresh_gardener_job(cron, config=_write(enabled=True, interval_min=45))
+    refresh_system_job(cron, GARDENER_JOB_ID, config=_write(enabled=True, interval_min=45))
 
     job = _gardener_job(cron)
     assert job is not None and job.schedule.every_ms == 45 * 60_000
@@ -207,7 +206,7 @@ def test_a_disabled_gardener_is_not_registered_and_is_not_an_error(tmp_path):
     una pianificazione per una sezione spenta, e che lo dica con ``None``."""
     cron = _cron(tmp_path)
 
-    assert refresh_gardener_job(cron, config=_write(enabled=False)) is None
+    assert refresh_system_job(cron, GARDENER_JOB_ID, config=_write(enabled=False)) is None
     assert _gardener_job(cron) is None
 
 
@@ -219,10 +218,10 @@ def test_re_arming_the_same_interval_does_not_push_the_next_run_away(tmp_path):
     volta rimanderebbe la passata all'infinito senza che niente lo dica.
     """
     cron = _cron(tmp_path)
-    refresh_gardener_job(cron, config=_write(interval_min=30))
+    refresh_system_job(cron, GARDENER_JOB_ID, config=_write(interval_min=30))
     first = _gardener_job(cron).state.next_run_at_ms
 
-    refresh_gardener_job(cron, config=_write(interval_min=30))
+    refresh_system_job(cron, GARDENER_JOB_ID, config=_write(interval_min=30))
 
     assert _gardener_job(cron).state.next_run_at_ms == first
 

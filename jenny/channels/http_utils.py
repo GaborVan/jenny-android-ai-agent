@@ -159,6 +159,29 @@ def query_first(query: QueryParams, key: str) -> str | None:
     return values[0] if values else None
 
 
+# I due insiemi vivono qui, accanto a ``query_first``, perché è dove finiscono a
+# cercarli i quattro moduli che leggevano un booleano dalla query. Ognuno aveva
+# la sua lista: quella delle skill non conosceva ``"on"`` e non strippava, quindi
+# ``?disabled=on`` — la forma che manda un checkbox HTML — non disabilitava
+# niente, e uno spazio finale ribaltava il valore.
+TRUTHY_VALUES = ("1", "true", "yes", "on")
+FALSY_VALUES = ("0", "false", "no", "off")
+
+
+def parse_flag(raw: str | None) -> bool:
+    """Un valore di query letto come flag: vero solo se dichiarato vero."""
+    return (raw or "").strip().lower() in TRUTHY_VALUES
+
+
+def query_flag(query: QueryParams, *keys: str) -> bool:
+    """``parse_flag`` sul primo *keys* presente nella query."""
+    for key in keys:
+        value = query_first(query, key)
+        if value is not None:
+            return parse_flag(value)
+    return False
+
+
 def is_localhost(connection: Any) -> bool:
     """Return True when the peer address is loopback.
 

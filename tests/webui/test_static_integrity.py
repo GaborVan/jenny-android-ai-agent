@@ -96,14 +96,16 @@ def test_non_manifest_orphan_file_is_served_from_disk(tmp_path):
 
 def test_font_asset_is_served_from_disk(tmp_path):
     # I tipi non attivi (font/immagini) non eseguono codice: restano serviti
-    # dal disco anche se nel manifest.
+    # dal disco anche se nel manifest. Il file lo scrive il test, quindi il
+    # nome serve solo a essere di un tipo non attivo — ma è comunque uno che
+    # esiste davvero, per non descrivere un asset che non spediamo.
     handler = _make_handler(tmp_path)
-    png = "assets/jenny.png"  # png non attivo → disco
-    disk = handler.static_dist_path / png
+    image = "assets/jenny-idle.webp"
+    disk = handler.static_dist_path / image
     disk.parent.mkdir(parents=True, exist_ok=True)
-    disk.write_bytes(b"\x89PNG\r\n-test-bytes")
+    disk.write_bytes(b"RIFF\x00\x00\x00\x00WEBP-test-bytes")
 
-    resp = handler._serve_static(f"/html-mobile/{png}")
+    resp = handler._serve_static(f"/html-mobile/{image}")
 
     assert resp is not None
-    assert resp.body == b"\x89PNG\r\n-test-bytes"
+    assert resp.body == b"RIFF\x00\x00\x00\x00WEBP-test-bytes"

@@ -379,7 +379,7 @@ def read_state(root: Path) -> GardenerState:
         return GardenerState()
     if not isinstance(data, dict) or data.get("version") != _STATE_VERSION:
         if data:
-            logger.warning("gardener: stato non riconosciuto in {}, si rilegge da capo", path)
+            logger.warning("gardener: unrecognized state in {}, re-reading from the start", path)
         return GardenerState()
     raw = data.get("cursor")
     cursor = {
@@ -448,7 +448,7 @@ def write_state(root: Path, state: GardenerState) -> None:
     pruned = {rel: seen for rel, seen in state.cursor.items() if (root / rel).is_file()}
     if len(pruned) != len(state.cursor):
         logger.debug(
-            "gardener: potate {} voci di cursore senza file", len(state.cursor) - len(pruned)
+            "gardener: pruned {} cursor entries with no file", len(state.cursor) - len(pruned)
         )
     # Il testimone segue il cursore: senza il suo conteggio non vuol dire niente.
     seals = {rel: seal for rel, seal in state.witness.items() if rel in pruned}
@@ -485,8 +485,8 @@ def record_attempt(
         write_state(root, state)
     except OSError as exc:
         logger.error(
-            "gardener: il tentativo su {} non è stato registrato ({}): la passata "
-            "ripartirà al prossimo tick",
+            "gardener: the attempt on {} was not recorded ({}): the pass "
+            "will restart on the next tick",
             root.name, exc,
         )
     return state.failures
@@ -540,8 +540,8 @@ def read_journal_delta(
             # Qui il file finisce prima del cursore: non c'è niente da
             # perdere, quindi rileggere sarebbe solo un costo.
             logger.warning(
-                "gardener: {} è più corto del cursore ({} righe, cursore {}): "
-                "l'append-only del diario è stato violato",
+                "gardener: {} is shorter than the cursor ({} lines, cursor {}): "
+                "the journal's append-only rule was violated",
                 rel, len(physical), seen,
             )
             continue
@@ -583,8 +583,8 @@ def read_journal_delta(
             # testimone non lo teneva), e si ripaga da sé — la passata dopo il
             # testimone c'è.
             logger.warning(
-                "gardener: il prefisso letto di {} non torna (cursore {}): "
-                "il diario è stato riscritto sopra il cursore, si rilegge da capo",
+                "gardener: the read prefix of {} does not match (cursor {}): "
+                "the journal was rewritten over the cursor, re-reading from the start",
                 rel, seen,
             )
             seen = 0
@@ -630,7 +630,7 @@ def read_journal_delta(
     delta = JournalDelta(files=tuple(files), left_behind=left_behind)
     if left_behind:
         logger.info(
-            "gardener: delta di {} tagliato a {} voci, {} restano al giro dopo",
+            "gardener: delta for {} truncated to {} entries, {} left for the next round",
             root.name, delta.line_count, left_behind,
         )
     return delta

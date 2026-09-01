@@ -1,18 +1,11 @@
-"""Cron service for scheduled agent tasks."""
+"""Cron service for scheduled agent tasks.
 
-from jenny.cron.types import CronJob, CronSchedule
-
-__all__ = ["CronService", "CronJob", "CronSchedule"]
-
-_LAZY = {"CronService": ".service"}
-
-
-def __getattr__(name: str):
-    module_path = _LAZY.get(name)
-    if module_path is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    from importlib import import_module
-    mod = import_module(module_path, __name__)
-    val = getattr(mod, name)
-    globals()[name] = val
-    return val
+Volutamente vuoto: v. la nota in ``jenny/apps/__init__.py``. Qui c'era in più una
+``__getattr__`` di modulo che rendeva pigro ``CronService``, e costava più di
+quanto rendesse: una ``__getattr__`` fa diventare ``Any`` **ogni** attributo
+sconosciuto del package, cioè ``jenny.cron.CronServiceTypo`` smetteva di essere
+un errore — su un package che sta nel sottoinsieme *bloccante* di pyright
+(v. ``jenny/session/manager.py``, che quel prezzo lo cita per non pagarlo).
+In cambio evitava un import che, misurato, non faceva nessuno: le 117
+importazioni del package nominano tutte il sottomodulo.
+"""

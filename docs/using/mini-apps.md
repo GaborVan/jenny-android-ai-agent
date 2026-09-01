@@ -6,7 +6,7 @@ A Jenny App is a small app with its own screen that Jenny builds for you on requ
 
 Jenny has two ways of gaining a new capability, and they answer different questions:
 
-- **If it needs a screen, it's an app.** A Jenny App has its own UI you open from the Apps grid: a list you check off, a form you fill in, a chart you look at.
+- **If it needs a screen, it's an app.** A Jenny App has its own UI you open from the Jenny Apps room: a list you check off, a form you fill in, a chart you look at.
 - **If it only lives in chat, it's a skill.** A skill just teaches Jenny a procedure — there's nothing to open. See [Skills](skills.md).
 
 An app can still talk to Jenny (see [Directionality](#jenny-and-the-app-talk-in-one-direction) below), and it can integrate with an external server, but the defining trait is: does the user need to look at a screen for this, or does it just happen in conversation?
@@ -16,11 +16,11 @@ An app can still talk to Jenny (see [Directionality](#jenny-and-the-app-talk-in-
 Apps are created only through chat — there is no dedicated app editor in the WebUI. Two ways to start:
 
 1. Just ask, in your own words: "make me an app for tracking my plants."
-2. Tap the **+** tile in the **Jenny Apps** section of the Apps tab. It opens the chat with this guided prompt already typed:
+2. Tap **New App** at the top of the **Jenny Apps** room in the Apps tab. It opens the chat with this guided prompt already typed:
 
    > I want to create a new Jenny App. Use the "app-creator" skill and guide me step by step.
 
-Jenny then walks you through the design conversation (what the app tracks, what actions it needs) using the built-in `app-creator` skill, confirms with you, and writes the files. Editing an existing app works the same way: long-press the app tile and choose **Edit** — this sends the chat prompt `I want to edit the Jenny App "{name}" (slug: {slug}). Can you help me?` rather than opening any in-app editor.
+Jenny then walks you through the design conversation (what the app tracks, what actions it needs) using the built-in `app-creator` skill, confirms with you, and writes the files. Editing an existing app works the same way: long-press the app's row and choose **Edit** — this sends the chat prompt `I want to edit the Jenny App "{name}" (slug: {slug}). Can you help me?` rather than opening any in-app editor.
 
 ## Where an app lives
 
@@ -76,11 +76,11 @@ Actions that call an external server (a `http`-kind action, e.g. talking to a LA
 
 ## When an app is broken
 
-If a manifest fails to load — malformed JSON, an invalid action definition — the gateway never crashes. The app simply shows up in the Jenny Apps grid tagged **broken**, with the readable error underneath its name. Tapping it prompts: `The app "{name}" is broken: {error}. Ask Jenny to fix it?` — confirming sends the error straight to chat so Jenny can look at the files and repair them. Since the app generator is itself an LLM, occasionally getting a manifest wrong is expected, and this is the recovery path.
+If a manifest fails to load — malformed JSON, an invalid action definition — the gateway never crashes. The app simply shows up in the Jenny Apps room with an alert glyph on its row, and the readable error in a **warning band at the top of the room** — above the list, not tucked under the app's name, so one glance tells you something needs attention without hunting for which row. Tapping it prompts: `The app "{name}" is broken: {error}. Ask Jenny to fix it?` — confirming sends the error straight to chat so Jenny can look at the files and repair them. Since the app generator is itself an LLM, occasionally getting a manifest wrong is expected, and this is the recovery path.
 
 ## Deleting an app
 
-Long-press an app tile and choose **Delete**. The confirmation reads `Delete app "{name}"? It will be removed permanently.` — and it means it: this deletes the whole `workspace/apps/<slug>/` folder, including its `data/`. There is no trash or undo from the UI. Your only safety net is the automatic workspace [snapshot](backup.md) history, which is not something you can browse per-app — restoring one means restoring the entire workspace to an earlier point in time.
+Long-press an app's row and choose **Delete**. The confirmation reads `Delete app "{name}"? It will be removed permanently.` — and it means it: this deletes the whole `workspace/apps/<slug>/` folder, including its `data/`. There is no trash or undo from the UI. Your only safety net is the automatic workspace [snapshot](backup.md) history, which is not something you can browse per-app — restoring one means restoring the entire workspace to an earlier point in time.
 
 ## See also
 

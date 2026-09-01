@@ -33,10 +33,10 @@ from typing import Any
 
 from loguru import logger
 
+from jenny.runtime.chaquopy_bridge import BridgeCache
 from jenny.runtime.context import get_android_context
 
-_BRIDGE_LOCK = asyncio.Lock()
-_BRIDGE_INSTANCE: Any = None
+_BRIDGE = BridgeCache("com.flagdizero.jenny.PowerBridge")
 
 # Serializza refcount e chiamate acquire/release: due turni che partono insieme
 # sullo stesso tag non devono entrambi vedere "contatore a zero" e acquisire.
@@ -86,10 +86,9 @@ def reset_power_state() -> None:
     rilasci da solo. Qui si azzera solo la contabilità, così un gateway fresco
     non parte credendo di tenere un lock che non tiene.
     """
-    global _BRIDGE_INSTANCE, _BRIDGE_LOCK, _STATE_LOCK, _WAKE_LOOP, _WAKE_EVENT
-    _BRIDGE_LOCK = asyncio.Lock()
+    global _STATE_LOCK, _WAKE_LOOP, _WAKE_EVENT
+    _BRIDGE.reset()
     _STATE_LOCK = asyncio.Lock()
-    _BRIDGE_INSTANCE = None
     _REFCOUNTS.clear()
     _HELD.clear()
     # Loop ed evento del giro precedente sono legati a un loop morto: un
@@ -101,26 +100,18 @@ def reset_power_state() -> None:
 
 
 def _resolve_bridge_class() -> Any:
-    """Risolve la classe Kotlin ``PowerBridge`` via Chaquopy."""
-    from java import jclass  # importabile solo sotto il runtime Chaquopy
+    """Risolve la classe Kotlin ``PowerBridge`` via Chaquopy.
 
-    return jclass("com.flagdizero.jenny.PowerBridge")
+    Resta una funzione di modulo, e non una chiamata diretta a
+    ``_BRIDGE.resolve_class``: è il seam su cui i test montano il finto
+    bridge fuori dal telefono.
+    """
+    return _BRIDGE.resolve_class()
 
 
 async def _get_bridge(context: Any) -> Any:
     """Costruisce o ritorna l'istanza cachata di ``PowerBridge`` (thread-safe)."""
-    global _BRIDGE_INSTANCE
-    if _BRIDGE_INSTANCE is not None:
-        return _BRIDGE_INSTANCE
-    async with _BRIDGE_LOCK:
-        if _BRIDGE_INSTANCE is not None:
-            return _BRIDGE_INSTANCE
-        bridge_cls = _resolve_bridge_class()
-        try:
-            _BRIDGE_INSTANCE = bridge_cls(context)
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(f"Failed to construct PowerBridge: {exc}") from exc
-        return _BRIDGE_INSTANCE
+    return await _BRIDGE.get(context, resolve=_resolve_bridge_class)
 
 
 async def _call(method: str, *args: Any) -> bool:

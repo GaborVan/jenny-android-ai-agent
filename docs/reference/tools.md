@@ -12,13 +12,13 @@ There is no fixed tool count. What Jenny actually has available in a given conve
 
 - **The agent's scope** — the main agent loads either the `orchestrator` scope (default, see `agents.defaults.orchestratorMode`) or the historical `core` scope; a subagent loads the `subagent` scope, narrowed further by its agent type. The four SSH tools sit in a scope of their own, `remote`, which **no** agent loads by default — only the `sysadmin` subagent type asks for it. The same install therefore exposes different tools to the orchestrator, to a `sysadmin` subagent, and to every other subagent.
 
-The built-in count is **31**: 30 tools registered through the standard loader (`jenny/agent/tools/loader.py`) plus `my`, which is registered by hand because it needs a live reference to the running agent loop (`jenny/agent/loop.py`). No single agent sees all of them at once — see the scope note above. Add to that N dynamic app tools. If you ask Jenny to list its tools, expect the number to vary between installs.
+The built-in count is **41**: 40 tools registered through the standard loader (`jenny/agent/tools/loader.py`, 22 modules) plus `my`, which is registered by hand because it needs a live reference to the running agent loop (`jenny/agent/loop.py`). Two more reach the registry the same hand-built way and for the same reason — `memory_entry`, which needs the memory store, and the per-app action tool — so the loader's module list is not a complete inventory of the tool surface. No single agent sees all of them at once — see the scope note above. Add to that N dynamic app tools. If you ask Jenny to list its tools, expect the number to vary between installs.
 
-Below, tools are grouped into eight categories. Each entry gives the exact tool name the model calls, what it does for you in practice, the parameters worth knowing, hard numeric limits, the config toggle that controls it, and any gotcha worth knowing before you rely on it.
+Below, tools are grouped into ten categories. Each entry gives the exact tool name the model calls, what it does for you in practice, the parameters worth knowing, hard numeric limits, the config toggle that controls it, and any gotcha worth knowing before you rely on it.
 
 ### Reading the "Config" line — a toggle is not the only gate
 
-Ten of the tools below are marked **subagent-only**. The config toggle on their line still applies, but with `agents.defaults.orchestratorMode` at its default of `true` it is not the gate you'll hit first: the tool is simply absent from the agent you talk to, and the work reaches it by delegation. Those ten are `write_file`, `edit_file`, `apply_patch`, `find_files`, `python_exec`, `write_stdin`, `list_exec_sessions`, `web_search`, `web_fetch`, and `download_file`. Set `orchestratorMode` to `false` and the main agent loads the `core` scope instead, which has all of them.
+Fifteen of the tools below are marked **subagent-only**. The config toggle on their line still applies, but with `agents.defaults.orchestratorMode` at its default of `true` it is not the gate you'll hit first: the tool is simply absent from the agent you talk to, and the work reaches it by delegation. Those fifteen are `write_file`, `edit_file`, `apply_patch`, `find_files`, `python_exec`, `write_stdin`, `list_exec_sessions`, `web_search`, `web_fetch`, `download_file`, and the five `browser_*` tools. Set `orchestratorMode` to `false` and the main agent loads the `core` scope instead, which has all of them.
 
 ---
 
@@ -475,6 +475,23 @@ Config: `tools.diagnostics.enable` (default `true`). Gotcha: the buffer **emptie
 
 ---
 
+### update_status
+
+Reports whether a newer version of the Jenny app is available for this device, and how far along a started installation is.
+
+- Reads local state only: **no network call and no side effects**, so it is safe to call whenever you ask "is there an update?". The check that fetches the manifest is the periodic `update_check` job, not this tool (see `updates.*` in [Configuration](configuration.md)).
+- Android-only: it registers only when an Android context is present.
+
+### install_update
+
+Downloads and installs the pending app update on this device.
+
+- **Destructive and final.** Android replaces the app and kills the process, so Jenny restarts and the conversation is cut off mid-turn — she does not get to report back. Ask before calling it.
+- Requires the "Install unknown apps" permission for Jenny; without it `PackageInstaller` refuses the session. Android normally still shows its own install prompt (see [Android permissions](android-permissions.md)).
+- Android-only, same as `update_status`.
+
+---
+
 ## 8. App tools
 
 Every action declared in an installed Jenny App's `<workspace>/apps/<slug>/app.json` becomes a native tool named `<slug>_<action>` (the slug's hyphens are kept as-is, never normalized, so `my-app` and `my_app` can't collide with each other).
@@ -487,6 +504,61 @@ Every action declared in an installed Jenny App's `<workspace>/apps/<slug>/app.j
 See the Mini-apps page for how apps and actions are authored. Config: `apps.enabled` (default `true`, turning it off removes all app tools at once), `apps.httpTimeoutS` (default 20.0, range 1–120 — timeout for an app action's outbound proxy calls), `apps.maxCollectionBytes` (default 5,000,000 — per-collection storage cap).
 
 Gotcha: because the tool count depends on what's installed, don't expect a stable total — it changes every time an app is added, removed, or edited.
+
+---
+
+## 9. Memory recall and journal
+
+### recall
+
+Searches long-term memory for facts that were **removed from the active files and moved to the archive** — what Dream distilled away rather than what it kept.
+
+- Called with no arguments it returns the whole archive, one line per fact; call it again with the ids you want in full.
+- Scope `core` + `orchestrator`: it is the agent you talk to that has it, not a subagent.
+
+### recall_history
+
+Searches the verbatim turn-by-turn log of the personal conversation — what was actually said, before Dream distilled it.
+
+- Same two-step shape: no arguments gives the index, one line per turn; then call it again with the cursors you want expanded.
+- Scope `core` + `orchestrator`.
+
+### journal_append
+
+Appends one line to the current project's working journal (`raw/journal/<today>.md`).
+
+- Meant for the moment something is said that will still be true next week — a constraint, a decision, a preference, a name, a date.
+- The only tool in this group a subagent also gets (`core`, `orchestrator`, `subagent`), and it has no config toggle: it is always registered.
+
+---
+
+## 10. Interactive browser
+
+Five tools that drive a **real second WebView** with persistent cookies, for pages `web_fetch` cannot handle — anything behind a cookie banner, a login, or a click. All five are **subagent-only** (scope `core` + `subagent`) and share one gate: an Android context plus `tools.androidWeb.enable`, the same switch as web search and fetch. With it off, the disabled reason names Settings → Tools → Web Search.
+
+A session is exclusive and expensive: about **100 MB of RAM** while open, so `browser_close` is not optional politeness.
+
+### browser_open
+
+Opens a URL and returns the page as a list of elements that can be acted on. Cookies and logins persist until `browser_close`.
+
+### browser_snapshot
+
+Shows the current page again: interactive elements with their refs, plus headings. The default `diff` mode returns only what changed since the last snapshot. Elements below the fold are counted, not listed.
+
+### browser_do
+
+Runs a **sequence** of actions and returns what changed. Filling a form is one call, not one per field: steps run in order and stop at the first failure.
+
+### browser_read
+
+Reads the page's text, or one element's by ref. The snapshot gives structure; this gives prose, and only for the part asked for. Its output is untrusted external content and is treated as data, never as instructions.
+
+### browser_close
+
+Closes the session — page, cookies and the second WebView.
+
+Config, under `tools.androidWeb.browser`: `timeout`, `maxSnapshotChars`, `maxReadChars`, `idleCloseS` (an idle session is reaped on its own). See [Configuration](configuration.md).
 
 ---
 

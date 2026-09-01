@@ -99,7 +99,7 @@ Everything about how the agent talks to the model and manages its own context.
 | `agents.defaults.maxToolResultChars` | int | `16000` | Tool output above this is truncated before it reaches the model. |
 | `agents.defaults.contextBlockLimit` | int \| null | `null` | Optional cap on context blocks; unset means no extra limit. |
 
-`dream` has exactly **two** fields — `enabled` and `intervalH`. Older docs mentioned `cron`, `modelOverride` and `maxBatchSize`; none of them exist. `atlas` adds `maxContextTokens` to the same pair; which wiki supplies its entity list follows `wiki.defaultWiki`. See [Memory, Dream and Atlas](../using/memory.md).
+`dream` has **six** fields — `enabled`, `intervalH`, and the four budget/cadence knobs documented in [Memory, Dream and Atlas](../using/memory.md): `memoryBudgetChars`, `userBudgetChars`, `soulBudgetChars`, `reviewEveryRuns`. All six are settable from Settings → Memory. Older docs mentioned `cron`, `modelOverride` and `maxBatchSize`; none of them exist. `atlas` adds `maxContextTokens` to the same pair; which wiki supplies its entity list follows `wiki.defaultWiki`. See [Memory, Dream and Atlas](../using/memory.md).
 
 **All three periodic workers are settable from the app**, and this is the only block on this page where that is true: Dream and the memory budgets in **Settings → Memory**, Atlas and the gardener — plus `compactProjectsWhenIdle` — in **Settings → Wiki and projects**. The ranges above are the ones those screens carry and the server enforces; a value outside one is refused with the range named.
 
@@ -150,7 +150,7 @@ The channel the WebUI talks over. On-device, the runtime forces `host` and `port
 
 | Key | Type | Default | Effect |
 |---|---|---|---|
-| `websocket.enabled` | bool | `false` | Declared, but **not consulted by the current wiring**: the channel is built whenever a non-empty `websocket` section exists, and the Android runtime always writes one. Setting it to `false` does not disable the channel today. |
+| `websocket.enabled` | bool | `false` in the schema, `true` as written on-device | Enables the WebSocket channel. **An explicit `false` is honoured and does disable it** — `channels/dispatcher.py` reads it and returns, with a log line saying so. The Android runtime writes `true` via `setdefault`, which does not overwrite a `false` you put there yourself. |
 | `websocket.host` | string | `"127.0.0.1"` | Bind address. Forced to the runtime value on-device. |
 | `websocket.port` | int | `8765` | Off-device default. On the phone this is always overwritten with `18790`. |
 | `websocket.path` | string | `"/"` | WebSocket path. Must start with `/`. |
@@ -212,11 +212,15 @@ Defaults — allowed: `os`, `sys`, `pathlib`, `json`, `re`, `math`, `datetime`, 
 
 | Key | Type | Default | Effect |
 |---|---|---|---|
-| `tools.androidWeb.enable` | bool | `true` | Registers `web_search` and `web_fetch`. This is the only switch the code checks — the nested `search.enable` / `fetch.enable` fields exist in the schema but are not consulted, so they cannot disable one half on their own. |
+| `tools.androidWeb.enable` | bool | `true` | Registers `web_search`, `web_fetch` **and the five `browser_*` tools**. It is the only switch: there is no per-half toggle — `search.enable` / `fetch.enable` do not exist in the schema, so writing them changes nothing. |
 | `tools.androidWeb.search.searchEngine` | string | `"bing"` | The only supported value; the settings endpoint rejects anything else. |
 | `tools.androidWeb.search.maxResults` | int | `5` | Results per search. The UI validates 1–10. |
 | `tools.androidWeb.search.timeout` | int | `30` | Seconds per search. The UI validates 1–120. Also used as the fetch timeout. |
 | `tools.androidWeb.fetch.maxChars` | int | `50000` | Max characters extracted per page. The UI validates 1000–200000. |
+| `tools.androidWeb.browser.timeout` | int | `30` | Seconds per browser action. |
+| `tools.androidWeb.browser.maxSnapshotChars` | int | `2500` | Cap on a `browser_snapshot` payload. |
+| `tools.androidWeb.browser.maxReadChars` | int | `4000` | Cap on a `browser_read` payload. |
+| `tools.androidWeb.browser.idleCloseS` | int | `300` | Seconds of inactivity after which an open session is reaped on its own — an open browser costs ~100 MB of RAM. |
 
 ### tools.location
 
@@ -370,6 +374,19 @@ Default excludes: `ui/**`, `logs/**`, `.jenny/logs/**`, `.jenny/snapshots/**`, `
 | `apps.maxCollectionBytes` | int | `5000000` | Per-collection storage ceiling (5 MB). Writes past it fail with `413`. |
 
 See [Mini-apps](../using/mini-apps.md).
+
+## updates
+
+The in-app update check. It is the one outbound connection you did not switch on, so it is documented here rather than left to a contributor page — see [Privacy and security](https://github.com/flagdizero/jenny-android-ai-agent#privacy-and-security) in the README for what it does and does not send.
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `updates.enabled` | bool | `true` | Registers the periodic `update_check` job at startup **and** gates every run of it: a job left in the cron store by an earlier boot still exits before touching the network when this is `false`. |
+| `updates.manifestUrl` | string | the release's `latest.json` on GitHub | Where the version manifest is fetched from. A plain `GET`, redirects validated per hop, response size-capped. |
+| `updates.checkIntervalH` | int 1–168 | `24` | Hours between checks. The default is not a network compromise — it is how often it makes sense to *interrupt*, since every positive result is an interruption. |
+| `updates.notifyInChat` | bool | `true` | Whether a newer version opens a chat message, or stays visible only where you go looking for it. |
+
+Turning `enabled` off stops the check; the `install_update` tool remains available for when you ask for it explicitly. See also [Android permissions](android-permissions.md) for the three permissions the install half needs.
 
 ## wiki
 

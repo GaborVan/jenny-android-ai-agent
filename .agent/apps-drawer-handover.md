@@ -171,9 +171,11 @@ La strada giusta è costruire un **release firmato** e installare quello.
 successo alla casella 7.1, ed era voluto, perché lì non si installava niente).
 Va copiato dentro **e cancellato dopo**:
 
+`$REPO` è il checkout principale, `$WORKTREE` il worktree:
+
 ```bash
-cp /Users/flagdizero/Documents/GitHub/jenny-android-ai-agent/android/keystore.properties \
-   /Users/flagdizero/Documents/GitHub/jenny-apps-drawer/android/keystore.properties
+cp $REPO/android/keystore.properties \
+   $WORKTREE/android/keystore.properties
 ```
 
 *(In alternativa, senza copiare niente: esportare
@@ -187,7 +189,7 @@ via più pulita — non lascia un file da ricordarsi di cancellare.)*
 non `HEAD`. Un file mezzo modificato finisce dentro l'APK.
 
 ```bash
-cd /Users/flagdizero/Documents/GitHub/jenny-apps-drawer
+cd $WORKTREE
 git status --short            # deve essere vuoto
 cd android
 export ANDROID_HOME=$HOME/Library/Android/sdk
@@ -222,8 +224,8 @@ capire quale keystore ha firmato quello installato.
 ### 3.4 — Dopo
 
 ```bash
-rm /Users/flagdizero/Documents/GitHub/jenny-apps-drawer/android/keystore.properties
-git -C /Users/flagdizero/Documents/GitHub/jenny-apps-drawer status --short   # deve tornare vuoto
+rm $WORKTREE/android/keystore.properties
+git -C $WORKTREE status --short   # deve tornare vuoto
 ```
 
 ### 3.5 — Collegare la WebView a CDP

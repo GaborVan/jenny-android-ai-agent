@@ -42,7 +42,7 @@ All of the following subsystems are present and actively used:
 | Wiki system | `jenny/webui/wiki.py`, `jenny/webui/ws_http.py` | **KEEP** | Core feature: markdown knowledge base with wikilinks, graph, and audit. |
 | Audit system | `jenny/webui/audit.py`, API routes | **KEEP** | Companion to wiki; tracks feedback and review items. |
 | Skills subsystem | `jenny/skills/`, `jenny/agent/skills.py` | **KEEP** | Core feature: built-in and custom skill definitions loaded into agent context. |
-| App manifest protocol | `jenny/apps/protocol.py` | **KEEP** | Small, self-contained manifest shape for agent app metadata. |
+| App manifest protocol | `jenny/apps/manifest.py` | **KEEP** | Small, self-contained manifest shape for agent app metadata. |
 
 ## Migration Notes from Upstream
 

@@ -1357,8 +1357,8 @@ class ContextBuilder:
         leftover = root / LEGACY_WIKI_SCHEMA_FILENAME
         if leftover.is_file():
             logger.warning(
-                "{}: c'e' ancora {} — non entra nel prompt, e la migrazione lo rinomina "
-                "al prossimo avvio", root, leftover.name,
+                "{}: {} is still there — it does not enter the prompt, and the migration "
+                "renames it on the next start", root, leftover.name,
             )
         return wiki_schema_file(root)
 

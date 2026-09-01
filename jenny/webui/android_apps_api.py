@@ -15,9 +15,9 @@ from typing import Any
 from loguru import logger
 
 from jenny.android_entry import get_android_context
+from jenny.runtime.chaquopy_bridge import BridgeCache
 
-_BRIDGE_LOCK = asyncio.Lock()
-_BRIDGE_INSTANCE: Any = None
+_BRIDGE = BridgeCache("com.flagdizero.jenny.InstalledAppsBridge")
 
 _LIST_TIMEOUT_S = 15
 _LAUNCH_TIMEOUT_S = 10
@@ -33,32 +33,22 @@ def reset_installed_apps_state() -> None:
     non veniva mai resettato (asimmetria → possibile bridge stale dopo un
     restart del gateway). Chiamato da ``android_entry.run_gateway``.
     """
-    global _BRIDGE_INSTANCE, _BRIDGE_LOCK
-    _BRIDGE_LOCK = asyncio.Lock()
-    _BRIDGE_INSTANCE = None
+    _BRIDGE.reset()
 
 
 def _resolve_bridge_class() -> Any:
-    """Resolve the Kotlin InstalledAppsBridge class via Chaquopy."""
-    from java import jclass  # only importable under the Chaquopy runtime
+    """Resolve the Kotlin InstalledAppsBridge class via Chaquopy.
 
-    return jclass("com.flagdizero.jenny.InstalledAppsBridge")
+    Stays a module-level function rather than a direct call to
+    ``_BRIDGE.resolve_class``: it is the seam the tests replace to stand
+    in for the bridge off-device.
+    """
+    return _BRIDGE.resolve_class()
 
 
 async def _get_bridge(context: Any) -> Any:
     """Build or return a cached InstalledAppsBridge instance (thread-safe)."""
-    global _BRIDGE_INSTANCE
-    if _BRIDGE_INSTANCE is not None:
-        return _BRIDGE_INSTANCE
-    async with _BRIDGE_LOCK:
-        if _BRIDGE_INSTANCE is not None:
-            return _BRIDGE_INSTANCE
-        bridge_cls = _resolve_bridge_class()
-        try:
-            _BRIDGE_INSTANCE = bridge_cls(context)
-        except Exception as exc:
-            raise RuntimeError(f"Failed to construct InstalledAppsBridge: {exc}") from exc
-        return _BRIDGE_INSTANCE
+    return await _BRIDGE.get(context, resolve=_resolve_bridge_class)
 
 
 async def webui_android_apps_payload() -> dict[str, Any]:

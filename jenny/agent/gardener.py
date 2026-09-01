@@ -380,8 +380,8 @@ class GardenerStore:
             # silenzio, che e' esattamente come questo bug si e' presentato la
             # prima volta.
             logger.error(
-                "gardener: {} non e' dentro il workspace {}: i percorsi del prompt "
-                "saranno rifiutati",
+                "gardener: {} is not inside the workspace {}: prompt paths "
+                "will be refused",
                 self.root, self.workspace,
             )
             return self.root.name
@@ -982,7 +982,7 @@ class GardenerStore:
         except OSError as exc:
             # Il log è una traccia, non il lavoro: se non si scrive, la passata
             # resta valida e il cursore avanza comunque.
-            logger.warning("gardener: log non scritto su {}: {}", page, exc)
+            logger.warning("gardener: log not written to {}: {}", page, exc)
 
 
 async def _silent(*_args: Any, **_kwargs: Any) -> None:
@@ -1120,9 +1120,9 @@ def read_recent_user_messages(
         # fuori, e il registro del progetto lo dice solo se quella passata
         # scrive una riga (v. ``GardenerStore.log_pass``).
         logger.info(
-            "gardener: la finestra del controllo incrociato di {} è tagliata "
-            "({} messaggi tenuti{})",
-            name, len(kept), ", transcript ruotato" if rotated else "",
+            "gardener: cross-check window for {} is truncated "
+            "({} messages kept{})",
+            name, len(kept), ", transcript rotated" if rotated else "",
         )
     return list(reversed(kept)), truncated
 
@@ -1188,7 +1188,7 @@ async def _checkpoint(agent: Any) -> None:
         # Fuori dal gateway (test, ispezione) la rete non c'è. Si dice a DEBUG e
         # si prosegue: che in produzione ci sia lo garantisce il container, e un
         # test sul cablaggio.
-        logger.debug("gardener: nessun gancio di snapshot, passata senza rete")
+        logger.debug("gardener: no snapshot hook, pass runs without a net")
         return
     try:
         # ``cast`` e non un'annotazione su ``hook``: il gancio è duck-typed di
@@ -1197,7 +1197,7 @@ async def _checkpoint(agent: Any) -> None:
         # può attendere. Il tipo vero lo conosce solo il chiamante.
         await cast(Any, hook)("pre_gardener")
     except Exception:
-        logger.exception("gardener: snapshot pre-passata fallito; si prosegue")
+        logger.exception("gardener: pre-pass snapshot failed; continuing")
 
 
 # Le passate in volo, **per nome di progetto**.
@@ -1295,7 +1295,7 @@ def _yield_to_user_guard(agent: Any, name: str, aborted: list[str]) -> Any:
         try:
             in_flight = key in cast("Collection[str]", active() or ())
         except Exception:  # noqa: BLE001 — un segnale illeggibile non ferma la passata
-            logger.warning("gardener: chi è in volo non è leggibile; la passata continua")
+            logger.warning("gardener: in-flight state is unreadable; the pass continues")
             return None
         if not in_flight:
             return None
@@ -1372,7 +1372,7 @@ async def run_gardener(
     """
     if store.name in _PASSES_IN_FLIGHT:
         logger.warning(
-            "gardener: una passata su {} è già in volo; questa non parte", store.name
+            "gardener: a pass over {} is already in flight; this one does not start", store.name
         )
         return GardenerOutcome(status="already_running")
     _PASSES_IN_FLIGHT.add(store.name)
@@ -1406,7 +1406,7 @@ async def _run_pass(
     # politiche, e un tick che scegliesse un progetto che la passata poi rifiuta).
     map_pass = delta.is_empty
     if map_pass and not store.map_needs_pruning():
-        logger.debug("gardener: niente da leggere in {}, e la mappa sta nel suo tetto", store.name)
+        logger.debug("gardener: nothing to read in {}, and the map fits its budget", store.name)
         return GardenerOutcome(status="skipped_no_delta")
 
     # Dopo il cancello del delta e prima di qualunque scrittura: una passata che
@@ -1495,7 +1495,7 @@ async def _run_pass(
                 on_progress=_silent,
             )
         except Exception as exc:  # noqa: BLE001 — l'esito viaggia nell'outcome
-            logger.exception("gardener: passata su {} fallita", store.name)
+            logger.exception("gardener: pass over {} failed", store.name)
             return _stamped(GardenerOutcome(
                 status="failed",
                 elapsed=time.monotonic() - t0,
@@ -1565,8 +1565,8 @@ async def _run_pass(
                     map_after=map_after,
                 )
             logger.warning(
-                "gardener: {} ha ceduto il passo all'utente dopo {} scritture; cursore "
-                "fermo in {:.1f}s — {}",
+                "gardener: {} yielded to the user after {} writes; cursor "
+                "held after {:.1f}s — {}",
                 store.name, writes, elapsed, detail,
             )
         elif internal_run_completed(resp) and writes and refused:
@@ -1607,8 +1607,8 @@ async def _run_pass(
                 "was left unread and the next pass will see those lines again"
             )
             logger.warning(
-                "gardener: {} — {} righe, {} scritture su {} ({} rifiutate); cursore fermo "
-                "in {:.1f}s",
+                "gardener: {} — {} lines, {} writes to {} ({} refused); cursor held "
+                "after {:.1f}s",
                 store.name, delta.line_count, writes, attempted, refused, elapsed,
             )
         elif internal_run_should_commit(resp, file_states):
@@ -1630,8 +1630,8 @@ async def _run_pass(
                 # come «bloccato»: è il disco che non prende quel che gli si dà, e
                 # il giro dopo ripromuoverà le stesse righe finché dura.
                 logger.error(
-                    "gardener: {} ha scritto {} pagine ma il cursore non è stato "
-                    "registrato: {}",
+                    "gardener: {} wrote {} pages but the cursor was not "
+                    "recorded: {}",
                     store.name, writes, exc,
                 )
                 return _stamped(GardenerOutcome(
@@ -1665,17 +1665,17 @@ async def _run_pass(
                 )
             status = "written" if writes else "nothing_to_promote"
             logger.info(
-                "gardener: {} — {} righe, {} scritture, {} in {:.1f}s",
+                "gardener: {} — {} lines, {} writes, {} in {:.1f}s",
                 store.name, delta.line_count, writes, status, elapsed,
             )
         elif internal_run_completed(resp):
             # Completata ma con le scritture bloccate o rifiutate: il cursore **non**
             # avanza, altrimenti quelle righe risulterebbero digerite da una passata
             # che non ha prodotto niente, e nessun giro successivo le rivedrebbe.
-            logger.warning("gardener: {} ha finito senza scrivere; cursore fermo", store.name)
+            logger.warning("gardener: {} finished without writing; cursor held", store.name)
             status = "no_write"
         else:
-            logger.warning("gardener: {} non ha finito; cursore fermo", store.name)
+            logger.warning("gardener: {} did not finish; cursor held", store.name)
             status = "incomplete"
 
         return _stamped(GardenerOutcome(

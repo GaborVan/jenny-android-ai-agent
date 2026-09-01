@@ -213,6 +213,31 @@ def test_update_happy_path(env) -> None:
     assert "corpo nuovo" in skill_file.read_text(encoding="utf-8")
 
 
+@pytest.mark.parametrize("raw", ["on", "ON", " on ", "1", "yes", "TRUE"])
+def test_update_accepts_every_truthy_form_for_disabled(env, raw: str) -> None:
+    """``?disabled=on`` è la forma che manda un checkbox HTML, e non disabilitava.
+
+    Questa rotta teneva la propria lista di valori veri — ``("true","1","yes")``
+    senza ``.strip()`` — mentre le altre tre del repo accettavano anche ``on``.
+    """
+    _write_skill(env.skills_dir, "foo", description="vecchia")
+
+    response = _dispatch(env.handler, _update_path("foo", disabled=raw))
+
+    assert response.status_code == 200
+    assert _json(response)["disabled"] is True
+
+
+@pytest.mark.parametrize("raw", ["off", "false", "0", "no", "boh"])
+def test_update_treats_other_forms_as_enabled(env, raw: str) -> None:
+    _write_skill(env.skills_dir, "foo", description="vecchia")
+
+    response = _dispatch(env.handler, _update_path("foo", disabled=raw))
+
+    assert response.status_code == 200
+    assert _json(response)["disabled"] is False
+
+
 def test_update_rejects_name_with_encoded_slash(env) -> None:
     # Il path regex esclude "/" letterale, ma il nome viene decodificato con
     # unquote() *dopo* il match: uno slash percent-encoded (%2F) supera il

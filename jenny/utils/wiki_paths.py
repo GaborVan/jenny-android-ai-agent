@@ -494,7 +494,7 @@ def find_wiki_by_id(wikis_dir: Path, target: str) -> Path | None:
         return found[0]
     if len(found) > 1:
         logger.warning(
-            "wiki id {} dichiarato da {} cartelle ({}): nessuna scelta, e' ambiguo",
+            "wiki id {} declared by {} folders ({}): no pick made, it is ambiguous",
             target,
             len(found),
             ", ".join(sorted(p.name for p in found)),

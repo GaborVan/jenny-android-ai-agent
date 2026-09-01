@@ -2,7 +2,7 @@
 
 import { wsManager } from './shared/ws-manager.js';
 import { api } from './shared/api-client.js';
-import { escapeHtml, showToast } from './shared/utils.js';
+import { copyToClipboard, escapeHtml, showToast } from './shared/utils.js';
 import { sessionManager } from './shared/session-manager.js';
 import { scopeChip } from './shared/scope-chip.js';
 import { writeSwitch } from './shared/write-switch.js';
@@ -89,18 +89,22 @@ function initMarked() {
 
 // C1: copy handled via event-delegation (see setupEventListeners) instead of
 // an inline onclick, which DOMPurify strips from the sanitized markdown.
-function copyCodeFromButton(btn) {
+async function copyCodeFromButton(btn) {
   const pre = btn.closest('.chat-code-block')?.querySelector('pre code');
   if (!pre) return;
-  const text = pre.textContent;
-  navigator.clipboard.writeText(text).then(() => {
-    btn.textContent = i18n.t('chat.copied');
-    btn.classList.add('copied');
-    setTimeout(() => {
-      btn.textContent = i18n.t('chat.copy');
-      btn.classList.remove('copied');
-    }, 2000);
-  });
+  // `copyToClipboard` e non `navigator.clipboard.writeText` nudo: quello non
+  // esiste in ogni WebView, e senza `.catch` il pulsante restava muto mentre
+  // la promise veniva rifiutata. Ora un fallimento lo dice.
+  if (!(await copyToClipboard(pre.textContent))) {
+    showToast(i18n.t('chat.copyFailed'), 'error');
+    return;
+  }
+  btn.textContent = i18n.t('chat.copied');
+  btn.classList.add('copied');
+  setTimeout(() => {
+    btn.textContent = i18n.t('chat.copy');
+    btn.classList.remove('copied');
+  }, 2000);
 }
 
 function renderMarkdown(text) {

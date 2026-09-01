@@ -9,6 +9,7 @@ the real OS thread object (`session._thread.is_alive()` after a bounded
 `join()`), not on the bookkeeping flags.
 """
 
+import asyncio
 import sys
 import threading
 import time
@@ -134,7 +135,13 @@ async def test_idle_timeout_deadline_stops_the_background_thread():
 
     # Wait past the deadline, then poll again -- poll() itself must notice
     # the deadline has passed and call stop().
-    time.sleep(1.2)
+    #
+    # ``await asyncio.sleep`` and not ``time.sleep``: the work runs on a
+    # background thread either way, so the wall time is the same, but a blocking
+    # sleep inside an async test parks the loop as well. Nothing else needs it
+    # here -- and that is the point: it needs to stay that way by accident for
+    # this to keep working.
+    await asyncio.sleep(1.2)
     poll2 = await manager.poll_python(
         session_id=session_id,
         yield_time_ms=0,

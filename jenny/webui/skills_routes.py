@@ -17,6 +17,7 @@ from loguru import logger
 from websockets.http11 import Request as WsRequest
 from websockets.http11 import Response
 
+from jenny.channels.http_utils import parse_flag
 from jenny.webui.skills_api import (
     delete_workspace_skill,
     update_workspace_skill,
@@ -91,7 +92,7 @@ class SkillsRoutes:
         if content is not None:
             kwargs["content"] = unquote(content)
         if disabled_raw is not None:
-            kwargs["disabled"] = disabled_raw.lower() in ("true", "1", "yes")
+            kwargs["disabled"] = parse_flag(disabled_raw)
         if not kwargs:
             return self._error(400, "nothing to update")
         try:

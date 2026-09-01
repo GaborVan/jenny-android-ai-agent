@@ -12,6 +12,11 @@ from typing import Any, Literal
 
 from loguru import logger
 
+from jenny.config.runtime_env import (
+    WORKSPACE_SANDBOX_ENFORCED_ENV,
+    WORKSPACE_SANDBOX_ENFORCED_LEGACY_ENV,
+    WORKSPACE_SANDBOX_PROVIDER_ENV,
+)
 from jenny.security.workspace_policy import _safe_expanduser
 from jenny.session.keys import PROJECT_SESSION_PREFIX, is_project_session_key
 
@@ -562,9 +567,9 @@ def current_tool_workspace(
 
 def _env_system_provider(environ: dict[str, str] | None = None) -> str | None:
     env = environ if environ is not None else os.environ
-    explicit_provider = env.get("JENNY_WORKSPACE_SANDBOX_PROVIDER")
-    enforced = env.get("JENNY_WORKSPACE_SANDBOX_ENFORCED")
-    compatibility = env.get("JENNY_SANDBOX_ENFORCED")
+    explicit_provider = env.get(WORKSPACE_SANDBOX_PROVIDER_ENV)
+    enforced = env.get(WORKSPACE_SANDBOX_ENFORCED_ENV)
+    compatibility = env.get(WORKSPACE_SANDBOX_ENFORCED_LEGACY_ENV)
 
     marker = enforced if enforced is not None else compatibility
     if marker is None:

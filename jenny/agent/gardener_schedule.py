@@ -223,7 +223,7 @@ def _quiet_enough(sessions: Any, key: str, now: datetime, idle_min: int) -> bool
     try:
         info = sessions.read_session_metadata(key)
     except Exception:  # noqa: BLE001 — la lettura dei metadati non deve fermare il tick
-        logger.warning("gardener: metadati di sessione illeggibili per {}", key)
+        logger.warning("gardener: session metadata unreadable for {}", key)
         return True
     if not isinstance(info, dict):
         return True
@@ -313,7 +313,7 @@ def pick_project(
         # Detto, non taciuto: gli altri aspettano il tick dopo, e chi legge i log
         # deve poter vedere che non sono stati dimenticati.
         logger.info(
-            "gardener: {} progetti pronti, questo tick prende {} ({}, {} righe); gli altri: {}",
+            "gardener: {} projects ready, this tick takes {} ({}, {} lines); the rest: {}",
             len(candidates), pick.store.name, pick.reason, pick.delta_lines,
             ", ".join(f"{c.store.name} ({c.reason})" for c in candidates[1:]),
         )

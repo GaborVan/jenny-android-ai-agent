@@ -192,24 +192,32 @@ class TestBridgeSearch:
                 await android_web._bridge_search(object(), "python", 5, search_engine="google")
 
     async def test_timeout_propagates(self):
+        """Il timeout non viene inghiottito, e il backstop è quello dichiarato.
+
+        Prima qui c'era solo la prima metà, e nemmeno quella per intero: lo stub
+        di ``wait_for`` sollevava sempre ``TimeoutError``, col meccanismo vero
+        patchato via, quindi il test asseriva l'eccezione del proprio stub. (Lo
+        ``slow_search`` con ``time.sleep(1)`` era codice morto: ``coro.close()``
+        fa sì che non giri mai.) Un timeout vero costerebbe almeno dieci secondi
+        di orologio, perché il backstop è ``timeout + 10``; si verifica invece
+        **quel numero**, che la docstring di ``_bridge_search`` promette e che
+        nessun test copriva.
+        """
         bridge = Mock()
+        bridge.searchBing = Mock(return_value="[]")
+        seen: dict[str, object] = {}
 
-        def slow_search(query, max_results, timeout):
-            import time
-
-            time.sleep(1)
-            return "[]"
-
-        bridge.searchBing = slow_search
-
-        async def fake_wait_for(coro, *args, **kwargs):
-            coro.close()  # avoid an un-awaited to_thread() coroutine warning
+        async def fake_wait_for(coro, *args, timeout=None, **kwargs):
+            seen["timeout"] = timeout
+            coro.close()  # evita il warning sulla to_thread() non attesa
             raise asyncio.TimeoutError
 
         with patch.object(android_web, "_get_bridge", return_value=bridge):
             with patch.object(android_web.asyncio, "wait_for", fake_wait_for):
                 with pytest.raises(asyncio.TimeoutError):
-                    await android_web._bridge_search(object(), "python", 5)
+                    await android_web._bridge_search(object(), "python", 5, timeout=7)
+
+        assert seen["timeout"] == 17, "il backstop asyncio deve essere timeout + 10"
 
     async def test_bridge_exception_propagates(self):
         bridge = Mock()

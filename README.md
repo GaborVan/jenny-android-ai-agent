@@ -141,11 +141,15 @@ is served on **loopback by default** (`127.0.0.1`) — no port exposed to your n
 to reverse-proxy, no inbound attack surface unless you deliberately rebind it. The API is
 token-gated even on loopback, because Android does not isolate loopback TCP between apps.
 
-Jenny makes exactly five kinds of outbound connection — your provider, Bing when it searches,
-`api.telegram.org` if you enabled the bridge, any URL you or the agent explicitly fetch, and
-OpenRouter's attribution headers when that's your provider. No sixth item, no phone-home. It
-declares ten permissions and asks for **no** camera, microphone, contacts, SMS, call log,
-background location or storage.
+Jenny makes six kinds of outbound connection — your provider, Bing when it searches,
+`api.telegram.org` if you enabled the bridge, any URL you or the agent explicitly fetch,
+OpenRouter's attribution headers when that's your provider, and a daily check for a new
+release. **None of them carries anything about you.** The update check is a plain `GET` of the
+`latest.json` published with the release: no identifier, no version, no headers of ours, no
+query string — a public file fetched and compared on the device. It is the only one that goes
+to a server this project controls, and the only one you did not switch on: it runs every 24h,
+and `updates.enabled: false` stops it. Jenny declares 15 permissions and asks for **no**
+camera, microphone, contacts, SMS, call log, background location or storage.
 → [Every connection and permission](https://jenny.flagdizero.com/docs/reference/android-permissions/)
 
 Two disclosures I would rather you hear from me than discover:
@@ -171,7 +175,8 @@ rather than reassuring — read it before you point this at anything you care ab
 Collected in one place rather than scattered, so you can judge before installing.
 
 - **Sideload only.** A signed APK on Releases, and the source. No Play Store, no F-Droid
-  listing, and no automatic updates — you check back here.
+  listing. Jenny does check daily whether a newer release exists and can install it when you
+  say so, but nothing updates itself behind you: Android still shows its own install prompt.
 - **Not a full launcher.** No widgets, folders, icon packs or wallpaper management.
 - **Web search is Bing-only.** A real CAPTCHA page fails rather than being solved.
 - **Goals and subagents are separate tools, not an orchestrator.** A registered objective

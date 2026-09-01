@@ -85,7 +85,7 @@ No active task to stop.
 No arguments. Output is a fixed-format block (rendered as plain text, not markdown), for example:
 
 ```text
-🐈 jenny v0.6.6
+🐈 jenny v0.9.5
 🧠 Model: gpt-4o
 📊 Tokens: 1234 in / 567 out (40% cached)
 📚 Context: 12k/65k (22% of input budget)

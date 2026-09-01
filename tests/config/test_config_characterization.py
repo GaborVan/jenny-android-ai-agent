@@ -17,7 +17,10 @@ la fixture `loop_factory` disponibile solo in tests/agent/) è caratterizzato in
 
 from __future__ import annotations
 
-from jenny.providers.base import (
+# Le manopole di streaming stanno nel layer ``config/runtime_env.py`` insieme a
+# tutti gli altri knob ``JENNY_*``: ``providers/base.py`` ne ri-implementava il
+# parsing, e il posto in cui si viene a sapere quali knob esistono è uno solo.
+from jenny.config.runtime_env import (
     DEFAULT_FIRST_OUTPUT_TIMEOUT_S,
     DEFAULT_LOCAL_FIRST_OUTPUT_TIMEOUT_S,
     DEFAULT_STREAM_IDLE_TIMEOUT_S,

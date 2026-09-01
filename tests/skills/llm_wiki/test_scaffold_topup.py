@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
-import sys
 from datetime import date
 from pathlib import Path
 
@@ -28,8 +27,13 @@ _SCRIPTS_DIR = (
 
 @pytest.fixture(scope="module")
 def scaffold():
-    """Carica `scaffold.py` come modulo (la dir non e' un package importabile)."""
-    sys.path.insert(0, str(_SCRIPTS_DIR))
+    """Carica `scaffold.py` come modulo (la dir non è un package importabile).
+
+    Senza toccare ``sys.path``: ``spec_from_file_location`` non lo consulta, e
+    per i moduli fratelli ci pensa lo script stesso — ``scaffold.py`` si inserisce
+    la propria directory in testa prima di importarli. L'``insert`` che stava
+    qui non serviva a nulla e restava in piedi per tutta la sessione.
+    """
     spec = importlib.util.spec_from_file_location("scaffold", _SCRIPTS_DIR / "scaffold.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

@@ -12,7 +12,6 @@ from jenny.agent.tools.cron import CronTool
 from jenny.agent.turn_types import TurnOutcome
 from jenny.bus.events import InboundMessage
 from jenny.cron.could_not_check import (
-    COULD_NOT_CHECK_MARKER,
     ESCALATE_AFTER_FAILURES,
     ESCALATION_ASK_LIMIT,
     could_not_check_reason,
@@ -53,7 +52,6 @@ CRON_WAKELOCK_TIMEOUT_S = 1800.0
 # quando l'heartbeat ha lo stesso terzo esito (per-task), i lettori sono due e
 # la forma che il modello scrive deve restare una sola. Ri-esportati qui coi
 # nomi con cui il monitor li conosce.
-MONITOR_COULD_NOT_CHECK_MARKER = COULD_NOT_CHECK_MARKER
 MONITOR_ESCALATE_AFTER_FAILURES = ESCALATE_AFTER_FAILURES
 
 

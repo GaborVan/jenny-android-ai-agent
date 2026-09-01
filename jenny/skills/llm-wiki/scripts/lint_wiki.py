@@ -166,7 +166,6 @@ AUDIT_REQUIRED_FIELDS = {
     "anchor_after", "severity", "author", "source", "created", "status",
 }
 VALID_SEVERITIES = {"info", "suggest", "warn", "error"}
-VALID_STATUSES = {"open", "resolved"}
 
 # Canonical op names for log/ entries (SKILL.md § log/ format).
 #

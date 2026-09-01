@@ -16,6 +16,7 @@
     "agentRunning": "Agent in esecuzione",
     "copy": "Copia",
     "copied": "Copiato!",
+    "copyFailed": "Copia non riuscita",
     "close": "Chiudi",
     "filesModified": "{count} file modificati",
     "jenny": "Jenny",

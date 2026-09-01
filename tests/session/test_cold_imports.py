@@ -127,16 +127,23 @@ def test_the_known_failures_are_still_failing() -> None:
     [
         ("jenny.session", "SessionManager"),
         ("jenny.session", "Session"),
-        ("jenny.cron", "CronService"),
-        ("jenny.cron", "CronJob"),
     ],
 )
 def test_package_attribute_resolves_in_a_cold_interpreter(package: str, name: str) -> None:
     """Le forme `from <package> import <nome>`, che lo sweep non copre.
 
-    `jenny/cron/__init__.py` risolve `CronService` con una `__getattr__` pigra, cioè
-    non passa dal modulo: importare il package riesce e l'attributo può comunque
-    non risolversi.
+    Lo sweep importa il *modulo*; un package che ri-esporta può importarsi bene e
+    lasciare comunque l'attributo irrisolto, quindi va provato a parte.
+
+    `jenny.cron` stava qui con `CronService` e `CronJob`: il suo `__init__`
+    risolveva `CronService` con una `__getattr__` pigra — che non passa dal
+    modulo, ed è il caso in cui questa distinzione morde davvero. Quella
+    `__getattr__` non c'è più (nessuno importava per quella via, e una
+    `__getattr__` di modulo costava il controllo dei nomi di pyright su tutto il
+    package, come dice il test qui sotto). Senza re-export non c'è più niente da
+    risolvere: `from jenny.cron import CronService` ora fallisce subito e in
+    chiaro, che è il modo in cui *non* serve una guardia. Restano i due nomi di
+    `jenny.session`, che il package esporta davvero.
     """
     result = subprocess.run(
         [sys.executable, "-c", f"from {package} import {name}; print({name}.__name__)"],

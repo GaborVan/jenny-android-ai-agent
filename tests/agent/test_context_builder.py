@@ -8,7 +8,7 @@ import pytest
 from jenny.agent.context import ContextBuilder
 from jenny.session.goal_state import GOAL_STATE_KEY
 from jenny.utils.android_assets import _RETIRED_TEMPLATE_DIGESTS, _USER_OWNED_TEMPLATES
-from jenny.utils.helpers import merge_message_content
+from jenny.utils.helpers import load_bundled_template, merge_message_content
 
 pytestmark = pytest.mark.usefixtures("_configure_jenny_workspace")
 
@@ -696,12 +696,31 @@ class TestIsTemplateContent:
         original = tpl.read_text(encoding="utf-8")
         assert ContextBuilder._is_template_content(original, "memory/MEMORY.md") is True
 
-    def test_the_retired_memory_scaffold_is_still_recognised(self):
-        """Il round-trip col template bundled non prova più niente da solo.
+    def test_content_matching_a_template_that_is_not_empty(self):
+        """Lo stesso round-trip, ma su un template con del testo dentro.
 
         ``memory/MEMORY.md`` spedisce zero byte, quindi il test qui sopra
-        confronta ``""`` con ``""``: passerebbe anche con il riconoscimento
-        rotto. Il caso che conta è l'altro, ed è quello che c'è sui telefoni —
+        confronta ``""`` con ``""``. Non è inerte — rompendo il confronto col
+        bundle fallisce — ma è degenere: non esercita la normalizzazione, che è
+        dove i difetti veri sono già stati (un BOM UTF-8 sopravvive a
+        ``strip()`` e faceva smettere di combaciare un file che l'utente non
+        aveva mai scritto). ``SOUL.md`` porta 2 kB di testo, intestazioni e
+        righe vuote, quindi copre quella metà.
+        """
+        original = load_bundled_template("SOUL.md")
+        assert original, "SOUL.md non è più un template bundled non vuoto"
+        assert ContextBuilder._is_template_content(original, "SOUL.md") is True
+        assert ContextBuilder._is_template_content("\ufeff" + original, "SOUL.md") is True
+        assert ContextBuilder._is_template_content(original + "\nmia riga\n", "SOUL.md") is False
+
+    def test_the_retired_memory_scaffold_is_still_recognised(self):
+        """Il caso che conta non è il round-trip col bundle: è quello sui telefoni.
+
+        ``memory/MEMORY.md`` spedisce zero byte, quindi il test qui sopra
+        confronta ``""`` con ``""``. Misurato per mutazione il 31/08/2026: non
+        passa comunque — rompendo il confronto col bundle fallisce — ma è
+        degenere, e la copertura della normalizzazione sta nel test su
+        ``SOUL.md``. Quello che nessuno dei due copre è lo scaffold ritirato —
         lo scaffold "# Long-term Memory" con ``## User Information`` e
         ``## Preferences``, che contraddicono il routing di ``agent/dream.md``.
 

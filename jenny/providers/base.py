@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import os
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
@@ -28,38 +27,6 @@ from jenny.providers.retry_policy import (
     is_transient_response,
 )
 
-STREAM_IDLE_TIMEOUT_ENV = "JENNY_STREAM_IDLE_TIMEOUT_S"
-DEFAULT_STREAM_IDLE_TIMEOUT_S = 90.0
-MAX_STREAM_IDLE_TIMEOUT_S = 3600.0
-
-FIRST_OUTPUT_TIMEOUT_ENV = "JENNY_STREAM_FIRST_OUTPUT_TIMEOUT_S"
-DEFAULT_FIRST_OUTPUT_TIMEOUT_S = 300.0
-DEFAULT_LOCAL_FIRST_OUTPUT_TIMEOUT_S = 600.0
-
-
-def _resolve_timeout_s(
-    env_name: str,
-    env_value: str | None,
-    default: float,
-    maximum: float,
-) -> float:
-    """Read a timeout from env/config text, ignoring unusable values."""
-    raw = os.environ.get(env_name) if env_value is None else env_value
-    if raw is None or not raw.strip():
-        return default
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        logger.warning("Ignoring invalid {}={!r}; using {}", env_name, raw, default)
-        return default
-    if value <= 0:
-        logger.warning("Ignoring non-positive {}={!r}; using {}", env_name, raw, default)
-        return default
-    if value > maximum:
-        logger.warning("Clamping {}={!r} to {}", env_name, raw, maximum)
-        return maximum
-    return value
-
 
 class StreamTimeout(asyncio.TimeoutError):
     """Timeout di streaming che si porta dietro quale budget è scaduto.
@@ -74,33 +41,31 @@ class StreamTimeout(asyncio.TimeoutError):
         self.saw_output = saw_output
 
 
-def resolve_stream_idle_timeout_s(
-    *,
-    env_value: str | None = None,
-    default: float = DEFAULT_STREAM_IDLE_TIMEOUT_S,
-    maximum: float = MAX_STREAM_IDLE_TIMEOUT_S,
-) -> float:
-    """Return a safe streaming idle timeout from env/config text."""
-    return _resolve_timeout_s(STREAM_IDLE_TIMEOUT_ENV, env_value, default, maximum)
+class ProviderHTTPError(RuntimeError):
+    """Errore HTTP di un provider, con addosso i metadati che lo classificano.
 
-
-def resolve_first_output_timeout_s(
-    *,
-    local: bool = False,
-    env_value: str | None = None,
-    maximum: float = MAX_STREAM_IDLE_TIMEOUT_S,
-) -> float:
-    """Return how long to wait for the model's *first* output before giving up.
-
-    Tenuto separato dall'idle inter-chunk perché le due attese non sono la
-    stessa cosa: prima del primo token il server sta macinando il prompt e il
-    silenzio è previsto (su un llama.cpp on-device i soli schemi tool valgono
-    minuti di prompt processing), mentre a stream avviato un buco lungo è un
-    blocco vero. *local* alza il default per gli endpoint in loopback, gli
-    unici che possono essere lenti così.
+    Esiste perché un ``RuntimeError`` nudo li perde tutti. La catena a valle —
+    ``_extract_error_metadata`` → ``is_transient_response`` — legge lo status per
+    decidere se ritentare, e senza status ripiega sul testo, dove il marker
+    ``"429"`` fa passare per transitorio anche un ``insufficient_quota`` che non
+    lo è: quella richiesta veniva ritentata a vuoto fino a esaurire i tentativi.
+    Gli attributi hanno i nomi che le eccezioni dell'SDK OpenAI espongono
+    (``status_code``, ``headers``, ``body``), così chi le legge non deve
+    distinguere le due origini.
     """
-    default = DEFAULT_LOCAL_FIRST_OUTPUT_TIMEOUT_S if local else DEFAULT_FIRST_OUTPUT_TIMEOUT_S
-    return _resolve_timeout_s(FIRST_OUTPUT_TIMEOUT_ENV, env_value, default, maximum)
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        headers: Any = None,
+        body: Any = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.headers = headers
+        self.body = body
 
 
 @dataclass

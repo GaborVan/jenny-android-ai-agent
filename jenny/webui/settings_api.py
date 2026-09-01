@@ -10,6 +10,7 @@ import asyncio
 import os
 import re
 import time
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -17,6 +18,7 @@ from loguru import logger
 
 from jenny import __version__
 from jenny.agent.token_usage import token_usage_payload
+from jenny.channels.http_utils import FALSY_VALUES, TRUTHY_VALUES, parse_flag
 from jenny.config import store
 from jenny.config.loader import get_config_path, load_config
 from jenny.config.schema import KEEP_AWAKE_MODES, Config
@@ -311,9 +313,117 @@ def _query_first(query: QueryParams, key: str) -> str | None:
     return values[0] if values else None
 
 
-def _query_first_alias(query: QueryParams, snake: str, camel: str) -> str | None:
-    value = _query_first(query, snake)
-    return _query_first(query, camel) if value is None else value
+def _query_first_alias(query: QueryParams, *names: str) -> str | None:
+    """Il primo valore fra più nomi accettati (snake_case e camelCase)."""
+    for name in names:
+        value = _query_first(query, name)
+        if value is not None:
+            return value
+    return None
+
+
+
+# ── Applicatori generici ─────────────────────────────────────────────────────
+# Vivevano in ``worker_settings``, che li aveva generalizzati per i suoi tre
+# lavoratori mentre qui sotto nove rami li riscrivevano a mano — e uno di quei
+# nove aveva i bound del campo **copiati** invece di derivati, cioè un secondo
+# posto da aggiornare a ogni cambio di schema. Stanno qui perché
+# ``worker_settings`` importa già da questo modulo: il verso opposto sarebbe un
+# ciclo.
+
+def _bounds(model: type, attr: str) -> tuple[int | None, int | None]:
+    """I bound che lo schema impone a *attr*, letti dallo schema stesso."""
+    field = model.model_fields[attr]
+    low = getattr(field, "ge", None)
+    high = getattr(field, "le", None)
+    return (int(low) if low is not None else None, int(high) if high is not None else None)
+
+
+def _parse_bool(raw: str, field: str) -> bool:
+    value = raw.strip().lower()
+    if value in TRUTHY_VALUES:
+        return True
+    if value in FALSY_VALUES:
+        return False
+    raise WebUISettingsError(f"{field} must be a boolean")
+
+
+def _parse_int(raw: str, field: str, model: type, attr: str) -> int:
+    """Un intero dentro i bound dello schema, o un rifiuto che **nomina il range**.
+
+    Il range nel messaggio non e' cortesia: e' l'unico modo in cui chi ha appena
+    sforato scopre quale sia il valore ammesso, e la prosa che spiega *perche'*
+    quel tetto esista sta nei file i18n accanto al campo.
+    """
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        raise WebUISettingsError(f"{field} must be a whole number") from None
+    low, high = _bounds(model, attr)
+    if (low is not None and value < low) or (high is not None and value > high):
+        span = f"{low}" if high is None else f"{low}–{high}"
+        raise WebUISettingsError(f"{field} must be between {span}")
+    return value
+
+
+def _apply_int(
+    query: QueryParams,
+    target: Any,
+    attr: str,
+    model: type,
+    *names: str,
+) -> bool:
+    """Scrive un intero su *target* se la query lo porta. ``True`` = cambiato."""
+    raw = _query_first_alias(query, *names)
+    if raw is None:
+        return False
+    value = _parse_int(raw, names[0], model, attr)
+    if int(getattr(target, attr)) == value:
+        return False
+    setattr(target, attr, value)
+    return True
+
+
+def _apply_bool(query: QueryParams, target: Any, attr: str, *names: str) -> bool:
+    raw = _query_first_alias(query, *names)
+    if raw is None:
+        return False
+    value = _parse_bool(raw, names[0])
+    if bool(getattr(target, attr)) == value:
+        return False
+    setattr(target, attr, value)
+    return True
+
+
+
+def _apply_str(
+    query: QueryParams,
+    target: Any,
+    attr: str,
+    *names: str,
+    required: bool = True,
+    validate: Callable[[str], str | None] | None = None,
+) -> bool:
+    """Scrive una stringa strippata su *target* se la query la porta.
+
+    ``True`` = valore cambiato. *required* rifiuta la stringa vuota (che per
+    quasi tutti questi campi significa «cancellalo», e non è ciò che l'utente
+    intendeva); *validate* ritorna un messaggio d'errore, o ``None`` se il
+    valore va bene, ed è come timezone e nome del provider fanno il loro
+    controllo senza che questa funzione li conosca.
+    """
+    raw = _query_first_alias(query, *names)
+    if raw is None:
+        return False
+    value = raw.strip()
+    if required and not value:
+        raise WebUISettingsError(f"{names[0]} is required")
+    if validate is not None and (err := validate(value)):
+        raise WebUISettingsError(err)
+    if getattr(target, attr) == value:
+        return False
+    setattr(target, attr, value)
+    return True
 
 
 def _resolve_env_placeholders(value: str | None) -> str | None:
@@ -475,6 +585,21 @@ def provider_models_payload(query: QueryParams) -> dict[str, Any]:
         headers["Authorization"] = f"Bearer {api_key}"
         models_url = f"{api_base.rstrip('/')}/models"
 
+    # Deliberatamente **senza** ``validate_url_target``, e va scritto perché chi
+    # verifica "ogni richiesta in uscita è controllata?" trova questa e non può
+    # distinguere una decisione da una dimenticanza.
+    #
+    # La destinazione è ``providers.<nome>.apiBase``, cioè un valore che l'utente
+    # ha messo in Impostazioni per parlare col *suo* provider — e su questo
+    # dispositivo quel provider può legittimamente essere un llama.cpp in
+    # loopback o un server di modelli in LAN, che è esattamente ciò che l'SSRF
+    # blocca. La stessa deroga la prendono i due provider LLM quando chiamano
+    # l'endpoint di chat: bloccare qui e non lì proteggerebbe da niente e
+    # romperebbe i modelli locali.
+    #
+    # Cosa resta a delimitarla: la rotta è dietro il token (``/api/``), non
+    # segue redirect, ha un timeout stretto, e la risposta viene solo letta per
+    # estrarne una lista di nomi di modelli.
     try:
         response = httpx.get(
             models_url,
@@ -887,29 +1012,18 @@ def _apply_agent_settings(config: Config, query: QueryParams) -> tuple[bool, boo
     changed = False
     restart_required = False
 
-    model = _query_first(query, "model")
-    if model is not None:
-        model = model.strip()
-        if not model:
-            raise WebUISettingsError("model is required")
-        if defaults.model != model:
-            defaults.model = model
-            changed = True
+    if _apply_str(query, defaults, "model", "model"):
+        changed = True
 
-    default_provider = _query_first(query, "default_provider")
-    if default_provider is not None:
-        default_provider = default_provider.strip()
-        if not default_provider:
-            raise WebUISettingsError("default_provider is required")
-        provider_exists = any(
-            p.name == default_provider
-            for p in config.providers.providers
-        )
-        if not provider_exists:
-            raise WebUISettingsError("unknown provider")
-        if config.providers.default != default_provider:
-            config.providers.default = default_provider
-            changed = True
+    def _known_provider(name: str) -> str | None:
+        known = any(p.name == name for p in config.providers.providers)
+        return None if known else "unknown provider"
+
+    if _apply_str(
+        query, config.providers, "default", "default_provider",
+        validate=_known_provider,
+    ):
+        changed = True
 
     context_window_tokens = _parse_context_window_tokens(
         _query_first_alias(query, "context_window_tokens", "contextWindowTokens")
@@ -945,53 +1059,36 @@ def _apply_agent_settings(config: Config, query: QueryParams) -> tuple[bool, boo
         defaults.reasoning_effort = reasoning_effort
         changed = True
 
-    timezone = _query_first(query, "timezone")
-    if timezone is not None:
-        timezone = timezone.strip()
-        if not timezone:
-            raise WebUISettingsError("timezone is required")
-        # Rifiuta i nomi IANA sconosciuti (degrada ad accettare se tzdata manca).
-        if err := validate_timezone_name(timezone):
-            raise WebUISettingsError(err)
-        if defaults.timezone != timezone:
-            defaults.timezone = timezone
-            changed = True
-            restart_required = True
+    # ``validate_timezone_name`` rifiuta i nomi IANA sconosciuti, e degrada ad
+    # accettare se ``tzdata`` manca.
+    if _apply_str(query, defaults, "timezone", "timezone", validate=validate_timezone_name):
+        changed = True
+        restart_required = True
 
-    bot_name = _query_first_alias(query, "bot_name", "botName")
-    if bot_name is not None:
-        bot_name = bot_name.strip()
-        if not bot_name:
-            raise WebUISettingsError("bot_name is required")
-        if defaults.bot_name != bot_name:
-            defaults.bot_name = bot_name
-            changed = True
-            restart_required = True
+    if _apply_str(query, defaults, "bot_name", "bot_name", "botName"):
+        changed = True
+        restart_required = True
 
-    bot_icon = _query_first_alias(query, "bot_icon", "botIcon")
-    if bot_icon is not None:
-        bot_icon = bot_icon.strip()
-        if defaults.bot_icon != bot_icon:
-            defaults.bot_icon = bot_icon
-            changed = True
-            restart_required = True
+    # ``required=False``: l'icona vuota è "nessuna icona", che è una scelta
+    # legittima — a differenza del nome vuoto, che è un errore di battitura.
+    if _apply_str(query, defaults, "bot_icon", "bot_icon", "botIcon", required=False):
+        changed = True
+        restart_required = True
 
-    tool_hint_max_length = _query_first_alias(
+    # I bound li deriva ``_apply_int`` dallo schema (``ge=20, le=500`` su
+    # ``AgentDefaults.tool_hint_max_length``). Erano copiati qui a mano, cioè un
+    # secondo posto da aggiornare a ogni cambio di schema — e il messaggio
+    # d'errore, che nomina il range, sarebbe stato il primo a mentire.
+    if _apply_int(
         query,
+        defaults,
+        "tool_hint_max_length",
+        type(defaults),
         "tool_hint_max_length",
         "toolHintMaxLength",
-    )
-    if tool_hint_max_length is not None:
-        try:
-            parsed = int(tool_hint_max_length)
-        except ValueError:
-            raise WebUISettingsError("tool_hint_max_length must be an integer") from None
-        if parsed < 20 or parsed > 500:
-            raise WebUISettingsError("tool_hint_max_length must be between 20 and 500")
-        if defaults.tool_hint_max_length != parsed:
-            defaults.tool_hint_max_length = parsed
-            changed = True
-            restart_required = True
+    ):
+        changed = True
+        restart_required = True
 
     return changed, restart_required
 
@@ -1105,7 +1202,7 @@ async def delete_provider(data: dict[str, Any]) -> dict[str, Any]:
         # senza che nessuno lo dica e' il genere di cosa che poi si cerca per
         # mezz'ora.
         logger.info(
-            "Provider {} rimosso: {} preset non lo nominano piu' ({})",
+            "Provider {} removed: {} presets no longer name it ({})",
             name, len(repointed), ", ".join(sorted(repointed)),
         )
     return settings_payload()
@@ -1188,7 +1285,7 @@ async def update_location_settings(query: QueryParams) -> dict[str, Any]:
         enabled = _query_first(query, "enabled")
         if enabled is None:
             return False
-        value = enabled.strip().lower() in ("1", "true", "yes", "on")
+        value = parse_flag(enabled)
         if loc.enable == value:
             return False
         loc.enable = value

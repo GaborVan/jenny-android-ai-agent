@@ -86,3 +86,35 @@ export function ensureVendor(src) {
   _vendorLoads.set(src, p);
   return p;
 }
+
+
+/**
+ * Copia *text* negli appunti. Ritorna true se ha funzionato.
+ *
+ * Il fallback non è prudenza generica: la Clipboard API può mancare in una
+ * WebView, e la WebView Android è l'unico runtime che spediamo — quindi il
+ * ramo `execCommand` è la strada normale su una fetta dei dispositivi, non
+ * un caso limite. Esisteva già, in `mobile-settings.js`, per la chiave SSH;
+ * il pulsante Copia dei blocchi di codice chiamava invece `writeText` nudo,
+ * senza controllo e senza `.catch`, quindi lì non copiava niente **in
+ * silenzio** e lasciava una promise rifiutata.
+ */
+export async function copyToClipboard(text) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.style.position = 'fixed';
+    area.style.left = '-9999px';
+    document.body.appendChild(area);
+    area.select();
+    const ok = document.execCommand('copy');
+    area.remove();
+    return ok;
+  } catch {
+    return false;
+  }
+}

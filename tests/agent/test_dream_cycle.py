@@ -1108,8 +1108,8 @@ class TestTheAlarmCanActuallySound:
 class TestTheAlarmLeavesTheLog:
     """Su Android il ``logger.error`` è un allarme che non suona.
 
-    Nessuno legge logcat sul telefono, e la sola altra superficie —
-    ``/dream budget`` — risponde a chi è già andato a chiedere. Un Dream fermo
+    Nessuno legge logcat sul telefono, e la sola altra superficie — le misure
+    in Impostazioni → Memoria — risponde a chi è già andato a guardare. Un Dream fermo
     per giorni resterebbe quindi invisibile esattamente come prima della
     correzione che ha reso raggiungibile la soglia: la si raggiunge, e non lo
     sa nessuno.
@@ -1144,7 +1144,10 @@ class TestTheAlarmLeavesTheLog:
         content, metadata = sent[0]
         assert format_stuck_alarm(STUCK_IS_ALARMING) in content
         # L'alert dice dove andare a vedere i numeri, che qui non ci sono.
-        assert "/dream budget" in content
+        # Era ``/dream budget``, rimosso il 31/08/2026: la superficie ora è la
+        # sezione Memoria delle Impostazioni, e l'alert deve nominare *quella*
+        # — mandare a un comando che non esiste è peggio che non dire niente.
+        assert "Settings \u2192 Memory" in content
         assert metadata == {
             WEBUI_MESSAGE_SOURCE_METADATA_KEY: {"kind": "cron", "label": "Dream"}
         }
@@ -1189,7 +1192,7 @@ class TestTheAlarmLeavesTheLog:
         # Il conteggio nel corpo cresce: l'alert che sostituisce il precedente
         # non è una copia, è la misura aggiornata.
         assert [alert_fields(c, m)[1] for c, m in sent] == [
-            f"{format_stuck_alarm(n)} Run /dream budget to see the sizes."
+            f"{format_stuck_alarm(n)} Settings \u2192 Memory shows the sizes."
             for n in (STUCK_IS_ALARMING + 1, STUCK_IS_ALARMING + 2, STUCK_IS_ALARMING + 3)
         ]
 
@@ -1208,7 +1211,7 @@ class TestTheAlarmLeavesTheLog:
 
         _, body, _ = alert_fields(*sent[0])
         assert not body.endswith("…"), body
-        assert body.endswith("Run /dream budget to see the sizes.")
+        assert body.endswith("Settings \u2192 Memory shows the sizes.")
 
 
 class TestACycleWithNothingToConsolidate:
