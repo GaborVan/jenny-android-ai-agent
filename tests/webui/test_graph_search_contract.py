@@ -105,8 +105,15 @@ for (const k of ['document', 'window', 'requestAnimationFrame', 'cancelAnimation
 define('performance', { now: () => Date.now() });
 
 define('__GRAPH__', JSON.parse(fs.readFileSync(new URL('./graph.json', import.meta.url), 'utf-8')));
+// L'header sta per quello vero, e `loadGraph` ne usa tre metodi: il titolo e i
+// due che accendono e spengono il tasto verso la chat del progetto. Un finto a
+// cui manca un metodo del vero non e' un finto piu' piccolo, e' un errore in
+// mezzo alla prova: `showAction is not a function` faceva morire l'import prima
+// del primo assert sulla maschera di ricerca.
 window.mobileApp = {
-  currentMode: 'graph', header: { setTitle() {} }, pushNav() {},
+  currentMode: 'graph',
+  header: { setTitle() {}, showAction() {}, hideAction() {} },
+  pushNav() {},
   takePendingGraph: () => null, switchMode() {}, controllers: {},
 };
 define('mobileApp', window.mobileApp);
