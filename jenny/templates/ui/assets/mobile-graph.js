@@ -3,6 +3,7 @@ import { escapeHtml, hashString } from './shared/utils.js';
 import { i18n } from './shared/i18n.js';
 import { WikiSearchIndex } from './shared/wiki-search.js';
 import { AppState } from './shared/state.js';
+import { isOpenableProjectName } from './shared/scope-chip.js';
 
 export class GraphController {
   constructor() {
@@ -194,6 +195,11 @@ export class GraphController {
     const token = ++this._loadToken;
     const gen = this._gen;
     this.currentWiki = wiki;
+    // Accanto all'assegnazione, e non dopo la fetch: il tasto nomina la wiki
+    // che questa vista sta mostrando, e un caricamento fallito la mostra
+    // comunque (il titolo resta, il grafo diventa una riga d'errore). Ultimo
+    // chiamante vince, come per `currentWiki`.
+    this._syncProjectAction(wiki);
     this._cleanup();
     this.showLoading();
 
@@ -228,6 +234,20 @@ export class GraphController {
       // Chi è stato superato non spegne lo spinner di chi lo ha superato.
       if (!this._stale(token, gen)) this.hideLoading();
     }
+  }
+
+  /** Accende il tasto «chat del progetto» se questa vista ne ha uno da aprire.
+   *
+   *  Sul grafo home (`wiki` null) non c'è: i nodi sono *le* wiki, e non ce n'è
+   *  una da aprire più delle altre. Su una cartella con un nome che il server
+   *  non accetta come progetto non c'è nemmeno: aprirla porterebbe in
+   *  un'**altra** conversazione (v. `isOpenableProjectName`).
+   */
+  _syncProjectAction(wiki) {
+    const header = window.mobileApp?.header;
+    if (!header) return;
+    if (wiki && isOpenableProjectName(wiki)) header.showAction('open-project-chat', 'graph');
+    else header.hideAction('open-project-chat', 'graph');
   }
 
   _updateTitle(wiki) {
