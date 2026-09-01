@@ -49,6 +49,23 @@ const DEFAULT_DIR = 'wikis';
  */
 const VALID_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
+/** True se *name* è una cartella che il server aprirebbe come conversazione.
+ *
+ *  Le due metà di `is_valid_project_name`: la forma, e il `..` che la forma non
+ *  vede (`a..b` passa la regex). Separate là e separate qui, così le due domande
+ *  restano confrontabili a occhio.
+ *
+ *  Esportata perché la stessa domanda se la pone anche chi non sta creando
+ *  niente: il tasto che dalla wiki porta nella chat del progetto esiste solo se
+ *  quel nome è un nome che il server aprirebbe. È la stessa divisione che fa
+ *  `wiki_routes.py::_collect_projects` fra `projects` e `unopenable`, e un tasto
+ *  offerto su una cartella del secondo gruppo aprirebbe **un'altra**
+ *  conversazione — il guasto per cui quella divisione esiste.
+ */
+export function isOpenableProjectName(name) {
+  return typeof name === 'string' && VALID_NAME.test(name) && !name.includes('..');
+}
+
 /** Il rifiuto del server, detto nella lingua dell'utente.
  *
  *  `err.message` viene da un `CommandError` e **è in inglese**: interpolato in
@@ -650,10 +667,10 @@ export class ScopeChip {
     });
     if (!name) return;
     const clean = name.trim();
-    // Le due metà di `is_valid_project_name`: la forma, e il `..` che la forma
-    // non vede (`a..b` passa la regex). Separate là e separate qui, così le due
-    // domande restano confrontabili a occhio.
-    if (!VALID_NAME.test(clean) || clean.includes('..')) {
+    // La stessa domanda del tasto che dalla wiki porta nella chat: una regola
+    // sola, o le due strade per lo stesso nome smetterebbero di rispondere
+    // uguale (v. `isOpenableProjectName`).
+    if (!isOpenableProjectName(clean)) {
       showToast(i18n.t('scope.invalidName'), 'error');
       return;
     }

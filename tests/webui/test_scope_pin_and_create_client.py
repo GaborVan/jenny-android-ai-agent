@@ -93,6 +93,18 @@ def _const_block(source: str, name: str) -> str:
     return m.group(0)
 
 
+def _function(source: str, name: str) -> str:
+    """Una funzione di modulo, presa dal sorgente. `export` cade: qui non serve.
+
+    Stessa ragione di :func:`_const`: `isOpenableProjectName` è la regola che
+    decide quali nomi arrivano al server, e una copia a mano nel test
+    smetterebbe di misurare quella vera al primo cambio.
+    """
+    m = re.search(rf"(?ms)^export function {re.escape(name)}\(.*?^\}}$", source)
+    assert m, f"funzione {name} non trovata"
+    return m.group(0).removeprefix("export ")
+
+
 _HARNESS = """
 import assert from 'node:assert/strict';
 
@@ -191,7 +203,10 @@ function serverError(code, message) {
 def _harness() -> str:
     src = _read(CHIP_JS)
     return (
-        _HARNESS.replace("__VALID_NAME__", _const(src, "VALID_NAME"))
+        _HARNESS.replace(
+            "__VALID_NAME__",
+            _const(src, "VALID_NAME") + "\n" + _function(src, "isOpenableProjectName"),
+        )
         .replace("__CREATE_ERROR_KEYS__", _const_block(src, "CREATE_ERROR_KEYS"))
         .replace("__PUBLISH_PIN__", _member(src, "_publishPin"))
         .replace("__SYNC_FROM_SESSION__", _member(src, "syncFromSession"))

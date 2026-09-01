@@ -7,6 +7,7 @@ import { AppState } from './shared/state.js';
 import { renderTree, wireTreeFolder, wireTreeFiles } from './shared/tree-renderer.js';
 import { i18n } from './shared/i18n.js';
 import { confirmDialog, promptDialog } from './shared/dialog.js';
+import { isOpenableProjectName } from './shared/scope-chip.js';
 
 export class WikiController {
   constructor() {
@@ -139,6 +140,11 @@ export class WikiController {
 
   activate() {
     this._loadInitialView();
+    // `setMode` ha appena ridisegnato le azioni, e il tasto rinasce spento a
+    // ogni rientro. Riaccenderlo non è compito del caricamento: quando la vista
+    // era già disegnata `_loadInitialView` non ne fa nessuno, e il tasto
+    // resterebbe spento sopra una pagina che il suo progetto ce l'ha.
+    this._syncProjectAction();
     if (this._localeDirty) {
       this._localeDirty = false;
       this._rerenderForLocale();
@@ -217,6 +223,7 @@ export class WikiController {
     this.isHome = true;
     this.currentWiki = null;
     this.currentPath = '_index.md';
+    this._syncProjectAction();
     AppState.wiki.currentWiki = null;
     AppState.wiki.currentPath = '_index.md';
     this.contentEl.innerHTML = `<p class="wiki-blockq">${i18n.t('wiki.loading')}</p>`;
@@ -290,6 +297,10 @@ export class WikiController {
     this.isHome = false;
     this.currentWiki = wiki;
     this.currentPath = page;
+    // Accanto all'assegnazione, e non dopo la fetch: il tasto nomina la wiki
+    // che questa vista sta mostrando, e una pagina che non si carica la mostra
+    // comunque (resta il progetto, cambia la pagina).
+    this._syncProjectAction();
     AppState.wiki.currentWiki = wiki;
     AppState.wiki.currentPath = page;
     this.contentEl.innerHTML = `<p class="wiki-blockq">${i18n.t('wiki.loading')}</p>`;
@@ -322,6 +333,21 @@ export class WikiController {
       this._settled = true;  // anche una pagina d'errore è una vista disegnata
       this.contentEl.innerHTML = `<p class="wiki-blockq" style="color: var(--error)">${i18n.t('common.error')}: ${escapeHtml(err.message)}</p>`;
     }
+  }
+
+  /** Accende il tasto «chat del progetto» se questa vista ne ha uno da aprire.
+   *
+   *  Sulla Home (`isHome`) non c'è: quell'indice *è* l'elenco delle wiki, e non
+   *  ce n'è una da aprire più delle altre. Su una cartella con un nome che il
+   *  server non accetta come progetto non c'è nemmeno: aprirla porterebbe in
+   *  un'**altra** conversazione (v. `isOpenableProjectName`).
+   */
+  _syncProjectAction() {
+    const header = window.mobileApp?.header;
+    if (!header) return;
+    const wiki = this.isHome ? null : this.currentWiki;
+    if (wiki && isOpenableProjectName(wiki)) header.showAction('open-project-chat', 'wiki');
+    else header.hideAction('open-project-chat', 'wiki');
   }
 
   _renderBreadcrumbs() {
