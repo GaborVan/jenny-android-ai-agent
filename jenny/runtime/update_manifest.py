@@ -19,6 +19,9 @@ from __future__ import annotations
 # ``releases/latest/download/``: GitHub lo risolve sempre sull'ultima release,
 # quindi il client non deve conoscere il numero di versione per trovarla.
 # ``scripts/release.py`` pubblica l'asset con questo nome esatto.
+#
+# Fork GaborVan: il canale di aggiornamento punta al fork dell'utente (gli APK
+# sono firmati con il keystore locale, non con quello dell'autore upstream).
 DEFAULT_MANIFEST_URL = (
-    "https://github.com/flagdizero/jenny-android-ai-agent/releases/latest/download/latest.json"
+    "https://github.com/GaborVan/jenny-android-ai-agent/releases/latest/download/latest.json"
 )

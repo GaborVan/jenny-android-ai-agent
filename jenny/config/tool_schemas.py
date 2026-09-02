@@ -225,3 +225,68 @@ class SshConfig(Base):
     keepalive_interval_s: int = Field(default=30, ge=0, le=300)
     idle_close_s: int = Field(default=300, ge=30)
     max_transfer_bytes: int = Field(default=50 * 1024 * 1024, ge=1024)
+
+
+class UiAutomationConfig(Base):
+    """Configurazione dell'automazione UI Android (accessibilità).
+
+    Dà a Jenny occhi e mani sugli altri app: dump dell'albero di accessibilità,
+    tap (coordinate o testo), swipe, digitazione e azioni globali
+    (back/home/recents/notifications). Solo Android, via ``UiAutomationService``
+    (AccessibilityService di sistema).
+
+    ``enable`` è il toggle utente (default ON quando il tool è disponibile),
+    comunque gattato dal permesso di sistema: l'accessibilità va abilitata a
+    mano dall'utente in Impostazioni → Accessibilità, e senza quello ogni
+    azione ritorna ``service_not_enabled``.
+    """
+
+    enable: bool = True
+
+
+class NotificationsConfig(Base):
+    """Configurazione dell'accesso alle notifiche di sistema Android.
+
+    Dà a Jenny le orecchie sugli altri app: leggere le notifiche attive (codici
+    2FA, messaggi, stati) e dismissarle. Solo Android, via
+    ``NotificationListenerBridge`` — l'accesso va concesso a mano dall'utente
+    (Impostazioni → Notifiche → Accesso alle notifiche); senza quello ogni
+    azione ritorna ``service_not_enabled``.
+    """
+
+    enable: bool = True
+
+
+class ClipboardConfig(Base):
+    """Configurazione del bridge degli appunti Android (lettura/scrittura).
+
+    Su Android 10+ la lettura degli appunti è limitata dal sistema: funziona
+    quando l'app ha il focus o è la IME predefinita. La scrittura è sempre
+    permessa. Il toggle ``enable`` è la serratura lato agente.
+    """
+
+    enable: bool = True
+
+
+class SkillCreatorConfig(Base):
+    """Configurazione dei tool di creazione skill autonoma.
+
+    Espongono il ``skill-creator`` built-in come tool veri: ``skill_create``
+    (scaffold di una nuova skill), ``skill_validate`` (controllo struttura) e
+    ``skill_list`` (elenco delle skill esistenti). Così Jenny può impararsi una
+    nuova capacità da sola quando nota un'attività ripetibile, senza aspettare
+    la frase-innesco dell'utente. Gli script restano quelli della skill
+    ``skill-creator`` (nessuna logica duplicata).
+
+    La creazione scrive sotto ``<workspace>/skills/`` — come qualunque tool di
+    scrittura rispetta la workspace policy. ``enable`` è la serratura lato
+    agente.
+    """
+
+    enable: bool = True
+    # Sorgente remota per ``skill_sync``: "owner/repo" su GitHub (es.
+    # "GaborVan/jenny-android-ai-agent") oppure un URL raw/API completo.
+    # Quando vuota, il tool ``skill_sync`` non viene registrato.
+    sync_repo: str = ""
+    # Ramo da cui scaricare le skill quando ``sync_repo`` è "owner/repo".
+    sync_branch: str = "main"

@@ -78,6 +78,10 @@ _HARDCODED_TOOL_MODULES = [
     "introspect",
     "diagnostics",
     "ui_view",
+    "ui_automation",
+    "notifications",
+    "clipboard",
+    "skill_creator",
     "ssh",
     "app_update",
 ]
