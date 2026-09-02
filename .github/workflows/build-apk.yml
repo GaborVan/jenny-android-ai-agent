@@ -19,6 +19,14 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      # Chaquopy needs Python 3.11 on PATH to install the pip requirements
+      # (``installDebugPythonRequirements``). GitHub-hosted runners do not
+      # ship it; setup-python puts a ``python3.11`` binary on PATH.
+      - name: Set up Python 3.11 (Chaquopy)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Grant gradlew exec
         run: chmod +x android/gradlew
 
