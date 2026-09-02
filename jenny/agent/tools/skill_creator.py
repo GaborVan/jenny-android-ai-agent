@@ -25,8 +25,6 @@ from typing import Any
 
 from jenny.agent.tools.base import Tool, tool_parameters
 from jenny.agent.tools.schema import (
-    ArraySchema,
-    BooleanSchema,
     StringSchema,
     tool_parameters_schema,
 )
@@ -84,34 +82,44 @@ def _run_guard() -> str | None:
 
 
 @tool_parameters(
-    tool_parameters_schema(
-        name=StringSchema(
-            "Skill name, kebab-case (e.g. 'pdf-merge'). Directory name under "
-            "skills/.",
-            min_length=1,
-            max_length=64,
-        ),
-        description=StringSchema(
-            "One-paragraph description of what the skill does and when to use "
-            "it. Fills the SKILL.md frontmatter description.",
-            max_length=500,
-            nullable=True,
-        ),
-        resources=ArraySchema(
-            StringSchema(
-                "Resource subdirectory to create: scripts, references, assets.",
-                enum=list(_ALLOWED_RESOURCES),
-            ),
-            description="Subdirectories to scaffold (default: scripts only).",
-            min_items=0,
-            max_items=3,
-        ),
-        include_examples=BooleanSchema(
-            description="Create example files in the resource directories.",
-            default=False,
-        ),
-        required=["name"],
-    )
+    {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "description": (
+                    "Skill name, kebab-case (e.g. 'pdf-merge'). Directory name "
+                    "under skills/."
+                ),
+            },
+            "description": {
+                "type": ["string", "null"],
+                "maxLength": 500,
+                "description": (
+                    "One-paragraph description of what the skill does and when "
+                    "to use it. Fills the SKILL.md frontmatter description."
+                ),
+            },
+            "resources": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": ["scripts", "references", "assets"],
+                },
+                "description": (
+                    "Subdirectories to scaffold (default: scripts only)."
+                ),
+            },
+            "include_examples": {
+                "type": "boolean",
+                "description": "Create example files in the resource directories.",
+                "default": False,
+            },
+        },
+        "required": ["name"],
+    }
 )
 class SkillCreateTool(Tool):
     """Crea una nuova skill (struttura + SKILL.md da template)."""
