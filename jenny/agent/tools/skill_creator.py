@@ -91,10 +91,17 @@ def _safe_skill_name(name: str) -> str:
     return name[:64]
 
 
-async def _load_remote_tree(owner_repo: tuple[str, str], branch: str) -> list[str]:
-    """Elenco dei path sotto ``skills/`` nel ramo remoto (git trees API).
+# Prefissi sotto cui il repo può tenere le skill: radice ``skills/`` oppure
+# ``jenny/skills/`` (layout del package). skill_sync accetta entrambi.
+_REMOTE_SKILL_PREFIXES = ("jenny/skills/", "skills/")
 
-    Una sola chiamata, ricorsiva: ritorna tutti i file del repo; filtriamo qui.
+
+async def _load_remote_tree(owner_repo: tuple[str, str], branch: str) -> tuple[str, list[str]]:
+    """Path dei file skill nel ramo remoto (git trees API), normalizzati.
+
+    Una sola chiamata ricorsiva; ritorna ``(prefix, rel_paths)`` dove
+    ``rel_paths`` sono i path relativi a ``prefix`` (es. ``cron/SKILL.md``) e
+    ``prefix`` è la cartella radice effettiva (``skills`` o ``jenny/skills``).
     """
     owner, repo = owner_repo
     api = f"https://api.github.com/repos/{owner}/{repo}/git/trees/{branch}?recursive=1"
@@ -103,11 +110,22 @@ async def _load_remote_tree(owner_repo: tuple[str, str], branch: str) -> list[st
     tree = json.loads(raw.decode("utf-8"))
     if tree.get("truncated"):
         raise ValueError("remote tree truncated (repo too large)")
-    return [
-        item["path"]
-        for item in tree.get("tree", [])
-        if item.get("type") == "blob" and item.get("path", "").startswith("skills/")
-    ]
+    found: dict[str, list[str]] = {}
+    for item in tree.get("tree", []):
+        if item.get("type") != "blob":
+            continue
+        path = item.get("path", "")
+        for prefix in _REMOTE_SKILL_PREFIXES:
+            if path.startswith(prefix) and len(path) > len(prefix):
+                rel = path[len(prefix):]
+                if "/" in rel:
+                    found.setdefault(prefix.rstrip("/"), []).append(rel)
+                break
+    if not found:
+        return "", []
+    # Preferisce il layout da package (jenny/skills) quando entrambi esistono.
+    prefix = "jenny/skills" if "jenny/skills" in found else next(iter(found))
+    return prefix, sorted(found[prefix])
 
 
 def _scripts_dir() -> Path | None:
@@ -557,7 +575,7 @@ class SkillSyncTool(Tool):
 
         only = _safe_skill_name(skill) if skill else None
         try:
-            remote_paths = await asyncio.wait_for(
+            remote_prefix, remote_paths = await asyncio.wait_for(
                 _load_remote_tree((owner, repo), branch), timeout=60
             )
         except Exception as exc:  # noqa: BLE001
@@ -567,18 +585,28 @@ class SkillSyncTool(Tool):
                 ensure_ascii=False,
             )
 
-        # Path relativi sotto skills/<name>/... raggruppati per skill.
+        if not remote_prefix:
+            return json.dumps(
+                {
+                    "ok": True,
+                    "synced": [],
+                    "message": "no skills/ or jenny/skills/ folder in remote repo",
+                },
+                ensure_ascii=False,
+            )
+
+        # Path relativi sotto <prefix>/<name>/... raggruppati per skill.
         by_skill: dict[str, list[str]] = {}
         for path in sorted(remote_paths):
             parts = path.split("/")
-            if len(parts) < 2 or not parts[1]:
+            if len(parts) < 2 or not parts[0]:
                 continue
-            skill_name = _safe_skill_name(parts[1])
+            skill_name = _safe_skill_name(parts[0])
             if not skill_name:
                 continue
             if only and skill_name != only:
                 continue
-            rel = "/".join(parts[2:])
+            rel = "/".join(parts[1:])
             if not rel:
                 continue
             by_skill.setdefault(skill_name, []).append(rel)
@@ -606,7 +634,7 @@ class SkillSyncTool(Tool):
                     if total_files >= _MAX_SKILL_FILES:
                         errors.append("too many files, sync stopped")
                         break
-                    url = f"{raw_base}/skills/{skill_name}/{rel}"
+                    url = f"{raw_base}/{remote_prefix}/{skill_name}/{rel}"
                     try:
                         data = await asyncio.wait_for(_fetch_gh(client, url), timeout=30)
                     except Exception as exc:  # noqa: BLE001
