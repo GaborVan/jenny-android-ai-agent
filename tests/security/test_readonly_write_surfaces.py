@@ -171,6 +171,14 @@ _ASKS_FOR_ITSELF = {
     # il comportamento futuro (wall timeout, chip del goal, iniezione «keep
     # working»). Stessa famiglia di un job cron, stesso rifiuto.
     "agent/tools/long_task.py": "registra un goal sostenuto via sessions.save, non un path",
+    # T4.8: skill_create/skill_sync scrivono sotto ``<workspace>/skills/`` —
+    # destinazione fissa, fuori dai cancelli dei tool file (init_skill e il
+    # download del sync scrivono da soli), quindi il cancello non le vede e
+    # devono chiedere.
+    "agent/tools/skill_creator.py": (
+        "crea/sincronizza skill sotto <workspace>/skills/: destinazione fissa, "
+        "non passa dai tool file"
+    ),
 }
 
 # Chi scrive ma **non deve** chiedere, con la ragione. Non è una lista di
@@ -493,6 +501,26 @@ async def _probe_long_task(root: Path, readonly: bool) -> str:
     return out
 
 
+async def _probe_skill_creator(root: Path, readonly: bool) -> str:
+    from unittest.mock import patch
+
+    from jenny.agent.tools.skill_creator import SkillCreateTool
+
+    tool = SkillCreateTool()
+    # Il tool risolve il workspace via get_workspace_path: lo si punta su root
+    # perché la sonda scriva nel tmp e si possa osservare l'effetto.
+    with patch(
+        "jenny.agent.tools.skill_creator.get_workspace_path", return_value=root
+    ):
+        with _turn(root, readonly):
+            out = await tool.execute(name="probe-skill")
+    if readonly:
+        assert not (root / "skills" / "probe-skill").exists(), (
+            "in sola lettura la skill non deve nascere"
+        )
+    return out
+
+
 _PROBES: dict[str, Probe] = {
     "agent/tools/download.py": _probe_download,
     "apps/storage.py": _probe_app_storage,
@@ -500,6 +528,7 @@ _PROBES: dict[str, Probe] = {
     "agent/tools/app_update.py": _probe_app_update,
     "agent/tools/journal.py": _probe_journal,
     "agent/tools/long_task.py": _probe_long_task,
+    "agent/tools/skill_creator.py": _probe_skill_creator,
 }
 
 

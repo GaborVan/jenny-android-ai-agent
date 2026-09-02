@@ -35,6 +35,10 @@ from jenny.agent.tools.schema import (
 from jenny.config.paths import get_workspace_path
 from jenny.config.tool_schemas import SkillCreatorConfig
 from jenny.security.network import validate_url_target
+from jenny.security.workspace_access import (
+    READONLY_TOOL_REFUSAL,
+    current_turn_is_readonly,
+)
 
 # Sottocartelle risorsa ammesse da init_skill (whitelist).
 _ALLOWED_RESOURCES = {"scripts", "references", "assets"}
@@ -258,6 +262,12 @@ class SkillCreateTool(Tool):
         include_examples: bool = False,
         **kwargs: Any,
     ) -> str:
+        # Prima di tutto, non dopo: la destinazione è fissa
+        # (``<workspace>/skills/<name>/``) e non passa da
+        # ``resolve_allowed_path``, quindi il cancello non la vede — il
+        # controllo va chiesto qui, come per download/cron/journal.
+        if current_turn_is_readonly():
+            return READONLY_TOOL_REFUSAL
         guard = _run_guard()
         if guard:
             return json.dumps({"ok": False, "error": guard}, ensure_ascii=False)
@@ -541,6 +551,8 @@ class SkillSyncTool(Tool):
         return False
 
     async def execute(self, skill: str | None = None, **kwargs: Any) -> str:
+        if current_turn_is_readonly():
+            return READONLY_TOOL_REFUSAL
         sync_repo = str(getattr(self.config, "sync_repo", "") or "").strip()
         branch = str(getattr(self.config, "sync_branch", "main") or "main").strip()
         if not sync_repo:
