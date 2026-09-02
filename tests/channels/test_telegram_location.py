@@ -95,7 +95,7 @@ async def test_venue_uses_title_and_address_as_place() -> None:
     assert location._TELEGRAM["42"].place == "Piazza Maggiore, Bologna"
 
 
-async def test_toggle_off_falls_back_to_media_soon(monkeypatch) -> None:
+async def test_toggle_off_falls_back_to_unsupported_reply(monkeypatch) -> None:
     import jenny.config.loader as loader
 
     cfg = Config()
@@ -106,11 +106,11 @@ async def test_toggle_off_falls_back_to_media_soon(monkeypatch) -> None:
     await ch._handle_update(
         _update("42", location={"latitude": 45.0, "longitude": 9.0})
     )
-    # Toggle off: niente registrazione, niente turno, solo media_soon.
+    # Toggle off: niente registrazione, niente turno, solo risposta "non supportato".
     assert "42" not in location._TELEGRAM
     assert bus.inbound.empty()
     assert len(api.sent) == 1
-    assert "coming soon" in api.sent[0][1].lower()
+    assert "isn't supported yet" in api.sent[0][1].lower()
 
 
 async def test_malformed_location_is_not_a_turn() -> None:

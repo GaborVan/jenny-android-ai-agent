@@ -9,10 +9,12 @@ testata in ``tests/webui/test_webui_view_projection.py``.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
 from jenny.bus.events import OutboundMessage
 from jenny.bus.queue import MessageBus
+from jenny.channels import telegram_media
 from jenny.channels.telegram import TelegramChannel
 from jenny.channels.telegram_api import TelegramAPIError
 from jenny.config.schema import TelegramConfig
@@ -28,6 +30,27 @@ class FakeAPI:
         self.fail_html = fail_html
         self.photo_400 = photo_400
         self.closed = False
+        # Doppi per il download inbound (getFile/download_file): il chiamante
+        # dei test popola file_info/file_bytes per file_id, o file_errors per
+        # simulare un getFile rifiutato.
+        self.file_calls: list[str] = []
+        self.download_calls: list[tuple[str, int]] = []
+        self.file_info: dict[str, dict[str, Any]] = {}
+        self.file_bytes: dict[str, bytes] = {}
+        self.file_errors: dict[str, TelegramAPIError] = {}
+
+    async def get_file(self, file_id: str) -> dict[str, Any]:
+        self.file_calls.append(file_id)
+        if file_id in self.file_errors:
+            raise self.file_errors[file_id]
+        return self.file_info.get(file_id, {"file_id": file_id, "file_path": f"docs/{file_id}"})
+
+    async def download_file(self, file_path: str, *, max_bytes: int) -> bytes:
+        self.download_calls.append((file_path, max_bytes))
+        data = self.file_bytes.get(file_path, b"fake-bytes")
+        if len(data) > max_bytes:
+            raise TelegramAPIError(413, f"file exceeds {max_bytes} bytes: {file_path}")
+        return data
 
     async def send_message(self, chat_id: str, text: str, *, parse_mode: str | None = None):
         if parse_mode == "HTML" and self.fail_html:
@@ -256,11 +279,138 @@ async def test_each_inbound_gets_distinct_turn_id() -> None:
     assert first.metadata["webui_turn_id"] != second.metadata["webui_turn_id"]
 
 
-async def test_media_message_gets_coming_soon_reply() -> None:
+async def test_photo_message_downloads_and_publishes(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(telegram_media, "_telegram_media_dir", lambda: tmp_path)
+    api = FakeAPI()
+    api.file_info["abc"] = {"file_id": "abc", "file_path": "photos/abc.jpg", "file_size": 5}
+    api.file_bytes["photos/abc.jpg"] = b"\x89PNGfake"
+    ch, api, bus = _channel(paired="42", api=api)
+
+    await ch._handle_update(
+        _update(
+            "42",
+            photo=[{"file_id": "abc", "file_size": 5, "width": 10, "height": 10}],
+            caption="guarda qua",
+        )
+    )
+
+    assert api.sent == []  # nessuna risposta di servizio: il download è riuscito
+    msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1)
+    assert msg.content == "guarda qua"
+    saved = Path(msg.media[0])
+    assert saved.parent == tmp_path
+    assert saved.suffix == ".jpg"
+    assert saved.read_bytes() == b"\x89PNGfake"
+
+
+async def test_photo_without_caption_gets_default_content(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(telegram_media, "_telegram_media_dir", lambda: tmp_path)
     ch, api, bus = _channel(paired="42")
-    await ch._handle_update(_update("42", photo=[{"file_id": "x"}]))
+
+    await ch._handle_update(_update("42", photo=[{"file_id": "abc", "file_size": 5}]))
+
+    msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1)
+    assert msg.content == "📷 photo"
+
+
+async def test_document_message_uses_filename_for_extension(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(telegram_media, "_telegram_media_dir", lambda: tmp_path)
+    api = FakeAPI()
+    api.file_info["doc1"] = {"file_id": "doc1", "file_path": "documents/file_1.bin"}
+    api.file_bytes["documents/file_1.bin"] = b"pdf-bytes"
+    ch, api, bus = _channel(paired="42", api=api)
+
+    await ch._handle_update(_update("42", document={"file_id": "doc1", "file_name": "invoice.pdf"}))
+
+    msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1)
+    assert msg.content == "📄 invoice.pdf"
+    saved = Path(msg.media[0])
+    assert saved.suffix == ".pdf"
+    assert saved.read_bytes() == b"pdf-bytes"
+
+
+async def test_voice_message_downloads_as_ogg(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(telegram_media, "_telegram_media_dir", lambda: tmp_path)
+    ch, api, bus = _channel(paired="42")
+
+    await ch._handle_update(_update("42", voice={"file_id": "v1"}))
+
+    msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1)
+    assert msg.content == "🎤 voice message"
+    assert Path(msg.media[0]).suffix == ".ogg"
+
+
+async def test_media_too_large_is_skipped_without_reply(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(telegram_media, "_telegram_media_dir", lambda: tmp_path)
+    api = FakeAPI()
+    api.file_info["big"] = {
+        "file_id": "big",
+        "file_path": "video/big.mp4",
+        "file_size": telegram_media.MAX_DOWNLOAD_BYTES + 1,
+    }
+    ch, api, bus = _channel(paired="42", api=api)
+
+    await ch._handle_update(_update("42", video={"file_id": "big"}))
+
+    # Download rifiutato per dimensione: nessun turno pubblicato e nessuna
+    # risposta "non supportato" (il tipo *e* gestito, solo il file e troppo
+    # grande), niente file scritto sul disco.
+    assert bus.inbound.empty()
+    assert api.sent == []
+    assert api.download_calls == []  # skip prima ancora di scaricare
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_download_over_cap_streamed_is_skipped(tmp_path, monkeypatch) -> None:
+    """Il cap vale anche senza ``file_size`` dichiarato (streaming interrotto)."""
+    monkeypatch.setattr(telegram_media, "_telegram_media_dir", lambda: tmp_path)
+    api = FakeAPI()
+    api.file_info["big2"] = {"file_id": "big2", "file_path": "video/big2.mp4"}
+    api.file_bytes["video/big2.mp4"] = b"x" * (telegram_media.MAX_DOWNLOAD_BYTES + 1)
+    ch, api, bus = _channel(paired="42", api=api)
+
+    await ch._handle_update(_update("42", video={"file_id": "big2"}))
+
+    assert bus.inbound.empty()
+    assert api.sent == []
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_get_file_error_is_swallowed_without_reply(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(telegram_media, "_telegram_media_dir", lambda: tmp_path)
+    api = FakeAPI()
+    api.file_errors["missing"] = TelegramAPIError(400, "file not found")
+    ch, api, bus = _channel(paired="42", api=api)
+
+    await ch._handle_update(_update("42", audio={"file_id": "missing"}))
+
+    assert bus.inbound.empty()
+    assert api.sent == []
+
+
+async def test_sticker_with_emoji_becomes_text() -> None:
+    ch, api, bus = _channel(paired="42")
+    await ch._handle_update(_update("42", sticker={"file_id": "s1", "emoji": "😂"}))
+    msg = await asyncio.wait_for(bus.consume_inbound(), timeout=1)
+    assert msg.content == "😂"
+    assert msg.media == []
+    assert api.sent == []
+
+
+async def test_sticker_without_emoji_gets_unsupported_reply() -> None:
+    ch, api, bus = _channel(paired="42")
+    await ch._handle_update(_update("42", sticker={"file_id": "s1"}))
     assert len(api.sent) == 1
-    assert "coming soon" in api.sent[0][1]
+    assert "isn't supported yet" in api.sent[0][1]
+    assert bus.inbound.empty()
+
+
+async def test_unsupported_media_type_gets_reply() -> None:
+    """Poll non porta un file scaricabile: resta sulla fallback generica."""
+    ch, api, bus = _channel(paired="42")
+    await ch._handle_update(_update("42", poll={"id": "1", "question": "?"}))
+    assert len(api.sent) == 1
+    assert "isn't supported yet" in api.sent[0][1]
     assert bus.inbound.empty()
 
 

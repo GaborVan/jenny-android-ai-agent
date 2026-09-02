@@ -27,6 +27,7 @@ from jenny.bus.events import COORDINATION_FLAGS, InboundMessage, OutboundMessage
 from jenny.bus.queue import MessageBus
 from jenny.channels.telegram_api import TelegramAPI, TelegramAPIError
 from jenny.channels.telegram_format import markdown_to_telegram_html, split_message
+from jenny.channels.telegram_media import download_telegram_media
 from jenny.config.schema import TelegramConfig
 from jenny.runtime.power import keep_awake
 from jenny.webui.metadata import WEBUI_TURN_METADATA_KEY
@@ -62,13 +63,61 @@ _TG_MEDIA_MAX_BYTES = 10 * 1024 * 1024
 _MAX_PAIR_ATTEMPTS = 5
 _MAX_TRACKED_CHATS = 512
 
-# Chiavi di update Telegram che indicano contenuto non testuale (v1: non gestito).
-# ``location``/``venue`` sono gestite a parte (vedi _maybe_handle_location) e
-# restano qui solo per la fallback "media_soon" quando la posizione è off.
+# Chiavi di update Telegram che indicano contenuto non testuale. ``photo``,
+# ``document``, ``video``, ``audio`` e ``voice`` sono ora scaricate e
+# consegnate all'agente (vedi _maybe_handle_downloadable_media);
+# ``location``/``venue`` sono gestite a parte (vedi _maybe_handle_location);
+# ``sticker`` diventa testo (l'emoji associata) quando disponibile, altrimenti
+# resta non gestito. Restano qui solo per la fallback "media_unsupported":
+# ``video_note``, ``animation``, ``contact``, ``poll``, ``sticker`` senza
+# emoji, e ``location``/``venue`` col toggle posizione off.
 _MEDIA_KEYS = (
     "photo", "voice", "document", "sticker", "video", "audio",
     "video_note", "animation", "location", "contact", "poll",
 )
+
+# Estrattori per i tipi di update scaricabili: da un update grezzo ritornano
+# (file_id, nome file suggerito o None, contenuto di default se manca la
+# caption). Un dict e non una serie di if: il chiamante itera in ordine
+# stabile e si ferma al primo tipo presente nell'update.
+
+
+def _extract_photo(sizes: Any) -> tuple[str, str | None, str]:
+    if not isinstance(sizes, list) or not sizes:
+        raise ValueError("empty photo sizes")
+    largest = max(
+        sizes, key=lambda s: s.get("file_size") or s.get("width", 0) * s.get("height", 0)
+    )
+    return largest["file_id"], None, "📷 photo"
+
+
+def _extract_document(doc: Any) -> tuple[str, str | None, str]:
+    name = doc.get("file_name")
+    return doc["file_id"], name, f"📄 {name}" if name else "📄 document"
+
+
+def _extract_video(video: Any) -> tuple[str, str | None, str]:
+    name = video.get("file_name")
+    return video["file_id"], name, "🎥 video"
+
+
+def _extract_audio(audio: Any) -> tuple[str, str | None, str]:
+    name = audio.get("file_name") or audio.get("title")
+    return audio["file_id"], name, f"🎵 {name}" if name else "🎵 audio"
+
+
+def _extract_voice(voice: Any) -> tuple[str, str | None, str]:
+    # I vocali Telegram sono sempre OGG/Opus: nessun ``file_name`` in arrivo.
+    return voice["file_id"], "voice.ogg", "🎤 voice message"
+
+
+_MEDIA_EXTRACTORS: dict[str, Callable[[Any], tuple[str, str | None, str]]] = {
+    "photo": _extract_photo,
+    "document": _extract_document,
+    "video": _extract_video,
+    "audio": _extract_audio,
+    "voice": _extract_voice,
+}
 
 # Contenuto sintetico (LLM-facing, non mostrato all'utente) di un turno
 # innescato da una posizione condivisa: la posizione vera arriva nel runtime
@@ -82,7 +131,7 @@ _BOT_STRINGS: dict[str, dict[str, str]] = {
         "welcome": (
             "Scrivimi come in una chat normale e ti risponde Jenny.\n\n"
             "• /new — inizia una nuova conversazione\n"
-            "• 📎 Foto, vocali e documenti arriveranno presto"
+            "• 📎 Foto, documenti, video, audio e vocali sono supportati"
         ),
         "start_prompt": (
             "Per collegarti, inviami il codice a 6 cifre che vedi nella WebUI di Jenny."
@@ -90,14 +139,17 @@ _BOT_STRINGS: dict[str, dict[str, str]] = {
         "wrong_code": (
             "Codice non valido. Controlla il codice a 6 cifre nella WebUI di Jenny e riprova."
         ),
-        "media_soon": "📎 Foto, vocali e documenti arriveranno presto: per ora solo testo.",
+        "media_unsupported": (
+            "📎 Questo tipo di contenuto non è ancora supportato: prova con testo, "
+            "una foto o un documento."
+        ),
     },
     "en": {
         "paired": "✅ Paired! You can now talk to Jenny from this chat.",
         "welcome": (
             "Message me like a normal chat and Jenny replies.\n\n"
             "• /new — start a new conversation\n"
-            "• 📎 Photos, voice notes and documents are coming soon"
+            "• 📎 Photos, documents, videos, audio and voice notes are supported"
         ),
         "start_prompt": (
             "To pair, send me the 6-digit code shown in Jenny's WebUI."
@@ -105,14 +157,16 @@ _BOT_STRINGS: dict[str, dict[str, str]] = {
         "wrong_code": (
             "Invalid code. Check the 6-digit code in Jenny's WebUI and try again."
         ),
-        "media_soon": "📎 Photos, voice notes and documents are coming soon: text only for now.",
+        "media_unsupported": (
+            "📎 This content type isn't supported yet: try text, a photo, or a document."
+        ),
     },
     "uk": {
         "paired": "✅ З'єднано! Тепер ти можеш спілкуватися з Jenny в цьому чаті.",
         "welcome": (
             "Пиши мені як у звичайному чаті, і Jenny відповість.\n\n"
             "• /new — почати нову розмову\n"
-            "• 📎 Фото, голосові повідомлення та документи скоро з'являться"
+            "• 📎 Фото, документи, відео, аудіо та голосові повідомлення підтримуються"
         ),
         "start_prompt": (
             "Щоб з'єднатися, надішли мені 6-значний код, показаний у WebUI Jenny."
@@ -120,7 +174,9 @@ _BOT_STRINGS: dict[str, dict[str, str]] = {
         "wrong_code": (
             "Невірний код. Перевір 6-значний код у WebUI Jenny і спробуй ще раз."
         ),
-        "media_soon": "📎 Фото, голосові повідомлення та документи скоро з'являться: поки що лише текст.",
+        "media_unsupported": (
+            "📎 Цей тип вмісту поки не підтримується: спробуй текст, фото або документ."
+        ),
     },
 }
 
@@ -245,8 +301,12 @@ class TelegramChannel:
         if not isinstance(text, str) or not text.strip():
             if await self._maybe_handle_location(chat_id, sender, message):
                 return
+            if await self._maybe_handle_downloadable_media(chat_id, sender, message):
+                return
+            if await self._maybe_handle_sticker(chat_id, sender, message):
+                return
             if any(key in message for key in _MEDIA_KEYS):
-                await self._send_raw(chat_id, self._t("media_soon"))
+                await self._send_raw(chat_id, self._t("media_unsupported"))
             return
         if self._parse_start(text) is not None:
             # /start dal proprietario: guida rapida di servizio, non un turno
@@ -277,7 +337,7 @@ class TelegramChannel:
         Telegram entro il TTL) e innesca un turno LLM così Jenny reagisce, con
         la posizione già iniettata nel runtime context. Ritorna ``False`` se il
         messaggio non è una posizione o se il toggle posizione è off — in quel
-        caso il chiamante ricade sulla fallback "media_soon".
+        caso il chiamante ricade sulla fallback "media_unsupported".
         """
         raw_loc = message.get("location")
         venue = message.get("venue") if isinstance(message.get("venue"), dict) else None
@@ -292,7 +352,7 @@ class TelegramChannel:
             return False
 
         # Toggle posizione: caricato lazy (le condivisioni sono rare). Se off,
-        # non registriamo nulla e lasciamo rispondere la fallback media_soon.
+        # non registriamo nulla e lasciamo rispondere la fallback media_unsupported.
         try:
             from jenny.config.loader import load_config
 
@@ -325,6 +385,81 @@ class TelegramChannel:
                 sender_id=str(sender.get("id", chat_id)),
                 chat_id=chat_id,
                 content=_LOCATION_TURN_MARKER,
+                metadata=metadata,
+            )
+        )
+        return True
+
+    async def _maybe_handle_downloadable_media(
+        self, chat_id: str, sender: dict[str, Any], message: dict[str, Any]
+    ) -> bool:
+        """Scarica foto/documenti/video/audio/vocali e li pubblica come inbound.
+
+        Ritorna ``False`` se l'update non porta nessuno di questi tipi (il
+        chiamante ricade poi su sticker/fallback generico). Un download
+        fallito (rete, cap dimensione, ``getFile`` rifiutato) ritorna invece
+        ``True`` senza pubblicare nulla sul bus: è un tipo gestito il cui
+        download è fallito, non un tipo non gestito, quindi non deve mai
+        ricadere sulla risposta "non supportato".
+        """
+        for key, extractor in _MEDIA_EXTRACTORS.items():
+            obj = message.get(key)
+            if obj is None:
+                continue
+            try:
+                file_id, suggested_name, default_content = extractor(obj)
+            except (KeyError, ValueError, TypeError):
+                logger.warning("Telegram: malformed {} payload, skipping", key)
+                return True
+            path = await download_telegram_media(
+                self.api, file_id, suggested_name=suggested_name
+            )
+            if path is None:
+                logger.warning("Telegram: could not deliver {} from chat {}", key, chat_id)
+                return True
+            caption = message.get("caption")
+            content = (
+                caption.strip()
+                if isinstance(caption, str) and caption.strip()
+                else default_content
+            )
+            metadata: dict[str, Any] = {WEBUI_TURN_METADATA_KEY: str(uuid.uuid4())}
+            await self.bus.publish_inbound(
+                InboundMessage(
+                    channel=self.name,
+                    sender_id=str(sender.get("id", chat_id)),
+                    chat_id=chat_id,
+                    content=content,
+                    media=[str(path)],
+                    metadata=metadata,
+                )
+            )
+            return True
+        return False
+
+    async def _maybe_handle_sticker(
+        self, chat_id: str, sender: dict[str, Any], message: dict[str, Any]
+    ) -> bool:
+        """Converte uno sticker nella sua emoji quando disponibile.
+
+        Nessun download: gli sticker non hanno un formato utile all'agente
+        (WEBP/animati), ma l'emoji che li accompagna è già un contenuto
+        testuale a costo zero. Senza emoji, ritorna ``False`` e il chiamante
+        ricade sulla fallback "non supportato".
+        """
+        sticker = message.get("sticker")
+        if not isinstance(sticker, dict):
+            return False
+        emoji = sticker.get("emoji")
+        if not isinstance(emoji, str) or not emoji.strip():
+            return False
+        metadata: dict[str, Any] = {WEBUI_TURN_METADATA_KEY: str(uuid.uuid4())}
+        await self.bus.publish_inbound(
+            InboundMessage(
+                channel=self.name,
+                sender_id=str(sender.get("id", chat_id)),
+                chat_id=chat_id,
+                content=emoji.strip(),
                 metadata=metadata,
             )
         )
