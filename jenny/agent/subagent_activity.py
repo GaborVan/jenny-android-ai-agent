@@ -1217,6 +1217,14 @@ def _start_skill_validate(args: Mapping[str, Any]) -> str:
 def _end_skill_validate(args: Mapping[str, Any], outcome: _Outcome) -> str:
     return "skill validated"
 
+
+def _start_skill_sync(args: Mapping[str, Any]) -> str:
+    name = _arg_text(args, "skill", limit=40)
+    return f"syncing skill {name}" if name else "syncing skills from remote repo"
+
+def _end_skill_sync(args: Mapping[str, Any], outcome: _Outcome) -> str:
+    return "skills synced"
+
 def _start_skill_list(args: Mapping[str, Any]) -> str:
     return "listing skills"
 
@@ -1289,6 +1297,7 @@ _FORMATTERS: dict[str, tuple[_StartFn, _EndFn]] = {
     "skill_create": (_start_skill_create, _end_skill_create),
     "skill_validate": (_start_skill_validate, _end_skill_validate),
     "skill_list": (_start_skill_list, _end_skill_list),
+    "skill_sync": (_start_skill_sync, _end_skill_sync),
 }
 
 

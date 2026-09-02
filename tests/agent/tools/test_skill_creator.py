@@ -123,3 +123,54 @@ async def test_skill_validate_missing_folder(fake_workspace):
 async def tool_exec(tool, **kwargs):
     """Обгортка для виклику execute без ручного json-розбору."""
     return await tool.execute(**kwargs)
+
+
+# ── skill_sync: enabled() та валідація конфіга ─────────────────────────────
+
+
+def _sync_cfg(sync_repo_value: str = "GaborVan/jenny-android-ai-agent"):
+    class _SC:
+        enable = True
+        sync_branch = "main"
+
+    _SC.sync_repo = sync_repo_value
+
+    class _RepoCfg:
+        def __init__(self) -> None:
+            self.skill_creator = _SC()
+
+    return _RepoCfg()
+
+
+def test_skill_sync_disabled_without_repo():
+    assert sc.SkillSyncTool.enabled(_Ctx(enable=True)) is False
+
+
+def test_skill_sync_enabled_with_repo():
+    assert sc.SkillSyncTool.enabled(_Ctx2(_sync_cfg())) is True
+
+
+class _Ctx2:
+    def __init__(self, cfg) -> None:
+        self.config = cfg
+        self.android_context = None
+
+
+@pytest.mark.asyncio
+async def test_skill_sync_reports_missing_repo_config():
+    import json
+
+    tool = sc.SkillSyncTool(config=_Cfg().skill_creator)
+    out = json.loads(await tool.execute())
+    assert out["ok"] is False
+    assert "sync_repo" in out["error"]
+
+
+@pytest.mark.asyncio
+async def test_skill_sync_bad_repo_format():
+    import json
+
+    tool = sc.SkillSyncTool(config=_sync_cfg("not-a-slash-value").skill_creator)
+    out = json.loads(await tool.execute())
+    assert out["ok"] is False
+    assert "owner/repo" in out["error"]

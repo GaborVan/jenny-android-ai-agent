@@ -284,3 +284,9 @@ class SkillCreatorConfig(Base):
     """
 
     enable: bool = True
+    # Sorgente remota per ``skill_sync``: "owner/repo" su GitHub (es.
+    # "GaborVan/jenny-android-ai-agent") oppure un URL raw/API completo.
+    # Quando vuota, il tool ``skill_sync`` non viene registrato.
+    sync_repo: str = ""
+    # Ramo da cui scaricare le skill quando ``sync_repo`` è "owner/repo".
+    sync_branch: str = "main"
