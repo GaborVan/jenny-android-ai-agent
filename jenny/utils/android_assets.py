@@ -184,6 +184,12 @@ _SKILLS_MANIFEST = [
     "llm-wiki/references/log-guide.md",
     "llm-wiki/references/schema-guide.md",
     "llm-wiki/references/tooling-tips.md",
+    # ui-automation (accessibility: eyes & hands on other apps)
+    "ui-automation/SKILL.md",
+    # notifications (ears: 2FA codes, messages, statuses)
+    "notifications/SKILL.md",
+    # clipboard (system clipboard read/write)
+    "clipboard/SKILL.md",
     # my
     "my/SKILL.md",
     "my/references/examples.md",
