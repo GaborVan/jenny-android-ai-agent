@@ -139,6 +139,12 @@ class WebUISettingsRouter:
             return await self._handle_telegram_unpair(request)
         if path == "/api/telegram/disable":
             return await self._handle_telegram_disable(request)
+        if path == "/api/drivesync/status":
+            return await self._handle_drivesync_status(request)
+        if path == "/api/drivesync/sync":
+            return await self._handle_drivesync_sync(request)
+        if path == "/api/drivesync/update":
+            return await self._handle_drivesync_update(request)
         return None
 
     def _query(self, request: WsRequest) -> QueryParams:
@@ -540,6 +546,52 @@ class WebUISettingsRouter:
             self.logger.exception("telegram disable failed")
             return self._error_response(500, "failed to disable telegram")
         self._fire_telegram_changed()
+        return self._json_response(payload)
+
+    # -- Cloud sync (Google Drive) ------------------------------------------ #
+
+    async def _handle_drivesync_status(self, request: WsRequest) -> Response:
+        if not self._authorized(request):
+            return self._unauthorized()
+        from jenny.webui.drivesync_api import drive_sync_status_payload
+
+        try:
+            return self._json_response(await drive_sync_status_payload())
+        except Exception:
+            self.logger.exception("drive sync status failed")
+            return self._error_response(500, "failed to load drive sync status")
+
+    async def _handle_drivesync_sync(self, request: WsRequest) -> Response:
+        if not self._authorized(request):
+            return self._unauthorized()
+        from jenny.webui.drivesync_api import run_drive_sync_now
+
+        try:
+            payload = await run_drive_sync_now()
+        except Exception:
+            self.logger.exception("drive sync run failed")
+            return self._error_response(500, "drive sync failed")
+        self.logger.info(
+            "[drivesync] sync now: ok={} pushed={} pulled={} errors={}",
+            payload.get("ok"),
+            len(payload.get("pushed") or []),
+            len(payload.get("pulled") or []),
+            len(payload.get("errors") or []),
+        )
+        return self._json_response(payload)
+
+    async def _handle_drivesync_update(self, request: WsRequest) -> Response:
+        if not self._authorized(request):
+            return self._unauthorized()
+        from jenny.channels.http_utils import parse_flag
+        from jenny.webui.drivesync_api import update_drive_sync_settings
+
+        enabled = parse_flag(_query_param(self._query(request), "enabled"))
+        try:
+            payload = await update_drive_sync_settings(enabled)
+        except Exception:
+            self.logger.exception("drive sync settings update failed")
+            return self._error_response(500, "failed to update drive sync settings")
         return self._json_response(payload)
 
 

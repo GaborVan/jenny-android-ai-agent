@@ -183,6 +183,14 @@ One validation to be aware of: setting `host` to `0.0.0.0` or `::` **with an emp
 
 Pairing, the throttle, and the asymmetric view between Telegram and the WebUI: [Telegram bridge](../using/telegram.md).
 
+## drive_sync
+
+Cloud sync of the agent's memory files (`SOUL.md`, `USER.md`, and everything under `memory/`) between two devices through a Google Drive folder the user picks once (SAF, no storage permission). Only a kill-switch lives in config: the chosen folder URI is stored in Android SharedPreferences and the sync state in `<workspace>/.jenny/drive_sync_state.json`.
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `drive_sync.enabled` | bool | `true` | Master switch. When on (and a folder has been chosen from **Settings → Cloud sync**), a sync runs at gateway start and on every manual "Sync now". Per-file, last-writer-wins by mtime, ties broken by content hash. Never touches `config.json`, `.jenny/`, skills, sessions, or anything outside `SOUL.md`/`USER.md`/`memory/`. |
+
 ## tools
 
 Toggles for the built-in tool groups. Only web search and location have UI controls; everything else here is config-only. Full behavior of each tool: [Tool reference](./tools.md).

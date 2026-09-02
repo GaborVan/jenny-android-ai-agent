@@ -464,6 +464,24 @@
       "disabled": "Telegram channel disabled",
       "batteryHint": "For instant replies even when the phone is not charging, exempt Apex from battery optimization.",
       "batteryButton": "Exempt from battery"
+    },
+    "driveSync": {
+      "title": "Cloud sync",
+      "intro": "Keep memory (SOUL.md, USER.md, memory/) in sync between your devices through a Google Drive folder you choose. Config, keys and skills stay local.",
+      "androidOnly": "Cloud sync is only available in the Android app",
+      "noFolder": "No folder selected",
+      "folderChosen": "Folder: {name}",
+      "changeFolder": "Change folder",
+      "chooseFolder": "Choose Drive folder",
+      "neverSynced": "Never synced",
+      "lastSync": "Last sync: {when}",
+      "counts": "{pushed} pushed, {pulled} pulled",
+      "syncNow": "Sync now",
+      "syncing": "Syncing…",
+      "syncSuccess": "Sync complete",
+      "syncFailed": "Sync failed",
+      "folderPicked": "Folder \"{name}\" selected",
+      "folderPickFailed": "Could not select a folder"
     }
   },
   "common": {

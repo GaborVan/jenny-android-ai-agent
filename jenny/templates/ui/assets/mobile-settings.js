@@ -22,6 +22,7 @@ import {
   runImportFlow,
   runSnapshotRestore,
 } from './shared/backup-flow.js';
+import { driveSyncNativeAvailable, pickDriveSyncFolder } from './shared/drive-sync-flow.js';
 
 // Ripiego per `power.modes` quando il payload arriva da un gateway più vecchio
 // del client: stesso ordine di `KEEP_AWAKE_MODES` in config/schema.py, dal più
@@ -190,6 +191,7 @@ export class SettingsController {
       this._renderBatterySection(d),
       this._section('ssh', 'ti-terminal-2', i18n.t('settings.ssh.title'), this._renderSsh()),
       this._section('telegram', 'ti-brand-telegram', i18n.t('settings.telegram.title'), this._renderTelegram()),
+      this._section('drivesync', 'ti-cloud-upload', i18n.t('settings.driveSync.title'), this._renderDriveSync()),
       this._section('backup', 'ti-database-export', i18n.t('backup.sectionTitle'), this._renderBackup()),
       this._section('system', 'ti-info-circle', i18n.t('settings.system'), this._renderSystem(d)),
     ].join('');
@@ -599,6 +601,92 @@ export class SettingsController {
     // Il contenuto vero lo disegna il TelegramPairingWidget (condiviso con
     // l'onboarding) dentro questo placeholder, in _wireSections.
     return `<div id="settings-telegram-widget"></div>`;
+  }
+
+  // ── Cloud sync (Google Drive) ────────────────────────────────────────
+
+  /* Sincronizza SOLO SOUL.md/USER.md e memory/ tra due dispositivi via una
+     cartella Drive scelta dall'utente (SAF, nessun permesso storage). Niente
+     config.json, niente skills, niente sessioni: v. drive_sync.py per
+     l'algoritmo (last-writer-wins per mtime, pareggio per sha256). */
+  _renderDriveSync() {
+    return `
+      <p class="settings-hint" style="margin:0 0 10px;font-size:12px;color:var(--text-faint)">${i18n.t('settings.driveSync.intro')}</p>
+      <div id="drivesync-body">
+        <div class="settings-empty-state">${i18n.t('settings.loading')}</div>
+      </div>`;
+  }
+
+  _driveSyncBodyHtml(status) {
+    if (!status.available) {
+      return `<p class="settings-hint">${i18n.t('settings.driveSync.androidOnly')}</p>`;
+    }
+    const folder = status.folder;
+    const folderLine = folder
+      ? `<div class="settings-hint">${i18n.t('settings.driveSync.folderChosen', { name: escapeHtml(folder.name || '') })}</div>`
+      : `<div class="settings-hint">${i18n.t('settings.driveSync.noFolder')}</div>`;
+    const last = status.last_sync;
+    const lastLine = last
+      ? `<div class="settings-hint">${i18n.t('settings.driveSync.lastSync', { when: new Date(last.at * 1000).toLocaleString() })} — ${i18n.t('settings.driveSync.counts', { pushed: (last.pushed || []).length, pulled: (last.pulled || []).length })}</div>`
+      : `<div class="settings-hint">${i18n.t('settings.driveSync.neverSynced')}</div>`;
+    const chooseLabel = folder ? i18n.t('settings.driveSync.changeFolder') : i18n.t('settings.driveSync.chooseFolder');
+    const pickBtn = driveSyncNativeAvailable()
+      ? `<button class="settings-btn-add" id="btn-drivesync-pick"><i class="ti ti-folder"></i> ${chooseLabel}</button>`
+      : '';
+    const syncBtn = folder
+      ? `<button class="settings-btn-save settings-btn-block" id="btn-drivesync-sync"><i class="ti ti-refresh"></i> ${i18n.t('settings.driveSync.syncNow')}</button>`
+      : '';
+    return `${folderLine}${lastLine}${pickBtn}${syncBtn}`;
+  }
+
+  async _refreshDriveSyncStatus() {
+    const body = this.contentEl.querySelector('#drivesync-body');
+    if (!body) return;
+    let status;
+    try {
+      status = await api.getDriveSyncStatus();
+    } catch (e) {
+      body.innerHTML = `<div class="settings-empty-state">${escapeHtml(e.message || 'error')}</div>`;
+      return;
+    }
+    body.innerHTML = this._driveSyncBodyHtml(status);
+    this._wireDriveSyncButtons();
+  }
+
+  _wireDriveSyncButtons() {
+    const pickBtn = this.contentEl.querySelector('#btn-drivesync-pick');
+    if (pickBtn) {
+      pickBtn.addEventListener('click', async () => {
+        const { ok, name } = await pickDriveSyncFolder();
+        if (ok) {
+          showToast(i18n.t('settings.driveSync.folderPicked', { name }));
+        } else {
+          showToast(i18n.t('settings.driveSync.folderPickFailed'), 'error');
+        }
+        this._refreshDriveSyncStatus();
+      });
+    }
+    const syncBtn = this.contentEl.querySelector('#btn-drivesync-sync');
+    if (syncBtn) {
+      syncBtn.addEventListener('click', async () => {
+        syncBtn.disabled = true;
+        const original = syncBtn.innerHTML;
+        syncBtn.innerHTML = `<span class="onboarding-spinner tg-spinner-inline"></span> ${i18n.t('settings.driveSync.syncing')}`;
+        try {
+          const result = await api.runDriveSyncNow();
+          showToast(
+            result.ok ? i18n.t('settings.driveSync.syncSuccess') : i18n.t('settings.driveSync.syncFailed'),
+            result.ok ? undefined : 'error',
+          );
+        } catch (e) {
+          showToast(e.message || i18n.t('settings.driveSync.syncFailed'), 'error');
+        } finally {
+          syncBtn.disabled = false;
+          syncBtn.innerHTML = original;
+          this._refreshDriveSyncStatus();
+        }
+      });
+    }
   }
 
   // ── Models & Providers ─────────────────────────────────────────────
@@ -2178,6 +2266,12 @@ export class SettingsController {
       if (this._tgWidget) this._tgWidget.destroy();
       this._tgWidget = new TelegramPairingWidget(tgContainer, { mode: 'settings' });
       this._tgWidget.refresh();
+    }
+
+    // Cloud sync (Drive): stato dal gateway, ridisegnato in-place (nessun
+    // widget dedicato — la card non serve polling, solo un refresh dopo azioni).
+    if (this.contentEl.querySelector('#drivesync-body')) {
+      this._refreshDriveSyncStatus();
     }
 
     // Attività in background: stessa card condivisa con onboarding e Telegram.

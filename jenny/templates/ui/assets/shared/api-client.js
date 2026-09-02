@@ -536,6 +536,29 @@ class ApiClient {
     return this._telegramGet('/api/telegram/disable');
   }
 
+  // ── Drive sync APIs ──
+
+  async _driveSyncGet(url) {
+    const res = await this._fetch(url);
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(text || `Drive sync request failed: ${res.status}`);
+    }
+    return res.json();
+  }
+
+  async getDriveSyncStatus() {
+    return this._driveSyncGet('/api/drivesync/status');
+  }
+
+  async runDriveSyncNow() {
+    return this._driveSyncGet('/api/drivesync/sync');
+  }
+
+  async updateDriveSyncSettings({ enabled }) {
+    return this._driveSyncGet(`/api/drivesync/update?enabled=${enabled ? '1' : '0'}`);
+  }
+
   // ── Backup APIs ──
   // Il payload viaggia in un header custom come JSON base64 (il gateway non
   // legge i body HTTP; il base64 evita i limiti latin-1 degli header con

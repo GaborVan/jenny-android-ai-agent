@@ -270,6 +270,7 @@ _UI_MANIFEST = [
     "assets/shared/battery-exemption.js",
     "assets/shared/commands-chip.js",
     "assets/shared/dialog.js",
+    "assets/shared/drive-sync-flow.js",
     "assets/shared/home-view.js",
     "assets/shared/i18n.js",
     "assets/shared/image-handler.js",

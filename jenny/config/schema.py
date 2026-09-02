@@ -771,6 +771,18 @@ class TelegramConfig(Base):
     poll_timeout_s: int = Field(default=50, ge=1, le=300)
 
 
+class DriveSyncConfig(Base):
+    """Kill-switch per la sync memoria↔Google Drive tra dispositivi.
+
+    Solo un booleano: la cartella scelta (URI SAF) vive nelle SharedPreferences
+    Android, letta dal bridge Kotlin; il manifest e il riepilogo dell'ultima
+    sync vivono in ``<workspace>/.jenny/drive_sync_state.json`` (stato di
+    dispositivo, non una scelta di config da portare nei backup/altro device).
+    """
+
+    enabled: bool = True
+
+
 class ModelPresetConfig(Base):
     """Named model preset configuration."""
     label: str | None = None
@@ -821,6 +833,10 @@ class Config(BaseSettings):
     extract_document_text: bool = False
     websocket: dict[str, Any] = Field(default_factory=dict)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
+    drive_sync: DriveSyncConfig = Field(
+        default_factory=DriveSyncConfig,
+        validation_alias=AliasChoices("driveSync", "drive_sync"),
+    )
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)

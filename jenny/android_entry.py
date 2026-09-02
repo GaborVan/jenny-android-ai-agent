@@ -98,6 +98,7 @@ def run_gateway(
         from jenny.agent.tools.ssh_transport import reset_ssh_backend
         from jenny.config.store import reset_config_store_state
         from jenny.runtime.clipboard import reset_clipboard_state
+        from jenny.runtime.drive_sync_bridge import reset_drive_sync_bridge_state
         from jenny.runtime.location import reset_location_state
         from jenny.runtime.notifications import reset_notifications_state
         from jenny.runtime.notifier import reset_notifier_state
@@ -117,6 +118,7 @@ def run_gateway(
         reset_ui_automation_state()
         reset_notifications_state()
         reset_clipboard_state()
+        reset_drive_sync_bridge_state()
         # L'updater tiene una fase *sticky* e un ``UpdateBridge`` in cache: senza
         # questo reset un gateway che riparte nello stesso processo mostrerebbe
         # la fase del run precedente (e rifiuterebbe di installare, credendo di

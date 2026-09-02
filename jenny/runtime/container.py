@@ -606,6 +606,13 @@ class GatewayContainer:
             # processo, e nessun altro la consuma.
             from jenny.runtime.gap_history import record_startup_gap
             await record_startup_gap()
+            # Cloud sync (Drive): fire-and-forget. Nessuna cartella scelta o
+            # bridge assente sono l'esito normale finché l'utente non la
+            # configura da Settings; un fallimento di rete non deve mai
+            # ritardare l'avvio dell'agente.
+            from jenny.config.paths import get_workspace_path
+            from jenny.runtime.drive_sync import run_startup_sync
+            asyncio.create_task(run_startup_sync(get_workspace_path()))
             await self.cron.start()
             await self.snapshot.start()
             tasks = [self.channels.start()]

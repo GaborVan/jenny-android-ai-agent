@@ -64,6 +64,7 @@ ALLOWED: dict[str, str] = {
     "jenny/runtime/ui_automation.py:_BRIDGE.lock": "reset_ui_automation_state",
     "jenny/runtime/notifications.py:_BRIDGE.lock": "reset_notifications_state",
     "jenny/runtime/clipboard.py:_BRIDGE.lock": "reset_clipboard_state",
+    "jenny/runtime/drive_sync_bridge.py:_BRIDGE.lock": "reset_drive_sync_bridge_state",
     "jenny/runtime/power.py:_BRIDGE.lock": "reset_power_state",
     "jenny/runtime/power.py:_STATE_LOCK": "reset_power_state",
     "jenny/runtime/power.py:_WAKE_EVENT": "reset_power_state",

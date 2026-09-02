@@ -464,6 +464,24 @@
       "disabled": "Canale Telegram disattivato",
       "batteryHint": "Per risposte immediate anche a telefono non in carica, esenta Apex dall'ottimizzazione batteria.",
       "batteryButton": "Esenta dalla batteria"
+    },
+    "driveSync": {
+      "title": "Sync su cloud",
+      "intro": "Mantieni la memoria (SOUL.md, USER.md, memory/) sincronizzata tra i tuoi dispositivi tramite una cartella Google Drive a tua scelta. Config, chiavi e skill restano locali.",
+      "androidOnly": "La sync su cloud è disponibile solo nell'app Android",
+      "noFolder": "Nessuna cartella selezionata",
+      "folderChosen": "Cartella: {name}",
+      "changeFolder": "Cambia cartella",
+      "chooseFolder": "Scegli cartella Drive",
+      "neverSynced": "Mai sincronizzato",
+      "lastSync": "Ultima sync: {when}",
+      "counts": "{pushed} inviati, {pulled} ricevuti",
+      "syncNow": "Sincronizza ora",
+      "syncing": "Sincronizzazione…",
+      "syncSuccess": "Sync completata",
+      "syncFailed": "Sync non riuscita",
+      "folderPicked": "Cartella \"{name}\" selezionata",
+      "folderPickFailed": "Impossibile selezionare la cartella"
     }
   },
   "common": {

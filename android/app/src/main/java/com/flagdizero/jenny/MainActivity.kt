@@ -334,6 +334,43 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+    // ── Cloud sync (Drive): SAF folder picker ──
+    // L'utente sceglie UNA cartella (OpenDocumentTree, non un singolo file):
+    // dentro ci vivono i file sincronizzati, uno per elemento (v.
+    // DriveSyncBridge.kt) e il manifest. Il permesso va reso persistente
+    // subito, altrimenti sopravvive solo fino al riavvio del processo.
+    private val pickDriveSyncFolderLauncher =
+        registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+            if (uri == null) {
+                notifyDriveSyncJs("onFolderPicked", false, "")
+            } else {
+                persistDriveSyncFolder(uri)
+            }
+        }
+
+    private fun persistDriveSyncFolder(uri: Uri) {
+        try {
+            contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "persistDriveSyncFolder: takePersistableUriPermission failed (${e.javaClass.simpleName})")
+            notifyDriveSyncJs("onFolderPicked", false, "")
+            return
+        }
+        val name = try {
+            androidx.documentfile.provider.DocumentFile.fromTreeUri(this, uri)?.name
+        } catch (e: Exception) {
+            null
+        } ?: uri.lastPathSegment ?: ""
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+            .putString("drive_sync_tree_uri", uri.toString())
+            .putString("drive_sync_tree_name", name)
+            .apply()
+        notifyDriveSyncJs("onFolderPicked", true, name)
+    }
+
     // ── Composer: picker allegati WebView ──
     // WebChromeClient di default (vedi loadWebView) non implementa
     // onShowFileChooser: un <input type=file> nella WebView non apre nessun
@@ -1124,6 +1161,13 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread { importBackupLauncher.launch(arrayOf("*/*")) }
         }
 
+        /** Apre il picker SAF di selezione cartella per la cloud sync
+         *  (OpenDocumentTree). L'esito arriva a notifyDriveSyncJs("onFolderPicked", ...). */
+        @JavascriptInterface
+        fun pickDriveSyncFolder() {
+            runOnUiThread { pickDriveSyncFolderLauncher.launch(null) }
+        }
+
         /** Risolve un path (assoluto o relativo al workspace) in un file
          *  canonico dentro filesDir (anti-traversal, stessa disciplina di
          *  exportBackup). Ritorna null se il path non è valido. */
@@ -1490,6 +1534,16 @@ class MainActivity : AppCompatActivity() {
         runOnUiThread {
             webView?.evaluateJavascript(
                 "window.jennyBackup && window.jennyBackup.$callback && window.jennyBackup.$callback($ok)",
+                null
+            )
+        }
+    }
+
+    private fun notifyDriveSyncJs(callback: String, ok: Boolean, name: String) {
+        runOnUiThread {
+            webView?.evaluateJavascript(
+                "window.jennyDriveSync && window.jennyDriveSync.$callback && " +
+                    "window.jennyDriveSync.$callback($ok, ${JSONObject.quote(name)})",
                 null
             )
         }

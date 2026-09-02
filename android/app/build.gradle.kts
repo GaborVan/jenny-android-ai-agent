@@ -259,6 +259,10 @@ dependencies {
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
+    // DocumentFile: enumerare/creare/cancellare figli di un albero SAF
+    // (OpenDocumentTree) senza riscrivere DocumentsContract a mano — usato da
+    // DriveSyncBridge per la cartella Drive scelta dall'utente.
+    implementation("androidx.documentfile:documentfile:1.0.1")
     // Chrome Custom Tabs: apre i link esterni della chat in un browser
     // in-app (con pulsante di chiusura) invece di dirottare la WebView SPA.
     implementation("androidx.browser:browser:1.7.0")
