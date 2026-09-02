@@ -10,6 +10,11 @@
          l'accesso è vincolato alla vita del service (tipo `location`). -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Dettatura vocale nel composer (SpeechBridge.startListening): chiesta a
+         runtime al primo tap sul pulsante microfono, non alla catena di avvio.
+         Senza, SpeechRecognizer.isRecognitionAvailable resta vero ma
+         startListening fallisce silenziosamente lato OS. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- Posizione del dispositivo: fix foreground on-demand + last-known per il
          contesto dell'agente. NO background location (ACCESS_BACKGROUND_LOCATION):

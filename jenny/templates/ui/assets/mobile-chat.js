@@ -107,6 +107,22 @@ async function copyCodeFromButton(btn) {
   }, 2000);
 }
 
+/** Legge il testo della bolla che ospita `btn` (letto al click, mai
+    memorizzato: niente da tenere sincronizzato con lo streaming) e lo manda a
+    JennySpeech.speak. Stesso pattern di copyCodeFromButton: funzione di
+    modulo, non un metodo — non serve stato del controller. */
+function speakFromButton(btn) {
+  if (!window.JennySpeech) return;
+  const text = btn.closest('.chat-msg')?.querySelector('.chat-content')?.textContent?.trim();
+  if (!text) return;
+  try {
+    const res = JSON.parse(window.JennySpeech.speak(text));
+    if (!res.ok) showToast(i18n.t('chat.voiceUnavailable'), 'error');
+  } catch (e) {
+    showToast(i18n.t('chat.voiceUnavailable'), 'error');
+  }
+}
+
 function renderMarkdown(text) {
   initMarked();
   if (typeof marked !== 'undefined') {
@@ -154,6 +170,14 @@ export class ChatController {
     this.input = document.getElementById('chat-input');
     this.sendBtn = document.getElementById('btn-send');
     this.secondaryActions = document.getElementById('secondary-actions');
+    this.micBtn = document.getElementById('btn-mic');
+    this._listening = false;
+    // Bridge nativo opzionale (JennySpeech, v. SpeechBridge.kt): assente fuori
+    // dal guscio (browser, test). Il pulsante microfono resta nascosto e
+    // startListening/speak diventano no-op quando manca.
+    if (this.micBtn) this.micBtn.style.display = window.JennySpeech ? '' : 'none';
+    window.__jennySpeechResult = (result) => this._onSpeechResult(result);
+    window.__jennySpeechPermission = (granted) => this._onSpeechPermission(granted);
 
     this._deltaBuffer = '';
     this._reasoningBuffer = '';
@@ -289,6 +313,7 @@ export class ChatController {
     if (attachBtn) attachBtn.title = i18n.t('chat.attach');
     const newChatBtn = document.getElementById('btn-new-chat');
     if (newChatBtn) newChatBtn.title = i18n.t('chat.newChat');
+    if (this.micBtn) this.micBtn.title = i18n.t(this._listening ? 'chat.listening' : 'chat.listen');
   }
 
   setupEventListeners() {
@@ -299,6 +324,7 @@ export class ChatController {
     document.getElementById('btn-new-chat')?.addEventListener('click', () => {
       this.startNewChat();
     });
+    this.micBtn?.addEventListener('click', () => this._toggleListening());
     /* La tendina dei comandi si accende qui e non in `mobile-app.js` come le
        altre due della riga: quelle hanno bisogno dello stato di sessione, questa
        ha bisogno solo di qualcuno a cui consegnare la scelta — cioè di questo
@@ -393,10 +419,106 @@ export class ChatController {
       }
       const btn = e.target.closest('.chat-code-copy');
       if (btn && this.chatArea.contains(btn)) { copyCodeFromButton(btn); return; }
+      const speakBtn = e.target.closest('.chat-speak-btn');
+      if (speakBtn && this.chatArea.contains(speakBtn)) { speakFromButton(speakBtn); return; }
       // Tap su un'immagine (media allegato o immagine markdown inline) → lightbox.
       const img = e.target.closest('img');
       if (img && this.chatArea.contains(img)) this._openLightbox(img.currentSrc || img.src, img.alt || '');
     });
+  }
+
+  /** Pulsante microfono del composer: JennySpeech.startListening è async,
+      quindi qui non c'è niente da attendere in linea — l'esito arriva sempre
+      da window.__jennySpeechResult / __jennySpeechPermission. */
+  _toggleListening() {
+    if (!window.JennySpeech) return;
+    if (this._listening) {
+      this._stopListening();
+    } else {
+      this._startListening();
+    }
+  }
+
+  _startListening() {
+    let res;
+    try {
+      res = JSON.parse(window.JennySpeech.startListening());
+    } catch (e) {
+      showToast(i18n.t('chat.voiceUnavailable'), 'error');
+      return;
+    }
+    if (res.ok) {
+      this._setListening(true);
+      return;
+    }
+    if (res.error === 'permission_pending') {
+      // La richiesta di sistema è già in volo: __jennySpeechPermission(granted)
+      // arriva più tardi e, se concesso, ritenta da sé (_onSpeechPermission).
+      return;
+    }
+    if (res.error === 'permission_denied') {
+      showToast(i18n.t('chat.micPermissionDenied'), 'error');
+      return;
+    }
+    showToast(i18n.t('chat.voiceUnavailable'), 'error');
+  }
+
+  _stopListening() {
+    try { window.JennySpeech.cancelListening(); } catch (e) { /* nessun guscio nativo */ }
+    this._setListening(false);
+  }
+
+  _setListening(active) {
+    this._listening = active;
+    this.micBtn?.classList.toggle('listening', active);
+    if (this.micBtn) this.micBtn.title = i18n.t(active ? 'chat.listening' : 'chat.listen');
+  }
+
+  /** window.__jennySpeechResult: esito del riconoscimento, iniettato da
+      SpeechBridge.onResults/onError (v. SpeechBridge.kt). Un "nessuna
+      corrispondenza" o timeout non è un errore da mostrare: l'utente ha
+      semplicemente smesso di parlare, riprova col tap successivo. */
+  _onSpeechResult(result) {
+    this._setListening(false);
+    if (!result) return;
+    if (result.ok && result.text) {
+      this.input.value = this.input.value ? `${this.input.value} ${result.text}` : result.text;
+      this._autoResize();
+      this._updateSendState();
+      this.input.focus();
+      return;
+    }
+    if (result.error === 'stt_no_match' || result.error === 'stt_timeout') return;
+    if (result.error === 'permission_denied') {
+      showToast(i18n.t('chat.micPermissionDenied'), 'error');
+      return;
+    }
+    showToast(i18n.t('chat.voiceUnavailable'), 'error');
+  }
+
+  /** window.__jennySpeechPermission: esito della richiesta RECORD_AUDIO
+      chiesta on-demand da SpeechBridge.startListening. */
+  _onSpeechPermission(granted) {
+    if (granted) {
+      this._startListening();
+    } else {
+      showToast(i18n.t('chat.micPermissionDenied'), 'error');
+    }
+  }
+
+  /** Pulsante speaker su una bolla assistant, solo se il guscio nativo espone
+      JennySpeech e la bolla ha davvero del testo da leggere. */
+  _appendSpeakButton(msg) {
+    if (!msg || !window.JennySpeech) return;
+    if (msg.querySelector('.chat-speak-btn')) return;
+    const content = msg.querySelector('.chat-content');
+    if (!content || !content.textContent.trim()) return;
+    const btn = document.createElement('button');
+    btn.className = 'chat-speak-btn';
+    btn.type = 'button';
+    btn.title = i18n.t('chat.speak');
+    btn.innerHTML = '<i class="ti ti-volume"></i>';
+    msg.appendChild(btn);
   }
 
   /** Disciplina dei link dentro il markdown della chat. Tre esiti, e in nessuno
@@ -1040,6 +1162,7 @@ export class ChatController {
     if (!hasContent) return;
 
     this._appendLatency(node, turn.latencyMs);
+    this._appendSpeakButton(node);
 
     if (toTop) {
       this._insertAtTop(node);
@@ -1687,6 +1810,7 @@ export class ChatController {
 
   _handleTurnEnd(latencyMs) {
     this._appendLatency(this._currentMsg, latencyMs);
+    this._appendSpeakButton(this._currentMsg);
     this._dropTerminatedSubagents();
 
     this._resetStreamState();

@@ -158,6 +158,9 @@ class MainActivity : AppCompatActivity() {
     private var loadingView: FrameLayout? = null
     private var errorView: FrameLayout? = null
     private var webView: WebView? = null
+    // Voce di Jenny (TTS+STT): v. loadWebView e SpeechBridge.kt. Tenuto qui solo
+    // per il rilascio ordinato in onDestroy — nessun altro codice nativo la usa.
+    private var speechBridge: SpeechBridge? = null
     // Il callback del tasto Indietro. Abilitato solo mentre la SPA è a schermo:
     // v. onCreate, onPageFinished, showLoading e showError.
     private var backCallback: OnBackPressedCallback? = null
@@ -221,6 +224,32 @@ class MainActivity : AppCompatActivity() {
                 Log.w(TAG, "Location permission denied; device location stays unavailable")
             }
         }
+
+    // Microfono per la dettatura vocale (SpeechBridge.startListening): a
+    // differenza dei due sopra NON parte in catena all'avvio ma on-demand, al
+    // primo tap sul pulsante microfono del composer — la richiesta di startup
+    // è già esaurita per allora, nessun conflitto con "una sola richiesta di
+    // permessi per volta".
+    private var pendingRecordAudioResult: ((Boolean) -> Unit)? = null
+
+    private val recordAudioPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            val callback = pendingRecordAudioResult
+            pendingRecordAudioResult = null
+            callback?.invoke(granted)
+        }
+
+    /** Chiede RECORD_AUDIO se manca; richiama subito con `true` se già concesso. */
+    fun requestRecordAudioPermission(onResult: (Boolean) -> Unit) {
+        val granted = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        if (granted) {
+            onResult(true)
+            return
+        }
+        pendingRecordAudioResult = onResult
+        recordAudioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+    }
 
     // ── Launcher: la griglia app deve seguire i cambi di pacchetto ──
     // Prima la SPA si affidava solo a `visibilitychange`, ma l'uninstaller di
@@ -485,6 +514,8 @@ class MainActivity : AppCompatActivity() {
         } catch (e: IllegalArgumentException) {
             Log.w(TAG, "packageChangeReceiver already unregistered")
         }
+        speechBridge?.destroy()
+        speechBridge = null
         super.onDestroy()
     }
 
@@ -822,6 +853,13 @@ class MainActivity : AppCompatActivity() {
         // edge-swipe), altrimenti il drag di Jenny sul bordo triggera il back.
         // Sicuro: la WebView carica solo il gateway locale (127.0.0.1) fidato.
         wv.addJavascriptInterface(JennyGestureBridge(), "JennyNative")
+        // Voce di Jenny (TTS+STT), SECONDO JS interface accanto a JennyNative:
+        // SpeechBridge ha bisogno sia dell'Activity (permesso microfono, i due
+        // motori vogliono girare sul main thread) sia della WebView (per
+        // spingere gli esiti asincroni del riconoscimento). Vedi SpeechBridge.kt.
+        val speech = SpeechBridge(this, wv)
+        speechBridge = speech
+        wv.addJavascriptInterface(speech, "JennySpeech")
         // L'inset di gesture in fondo, che il CSS non può leggere da sé: v.
         // bottomGestureInsetPx e JennyGestureBridge.getBottomGestureInset().
         observeGestureInsets(wv)

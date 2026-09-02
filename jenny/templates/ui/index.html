@@ -177,6 +177,10 @@
                      dalla stessa conferma: sta a un pollice dalla graffetta. -->
                 <button class="input-action" id="btn-new-chat" title="Nuova chat" data-i18n-title="chat.newChat"><i class="ti ti-message-plus"></i></button>
                 <button class="input-action" id="btn-attach" title="Allega" data-i18n-title="chat.attach"><i class="ti ti-paperclip"></i></button>
+                <!-- Dettatura vocale (SpeechBridge.startListening via JennySpeech):
+                     nascosto di default, mostrato da mobile-chat.js solo se il
+                     guscio nativo espone il bridge (window.JennySpeech). -->
+                <button class="input-action" id="btn-mic" title="Detta" data-i18n-title="chat.listen" style="display:none"><i class="ti ti-microphone"></i></button>
               </div>
             </div>
             <button id="btn-send" class="compose-send" disabled><i class="ti ti-arrow-up"></i></button>
