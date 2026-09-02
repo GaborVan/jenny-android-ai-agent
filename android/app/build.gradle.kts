@@ -56,7 +56,11 @@ android {
         // uno di quelli e' installato. Pubblicare a 12 avrebbe significato non
         // poter provare l'aggiornamento proprio sul dispositivo che lo riceve:
         // l'updater pretende un codice STRETTAMENTE maggiore di quello installato.
-        versionCode = 14
+        //
+        // 14 = 0.9.5 upstream (firmato con la chiave dell'autore). La nostra
+        // fork riparte da 15 con la NOSTRA chiave di firma: dopo l'uninstall
+        // iniziale ogni build successiva (16, 17, …) si aggiorna in place.
+        versionCode = 15
         versionName = "0.9.5"
 
         ndk {
@@ -85,6 +89,16 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Quando ci sono le credenziali release, anche le build debug vengono
+            // firmate con lo STESSO keystore: così ogni APK successivo (debug o
+            // release) si installa sopra il precedente senza dover disinstallare
+            // (Android richiede lo stesso firmatario per l'update in-place).
+            // Senza credenziali si resta sul keystore debug di default.
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.findByName("release")
+            }
+        }
         release {
             isMinifyEnabled = true
             proguardFiles(
