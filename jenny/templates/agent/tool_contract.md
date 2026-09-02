@@ -38,9 +38,12 @@ Tool signatures are provided automatically via function calling. This section do
    modo più diretto di suggerirgli una chiamata a un tool inesistente. #}
 {% set locators = [] %}
 {% for t in ['find_files', 'list_dir', 'grep'] if has(t) %}{% set _ = locators.append(t) %}{% endfor %}
-{% if locators or has('get_source') %}
+{% if locators or has('get_source') or has('read_file') %}
 ## Discovery and Reading
 
+{% if has('read_file') %}
+- `read_file` on an image returns its visual content for direct analysis when the active model provider supports images in tool results (Anthropic). On providers that do not (OpenAI-compatible/Responses API), the result is a text reference to the saved path instead — the image itself is not visible to you there; say so rather than guessing at its contents.
+{% endif %}
 {% if has('get_source') %}
 - Jenny's own source is not in the workspace. Read it with `get_source` by dotted path (`jenny.agent.tools.android_web`, `jenny.agent.loop.AgentLoop.run`); {% if has('python_exec') %}`python_exec` path operations cannot reach it, because the boundary refuses everything outside the workspace{% else %}nothing else can reach it, because the workspace boundary refuses everything outside the workspace{% endif %}.
 {% endif %}
