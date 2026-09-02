@@ -21,4 +21,14 @@
     <string name="update_channel_description">Shown when a downloaded update needs your confirmation to install</string>
     <string name="update_notification_title">Update ready to install</string>
     <string name="update_notification_text">Tap to confirm — Jenny restarts on her own afterwards</string>
+
+    <!-- Accessibility service (UiAutomationService): what the user enables in
+         Settings → Accessibility so Jenny can see and touch other apps. -->
+    <string name="accessibility_service_label">Jenny UI control</string>
+    <string name="accessibility_service_description">Lets Jenny see the screen content and perform taps, swipes and typing in other apps, on your request.</string>
+
+    <!-- Notification listener (NotificationListenerBridge): what the user
+         enables so Jenny can read and dismiss notifications from other apps. -->
+    <string name="notification_listener_label">Jenny notifications access</string>
+    <string name="notification_listener_description">Lets Jenny read and dismiss notifications from other apps on your request.</string>
 </resources>

@@ -8,13 +8,17 @@ from loguru import logger
 
 from jenny.config.tool_schemas import (
     AndroidWebToolsConfig,
+    ClipboardConfig,
     DiagnosticsToolConfig,
     FileToolsConfig,
     IntrospectToolConfig,
     LocationConfig,
     MyToolConfig,
+    NotificationsConfig,
     PythonExecConfig,
+    SkillCreatorConfig,
     SshConfig,
+    UiAutomationConfig,
 )
 from jenny.config_base import Base
 from jenny.cron.types import CronSchedule
@@ -523,6 +527,22 @@ class ToolsConfig(Base):
     introspect: IntrospectToolConfig = Field(default_factory=IntrospectToolConfig)
     diagnostics: DiagnosticsToolConfig = Field(default_factory=DiagnosticsToolConfig)
     ssh: SshConfig = Field(default_factory=SshConfig)
+    ui_automation: UiAutomationConfig = Field(
+        default_factory=UiAutomationConfig,
+        validation_alias=AliasChoices("uiAutomation", "ui_automation"),
+    )
+    notifications: NotificationsConfig = Field(
+        default_factory=NotificationsConfig,
+        validation_alias=AliasChoices("notifications", "notifications"),
+    )
+    clipboard: ClipboardConfig = Field(
+        default_factory=ClipboardConfig,
+        validation_alias=AliasChoices("clipboard", "clipboard"),
+    )
+    skill_creator: SkillCreatorConfig = Field(
+        default_factory=SkillCreatorConfig,
+        validation_alias=AliasChoices("skillCreator", "skill_creator"),
+    )
     # NB: canonical home = ``Config.security`` (SecurityConfig). Questo campo
     # resta su ToolsConfig come **mirror** sincronizzato (il tool-layer lo legge
     # via ``ctx.config.restrict_to_workspace``); il validator di ``Config`` lo

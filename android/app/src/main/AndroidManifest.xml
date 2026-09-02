@@ -210,6 +210,43 @@
             </intent-filter>
         </receiver>
 
+
+        <!-- Automazione UI: occhi e mani di Jenny sugli altri app
+             (UiAutomationBridge → UiAutomationService). Servizio di
+             accessibilità: lo abilita l'utente a mano in Impostazioni →
+             Accessibilità; da quel momento Jenny può leggere il dump dello
+             schermo e simulare gesture (tap/swipe/testo/azioni globali).
+             `exported=false` + BIND_ACCESSIBILITY_SERVICE: lo vincola solo il
+             sistema, nessuna app terza può parlare col servizio. -->
+        <service
+            android:name=".UiAutomationService"
+            android:exported="false"
+            android:label="@string/accessibility_service_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
+        <!-- Orecchie di Jenny sugli altri app (NotificationsBridge →
+             NotificationListenerBridge): leggere e dismissare notifiche
+             (codici 2FA, messaggi, stati). Lo abilita l'utente a mano in
+             Impostazioni → Notifiche → Accesso alle notifiche;
+             `exported=false` + BIND_NOTIFICATION_LISTENER_SERVICE: lo vincola
+             solo il sistema. -->
+        <service
+            android:name=".NotificationListenerBridge"
+            android:exported="false"
+            android:label="@string/notification_listener_label"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
     </application>
 
 </manifest>

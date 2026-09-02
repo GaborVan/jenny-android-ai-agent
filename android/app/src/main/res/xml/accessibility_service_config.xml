@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Configurazione del servizio di accessibilità (UiAutomationService).
+
+     `canRetrieveWindowContent` è ciò che permette il dump dell'albero di
+     accessibilità (testi, id, bounds); `canPerformGestures` abilita
+     tap/swipe simulati. `accessibilityEventTypes` minimi: il servizio è
+     puramente on-demand, non reagisce agli eventi — serve solo che Android
+     tenga il servizio connesso e aggiorni la finestra attiva. -->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault|flagReportViewIds|flagRetrieveInteractiveWindows"
+    android:canPerformGestures="true"
+    android:canRetrieveWindowContent="true"
+    android:description="@string/accessibility_service_description"
+    android:notificationTimeout="100"
+    android:settingsActivity="com.flagdizero.jenny.MainActivity" />

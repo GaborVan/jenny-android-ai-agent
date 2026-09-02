@@ -1104,6 +1104,139 @@ def _end_ssh_transfer(args: Mapping[str, Any], outcome: _Outcome) -> str:
     return f"{verb} {_fmt_bytes(size)}" if size is not None else verb
 
 
+# -- ui_* (automazione UI Android, accessibilità) ----------------------------
+#
+# I sette tool dello scope ``core``/``orchestrator``/``subagent`` che leggono e
+# toccano lo schermo di altre app. Qui la regola 1 vale doppia: il contenuto
+# dello schermo è dato personale dell'utente, quindi dai risultati escono solo
+# esiti ("screen read", "tapped"), mai il testo visto o digitato. Dalle
+# argomentazioni si legge solo la chiave di ``ui_press`` (whitelist di sistema:
+# back/home/recents/notifications) e il tipo di gesto, mai il testo cercato o
+# scritto.
+
+
+def _start_ui_status(args: Mapping[str, Any]) -> str:
+    return "checking UI accessibility status"
+
+
+def _end_ui_status(args: Mapping[str, Any], outcome: _Outcome) -> str:
+    return "UI status checked"
+
+
+def _start_ui_screen_dump(args: Mapping[str, Any]) -> str:
+    return "reading current screen"
+
+
+def _end_ui_screen_dump(args: Mapping[str, Any], outcome: _Outcome) -> str:
+    return "screen read"
+
+
+def _start_ui_screenshot(args: Mapping[str, Any]) -> str:
+    return "capturing screen screenshot"
+
+
+def _end_ui_screenshot(args: Mapping[str, Any], outcome: _Outcome) -> str:
+    return "screenshot saved"
+
+
+def _start_ui_tap(args: Mapping[str, Any]) -> str:
+    if _arg_int(args, "x", "y") is not None:
+        return "tapping at screen coordinates"
+    return "tapping a screen element"
+
+
+def _end_ui_tap(args: Mapping[str, Any], outcome: _Outcome) -> str:
+    return "tapped"
+
+
+def _start_ui_swipe(args: Mapping[str, Any]) -> str:
+    return "swiping on screen"
+
+
+def _end_ui_swipe(args: Mapping[str, Any], outcome: _Outcome) -> str:
+    return "swiped"
+
+
+def _start_ui_type(args: Mapping[str, Any]) -> str:
+    return "typing into focused field"
+
+
+def _end_ui_type(args: Mapping[str, Any], outcome: _Outcome) -> str:
+    return "text entered"
+
+
+def _start_ui_press(args: Mapping[str, Any]) -> str:
+    key = _arg_text(args, "key", limit=16)
+    return f"pressing {key}" if key else "pressing a system key"
+
+
+def _end_ui_press(args: Mapping[str, Any], outcome: _Outcome) -> str:
+    key = _arg_text(args, "key", limit=16)
+    return f"pressed {key}" if key else "pressed"
+
+
+
+def _start_list_notifications(args: Mapping[str, Any]) -> str:
+    return "reading active notifications"
+
+def _end_list_notifications(args: Mapping[str, Any], outcome: _Outcome) -> str:
+    # Deliberatamente senza contenuto: le notifiche possono contenere codici 2FA
+    # e dati personali. Il pannello dice solo che sono state lette.
+    return "notifications read"
+
+def _start_dismiss_notification(args: Mapping[str, Any]) -> str:
+    return "dismissing a notification"
+
+def _end_dismiss_notification(args: Mapping[str, Any], outcome: _Outcome) -> str:
+    return "notification dismissed"
+
+def _start_open_notification_settings(args: Mapping[str, Any]) -> str:
+    return "opening notification-access settings"
+
+def _end_open_notification_settings(args: Mapping[str, Any], outcome: _Outcome) -> str:
+    return "notification settings opened"
+
+def _start_clipboard_get(args: Mapping[str, Any]) -> str:
+    return "reading system clipboard"
+
+def _end_clipboard_get(args: Mapping[str, Any], outcome: _Outcome) -> str:
+    return "clipboard read"
+
+
+def _start_skill_create(args: Mapping[str, Any]) -> str:
+    name = _arg_text(args, "name", limit=40)
+    return f"creating skill {name}" if name else "creating a new skill"
+
+def _end_skill_create(args: Mapping[str, Any], outcome: _Outcome) -> str:
+    return "skill created"
+
+def _start_skill_validate(args: Mapping[str, Any]) -> str:
+    name = _arg_text(args, "name", limit=40)
+    return f"validating skill {name}" if name else "validating a skill"
+
+def _end_skill_validate(args: Mapping[str, Any], outcome: _Outcome) -> str:
+    return "skill validated"
+
+def _start_skill_list(args: Mapping[str, Any]) -> str:
+    return "listing skills"
+
+def _end_skill_list(args: Mapping[str, Any], outcome: _Outcome) -> str:
+    return "skills listed"
+
+def _start_clipboard_set(args: Mapping[str, Any]) -> str:
+    return "writing to system clipboard"
+
+def _end_clipboard_set(args: Mapping[str, Any], outcome: _Outcome) -> str:
+    return "clipboard written"
+
+def _start_ui_open_accessibility_settings(args: Mapping[str, Any]) -> str:
+    return "opening accessibility settings"
+
+
+def _end_ui_open_accessibility_settings(args: Mapping[str, Any], outcome: _Outcome) -> str:
+    return "accessibility settings opened"
+
+
 # Registro: un tool coperto ha una riga qui. Copre tutto lo scope ``subagent``
 # e tutto lo scope ``remote`` di ``agent/tools/loader.py`` (e quindi ogni
 # allowlist di ``agent/agent_types.py``, che ne e un sottoinsieme).
@@ -1134,6 +1267,28 @@ _FORMATTERS: dict[str, tuple[_StartFn, _EndFn]] = {
     "ssh_exec": (_start_ssh_exec, _end_ssh_exec),
     "ssh_job": (_start_ssh_job, _end_ssh_job),
     "ssh_transfer": (_start_ssh_transfer, _end_ssh_transfer),
+    "ui_status": (_start_ui_status, _end_ui_status),
+    "ui_screen_dump": (_start_ui_screen_dump, _end_ui_screen_dump),
+    "ui_screenshot": (_start_ui_screenshot, _end_ui_screenshot),
+    "ui_tap": (_start_ui_tap, _end_ui_tap),
+    "ui_swipe": (_start_ui_swipe, _end_ui_swipe),
+    "ui_type": (_start_ui_type, _end_ui_type),
+    "ui_press": (_start_ui_press, _end_ui_press),
+    "ui_open_accessibility_settings": (
+        _start_ui_open_accessibility_settings,
+        _end_ui_open_accessibility_settings,
+    ),
+    "list_notifications": (_start_list_notifications, _end_list_notifications),
+    "dismiss_notification": (_start_dismiss_notification, _end_dismiss_notification),
+    "open_notification_settings": (
+        _start_open_notification_settings,
+        _end_open_notification_settings,
+    ),
+    "clipboard_get": (_start_clipboard_get, _end_clipboard_get),
+    "clipboard_set": (_start_clipboard_set, _end_clipboard_set),
+    "skill_create": (_start_skill_create, _end_skill_create),
+    "skill_validate": (_start_skill_validate, _end_skill_validate),
+    "skill_list": (_start_skill_list, _end_skill_list),
 }
 
 
