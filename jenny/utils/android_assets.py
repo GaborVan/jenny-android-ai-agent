@@ -219,6 +219,7 @@ _UI_MANIFEST = [
     "assets/bootstrap.js",
     "assets/i18n/en.json",
     "assets/i18n/it.json",
+    "assets/i18n/uk.json",
     "assets/jenny-fall-color.webp",
     "assets/jenny-fall.webp",
     "assets/jenny-ground-color.webp",

@@ -279,6 +279,7 @@ _ANDROID_WEB_SEARCH_ENGINE = "bing"
 WELCOME_TEMPLATES: dict[str, str] = {
     "it": "Ciao sono {bot_name} e da oggi vivo sul tuo smartphone, molto piacere!",
     "en": "Hi, I'm {bot_name} and from today I live on your smartphone. Nice to meet you!",
+    "uk": "Привіт, я {bot_name}, і віднині я живу на твоєму смартфоні, дуже приємно!",
 }
 
 _CONTEXT_WINDOW_TOKEN_OPTIONS = {65_536, 262_144}
