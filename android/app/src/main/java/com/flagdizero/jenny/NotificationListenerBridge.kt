@@ -57,8 +57,14 @@ class NotificationListenerBridge : NotificationListenerService() {
         super.onDestroy()
     }
 
-    /** Lista JSON delle notifiche attive (package, title, text, postTimeMs). */
-    fun getActiveNotifications(): String {
+    /** Lista JSON delle notifiche attive (package, title, text, postTimeMs).
+     *
+     * Nome volutamente NON ``getActiveNotifications``: quello è il metodo di
+     * sistema che restituisce gli ``StatusBarNotification`` — ridefinirlo con
+     * una firma diversa romperebbe la property sintetica ``activeNotifications``
+     * usata nel loop qui sotto.
+     */
+    fun snapshotNotifications(): String {
         return try {
             val out = JSONArray()
             for (sbn in activeNotifications) {
@@ -68,7 +74,7 @@ class NotificationListenerBridge : NotificationListenerService() {
                 val item = JSONObject()
                     .put("key", sbn.key)
                     .put("package", sbn.packageName ?: "")
-                    .put("postTimeMs", sbn.postTime)
+                    .put("postTimeMs", sbn.notification?.`when` ?: 0L)
                 if (!title.isNullOrBlank()) item.put("title", title.take(MAX_TEXT_CHARS))
                 if (!text.isNullOrBlank()) item.put("text", text.take(MAX_TEXT_CHARS))
                 out.put(item)
@@ -78,7 +84,7 @@ class NotificationListenerBridge : NotificationListenerService() {
                 .put("notifications", out)
                 .toString()
         } catch (e: Exception) {
-            Log.w(TAG, "getActiveNotifications failed", e)
+            Log.w(TAG, "snapshotNotifications failed", e)
             errorJson("read_failed: ${e.message}")
         }
     }
@@ -86,8 +92,8 @@ class NotificationListenerBridge : NotificationListenerService() {
     /** Rimuove una notifica per chiave (dal dump di getActiveNotifications). */
     fun dismissNotification(key: String): String {
         return try {
-            val ok = runCatching { cancelNotification(key) }.getOrDefault(false)
-            if (ok) okJson() else errorJson("dismiss_failed")
+            cancelNotification(key)
+            okJson()
         } catch (e: Exception) {
             Log.w(TAG, "dismissNotification failed", e)
             errorJson("dismiss_failed: ${e.message}")

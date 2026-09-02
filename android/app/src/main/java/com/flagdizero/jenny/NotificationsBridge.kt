@@ -41,7 +41,7 @@ class NotificationsBridge(context: Context) {
     fun isEnabled(): Boolean = NotificationListenerBridge.instance != null
 
     fun getActiveNotifications(): String =
-        delegateOrNotEnabled { it.getActiveNotifications() }
+        delegateOrNotEnabled { it.snapshotNotifications() }
 
     fun dismissNotification(key: String): String =
         delegateOrNotEnabled { it.dismissNotification(key) }

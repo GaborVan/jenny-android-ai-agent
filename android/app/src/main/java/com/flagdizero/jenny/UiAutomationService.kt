@@ -5,12 +5,12 @@ import android.accessibilityservice.AccessibilityService.ScreenshotResult
 import android.accessibilityservice.AccessibilityService.TakeScreenshotCallback
 import android.accessibilityservice.GestureDescription
 import android.graphics.Bitmap
+import android.graphics.ColorSpace
 import android.graphics.Path
 import android.graphics.Rect
 import android.hardware.HardwareBuffer
 import android.os.Build
 import android.os.Bundle
-import android.os.CountDownLatch
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -19,6 +19,7 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import java.io.File
 import java.io.FileOutputStream
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
 import org.json.JSONArray
@@ -206,15 +207,20 @@ class UiAutomationService : AccessibilityService() {
         val executor = Executor { runnable -> mainHandler.post(runnable) }
         val callback = object : TakeScreenshotCallback {
             override fun onSuccess(screenshot: ScreenshotResult) {
-                holder[0] = try {
+                try {
                     val buffer: HardwareBuffer = screenshot.hardwareBuffer
-                    val bitmap = Bitmap.wrapHardwareBuffer(buffer, screenshot.colorSpace)
+                    val colorSpace: ColorSpace? = screenshot.colorSpace
+                    val bitmap: Bitmap? = Bitmap.wrapHardwareBuffer(buffer, colorSpace)
+                    if (bitmap == null) {
+                        holder[0] = errorJson("screenshot_decode_failed")
+                        return
+                    }
                     val file = File(path).apply { parentFile?.mkdirs() }
                     FileOutputStream(file).use { out ->
                         if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)) {
-                            errorJson("screenshot_compress_failed")
+                            holder[0] = errorJson("screenshot_compress_failed")
                         } else {
-                            JSONObject()
+                            holder[0] = JSONObject()
                                 .put("ok", true)
                                 .put("path", file.absolutePath)
                                 .put("width", bitmap.width)
@@ -224,7 +230,7 @@ class UiAutomationService : AccessibilityService() {
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "captureScreenshot save failed", e)
-                    errorJson("screenshot_save_failed: ${e.message}")
+                    holder[0] = errorJson("screenshot_save_failed: ${e.message}")
                 } finally {
                     latch.countDown()
                 }
