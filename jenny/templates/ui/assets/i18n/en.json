@@ -41,7 +41,8 @@
     "newChat": "New chat",
     "newChatConfirm": "Start a new chat? Apex stops remembering everything said so far. The conversation is not deleted — scroll up to read it again.",
     "newChatConfirmOk": "New chat",
-    "loadPrevious": "Show the previous conversation"
+    "loadPrevious": "Show the previous conversation",
+    "voiceNoSpeech": "I didn't hear anything — say it again, a bit louder."
   },
   "commands": {
     "label": "Commands",

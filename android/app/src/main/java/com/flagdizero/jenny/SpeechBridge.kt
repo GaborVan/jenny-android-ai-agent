@@ -5,8 +5,6 @@ import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.speech.RecognitionListener
 import android.speech.RecognitionService
 import android.speech.RecognizerIntent
@@ -235,27 +233,17 @@ class SpeechBridge(
 
         override fun onError(error: Int) {
             listening = false
-            // Tolleranza agli errori transitori del servizio di riconoscimento:
-            // al più due ripensamenti per tap, ognuno con istanza fresca e
-            // strategia diversa (prima Google/default con lingua forzata, poi
-            // senza lingua forzata, poi ancora con lingua). Se dopo tre
-            // tentativi persiste, l'errore vero passa al JS col codice grezzo.
-            val retryable = error == SpeechRecognizer.ERROR_CLIENT ||
-                error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED ||
-                error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY ||
-                error == SpeechRecognizer.ERROR_AUDIO ||
-                error == SpeechRecognizer.ERROR_SERVER
-            if (retryable && sttAttempts < 2) {
-                sttAttempts++
-                val attempt = sttAttempts
-                Log.w(TAG, "STT onError=$error retrying (attempt $attempt)")
+            // Un solo ripensamento, e solo per la lingua: ERROR_LANGUAGE_NOT_SUPPORTED
+            // significa che il servizio (Samsung) non ha il modello per la lingua
+            // forzata (uk-UA) — riprovare con la lingua di sistema è la cura.
+            // ERROR_CLIENT/BUSY/AUDIO/SERVER NON vengono ripetuti qui: i retry
+            // multipli creavano la corsa "already_listening" vista dal JS
+            // (riavvii a raffica mentre l'istanza stava ancora chiudendo).
+            if (error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED && !languageRetried) {
+                languageRetried = true
+                Log.w(TAG, "STT: forced language unsupported, retrying with device default")
                 destroyRecognizer()
-                // Piccola pausa: su Samsung un start troppo rapido dopo un errore
-                // può riverificare ERROR_CLIENT; 250ms bastano a far rilasciare
-                // il servizio.
-                Handler(Looper.getMainLooper()).postDelayed({
-                    beginListening(forceLanguage = attempt < 2)
-                }, 250)
+                activity.runOnUiThread { beginListening(forceLanguage = false) }
                 return
             }
             val (code, rawCode) = when (error) {
@@ -280,10 +268,10 @@ class SpeechBridge(
     }
 
     @Volatile
-    private var sttAttempts = 0
+    private var languageRetried = false
 
     private fun beginListening(forceLanguage: Boolean = true) {
-        if (forceLanguage) sttAttempts = 0 // nuovo giro utente: tentativi disponibili
+        if (forceLanguage) languageRetried = false // nuovo giro utente: un retry disponibile
         try {
             val component = preferredRecognitionComponent()
             val rec = recognizer ?: createRecognizer(component).also { recognizer = it }

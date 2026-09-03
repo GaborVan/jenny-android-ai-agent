@@ -492,7 +492,18 @@ export class ChatController {
       this.input.focus();
       return;
     }
-    if (result.error === 'stt_no_match' || result.error === 'stt_timeout') return;
+    if (result.error === 'stt_no_match' || result.error === 'stt_timeout') {
+      // Non è un errore: il riconoscitore ha ascoltato ma non ha sentito
+      // voce. Prima si spegneva in silenzio e sembrava "si accende e si
+      // spegne da solo"; ora lo dice, così si distingue da un guasto vero.
+      showToast(i18n.t('chat.voiceNoSpeech'), 'info');
+      return;
+    }
+    if (result.error === 'already_listening') {
+      // Gara benigna: un tap mentre il giro precedente sta ancora chiudendo.
+      // Lo stato è già "in ascolto" — niente toast, niente cambi di stato.
+      return;
+    }
     if (result.error === 'permission_denied') {
       showToast(i18n.t('chat.micPermissionDenied'), 'error');
       return;

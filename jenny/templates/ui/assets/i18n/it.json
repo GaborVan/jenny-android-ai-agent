@@ -41,7 +41,8 @@
     "newChat": "Nuova chat",
     "newChatConfirm": "Iniziare una chat nuova? Apex smette di ricordare quel che è stato detto finora. La conversazione non viene cancellata: si rilegge scorrendo in su.",
     "newChatConfirmOk": "Nuova chat",
-    "loadPrevious": "Mostra la conversazione precedente"
+    "loadPrevious": "Mostra la conversazione precedente",
+    "voiceNoSpeech": "Non ho sentito nulla — riprova, un po' più forte."
   },
   "commands": {
     "label": "Comandi",
