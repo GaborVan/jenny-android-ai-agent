@@ -482,6 +482,10 @@
       "syncFailed": "Sync non riuscita",
       "folderPicked": "Cartella \"{name}\" selezionata",
       "folderPickFailed": "Impossibile selezionare la cartella"
+    },
+    "updates": {
+      "title": "Aggiornamenti",
+      "hint": "Qui l'app controlla GitHub per una versione nuova — premi \"Controlla ora\" quando vuoi, o apri questa sezione dopo una release per trovarla offerta subito."
     }
   },
   "common": {

@@ -482,6 +482,10 @@
       "syncFailed": "Sync failed",
       "folderPicked": "Folder \"{name}\" selected",
       "folderPickFailed": "Could not select a folder"
+    },
+    "updates": {
+      "title": "Updates",
+      "hint": "The app checks GitHub for a new version here — tap \"Check now\" whenever you want, or open this section after a release to see it offered right away."
     }
   },
   "common": {

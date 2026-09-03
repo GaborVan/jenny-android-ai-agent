@@ -183,6 +183,7 @@ export class SettingsController {
     this.contentEl.innerHTML = [
       this._renderConfigRecovery(d),
       this._renderCronRecovery(d),
+      this._section('updates', 'ti-refresh', i18n.t('settings.updates.title'), this._renderUpdates(d)),
       this._section('personalization', 'ti-palette', i18n.t('settings.personalization'), this._renderPersonalization(d)),
       this._section('models', 'ti-cpu', i18n.t('settings.model'), this._renderModelSettings(d)),
       this._section('tools', 'ti-tool', i18n.t('settings.tools'), this._renderTools(d)),
@@ -1660,7 +1661,17 @@ export class SettingsController {
 
   /* Diagnostica e opzioni da power user: versione, modalità avanzata,
      statistiche di utilizzo token. */
-  _renderSystem(d) {
+  /* ── Aggiornamento dell'app (sezione dedicata) ───────────────────────
+
+     Prima viveva dentro "Sistema", in fondo a un elenco lungo: per chi non sa
+     che esiste, un update non arrivava mai (il job periodico gira ogni 24h e
+     l'unica affordance era un bottone sepolto). Qui è un accordion a sé, il
+     primo dopo i banner di recovery: versione corrente, badge quando c'è una
+     release nuova, card con "Installa ora", e il blocco di diagnostica del
+     check con il suo "Controlla ora". All'apertura della sezione il check
+     parte da solo se l'ultimo tentativo è vecchio (>= 1h), così basta aprire
+     le impostazioni per sapere se c'è qualcosa di nuovo. */
+  _renderUpdates(d) {
     const v = d.version || {};
     return `
       <div class="settings-field-row">
@@ -1669,7 +1680,11 @@ export class SettingsController {
       </div>
       ${this._renderUpdateCard(v)}
       ${this._renderUpdateCheck(v)}
-      <div class="settings-divider"></div>
+      <p class="settings-hint" style="margin:6px 0 0;font-size:12px;color:var(--text-faint)">${i18n.t('settings.updates.hint')}</p>`;
+  }
+
+  _renderSystem(d) {
+    return `
       <div class="settings-field settings-toggle-row">
         <label class="settings-label">${i18n.t('settings.advancedMode')}</label>
         <label class="toggle-switch">
@@ -1870,6 +1885,18 @@ export class SettingsController {
     showToast(v.update_available
       ? i18n.t('settings.update.available', { version: v.latest || '' })
       : i18n.t('settings.update.checkUpToDate'));
+  }
+
+  /* Auto-check all'apertura della sezione "Оновлення". Non si fa mai più di
+     una volta l'ora e mai mentre un check è già in volo: il doppio tap non
+     deve raddoppiare la rete, e riaprire la sezione subito dopo non deve
+     rifare una GET finita da dieci secondi. */
+  _autoUpdateCheckOnOpen() {
+    if (this._checking) return;
+    const v = this.data?.version || {};
+    const last = Number(v.last_check) || 0;
+    if (Date.now() - last < 3600000) return; // 1h: ancora fresca
+    this._runUpdateCheck();
   }
 
   /* Chiave della riga di fase. `idle` non ne ha una: prima di premere il
