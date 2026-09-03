@@ -461,8 +461,10 @@ export class ChatController {
       return;
     }
     // Errore non atteso: mostra il codice così il prossimo giro di debug
-    // parte da un fatto, non da un'ipotesi.
-    showToast(`${i18n.t('chat.voiceUnavailable')} (${res.error})`, 'error');
+    // parte da un fatto, non da un'ipotesi. `code` (numero Android grezzo) e
+    // `error` (nome simbolico) arrivano entrambi da SpeechBridge.onError.
+    const raw = typeof res.code === 'number' ? ` #${res.code}` : '';
+    showToast(`${i18n.t('chat.voiceUnavailable')} (${res.error}${raw})`, 'error');
   }
 
   _stopListening() {
@@ -496,7 +498,8 @@ export class ChatController {
       return;
     }
     // Codice d'errore in chiaro per il debug (v. _startListening).
-    showToast(`${i18n.t('chat.voiceUnavailable')} (${result.error})`, 'error');
+    const raw = typeof result.code === 'number' ? ` #${result.code}` : '';
+    showToast(`${i18n.t('chat.voiceUnavailable')} (${result.error}${raw})`, 'error');
   }
 
   /** window.__jennySpeechPermission: esito della richiesta RECORD_AUDIO

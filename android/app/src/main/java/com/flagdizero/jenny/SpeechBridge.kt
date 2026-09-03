@@ -188,25 +188,72 @@ class SpeechBridge(
 
         override fun onError(error: Int) {
             listening = false
-            val code = when (error) {
-                SpeechRecognizer.ERROR_NO_MATCH -> "stt_no_match"
-                SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "stt_timeout"
-                SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "permission_denied"
-                SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "stt_network"
-                SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "stt_busy"
-                else -> "stt_error"
+            // Prima di arrendersi con "stt_language_not_supported": un solo
+            // ripensamento senza EXTRA_LANGUAGE. Il riconoscitore predefinito
+            // (spesso Samsung su S25) non sempre supporta la lingua forzata
+            // (uk-UA) e ripiegare sulla lingua di sistema risolve il caso più
+            // comune. Un solo tentativo, poi l'errore vero passa al JS con il
+            // codice Android grezzo ("code") per la diagnosi.
+            if (error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED && !languageRetried) {
+                languageRetried = true
+                Log.w(TAG, "STT: forced language unsupported, retrying with device default")
+                // Dopo un errore il recognizer può restare in uno stato non
+                // riutilizzabile: distruggerlo e ricrearlo è il pattern sicuro.
+                activity.runOnUiThread {
+                    try {
+                        recognizer?.destroy()
+                    } catch (e: Exception) {
+                        Log.w(TAG, "recognizer destroy on retry failed", e)
+                    }
+                    recognizer = null
+                    beginListening(forceLanguage = false)
+                }
+                return
             }
-            pushSpeechResult(errorJson(code))
+            val (code, rawCode) = when (error) {
+                SpeechRecognizer.ERROR_NO_MATCH -> "stt_no_match" to error
+                SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "stt_timeout" to error
+                SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "permission_denied" to error
+                SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "stt_network" to error
+                SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "stt_busy" to error
+                SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED -> "stt_language_not_supported" to error
+                SpeechRecognizer.ERROR_AUDIO -> "stt_audio" to error
+                SpeechRecognizer.ERROR_CLIENT -> "stt_client" to error
+                SpeechRecognizer.ERROR_SERVER -> "stt_server" to error
+                else -> "stt_error" to error
+            }
+            val payload = JSONObject()
+                .put("ok", false)
+                .put("error", code)
+                .put("code", rawCode)
+            pushSpeechResult(payload.toString())
+            // Dopo un errore il recognizer può restare in uno stato non
+            // riutilizzabile (busy/client): distruggerlo così il prossimo tap
+            // riparte da un'istanza pulita.
+            activity.runOnUiThread {
+                try {
+                    recognizer?.destroy()
+                } catch (e: Exception) {
+                    Log.w(TAG, "recognizer destroy after error failed", e)
+                }
+                recognizer = null
+            }
         }
     }
 
-    private fun beginListening() {
+    @Volatile
+    private var languageRetried = false
+
+    private fun beginListening(forceLanguage: Boolean = true) {
+        if (forceLanguage) languageRetried = false // nuovo giro utente: un retry disponibile
         try {
             val rec = recognizer ?: SpeechRecognizer.createSpeechRecognizer(activity).also { recognizer = it }
             rec.setRecognitionListener(recognitionListener)
             val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, localeForCurrentLanguage().toLanguageTag())
+                if (forceLanguage) {
+                    putExtra(RecognizerIntent.EXTRA_LANGUAGE, localeForCurrentLanguage().toLanguageTag())
+                }
                 putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
             }
             listening = true
@@ -214,7 +261,13 @@ class SpeechBridge(
         } catch (e: Exception) {
             Log.w(TAG, "startListening failed", e)
             listening = false
-            pushSpeechResult(errorJson("stt_error"))
+            pushSpeechResult(
+                JSONObject()
+                    .put("ok", false)
+                    .put("error", "stt_error")
+                    .put("code", -1)
+                    .toString()
+            )
         }
     }
 
