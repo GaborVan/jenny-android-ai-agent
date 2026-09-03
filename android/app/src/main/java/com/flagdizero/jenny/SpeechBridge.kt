@@ -1,10 +1,14 @@
 package com.flagdizero.jenny
 
 import android.Manifest
+import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.speech.RecognitionListener
+import android.speech.RecognitionService
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
@@ -167,6 +171,46 @@ class SpeechBridge(
 
     // ── STT ──
 
+    /* ERROR_CLIENT (#5) da parte del riconoscitore predefinito Samsung è un
+       comportamento noto: il servizio Samsung spesso risponde con "client
+       error" invece di lavorare (soprattutto con lingua forzata). La cura più
+       affidabile è usare esplicitamente il servizio Google quando è installato
+       (package googlequicksearchbox), che supporta bene l'ucraino. Se Google
+       non c'è si ripiega sul default e si riprova senza lingua forzata. */
+    private fun preferredRecognitionComponent(): ComponentName? {
+        return try {
+            val intent = Intent(RecognitionService.SERVICE_INTERFACE)
+            val services = activity.packageManager.queryIntentServices(intent, 0)
+            services
+                .mapNotNull { it.serviceInfo }
+                .map { ComponentName(it.packageName, it.name) }
+                .firstOrNull {
+                    it.packageName.contains("googlequicksearchbox", ignoreCase = true) ||
+                        it.packageName.contains("google", ignoreCase = true)
+                }
+        } catch (e: Exception) {
+            Log.w(TAG, "queryIntentServices failed", e)
+            null
+        }
+    }
+
+    private fun createRecognizer(component: ComponentName?): SpeechRecognizer {
+        return if (component != null) {
+            SpeechRecognizer.createSpeechRecognizer(activity, component)
+        } else {
+            SpeechRecognizer.createSpeechRecognizer(activity)
+        }
+    }
+
+    private fun destroyRecognizer() {
+        try {
+            recognizer?.destroy()
+        } catch (e: Exception) {
+            Log.w(TAG, "recognizer destroy failed", e)
+        }
+        recognizer = null
+    }
+
     private val recognitionListener = object : RecognitionListener {
         override fun onReadyForSpeech(params: Bundle?) {}
         override fun onBeginningOfSpeech() {}
@@ -184,30 +228,34 @@ class SpeechBridge(
             } else {
                 pushSpeechResult(JSONObject().put("ok", true).put("text", text).toString())
             }
+            // Risultato ok: l'istanza ha finito il suo ciclo; si distrugge per
+            // ripartire puliti al prossimo tap (evita stati "client/busy").
+            destroyRecognizer()
         }
 
         override fun onError(error: Int) {
             listening = false
-            // Prima di arrendersi con "stt_language_not_supported": un solo
-            // ripensamento senza EXTRA_LANGUAGE. Il riconoscitore predefinito
-            // (spesso Samsung su S25) non sempre supporta la lingua forzata
-            // (uk-UA) e ripiegare sulla lingua di sistema risolve il caso più
-            // comune. Un solo tentativo, poi l'errore vero passa al JS con il
-            // codice Android grezzo ("code") per la diagnosi.
-            if (error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED && !languageRetried) {
-                languageRetried = true
-                Log.w(TAG, "STT: forced language unsupported, retrying with device default")
-                // Dopo un errore il recognizer può restare in uno stato non
-                // riutilizzabile: distruggerlo e ricrearlo è il pattern sicuro.
-                activity.runOnUiThread {
-                    try {
-                        recognizer?.destroy()
-                    } catch (e: Exception) {
-                        Log.w(TAG, "recognizer destroy on retry failed", e)
-                    }
-                    recognizer = null
-                    beginListening(forceLanguage = false)
-                }
+            // Tolleranza agli errori transitori del servizio di riconoscimento:
+            // al più due ripensamenti per tap, ognuno con istanza fresca e
+            // strategia diversa (prima Google/default con lingua forzata, poi
+            // senza lingua forzata, poi ancora con lingua). Se dopo tre
+            // tentativi persiste, l'errore vero passa al JS col codice grezzo.
+            val retryable = error == SpeechRecognizer.ERROR_CLIENT ||
+                error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED ||
+                error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY ||
+                error == SpeechRecognizer.ERROR_AUDIO ||
+                error == SpeechRecognizer.ERROR_SERVER
+            if (retryable && sttAttempts < 2) {
+                sttAttempts++
+                val attempt = sttAttempts
+                Log.w(TAG, "STT onError=$error retrying (attempt $attempt)")
+                destroyRecognizer()
+                // Piccola pausa: su Samsung un start troppo rapido dopo un errore
+                // può riverificare ERROR_CLIENT; 250ms bastano a far rilasciare
+                // il servizio.
+                Handler(Looper.getMainLooper()).postDelayed({
+                    beginListening(forceLanguage = attempt < 2)
+                }, 250)
                 return
             }
             val (code, rawCode) = when (error) {
@@ -227,27 +275,18 @@ class SpeechBridge(
                 .put("error", code)
                 .put("code", rawCode)
             pushSpeechResult(payload.toString())
-            // Dopo un errore il recognizer può restare in uno stato non
-            // riutilizzabile (busy/client): distruggerlo così il prossimo tap
-            // riparte da un'istanza pulita.
-            activity.runOnUiThread {
-                try {
-                    recognizer?.destroy()
-                } catch (e: Exception) {
-                    Log.w(TAG, "recognizer destroy after error failed", e)
-                }
-                recognizer = null
-            }
+            destroyRecognizer()
         }
     }
 
     @Volatile
-    private var languageRetried = false
+    private var sttAttempts = 0
 
     private fun beginListening(forceLanguage: Boolean = true) {
-        if (forceLanguage) languageRetried = false // nuovo giro utente: un retry disponibile
+        if (forceLanguage) sttAttempts = 0 // nuovo giro utente: tentativi disponibili
         try {
-            val rec = recognizer ?: SpeechRecognizer.createSpeechRecognizer(activity).also { recognizer = it }
+            val component = preferredRecognitionComponent()
+            val rec = recognizer ?: createRecognizer(component).also { recognizer = it }
             rec.setRecognitionListener(recognitionListener)
             val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
