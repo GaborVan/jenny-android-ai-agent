@@ -60,8 +60,8 @@ android {
         // 14 = 0.9.5 upstream (firmato con la chiave dell'autore). La nostra
         // fork riparte da 15 con la NOSTRA chiave di firma: dopo l'uninstall
         // iniziale ogni build successiva (16, 17, …) si aggiorna in place.
-        versionCode = 21
-        versionName = "0.9.11"
+        versionCode = 22
+        versionName = "0.9.12"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
