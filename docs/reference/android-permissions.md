@@ -38,10 +38,11 @@ These three exist for one feature: noticing a new release and installing it. The
 
 ## App visibility (`<queries>`)
 
-Separately from permissions, Jenny's manifest declares two narrow `<queries>` entries so `PackageManager` will tell it about specific other apps, without the broad `QUERY_ALL_PACKAGES` permission:
+Separately from permissions, Jenny's manifest declares narrow `<queries>` entries so `PackageManager` will tell it about specific other apps/services, without the broad `QUERY_ALL_PACKAGES` permission:
 
 - Apps that declare a launcher entry point (`MAIN`/`LAUNCHER`) — this is what powers the "Android apps" launcher tab inside Jenny. See [Phone app launcher](../using/app-launcher.md).
 - Any camera app that can handle `IMAGE_CAPTURE` — this is what lets the attachment chooser offer "take a photo" without Jenny needing the camera permission itself.
+- Speech-recognition services (`android.speech.RecognitionService`) and text-to-speech engines (`android.intent.action.TTS_SERVICE`) — Android 11+ hides other apps' services from `PackageManager` unless declared here; without them `SpeechRecognizer.isRecognitionAvailable()` returns false and the mic button reports "voice feature unavailable" even when Google/Samsung speech is installed. See [Voice](../using/voice.md).
 
 ## Where this fits
 

@@ -84,6 +84,18 @@
         <intent>
             <action android:name="android.media.action.IMAGE_CAPTURE" />
         </intent>
+        <!-- Visibilità dei servizi di voce (Android 11+/package visibility):
+             senza queste dichiarazioni SpeechRecognizer.isRecognitionAvailable()
+             torna false e TextToSpeech non trova il motore — la voce risulta
+             "funzione non disponibile" anche se Google/Samsung speech è
+             installato. SpeechBridge (STT) usa RecognitionService; il TTS si
+             aggancia al motore predefinito via TTS_SERVICE. -->
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
     </queries>
 
     <!-- `android:name` NON è opzionale qui: senza questa riga il sistema
