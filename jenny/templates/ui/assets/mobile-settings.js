@@ -606,10 +606,12 @@ export class SettingsController {
 
   // ── Cloud sync (Google Drive) ────────────────────────────────────────
 
-  /* Sincronizza SOLO SOUL.md/USER.md e memory/ tra due dispositivi via una
-     cartella Drive scelta dall'utente (SAF, nessun permesso storage). Niente
-     config.json, niente skills, niente sessioni: v. drive_sync.py per
-     l'algoritmo (last-writer-wins per mtime, pareggio per sha256). */
+  /* Sincronizza SOUL.md/USER.md e memory/ tra due dispositivi via una
+     cartella Drive scelta dall'utente (SAF, nessun permesso storage); quando
+     la cartella scelta è la condivisa "Apex-Pamyat" sincronizza anche lo
+     specchio locale shared/ (profile/knowledge/notes). Niente config.json,
+     niente skills, niente sessioni: v. drive_sync.py per l'algoritmo
+     (last-writer-wins per mtime, pareggio per sha256). */
   _renderDriveSync() {
     return `
       <p class="settings-hint" style="margin:0 0 10px;font-size:12px;color:var(--text-faint)">${i18n.t('settings.driveSync.intro')}</p>

@@ -19,6 +19,15 @@ ROOT_SCOPE_FILES = ("SOUL.md", "USER.md")
 MEMORY_PREFIX = "memory/"
 _ENCODED_MEMORY_PREFIX = "memory__"
 
+# Scope condiviso: mirror locale ``shared/`` della cartella Drive condivisa
+# ("Apex-Pamyat") riservata a profile/knowledge/notes — v. docs/using/
+# shared-memory.md. Solo le sottocartelle elencate partecipano; qualunque
+# altra voce (file sparsi nella root della cartella, sottocartelle estranee,
+# il manifest stesso) viene ignorata, mai toccata.
+SHARED_PREFIX = "shared/"
+_ENCODED_SHARED_PREFIX = "shared__"
+SHARED_SUBFOLDERS = ("profile", "knowledge", "notes")
+
 
 @dataclass(frozen=True)
 class FileMeta:
@@ -39,9 +48,18 @@ class SyncPlan:
 
 
 def encode_name(relpath: str) -> str:
-    """``SOUL.md`` invariato; ``memory/x/y.md`` -> ``memory__x__y.md``."""
+    """``SOUL.md`` invariato; ``memory/x/y.md`` -> ``memory__x__y.md``;
+    ``shared/profile/USER.md`` -> ``shared__profile__USER.md`` (stessa
+    disciplina di appiattimento di ``memory/``).
+    """
     if relpath in ROOT_SCOPE_FILES:
         return relpath
+    if relpath.startswith(SHARED_PREFIX):
+        rest = relpath[len(SHARED_PREFIX):]
+        folder, sep, _inner = rest.partition("/")
+        if not sep or folder not in SHARED_SUBFOLDERS:
+            raise ValueError(f"path out of drive-sync scope: {relpath!r}")
+        return _ENCODED_SHARED_PREFIX + rest.replace("/", "__")
     if not relpath.startswith(MEMORY_PREFIX):
         raise ValueError(f"path out of drive-sync scope: {relpath!r}")
     return _ENCODED_MEMORY_PREFIX + relpath[len(MEMORY_PREFIX):].replace("/", "__")
@@ -57,6 +75,17 @@ def decode_name(encoded: str) -> str | None:
     """
     if encoded in ROOT_SCOPE_FILES:
         return encoded
+    if encoded.startswith(_ENCODED_SHARED_PREFIX):
+        rest = encoded[len(_ENCODED_SHARED_PREFIX):]
+        if not rest:
+            return None
+        # Deve esserci una sottocartella autorizzata *e* un nome file dopo di
+        # essa: ``shared__profile`` da solo è la cartella, non un file.
+        folder, sep, _inner = rest.partition("__")
+        if not sep or folder not in SHARED_SUBFOLDERS or not _inner:
+            return None
+        relpath = SHARED_PREFIX + rest.replace("__", "/")
+        return relpath if is_safe_scope_relpath(relpath) else None
     if encoded.startswith(_ENCODED_MEMORY_PREFIX):
         rest = encoded[len(_ENCODED_MEMORY_PREFIX):]
         if not rest:
@@ -70,15 +99,47 @@ def is_safe_scope_relpath(relpath: str) -> bool:
     """Vero se ``relpath`` sta dentro lo scope e non può uscire dal workspace."""
     if relpath in ROOT_SCOPE_FILES:
         return True
-    if not relpath.startswith(MEMORY_PREFIX):
-        return False
     if "\\" in relpath:
+        return False
+    if relpath.startswith(SHARED_PREFIX):
+        sub = relpath[len(SHARED_PREFIX):]
+        if not sub:
+            return False
+        parts = sub.split("/")
+        return parts[0] in SHARED_SUBFOLDERS and not any(
+            part in ("", ".", "..") for part in parts
+        )
+    if not relpath.startswith(MEMORY_PREFIX):
         return False
     sub = relpath[len(MEMORY_PREFIX):]
     if not sub:
         return False
     parts = sub.split("/")
     return not any(part in ("", ".", "..") for part in parts)
+
+
+def is_shared_encoded_name(encoded: str) -> bool:
+    """Vero per i nomi codificati dello scope condiviso (``shared__...``)."""
+    return encoded.startswith(_ENCODED_SHARED_PREFIX)
+
+
+def split_shared_encoded(encoded: str) -> tuple[str, str] | None:
+    """Da un nome codificato condiviso alla coppia (sottocartella, nome remoto):
+    ``shared__profile__USER.md`` -> ``("profile", "USER.md")``; ``None`` per
+    qualunque nome che non appartenga allo scope condiviso.
+
+    Il nome remoto è il file dentro la sottocartella Drive: un ``__`` residuo
+    (``a__b.md``) sta per una sottocartella locale ``a/b.md``, la stessa
+    convenzione di ``memory/``. Serve a chi orchestra per instradare le
+    chiamate *In sul bridge.
+    """
+    relpath = decode_name(encoded)
+    if relpath is None or not relpath.startswith(SHARED_PREFIX):
+        return None
+    folder, sep, rest = relpath[len(SHARED_PREFIX):].partition("/")
+    if not sep or folder not in SHARED_SUBFOLDERS or not rest:
+        return None
+    return folder, rest.replace("/", "__")
 
 
 def plan_sync(

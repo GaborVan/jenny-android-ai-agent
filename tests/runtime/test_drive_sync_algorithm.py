@@ -8,12 +8,17 @@ tie-break, traversal). Gli adapter (I/O vero) sono coperti separatamente in
 
 from __future__ import annotations
 
+import pytest
+
 from jenny.runtime.drive_sync_algorithm import (
+    SHARED_SUBFOLDERS,
     FileMeta,
     decode_name,
     encode_name,
     is_safe_scope_relpath,
+    is_shared_encoded_name,
     plan_sync,
+    split_shared_encoded,
 )
 
 # ── encode/decode name ──────────────────────────────────────────────────────
@@ -54,6 +59,100 @@ def test_decode_rejects_path_traversal() -> None:
 
 def test_decode_rejects_absolute_and_backslash_paths() -> None:
     assert is_safe_scope_relpath("memory/..\\..\\windows") is False
+
+
+# ── scope condiviso (shared/) ────────────────────────────────────────────
+
+
+def test_shared_subfolders_are_the_three_allowed_ones() -> None:
+    assert SHARED_SUBFOLDERS == ("profile", "knowledge", "notes")
+
+
+def test_encode_shared_file_flattens_slashes() -> None:
+    assert encode_name("shared/profile/USER.md") == "shared__profile__USER.md"
+    assert encode_name("shared/knowledge/instances.md") == "shared__knowledge__instances.md"
+    assert encode_name("shared/notes/apex-phone-2026-09-03.md") == (
+        "shared__notes__apex-phone-2026-09-03.md"
+    )
+    assert encode_name("shared/knowledge/sub/x.md") == "shared__knowledge__sub__x.md"
+
+
+def test_encode_shared_rejects_shallow_and_unknown_subtrees() -> None:
+    # File direttamente in shared/ senza sottocartella autorizzata: fuori scope.
+    with pytest.raises(ValueError):
+        encode_name("shared/notes.md")
+    with pytest.raises(ValueError):
+        encode_name("shared/x/y.md")  # sottocartella estranea
+    with pytest.raises(ValueError):
+        encode_name("shared/")
+
+
+def test_decode_reverses_encode_for_shared_names() -> None:
+    for relpath in (
+        "shared/profile/USER.md",
+        "shared/knowledge/instances.md",
+        "shared/notes/2026-09-03.md",
+        "shared/knowledge/sub/dir/x.md",
+    ):
+        assert decode_name(encode_name(relpath)) == relpath
+
+
+def test_decode_rejects_unknown_or_empty_shared_names() -> None:
+    assert decode_name("shared__other__x.md") is None  # sottocartella estranea
+    assert decode_name("shared__notes.md") is None  # niente sottocartella
+    assert decode_name("shared__") is None
+    assert decode_name("shared__profile") is None  # niente nome file
+    assert decode_name("apex-sync-manifest.json") is None
+
+
+def test_is_safe_scope_relpath_for_shared() -> None:
+    assert is_safe_scope_relpath("shared/profile/USER.md") is True
+    assert is_safe_scope_relpath("shared/knowledge/sub/x.md") is True
+    assert is_safe_scope_relpath("shared/x.md") is False
+    assert is_safe_scope_relpath("shared/other/x.md") is False
+    assert is_safe_scope_relpath("shared/") is False
+    # Traversal: non deve mai uscire dalla sottocartella autorizzata.
+    assert is_safe_scope_relpath("shared/profile/../USER.md") is False
+    assert is_safe_scope_relpath("shared/profile/../../etc/passwd") is False
+    assert is_safe_scope_relpath("shared/../SOUL.md") is False
+
+
+def test_decode_rejects_shared_path_traversal() -> None:
+    assert decode_name("shared__..__..") is None  # -> "shared/../.."
+    assert decode_name("shared__profile__..__evil.md") is None
+    assert decode_name("shared__..__profile__x.md") is None
+    assert decode_name("shared__profile__a__..__b.md") is None
+
+
+def test_is_shared_encoded_name() -> None:
+    assert is_shared_encoded_name("shared__profile__USER.md") is True
+    assert is_shared_encoded_name("memory__MEMORY.md") is False
+    assert is_shared_encoded_name("SOUL.md") is False
+    assert is_shared_encoded_name("shared") is False
+
+
+def test_split_shared_encoded() -> None:
+    assert split_shared_encoded("shared__profile__USER.md") == ("profile", "USER.md")
+    assert split_shared_encoded("shared__notes__apex-phone-x.md") == ("notes", "apex-phone-x.md")
+    # Un ``__`` residuo nel nome remoto sta per una sottocartella locale.
+    assert split_shared_encoded("shared__knowledge__a__b.md") == ("knowledge", "a__b.md")
+    assert split_shared_encoded("SOUL.md") is None
+    assert split_shared_encoded("memory__MEMORY.md") is None
+    assert split_shared_encoded("shared__other__x.md") is None
+
+
+def test_shared_names_are_indistinguishable_from_plan_rules() -> None:
+    # plan_sync non sa nulla di shared/: tratta i nomi codificati allo stesso
+    # modo di quelli dell'istanza (upload/download/tombstone).
+    plan = plan_sync(
+        local={"shared__notes__apex-phone-x.md": _meta(100.0, "l")},
+        remote={"shared__profile__USER.md": _meta(50.0, "r")},
+        manifest={},
+    )
+    assert set(plan.uploads) == {"shared__notes__apex-phone-x.md"}
+    assert set(plan.downloads) == {"shared__profile__USER.md"}
+    assert plan.deletes_remote == ()
+    assert plan.skipped == ()
 
 
 # ── plan_sync ────────────────────────────────────────────────────────────

@@ -119,3 +119,81 @@ async def drive_delete_file(name: str) -> dict[str, Any] | None:
         logger.opt(exception=True).debug("DriveSyncBridge.deleteFile failed")
         return _error("bridge_unavailable")
     return _parse_result(raw) or _error("bridge_unavailable")
+
+
+# ── Operazioni nelle sottocartelle (scope condiviso "Apex-Pamyat") ──────────
+# Omologhe *In delle funzioni sopra: stesso pattern, ``folder`` (la
+# sottocartella reale dentro la cartella Drive) sempre primo argomento.
+# Fuori da Android tutto degrada a ``None`` come le altre.
+
+
+async def drive_ensure_folder(folder: str) -> dict[str, Any] | None:
+    """Crea la sottocartella se manca; idempotente: ``{"ok":true}`` se esiste già."""
+    context = get_android_context()
+    if context is None:
+        return None
+    try:
+        bridge = await _get_bridge(context)
+        raw = await asyncio.to_thread(bridge.ensureFolder, folder)
+    except Exception:  # noqa: BLE001
+        logger.opt(exception=True).debug("DriveSyncBridge.ensureFolder failed")
+        return _error("bridge_unavailable")
+    return _parse_result(raw) or _error("bridge_unavailable")
+
+
+async def drive_list_files_in(folder: str) -> dict[str, Any] | None:
+    """``{"ok":true,"files":[...]}``; ``not_found`` se la sottocartella manca."""
+    context = get_android_context()
+    if context is None:
+        return None
+    try:
+        bridge = await _get_bridge(context)
+        raw = await asyncio.to_thread(bridge.listFilesIn, folder)
+    except Exception:  # noqa: BLE001
+        logger.opt(exception=True).debug("DriveSyncBridge.listFilesIn failed")
+        return _error("bridge_unavailable")
+    return _parse_result(raw) or _error("bridge_unavailable")
+
+
+async def drive_read_file_in(folder: str, name: str) -> dict[str, Any] | None:
+    """``{"ok":true,"content":"<base64>"}``."""
+    context = get_android_context()
+    if context is None:
+        return None
+    try:
+        bridge = await _get_bridge(context)
+        raw = await asyncio.to_thread(bridge.readFileIn, folder, name)
+    except Exception:  # noqa: BLE001
+        logger.opt(exception=True).debug("DriveSyncBridge.readFileIn failed")
+        return _error("bridge_unavailable")
+    return _parse_result(raw) or _error("bridge_unavailable")
+
+
+async def drive_write_file_in(
+    folder: str, name: str, content_b64: str
+) -> dict[str, Any] | None:
+    """``{"ok":true}``; la sottocartella deve esistere (ensureFolder prima)."""
+    context = get_android_context()
+    if context is None:
+        return None
+    try:
+        bridge = await _get_bridge(context)
+        raw = await asyncio.to_thread(bridge.writeFileIn, folder, name, content_b64)
+    except Exception:  # noqa: BLE001
+        logger.opt(exception=True).debug("DriveSyncBridge.writeFileIn failed")
+        return _error("bridge_unavailable")
+    return _parse_result(raw) or _error("bridge_unavailable")
+
+
+async def drive_delete_file_in(folder: str, name: str) -> dict[str, Any] | None:
+    """``{"ok":true}``; idempotente (file o sottocartella già assenti)."""
+    context = get_android_context()
+    if context is None:
+        return None
+    try:
+        bridge = await _get_bridge(context)
+        raw = await asyncio.to_thread(bridge.deleteFileIn, folder, name)
+    except Exception:  # noqa: BLE001
+        logger.opt(exception=True).debug("DriveSyncBridge.deleteFileIn failed")
+        return _error("bridge_unavailable")
+    return _parse_result(raw) or _error("bridge_unavailable")

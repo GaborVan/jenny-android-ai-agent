@@ -3,6 +3,16 @@ adapter locale e bridge Android; possiede lo stato locale
 (``<workspace>/.jenny/drive_sync_state.json``) e il manifest remoto
 (``apex-sync-manifest.json`` nella cartella scelta dall'utente).
 
+Due contorni convivono in un giro solo:
+
+* **istanza** — come sempre: ``SOUL.md``/``USER.md`` alla radice e ``memory/``,
+  per qualunque cartella scelta;
+* **condiviso** — attivo solo quando la cartella scelta si chiama
+  ``Apex-Pamyat``: lo specchio locale ``shared/`` (profile/knowledge/notes)
+  contro le sottocartelle reali omonime della cartella Drive. Per qualunque
+  altra cartella i file di ``shared/`` restano locali e non finiscono né
+  caricati né nel manifest (v. docs/using/shared-memory.md).
+
 Lo stato locale non è config: è cache di dispositivo (id dispositivo, ultimo
 manifest visto, riepilogo dell'ultimo giro) e non deve mai finire nel backup
 cifrato del workspace né essere trattato come una scelta dell'utente da
@@ -22,19 +32,36 @@ from typing import Any
 
 from loguru import logger
 
-from jenny.runtime.drive_sync_algorithm import FileMeta, decode_name, plan_sync
+from jenny.runtime.drive_sync_algorithm import (
+    SHARED_PREFIX,
+    SHARED_SUBFOLDERS,
+    FileMeta,
+    decode_name,
+    is_shared_encoded_name,
+    plan_sync,
+    split_shared_encoded,
+)
 from jenny.runtime.drive_sync_bridge import (
     drive_delete_file,
+    drive_delete_file_in,
+    drive_ensure_folder,
     drive_folder_info,
     drive_list_files,
+    drive_list_files_in,
     drive_read_file,
+    drive_read_file_in,
     drive_write_file,
+    drive_write_file_in,
 )
 from jenny.runtime.drive_sync_local import read_scope_file, scope_snapshot, write_scope_file
 
 STATE_FILENAME = "drive_sync_state.json"
 MANIFEST_REMOTE_NAME = "apex-sync-manifest.json"
 MANIFEST_SCHEMA = 1
+
+# Nome esatto della cartella Drive condivisa: il contorno condiviso è attivo
+# solo quando l'utente sceglie questa cartella (v. docs/using/shared-memory.md).
+SHARED_FOLDER_NAME = "Apex-Pamyat"
 
 
 def _state_path(workspace: Path) -> Path:
@@ -80,11 +107,66 @@ async def sync_status(workspace: Path) -> dict[str, Any]:
     info = await drive_folder_info()
     state = _load_state(workspace)
     last_sync = state.get("last_sync")
+    folder = info if info and info.get("ok") else None
     return {
         "available": info is not None,
-        "folder": info if info and info.get("ok") else None,
+        "folder": folder,
+        # Il contorno condiviso è attivo solo con la cartella Apex-Pamyat:
+        # lo dice lo status perché la card possa mostrarlo senza indovinare.
+        "shared_active": bool(folder and folder.get("name") == SHARED_FOLDER_NAME),
         "last_sync": last_sync if isinstance(last_sync, dict) else None,
     }
+
+
+def _active_scope_snapshot(
+    workspace: Path, *, include_shared: bool
+) -> dict[str, FileMeta]:
+    """Snapshot locale per il giro: senza il contorno condiviso i file di
+    ``shared/`` non devono né caricarsi né finire nel manifest di una cartella
+    che non è ``Apex-Pamyat``."""
+    snapshot = scope_snapshot(workspace)
+    if include_shared:
+        return snapshot
+    return {
+        name: meta
+        for name, meta in snapshot.items()
+        if not is_shared_encoded_name(name)
+    }
+
+
+async def _read_remote_file(name: str) -> dict[str, Any] | None:
+    """Legge un file remoto instradando sul bridge giusto: *In per lo scope
+    condiviso, radice per l'istanza."""
+    shared = split_shared_encoded(name)
+    if shared is not None:
+        folder, remote_name = shared
+        return await drive_read_file_in(folder, remote_name)
+    return await drive_read_file(name)
+
+
+async def _delete_remote_file(name: str) -> dict[str, Any] | None:
+    shared = split_shared_encoded(name)
+    if shared is not None:
+        folder, remote_name = shared
+        return await drive_delete_file_in(folder, remote_name)
+    return await drive_delete_file(name)
+
+
+async def _upload_remote_file(
+    name: str, content_b64: str, ensured: set[str]
+) -> dict[str, Any] | None:
+    """Scrive un file remoto; per lo scope condiviso crea prima la sottocartella
+    (una sola volta per giro) e scrive *dentro* di essa."""
+    shared = split_shared_encoded(name)
+    if shared is None:
+        return await drive_write_file(name, content_b64)
+    folder, remote_name = shared
+    if folder not in ensured:
+        result = await drive_ensure_folder(folder)
+        if not result or not result.get("ok"):
+            return result or {"ok": False, "error": "ensure_folder_failed"}
+        ensured.add(folder)
+    return await drive_write_file_in(folder, remote_name, content_b64)
 
 
 async def run_sync(workspace: Path) -> dict[str, Any]:
@@ -96,6 +178,8 @@ async def run_sync(workspace: Path) -> dict[str, Any]:
     if not info.get("ok"):
         return {"ok": False, "error": info.get("error") or "no_folder"}
 
+    shared_active = info.get("name") == SHARED_FOLDER_NAME
+
     listing = await drive_list_files()
     if not listing or not listing.get("ok"):
         return {"ok": False, "error": (listing or {}).get("error") or "list_failed"}
@@ -104,17 +188,42 @@ async def run_sync(workspace: Path) -> dict[str, Any]:
     device_id = _device_id(state)
     manifest_files = _files_from_dict(state.get("manifest_files"))
 
-    local_snapshot = scope_snapshot(workspace)
-
-    remote_entries: dict[str, dict[str, Any]] = {}
-    for entry in listing.get("files") or []:
-        name = entry.get("name") if isinstance(entry, dict) else None
-        # Nome non riconosciuto (manifest remoto, file dell'utente): ignorato,
-        # mai toccato — v. decode_name.
-        if isinstance(name, str) and decode_name(name) is not None:
-            remote_entries[name] = entry
+    local_snapshot = _active_scope_snapshot(workspace, include_shared=shared_active)
 
     errors: list[dict[str, str]] = []
+    remote_entries: dict[str, dict[str, Any]] = {}
+
+    # ── contorno istanza: file nella radice della cartella Drive ──
+    for entry in listing.get("files") or []:
+        raw_name = entry.get("name") if isinstance(entry, dict) else None
+        # Nome non riconosciuto (manifest remoto, file dell'utente): ignorato,
+        # mai toccato — v. decode_name. I nomi ``shared__...`` alla radice non
+        # sono nostri: lo scope condiviso vive nelle sottocartelle reali.
+        if isinstance(raw_name, str):
+            relpath = decode_name(raw_name)
+            if relpath is not None and not relpath.startswith(SHARED_PREFIX):
+                remote_entries[raw_name] = entry
+
+    # ── contorno condiviso: sottocartelle reali della cartella Apex-Pamyat ──
+    if shared_active:
+        for folder in SHARED_SUBFOLDERS:
+            sub_listing = await drive_list_files_in(folder)
+            if sub_listing is None or not sub_listing.get("ok"):
+                sub_error = (sub_listing or {}).get("error")
+                if sub_error == "not_found":
+                    continue  # sottocartella mai creata: nessun file remoto, non è un errore
+                errors.append({"file": f"shared/{folder}", "error": sub_error or "list_failed"})
+                continue
+            for entry in sub_listing.get("files") or []:
+                raw_name = entry.get("name") if isinstance(entry, dict) else None
+                if not isinstance(raw_name, str):
+                    continue
+                encoded = f"shared__{folder}__{raw_name}"
+                # Anti-traversal: un nome che decodifica fuori dallo scope
+                # (``..``, backslash, sottocartella estranea) viene ignorato.
+                if decode_name(encoded) is not None:
+                    remote_entries[encoded] = entry
+
     remote_snapshot: dict[str, FileMeta] = {}
     downloaded: dict[str, bytes] = {}
 
@@ -127,7 +236,7 @@ async def run_sync(workspace: Path) -> dict[str, Any]:
             # download.
             remote_snapshot[name] = cached
             continue
-        read = await drive_read_file(name)
+        read = await _read_remote_file(name)
         if not read or not read.get("ok"):
             errors.append({"file": name, "error": (read or {}).get("error") or "read_failed"})
             continue
@@ -142,12 +251,15 @@ async def run_sync(workspace: Path) -> dict[str, Any]:
     plan = plan_sync(local_snapshot, remote_snapshot, manifest_files)
 
     pushed: list[str] = []
+    ensured_folders: set[str] = set()
     for name in plan.uploads:
         data = read_scope_file(workspace, name)
         if data is None:
             errors.append({"file": name, "error": "local_missing"})
             continue
-        result = await drive_write_file(name, base64.b64encode(data).decode("ascii"))
+        result = await _upload_remote_file(
+            name, base64.b64encode(data).decode("ascii"), ensured_folders
+        )
         if not result or not result.get("ok"):
             errors.append({"file": name, "error": (result or {}).get("error") or "write_failed"})
             continue
@@ -157,7 +269,7 @@ async def run_sync(workspace: Path) -> dict[str, Any]:
     for name in plan.downloads:
         data = downloaded.get(name)
         if data is None:
-            read = await drive_read_file(name)
+            read = await _read_remote_file(name)
             if not read or not read.get("ok"):
                 errors.append({"file": name, "error": (read or {}).get("error") or "read_failed"})
                 continue
@@ -173,7 +285,7 @@ async def run_sync(workspace: Path) -> dict[str, Any]:
 
     deleted: list[str] = []
     for name in plan.deletes_remote:
-        result = await drive_delete_file(name)
+        result = await _delete_remote_file(name)
         if not result or not result.get("ok"):
             errors.append({"file": name, "error": (result or {}).get("error") or "delete_failed"})
             continue
@@ -181,8 +293,9 @@ async def run_sync(workspace: Path) -> dict[str, Any]:
 
     # Manifest finale: lo stato locale dopo la sync, perché a questo punto è
     # quello che entrambi i lati condividono (upload e download sono già
-    # scritti su disco).
-    final_snapshot = scope_snapshot(workspace)
+    # scritti su disco). Per una cartella non condivisa i file di ``shared/``
+    # restano fuori anche dal manifest.
+    final_snapshot = _active_scope_snapshot(workspace, include_shared=shared_active)
     new_manifest_files = {
         name: {"mtime": meta.mtime, "sha256": meta.sha256} for name, meta in final_snapshot.items()
     }

@@ -2,8 +2,10 @@
 decisione (quella è in ``drive_sync_algorithm.plan_sync``).
 
 Scope sincronizzato: ``SOUL.md``/``USER.md`` alla radice del workspace, e
-``memory/`` ricorsiva. Niente altro — non ``.jenny/``, non ``config.json``,
-non ``skills/``.
+``memory/`` ricorsiva. In più lo scope condiviso: lo specchio locale
+``shared/`` (sottocartelle profile/knowledge/notes) della cartella Drive
+condivisa — v. ``drive_sync_algorithm.SHARED_SUBFOLDERS``. Niente altro —
+non ``.jenny/``, non ``config.json``, non ``skills/``.
 """
 
 from __future__ import annotations
@@ -15,6 +17,8 @@ from pathlib import Path
 from jenny.runtime.drive_sync_algorithm import (
     MEMORY_PREFIX,
     ROOT_SCOPE_FILES,
+    SHARED_PREFIX,
+    SHARED_SUBFOLDERS,
     FileMeta,
     decode_name,
     encode_name,
@@ -30,6 +34,17 @@ def _iter_scope_relpaths(workspace: Path) -> Iterator[str]:
         for path in sorted(memory_dir.rglob("*")):
             if path.is_file():
                 yield MEMORY_PREFIX + path.relative_to(memory_dir).as_posix()
+    shared_root = workspace / "shared"
+    if shared_root.is_dir():
+        # Solo le sottocartelle autorizzate: un file messo direttamente in
+        # shared/ o in una sottocartella estranea non partecipa alla sync.
+        for folder in SHARED_SUBFOLDERS:
+            subdir = shared_root / folder
+            if not subdir.is_dir():
+                continue
+            for path in sorted(subdir.rglob("*")):
+                if path.is_file():
+                    yield SHARED_PREFIX + path.relative_to(shared_root).as_posix()
 
 
 def scope_snapshot(workspace: Path) -> dict[str, FileMeta]:
