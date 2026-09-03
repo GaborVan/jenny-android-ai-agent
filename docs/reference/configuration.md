@@ -185,11 +185,11 @@ Pairing, the throttle, and the asymmetric view between Telegram and the WebUI: [
 
 ## drive_sync
 
-Cloud sync of the agent's memory files (`SOUL.md`, `USER.md`, and everything under `memory/`) between two devices through a Google Drive folder the user picks once (SAF, no storage permission). Only a kill-switch lives in config: the chosen folder URI is stored in Android SharedPreferences and the sync state in `<workspace>/.jenny/drive_sync_state.json`.
+Cloud sync of the agent's memory files (`SOUL.md`, `USER.md`, and everything under `memory/`) between two devices through a Google Drive folder the user picks once (SAF, no storage permission). When the chosen folder is named **Apex-Pamyat**, a second, shared scope also syncs `<workspace>/shared/**` (profile/knowledge/notes) against the folder's real subfolders — see [Shared memory across devices](../using/shared-memory.md). Only a kill-switch lives in config: the chosen folder URI is stored in Android SharedPreferences and the sync state in `<workspace>/.jenny/drive_sync_state.json`.
 
 | Key | Type | Default | Effect |
 |---|---|---|---|
-| `drive_sync.enabled` | bool | `true` | Master switch. When on (and a folder has been chosen from **Settings → Cloud sync**), a sync runs at gateway start and on every manual "Sync now". Per-file, last-writer-wins by mtime, ties broken by content hash. Never touches `config.json`, `.jenny/`, skills, sessions, or anything outside `SOUL.md`/`USER.md`/`memory/`. |
+| `drive_sync.enabled` | bool | `true` | Master switch. When on (and a folder has been chosen from **Settings → Cloud sync**), a sync runs at gateway start and on every manual "Sync now". Per-file, last-writer-wins by mtime, ties broken by content hash. Never touches `config.json`, `.jenny/`, skills, sessions, or anything outside `SOUL.md`/`USER.md`/`memory/` — plus `shared/` when the chosen folder is the shared one (Apex-Pamyat). |
 
 ## tools
 
