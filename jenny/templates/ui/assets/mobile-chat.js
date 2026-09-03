@@ -460,7 +460,9 @@ export class ChatController {
       showToast(i18n.t('chat.micPermissionDenied'), 'error');
       return;
     }
-    showToast(i18n.t('chat.voiceUnavailable'), 'error');
+    // Errore non atteso: mostra il codice così il prossimo giro di debug
+    // parte da un fatto, non da un'ipotesi.
+    showToast(`${i18n.t('chat.voiceUnavailable')} (${res.error})`, 'error');
   }
 
   _stopListening() {
@@ -493,7 +495,8 @@ export class ChatController {
       showToast(i18n.t('chat.micPermissionDenied'), 'error');
       return;
     }
-    showToast(i18n.t('chat.voiceUnavailable'), 'error');
+    // Codice d'errore in chiaro per il debug (v. _startListening).
+    showToast(`${i18n.t('chat.voiceUnavailable')} (${result.error})`, 'error');
   }
 
   /** window.__jennySpeechPermission: esito della richiesta RECORD_AUDIO

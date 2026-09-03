@@ -230,7 +230,15 @@ class SpeechBridge(
             // Async: il JS deve richiamare startListening() dopo aver ricevuto
             // window.__jennySpeechPermission(true) — non c'è niente da attendere
             // qui, la richiesta di sistema è già in volo.
-            activity.requestRecordAudioPermission { ok -> pushPermissionResult(ok) }
+            //
+            // runOnUiThread è d'obbligo: questo metodo è un @JavascriptInterface,
+            // quindi gira sul thread di background della WebView, non sul main.
+            // ActivityResultLauncher.launch() pretende il main thread e senza
+            // questo wrapper lancia IllegalStateException — il dialogo di sistema
+            // non compariva mai e il JS vedeva solo "voice unavailable".
+            activity.runOnUiThread {
+                activity.requestRecordAudioPermission { ok -> pushPermissionResult(ok) }
+            }
             return errorJson("permission_pending")
         }
         activity.runOnUiThread { beginListening() }
