@@ -30,6 +30,19 @@ carries the reasoning that outlives them.
   used to require inventing a dummy key. It is in the provider dialog as *How
   it's paid*, surfaced by the settings API, and documented with a worked config
   in [docs/reference/providers.md](docs/reference/providers.md).
+- **A preset for the home bridge, and a diagnosis for its failures.** `Add
+  provider` opens with a **Home bridge (Tailscale)** preset
+  (`jenny/providers/presets.py`): it fills the tailnet base URL, picks
+  `tier: subscription` so the token stays optional, and names the models the
+  bridge exposes — while leaving every field editable, so the saved entry is an
+  ordinary provider. A failed call to a `.ts.net` endpoint is classified rather
+  than pasted raw (`jenny/providers/endpoint_errors.py`): no response at all
+  says to enable Tailscale and MagicDNS, `401` says the token was rejected, and
+  `502/503/504` says the CLI behind the bridge is not answering (usually an
+  exhausted session limit). The model list from `GET /v1/models` is read by a
+  single parser (`jenny/providers/model_listing.py`) that the Settings model
+  probe now shares. Documented in
+  [docs/reference/providers.md](docs/reference/providers.md#connecting-through-tailscale-home-bridge).
 - **Voice output.** The agent can read text aloud on the phone through the
   system Android `TextToSpeech` engine: two tools, `speak` (text, optional
   language tag, optional rate) and `stop_speaking`. Nothing leaves the device and

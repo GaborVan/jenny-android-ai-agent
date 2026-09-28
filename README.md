@@ -117,6 +117,14 @@ reaching the agent from anywhere — outbound-only, your own bot token, so nothi
 network becomes reachable from the internet. Messages through it pass through Telegram's
 servers; your memory and files never do. Off by default.
 
+**🏠 Home bridge over Tailscale.** If the subscription you want to use is a CLI on your own
+PC, point Jenny at a bridge that exposes it as an OpenAI-compatible API, reached through your
+private tailnet instead of the open internet. **Add provider** now offers a
+**Home bridge (Tailscale)** preset that fills the URL and the subscription tier, and a failed
+call to a `.ts.net` address is reported as what it is — Tailscale off, wrong token, or the
+CLI behind the bridge out of session — instead of a raw server payload.
+→ [Connecting through Tailscale](docs/reference/providers.md#connecting-through-tailscale-home-bridge)
+
 ## Quick start
 
 Download the APK from [**Releases**](../../releases/latest) — Android 8.0 or newer, ~67 MB,
