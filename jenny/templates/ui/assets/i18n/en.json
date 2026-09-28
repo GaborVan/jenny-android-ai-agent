@@ -492,7 +492,12 @@
     "tierApi": "API key (pay per use)",
     "tierSubscription": "Subscription bridge (no key)",
     "tierLocal": "Local model server",
-    "tierHint": "Local and subscription endpoints don't need an API key."
+    "tierHint": "Local and subscription endpoints don't need an API key.",
+    "preset": "Preset",
+    "presetNone": "— No preset —",
+    "presetHint": "Fills the fields for a known endpoint. Address and token stay editable.",
+    "presetHomeBridge": "Home bridge (Tailscale)",
+    "presetModels": "Models: {models}"
   },
   "common": {
     "loading": "Loading...",

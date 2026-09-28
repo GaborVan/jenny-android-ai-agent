@@ -492,7 +492,12 @@
     "tierApi": "API-ключ (за використання)",
     "tierSubscription": "Міст підписки (без ключа)",
     "tierLocal": "Локальний сервер",
-    "tierHint": "Локальні endpoint-и та міст підписки не потребують API-ключа."
+    "tierHint": "Локальні endpoint-и та міст підписки не потребують API-ключа.",
+    "preset": "Пресет",
+    "presetNone": "— Без пресета —",
+    "presetHint": "Заповнює поля для відомого endpoint-а. Адресу й токен можна потім змінити.",
+    "presetHomeBridge": "Домашній міст (Tailscale)",
+    "presetModels": "Моделі: {models}"
   },
   "common": {
     "loading": "Завантаження...",

@@ -492,7 +492,12 @@
     "tierApi": "Chiave API (a consumo)",
     "tierSubscription": "Bridge di abbonamento (senza chiave)",
     "tierLocal": "Server locale",
-    "tierHint": "Gli endpoint locali e di abbonamento non richiedono una chiave API."
+    "tierHint": "Gli endpoint locali e di abbonamento non richiedono una chiave API.",
+    "preset": "Preset",
+    "presetNone": "— Nessun preset —",
+    "presetHint": "Riempie i campi per un endpoint noto. Indirizzo e token restano modificabili.",
+    "presetHomeBridge": "Bridge di casa (Tailscale)",
+    "presetModels": "Modelli: {models}"
   },
   "common": {
     "loading": "Caricamento...",

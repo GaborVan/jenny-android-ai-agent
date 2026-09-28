@@ -22,6 +22,8 @@ from jenny.channels.http_utils import FALSY_VALUES, TRUTHY_VALUES, parse_flag
 from jenny.config import store
 from jenny.config.loader import get_config_path, load_config
 from jenny.config.schema import KEEP_AWAKE_MODES, Config
+from jenny.providers.model_listing import model_id_from_row, model_rows
+from jenny.providers.presets import presets_payload as provider_presets_payload
 from jenny.security.workspace_access import workspace_sandbox_status
 from jenny.security.workspace_policy import _safe_expanduser
 from jenny.session.keys import UNIFIED_SESSION_KEY
@@ -447,15 +449,7 @@ def _resolve_env_placeholders(value: str | None) -> str | None:
 
 
 def _model_id_from_row(row: Any) -> str | None:
-    if isinstance(row, str):
-        return row.strip() or None
-    if not isinstance(row, dict):
-        return None
-    for key in ("id", "name", "model"):
-        value = row.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
+    return model_id_from_row(row)
 
 
 def _model_context_window(row: Any) -> int | None:
@@ -498,9 +492,7 @@ def _model_row_payload(row: Any) -> dict[str, Any] | None:
 
 
 def _extract_model_rows(body: Any) -> list[dict[str, Any]]:
-    raw_rows = body.get("data") if isinstance(body, dict) else body
-    if not isinstance(raw_rows, list):
-        return []
+    raw_rows = model_rows(body)
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
     for raw_row in raw_rows:
@@ -897,6 +889,10 @@ def settings_payload(
     payload = {
         "first_run": _is_first_run(config),
         "providers": _provider_list_simple(config),
+        # I profili precompilati (il bridge di casa dietro Tailscale) sono una
+        # costante del codice, non config: la UI li offre e poi salva un
+        # provider normale, che resta liberamente modificabile.
+        "provider_presets": provider_presets_payload(),
         "default_provider": config.providers.default,
         "agent": {
             "model": effective_preset.model,

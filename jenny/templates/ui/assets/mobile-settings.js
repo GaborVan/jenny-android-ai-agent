@@ -2659,6 +2659,15 @@ export class SettingsController {
     });
   }
 
+  /* Il nome tradotto di un preset, col nome del backend come ripiego: se la
+     locale non conosce ancora l'id, cade sul testo che arriva da Python invece
+     di mostrare la chiave i18n grezza. */
+  _providerPresetLabel(preset) {
+    const key = { 'home-bridge-tailscale': 'settings.presetHomeBridge' }[preset.id];
+    const translated = key ? i18n.t(key) : '';
+    return translated && translated !== key ? translated : preset.name;
+  }
+
   _showAddProviderDialog(existingProvider) {
     const isEdit = !!existingProvider;
     // La chiave salvata non torna mai al client: il backend manda solo un
@@ -2672,6 +2681,19 @@ export class SettingsController {
     // bridge di abbonamento non ne hanno una, e pretenderla era l'unico modo
     // per cui non si potevano salvare dalla UI.
     const tier = (isEdit && existingProvider.tier) || 'api';
+    // I preset arrivano dal backend (``provider_presets``): sono un punto di
+    // partenza per i campi, non un profilo speciale. In modifica non si offrono
+    // — il provider esiste già e si sta solo cambiandolo.
+    const presets = isEdit ? [] : (this.data?.provider_presets || []);
+    const presetField = presets.length ? `
+        <div class="settings-field">
+          <label class="settings-label">${i18n.t('settings.preset')}</label>
+          <select class="settings-select" id="dlg-provider-preset">
+            <option value="">${i18n.t('settings.presetNone')}</option>
+            ${presets.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(this._providerPresetLabel(p))}</option>`).join('')}
+          </select>
+          <span class="settings-field-hint" id="dlg-preset-hint">${i18n.t('settings.presetHint')}</span>
+        </div>` : '';
     const dialog = document.createElement('dialog');
     dialog.className = 'oc-dialog';
     dialog.id = 'provider-dialog';
@@ -2680,6 +2702,7 @@ export class SettingsController {
         <h3 style="margin:0 0 16px;font-size:15px;font-weight:600">
           ${isEdit ? i18n.t('settings.editProvider') : i18n.t('settings.addProviderTitle')}
         </h3>
+        ${presetField}
         <div class="settings-field">
           <label class="settings-label">${i18n.t('settings.name')}</label>
           <input type="text" class="settings-input" id="dlg-provider-name" placeholder="${i18n.t('settings.namePlaceholder')}"
@@ -2731,6 +2754,27 @@ export class SettingsController {
       };
       baseInput.placeholder = defaults[formatSelect.value] || '';
     });
+
+    // Scegliere un preset riempie i campi e basta: dopo resta tutto modificabile
+    // (nome, URL, token), ed è il salvataggio normale a scrivere il provider.
+    const presetSelect = dialog.querySelector('#dlg-provider-preset');
+    if (presetSelect) {
+      presetSelect.addEventListener('change', () => {
+        const preset = presets.find(p => p.id === presetSelect.value);
+        const hint = dialog.querySelector('#dlg-preset-hint');
+        if (!preset) {
+          if (hint) hint.textContent = i18n.t('settings.presetHint');
+          return;
+        }
+        dialog.querySelector('#dlg-provider-name').value = preset.name;
+        formatSelect.value = preset.format;
+        dialog.querySelector('#dlg-provider-tier').value = preset.tier;
+        baseInput.value = preset.api_base;
+        if (hint && preset.models && preset.models.length) {
+          hint.textContent = i18n.t('settings.presetModels', { models: preset.models.join(', ') });
+        }
+      });
+    }
 
     // Anche Annulla passa dal `cancel` annullabile, come Esc e il tasto
     // Indietro: chiamando close() dritto scavalcava il guard del salvataggio in
