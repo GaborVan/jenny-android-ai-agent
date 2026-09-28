@@ -268,6 +268,20 @@ class ClipboardConfig(Base):
     enable: bool = True
 
 
+class TtsConfig(Base):
+    """Configurazione della sintesi vocale di sistema (tool ``speak``/``stop_speaking``).
+
+    Usa solo il motore ``TextToSpeech`` di Android: niente cloud, nessun
+    permesso richiesto. ``enable`` è la sola manopola, come per gli altri tool
+    di dispositivo (``clipboard``, ``notifications``): i limiti applicati
+    (testo fino a 4000 caratteri, rate 0.5–2.0) vivono in
+    ``jenny/runtime/tts.py``, che è l'unico posto che li applica davvero, e
+    duplicarli qui darebbe una seconda verità da tenere allineata.
+    """
+
+    enable: bool = True
+
+
 class SkillCreatorConfig(Base):
     """Configurazione dei tool di creazione skill autonoma.
 

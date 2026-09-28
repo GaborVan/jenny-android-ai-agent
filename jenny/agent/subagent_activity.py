@@ -1237,6 +1237,20 @@ def _start_clipboard_set(args: Mapping[str, Any]) -> str:
 def _end_clipboard_set(args: Mapping[str, Any], outcome: _Outcome) -> str:
     return "clipboard written"
 
+def _start_speak(args: Mapping[str, Any]) -> str:
+    return "speaking aloud"
+
+def _end_speak(args: Mapping[str, Any], outcome: _Outcome) -> str:
+    # Deliberatamente senza contenuto: il testo letto ad alta voce e' la risposta
+    # dell'agente, ma il pannello non ripete cio' che esce dalle casse.
+    return "spoken"
+
+def _start_stop_speaking(args: Mapping[str, Any]) -> str:
+    return "stopping speech"
+
+def _end_stop_speaking(args: Mapping[str, Any], outcome: _Outcome) -> str:
+    return "speech stopped"
+
 def _start_ui_open_accessibility_settings(args: Mapping[str, Any]) -> str:
     return "opening accessibility settings"
 
@@ -1294,6 +1308,8 @@ _FORMATTERS: dict[str, tuple[_StartFn, _EndFn]] = {
     ),
     "clipboard_get": (_start_clipboard_get, _end_clipboard_get),
     "clipboard_set": (_start_clipboard_set, _end_clipboard_set),
+    "speak": (_start_speak, _end_speak),
+    "stop_speaking": (_start_stop_speaking, _end_stop_speaking),
     "skill_create": (_start_skill_create, _end_skill_create),
     "skill_validate": (_start_skill_validate, _end_skill_validate),
     "skill_list": (_start_skill_list, _end_skill_list),

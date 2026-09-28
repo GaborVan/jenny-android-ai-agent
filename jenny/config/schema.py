@@ -18,6 +18,7 @@ from jenny.config.tool_schemas import (
     PythonExecConfig,
     SkillCreatorConfig,
     SshConfig,
+    TtsConfig,
     UiAutomationConfig,
 )
 from jenny.config_base import Base
@@ -538,6 +539,11 @@ class ToolsConfig(Base):
     clipboard: ClipboardConfig = Field(
         default_factory=ClipboardConfig,
         validation_alias=AliasChoices("clipboard", "clipboard"),
+    )
+    # Sintesi vocale di sistema (tool speak/stop_speaking), altro tool solo Android.
+    tts: TtsConfig = Field(
+        default_factory=TtsConfig,
+        validation_alias=AliasChoices("tts", "tts"),
     )
     skill_creator: SkillCreatorConfig = Field(
         default_factory=SkillCreatorConfig,
