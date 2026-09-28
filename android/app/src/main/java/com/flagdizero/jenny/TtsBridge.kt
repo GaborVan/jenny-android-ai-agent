@@ -24,10 +24,10 @@ import java.util.concurrent.TimeUnit
  *
  * `TextToSpeech` va costruito sul thread principale (lo impone l'API Android),
  * quindi la costruzione viene marshalled su `Looper.getMainLooper()`. Il ponte
- * per\u00f2 **non** attende l\u00ec: `BridgeCache` lo costruisce sul thread del loop
+ * però **non** attende lì: `BridgeCache` lo costruisce sul thread del loop
  * asyncio di Python, e un'attesa di 5 secondi in quel punto fermerebbe il
  * gateway. L'attesa vive in `awaitEngine()`, chiamata da `speak()` su un worker
- * (`asyncio.to_thread`), e ha un timeout perch\u00e9 senza motore TTS installato
+ * (`asyncio.to_thread`), e ha un timeout perché senza motore TTS installato
  * `OnInitListener` non arriva mai.
  *
  * Ogni chiamata è avvolta in try/catch: un fallimento Android diventa un JSON
