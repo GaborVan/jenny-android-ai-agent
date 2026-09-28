@@ -17,6 +17,7 @@ import hmac
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -119,6 +120,26 @@ _MEDIA_EXTRACTORS: dict[str, Callable[[Any], tuple[str, str | None, str]]] = {
     "voice": _extract_voice,
 }
 
+# Tipi di update di cui si tenta la trascrizione. Solo i vocali: un ``audio``
+# è, nove volte su dieci, un brano o un podcast, e mandare una canzone al
+# motore di riconoscimento non è quello che l'utente sta chiedendo.
+_TRANSCRIBE_KEYS = frozenset({"voice"})
+
+
+@dataclass(frozen=True)
+class _VoiceResult:
+    """Esito della trascrizione di un vocale.
+
+    Tre stati, e sono tre cose diverse: ``transcript`` è il testo da consegnare
+    all'agente; ``replied`` dice che l'utente ha già ricevuto la riga di errore
+    e il turno **non** deve partire; né l'uno né l'altro (il valore neutro) è il
+    *passthrough* — non si è tentato nulla, il vocale viaggia come file come
+    prima che esistesse la trascrizione.
+    """
+
+    transcript: str | None = None
+    replied: bool = False
+
 # Contenuto sintetico (LLM-facing, non mostrato all'utente) di un turno
 # innescato da una posizione condivisa: la posizione vera arriva nel runtime
 # context come "User location (shared via Telegram): …".
@@ -143,6 +164,10 @@ _BOT_STRINGS: dict[str, dict[str, str]] = {
             "📎 Questo tipo di contenuto non è ancora supportato: prova con testo, "
             "una foto o un documento."
         ),
+        "voice_failed": (
+            "🎤 Non riesco a trascrivere questo vocale. Riprova, oppure scrivimi "
+            "il messaggio in testo."
+        ),
     },
     "en": {
         "paired": "✅ Paired! You can now talk to Jenny from this chat.",
@@ -160,6 +185,9 @@ _BOT_STRINGS: dict[str, dict[str, str]] = {
         "media_unsupported": (
             "📎 This content type isn't supported yet: try text, a photo, or a document."
         ),
+        "voice_failed": (
+            "🎤 I couldn't transcribe this voice note. Try again, or send it as text."
+        ),
     },
     "uk": {
         "paired": "✅ З'єднано! Тепер ти можеш спілкуватися з Jenny в цьому чаті.",
@@ -176,6 +204,9 @@ _BOT_STRINGS: dict[str, dict[str, str]] = {
         ),
         "media_unsupported": (
             "📎 Цей тип вмісту поки не підтримується: спробуй текст, фото або документ."
+        ),
+        "voice_failed": (
+            "🎤 Не вдалося розпізнати це голосове. Спробуй ще раз або напиши текстом."
         ),
     },
 }
@@ -423,6 +454,14 @@ class TelegramChannel:
                 if isinstance(caption, str) and caption.strip()
                 else default_content
             )
+            if key in _TRANSCRIBE_KEYS:
+                voice = await self._transcribe_voice_note(chat_id, path)
+                if voice.replied:
+                    # L'utente ha già la riga di errore: nessun turno LLM su un
+                    # audio che non è stato riconosciuto.
+                    return True
+                if voice.transcript:
+                    content = voice.transcript
             metadata: dict[str, Any] = {WEBUI_TURN_METADATA_KEY: str(uuid.uuid4())}
             await self.bus.publish_inbound(
                 InboundMessage(
@@ -436,6 +475,56 @@ class TelegramChannel:
             )
             return True
         return False
+
+    async def _transcribe_voice_note(self, chat_id: str, path: Path | str) -> _VoiceResult:
+        """Trascrive il vocale appena scaricato, o dice perché non l'ha fatto.
+
+        Fuori da Android (host, test) e a toggle spento la trascrizione non
+        viene nemmeno tentata: il vocale arriva all'agente come file, che è il
+        comportamento che c'era prima di questa funzione. Quando invece la
+        trascrizione è tentata e fallisce, l'utente riceve una riga di servizio
+        e il turno **non** parte: non c'è niente da far ragionare a un modello
+        su un audio che non è stato riconosciuto.
+        """
+        cfg = self._voice_config()
+        if cfg is None or not getattr(cfg, "enable", True):
+            return _VoiceResult()
+
+        from jenny.runtime.stt import transcribe_file
+
+        result = await transcribe_file(
+            str(path),
+            language=self._language,
+            prefer_offline=bool(getattr(cfg, "prefer_offline", False)),
+        )
+        if result is None:
+            return _VoiceResult()
+        text = str(result.get("text") or "").strip()
+        if result.get("ok") and text:
+            return _VoiceResult(transcript=text)
+        logger.warning(
+            "Telegram: could not transcribe voice note from chat {}: {}",
+            chat_id,
+            result.get("error"),
+        )
+        await self._send_raw(chat_id, self._t("voice_failed"))
+        return _VoiceResult(replied=True)
+
+    @staticmethod
+    def _voice_config() -> Any:
+        """La sezione ``voice`` del config, o ``None`` se non è leggibile.
+
+        Caricata lazy (i vocali sono rari, come le posizioni condivise). Un
+        config illeggibile degrada a *passthrough*: senza una conferma della
+        scelta dell'utente non si manda audio a un motore di riconoscimento.
+        """
+        try:
+            from jenny.config.loader import load_config
+
+            return load_config().voice
+        except Exception:  # noqa: BLE001
+            logger.opt(exception=True).debug("Telegram: could not load voice config")
+            return None
 
     async def _maybe_handle_sticker(
         self, chat_id: str, sender: dict[str, Any], message: dict[str, Any]

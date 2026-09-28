@@ -20,6 +20,7 @@ from jenny.config.tool_schemas import (
     SshConfig,
     TtsConfig,
     UiAutomationConfig,
+    VoiceConfig,
 )
 from jenny.config_base import Base
 from jenny.cron.types import CronSchedule
@@ -839,6 +840,7 @@ class Config(BaseSettings):
     extract_document_text: bool = False
     websocket: dict[str, Any] = Field(default_factory=dict)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
+    voice: VoiceConfig = Field(default_factory=VoiceConfig)
     drive_sync: DriveSyncConfig = Field(
         default_factory=DriveSyncConfig,
         validation_alias=AliasChoices("driveSync", "drive_sync"),

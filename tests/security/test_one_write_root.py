@@ -295,6 +295,13 @@ _NOT_A_WRITE_ROOT = {
     ),
     ("message.py", "project_path"): "risolve gli allegati in uscita: è una lettura",
     ("message.py", "allowed_root"): "idem — l'alias storico, non una seconda risposta",
+    ("voice.py", "project_path"): (
+        "risolve il file da trascrivere: è una lettura, e la radice serve solo a "
+        "interpretare un percorso relativo"
+    ),
+    ("voice.py", "allowed_root"): (
+        "idem — è il confine di **lettura**, applicato da resolve_workspace_path"
+    ),
     ("memory_recall.py", "project_path"): (
         "domanda opposta: non dove si scrive, ma **se** questo turno è dentro un "
         "progetto. recall_history legge solo la radice e tace altrove, e il "

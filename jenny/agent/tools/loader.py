@@ -82,6 +82,7 @@ _HARDCODED_TOOL_MODULES = [
     "notifications",
     "clipboard",
     "tts",
+    "voice",
     "skill_creator",
     "ssh",
     "app_update",

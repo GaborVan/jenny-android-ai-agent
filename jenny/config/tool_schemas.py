@@ -282,6 +282,29 @@ class TtsConfig(Base):
     enable: bool = True
 
 
+class VoiceConfig(Base):
+    """Configurazione del riconoscimento vocale (STT) dei messaggi in arrivo.
+
+    Jenny trascrive un vocale con il ``SpeechRecognizer`` di sistema: nessuna
+    chiave, nessun servizio nostro, e sul dispositivo il file lo decodifica
+    Android stesso. Chi **ascolta** davvero è però il motore di riconoscimento
+    installato — di solito quello di Google — e quel motore può mandare l'audio
+    ai suoi server: ``prefer_offline`` gli chiede di restare offline, ma è una
+    richiesta, non una garanzia (con un modello offline non installato, chiedere
+    offline significa non riconoscere).
+
+    Vive qui e non fra le sezioni di app perché la usano in due — il tool
+    ``transcribe_audio`` e il canale Telegram, che trascrive il vocale mentre lo
+    scarica — e questo modulo è quello leggero che entrambi possono importare.
+
+    ``enable`` a ``false`` spegne tutto: nessuna trascrizione viene tentata, il
+    vocale arriva all'agente come file e il tool non si registra.
+    """
+
+    enable: bool = True
+    prefer_offline: bool = False
+
+
 class SkillCreatorConfig(Base):
     """Configurazione dei tool di creazione skill autonoma.
 
