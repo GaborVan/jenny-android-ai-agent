@@ -25,6 +25,7 @@ from jenny.providers.base import (
     StreamTimeout,
     tool_arguments_json_for_replay,
 )
+from jenny.providers.endpoint_errors import diagnose_for_user
 from jenny.providers.openai_compat_helpers import (
     _ALLOWABLE_MSG_KEYS,
     _DEFAULT_OPENROUTER_HEADERS,
@@ -658,6 +659,7 @@ class OpenAICompatProvider(ResponseParsingMixin, LLMProvider):
         e: Exception,
         *,
         partial_content: str | None = None,
+        api_base: str | None = None,
     ) -> LLMResponse:
         if isinstance(e, ProviderHTTPError):
             # Il suo messaggio nomina già status, URL e un estratto del corpo, che
@@ -674,6 +676,16 @@ class OpenAICompatProvider(ResponseParsingMixin, LLMProvider):
                 body = None
             body_text = body if isinstance(body, str) else str(body) if body is not None else ""
             msg = f"Error: {body_text.strip()[:500]}" if body_text.strip() else f"Error calling LLM: {e}"
+
+        # A runtime si passa ``api_base``: l'errore così com'è (status, URL,
+        # estratto di corpo) finisce davanti all'utente in chat, e su un endpoint
+        # ``.ts.net`` — il bridge di casa — un 401, un 503 o un Tailscale spento
+        # sono tre cose diverse da dire in modo diverso. Su un provider pubblico
+        # la diagnosi è ``None`` e il messaggio originale resta: lì è più utile
+        # di una frase sostitutiva.
+        diagnosis = diagnose_for_user(e, api_base=api_base) if api_base is not None else None
+        if diagnosis is not None:
+            msg = diagnosis.text()
 
         headers = getattr(e, "headers", None)
         if headers is None:
@@ -949,7 +961,7 @@ class OpenAICompatProvider(ResponseParsingMixin, LLMProvider):
                 reasoning_effort, tool_choice,
             )
         except Exception as e:
-            return self._handle_error(e)
+            return self._handle_error(e, api_base=self._base_url())
 
     async def chat_stream(
         self,
@@ -1007,7 +1019,9 @@ class OpenAICompatProvider(ResponseParsingMixin, LLMProvider):
             )
         except Exception as e:
             return self._handle_error(
-                e, partial_content=getattr(e, "partial_content", None),
+                e,
+                partial_content=getattr(e, "partial_content", None),
+                api_base=self._base_url(),
             )
 
     def get_default_model(self) -> str:

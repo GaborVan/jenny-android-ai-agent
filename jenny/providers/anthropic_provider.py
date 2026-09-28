@@ -30,6 +30,7 @@ from jenny.providers.base import (
 )
 from jenny.providers.body_merge import deep_merge
 from jenny.providers.endpoint_budget import is_local_endpoint, request_timeout_s
+from jenny.providers.endpoint_errors import diagnose_for_user
 from jenny.providers.tool_ids import dedupe_tool_ids, unique_tool_ids_in_history
 
 
@@ -95,7 +96,13 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
         return normalized
 
     @classmethod
-    def _handle_error(cls, e: Exception, *, partial_content: str | None = None) -> LLMResponse:
+    def _handle_error(
+        cls,
+        e: Exception,
+        *,
+        partial_content: str | None = None,
+        api_base: str | None = None,
+    ) -> LLMResponse:
         response = getattr(e, "response", None)
         headers = getattr(response, "headers", None)
         # ``.text`` su una response in streaming non ancora letta solleva
@@ -125,6 +132,15 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
         status_code = getattr(e, "status_code", None)
         if status_code is None and response is not None:
             status_code = getattr(response, "status_code", None)
+
+        # A runtime l'errore finisce in chat: su un endpoint ``.ts.net`` (il
+        # bridge di casa) vale una frase invece del payload grezzo; altrove la
+        # diagnosi è ``None`` e il messaggio originale resta. Il ``retry_after``
+        # è già stato estratto dal testo originale qui sopra, quindi riscrivere
+        # ``msg`` non toglie alla retry policy ciò che leggeva.
+        diagnosis = diagnose_for_user(e, api_base=api_base) if api_base is not None else None
+        if diagnosis is not None:
+            msg = diagnosis.text()
 
         should_retry: bool | None = None
         if headers is not None:
@@ -576,7 +592,9 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
             # arrivano così alla retry policy, che altrimenti vedrebbe solo
             # testo e non riproverebbe un 429.
             return self._handle_error(
-                e, partial_content="".join(content_parts) or None,
+                e,
+                partial_content="".join(content_parts) or None,
+                api_base=self.api_base,
             )
         except Exception as exc:
             # Mirrors LLMProvider._safe_chat_stream's generic error message so
@@ -634,7 +652,7 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
                 reasoning_effort, tool_choice,
             )
         except Exception as e:
-            return self._handle_error(e)
+            return self._handle_error(e, api_base=self.api_base)
 
     async def chat_stream(
         self,
