@@ -92,7 +92,7 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for contribution flow and PR guidelin
 
 - Python 3.11+, asyncio throughout.
 - Line length: 100.
-- Linting: `ruff` with rules E, F, I, N, W (E501 ignored).
+- Linting: `ruff` with rules E, F, I, N, W, B, C4 (E501 ignored).
 - pytest with `asyncio_mode = "auto"`.
 - Language convention: docstrings/comments in Italian for new code; inherited upstream code keeps English — do not translate existing text. Identifiers, log messages and commit-facing strings: English. User-facing WebUI strings are localized via i18n JSON files (`jenny/templates/ui/assets/i18n/{it,en}.json`), not hardcoded.
 

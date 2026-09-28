@@ -235,7 +235,7 @@ Config: no dedicated toggle (always registered) — but **subagent-only** in the
 
 ## 4. Device
 
-`get_location` is Android-only — it needs the platform location bridge. `ui_view` is not gated on Android as such: it registers whenever a WebUI query service exists, which in the normal Android runtime is always, but the condition is the service, not the platform. Both are available to the orchestrator.
+`get_location` is Android-only — it needs the platform location bridge. `ui_view` is not gated on Android as such: it registers whenever a WebUI query service exists, which in the normal Android runtime is always, but the condition is the service, not the platform. `speak`/`stop_speaking` are Android-only too, and gated on their own config toggle. All are available to the orchestrator.
 
 ### get_location
 
@@ -258,6 +258,20 @@ A **pull** model for letting Jenny see the screen: there is no ambient screen ac
 - HTML returned is capped at 48 KB per block (view HTML and app HTML each capped separately).
 
 Config: no dedicated toggle — it registers whenever the underlying query service exists (the normal runtime always has it).
+
+### speak / stop_speaking
+
+Voice **output**. `speak` makes the phone read text aloud through the system text-to-speech engine; `stop_speaking` cuts off whatever is being spoken right now.
+
+- `speak` reads the `text` you give it **verbatim** — it is not a summariser. Pass a spoken-friendly version of a long answer rather than the written one; anything over 4000 characters is refused (`text_too_long`) instead of being read in full.
+- Optional `language` is a BCP-47 tag (`uk-UA`, `it-IT`, `en-US`); empty or omitted uses the device/engine default language. An unsupported tag returns `language_not_supported`.
+- Optional `rate` runs from 0.5 (slow) to 2.0 (fast), default 1.0; values outside the range are clamped.
+- `stop_speaking` takes no parameters, and stopping an idle engine is not an error.
+- Nothing leaves the device and no permission is involved: synthesis happens locally with whatever TTS engine is installed. This is the same `TextToSpeech` engine the chat bubble's read-aloud button uses.
+- If no usable engine exists on the device the call returns `{"ok":false,"error":"tts_unavailable"}` with a hint naming the setting to fix. That failure is not transient, and the tool description tells the model not to retry it in a loop.
+- Available to the orchestrator and to subagents.
+
+Config: `tools.tts.enable` (default `true`). There is no Settings-screen switch, so it is `config.json`-only. The length and rate limits are constants in `jenny/runtime/tts.py`, not config keys.
 
 ---
 
@@ -594,6 +608,7 @@ Settings → Tools in the WebUI governs exactly two things, and SSH gets a secti
 |---|---|---|
 | Web search (engine, max results, timeout, fetch max chars) | Yes — Settings → Tools → Web Search | `tools.androidWeb.*` |
 | Location sharing | Yes — Settings → Tools → Location | `tools.location.enable` |
+| Voice output (`speak`, `stop_speaking`) | No | `tools.tts.enable` |
 | SSH access (on/off, hosts, keys, fingerprints) | Yes — Settings → SSH (its own section) | `tools.ssh.enable`, `tools.ssh.hosts` |
 | File tools (read/write/edit/patch/list/find/grep) | No | `tools.file.enable` |
 | Python execution | No | `tools.pythonExec.enable` (+ timeout, output cap, module lists) |

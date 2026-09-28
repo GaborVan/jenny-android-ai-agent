@@ -197,9 +197,14 @@ Collected in one place rather than scattered, so you can judge before installing
 **Pre-release prototype.** It works, it's been my daily driver for months, and it has rough
 edges — onboarding most of all, which is exactly where feedback is worth most.
 
-Not promised, roughly in order: measured battery numbers · voice in and out · a credential
-store so mini-apps can reach authenticated servers · the agent operating other apps on the
-phone · richer system surfaces.
+Not promised, roughly in order: measured battery numbers · voice **input**, and a spoken loop
+that doesn't need an explicit tool call · a credential store so mini-apps can reach
+authenticated servers · the agent operating other apps on the phone · richer system surfaces.
+
+Voice *output* is no longer on that list: the agent can read a reply aloud with the `speak`
+tool, through the phone's own text-to-speech engine (nothing leaves the device, no permission
+involved). It still takes a tool call, though — this is not a conversation you can simply talk
+to.
 
 ## Contributing
 

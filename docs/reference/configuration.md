@@ -240,6 +240,14 @@ Defaults — allowed: `os`, `sys`, `pathlib`, `json`, `re`, `math`, `datetime`, 
 
 See [Location](../using/location.md).
 
+### tools.tts
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `tools.tts.enable` | bool | `true` | Registers `speak` and `stop_speaking`, which read text aloud through the system Android text-to-speech engine. Nothing leaves the device and no permission is involved; an unsupported language or a missing engine is reported as a tool error, not a crash. There is no Settings-screen switch for it. |
+
+The length cap (4000 characters) and the rate range (0.5–2.0) are constants in `jenny/runtime/tts.py`, not config keys. See [Tools](../reference/tools.md).
+
 ### tools.ssh
 
 Access to remote machines. Both gates are closed by default and **both are necessary**: this is the only capability that acts on a computer other than the phone.
