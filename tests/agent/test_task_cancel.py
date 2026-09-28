@@ -19,7 +19,7 @@ def _sub_spec(task: str = "do task", label: str = "label", **kw):
     """Spec minimale per invocare ``_run_subagent`` direttamente."""
     from jenny.agent.subagent import SubagentSpec
 
-    defaults = dict(origin_channel="test", origin_chat_id="c1")
+    defaults = {"origin_channel": "test", "origin_chat_id": "c1"}
     defaults.update(kw)
     return SubagentSpec(task=task, label=label, **defaults)
 

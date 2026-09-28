@@ -32,7 +32,9 @@ def test_camel_case_aliases_load():
 def test_bounds_enforced():
     import pytest
 
-    with pytest.raises(Exception):
+    from jenny.pydantic_compat import ValidationError
+
+    with pytest.raises(ValidationError):
         LocationConfig(telegram_ttl_s=1)  # < 60
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         LocationConfig(fresh_timeout_s=999)  # > 60

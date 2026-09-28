@@ -289,14 +289,14 @@ def _request(path: str, token: str | None = _SECRET) -> WsRequest:
 
 
 def _router(**overrides: Any) -> WebUISettingsRouter:
-    kwargs: dict[str, Any] = dict(
-        bus=MagicMock(),
-        logger=MagicMock(),
-        check_api_token=lambda request: check_api_secret(request.headers, request.path, _SECRET),
-        parse_query=parse_query,
-        json_response=http_json_response,
-        error_response=http_error,
-    )
+    kwargs: dict[str, Any] = {
+        "bus": MagicMock(),
+        "logger": MagicMock(),
+        "check_api_token": lambda request: check_api_secret(request.headers, request.path, _SECRET),
+        "parse_query": parse_query,
+        "json_response": http_json_response,
+        "error_response": http_error,
+    }
     kwargs.update(overrides)
     return WebUISettingsRouter(**kwargs)
 

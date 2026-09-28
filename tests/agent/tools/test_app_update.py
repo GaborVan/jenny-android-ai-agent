@@ -32,7 +32,10 @@ _INFO = UpdateInfo(
 )
 
 
-def _ctx(*, android: Any = object()) -> Any:
+_ANY_ANDROID: Any = object()
+
+
+def _ctx(*, android: Any = _ANY_ANDROID) -> Any:
     return SimpleNamespace(android_context=android, config=SimpleNamespace())
 
 

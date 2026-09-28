@@ -201,7 +201,7 @@ async def test_a_raising_cycle_releases_the_guard(tmp_path: Path) -> None:
     # ``sessions_dir`` non è un path: ``prune_dream_sessions`` esplode.
     agent.sessions = SimpleNamespace(sessions_dir=None)
 
-    with pytest.raises(Exception):
+    with pytest.raises(AttributeError):
         await dispatcher.dispatch(_DREAM_JOB)
 
     assert not dream_cycle._CYCLE_IN_FLIGHT

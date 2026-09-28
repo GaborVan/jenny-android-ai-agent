@@ -444,14 +444,14 @@ class LLMProvider(ABC):
                 await on_stream_recover()
             has_streamed_content = False
 
-        kw: dict[str, Any] = dict(
-            messages=messages, tools=tools, model=model,
-            max_tokens=max_tokens, temperature=temperature,
-            reasoning_effort=reasoning_effort, tool_choice=tool_choice,
-            on_content_delta=_tracking_delta if on_content_delta is not None else None,
-            on_thinking_delta=on_thinking_delta,
-            on_tool_call_delta=on_tool_call_delta,
-        )
+        kw: dict[str, Any] = {
+            "messages": messages, "tools": tools, "model": model,
+            "max_tokens": max_tokens, "temperature": temperature,
+            "reasoning_effort": reasoning_effort, "tool_choice": tool_choice,
+            "on_content_delta": _tracking_delta if on_content_delta is not None else None,
+            "on_thinking_delta": on_thinking_delta,
+            "on_tool_call_delta": on_tool_call_delta,
+        }
         response = await self._run_with_retry(
             self._safe_chat_stream,
             kw,
@@ -497,11 +497,11 @@ class LLMProvider(ABC):
         if reasoning_effort is self._SENTINEL:
             reasoning_effort = self.generation.reasoning_effort
 
-        kw: dict[str, Any] = dict(
-            messages=messages, tools=tools, model=model,
-            max_tokens=max_tokens, temperature=temperature,
-            reasoning_effort=reasoning_effort, tool_choice=tool_choice,
-        )
+        kw: dict[str, Any] = {
+            "messages": messages, "tools": tools, "model": model,
+            "max_tokens": max_tokens, "temperature": temperature,
+            "reasoning_effort": reasoning_effort, "tool_choice": tool_choice,
+        }
         return await self._run_with_retry(
             self._safe_chat,
             kw,

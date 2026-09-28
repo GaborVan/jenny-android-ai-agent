@@ -389,7 +389,7 @@ def test_the_boot_does_not_stack_a_twin_of_the_initial_view() -> None:
     body = _init_body(_app())
     marks = [m.start() for m in re.finditer(r"this\.replaceNav\(this\._navStateFor\(", body)]
     assert marks, "il boot non riscrive più la entry iniziale"
-    switches = [m for m in re.finditer(r"this\.switchMode\((\w+), (\w+)\)", body)]
+    switches = list(re.finditer(r"this\.switchMode\((\w+), (\w+)\)", body))
     assert switches, "il boot non entra più in nessuna vista"
     boot_switch = switches[-1]
     assert boot_switch.group(2) == "false", (

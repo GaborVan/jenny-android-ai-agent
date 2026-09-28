@@ -32,17 +32,17 @@ from jenny.session.turn_continuation import (
 
 
 def _ctx(**overrides):
-    base = dict(
-        session=SimpleNamespace(metadata={GOAL_STATE_KEY: {"status": "active", "objective": "x"}}),
-        msg=InboundMessage(channel="websocket", sender_id="u1", chat_id="c1", content="go"),
-        session_key="websocket:c1",
-        pending_queue=asyncio.Queue(),
-        stop_reason="max_iterations",
-        final_content="paused",
-        all_messages=[],
-        suppress_response=False,
-        visible_run_started_at=None,
-    )
+    base = {
+        "session": SimpleNamespace(metadata={GOAL_STATE_KEY: {"status": "active", "objective": "x"}}),
+        "msg": InboundMessage(channel="websocket", sender_id="u1", chat_id="c1", content="go"),
+        "session_key": "websocket:c1",
+        "pending_queue": asyncio.Queue(),
+        "stop_reason": "max_iterations",
+        "final_content": "paused",
+        "all_messages": [],
+        "suppress_response": False,
+        "visible_run_started_at": None,
+    }
     base.update(overrides)
     return SimpleNamespace(**base)
 

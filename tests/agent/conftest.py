@@ -60,15 +60,15 @@ def make_loop(
     if provider is None:
         provider = make_provider(default_model=model)
 
-    kwargs = dict(
-        bus=bus,
-        provider=provider,
-        workspace=tmp_path,
-        model=model,
-        context_window_tokens=context_window_tokens,
-        session_ttl_minutes=session_ttl_minutes,
-        max_messages=max_messages,
-    )
+    kwargs = {
+        "bus": bus,
+        "provider": provider,
+        "workspace": tmp_path,
+        "model": model,
+        "context_window_tokens": context_window_tokens,
+        "session_ttl_minutes": session_ttl_minutes,
+        "max_messages": max_messages,
+    }
     if tools_config is not None:
         kwargs["tools_config"] = tools_config
     if model_presets is not None:

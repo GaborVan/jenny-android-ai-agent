@@ -125,7 +125,7 @@ def _collect_validators(
     after_validators: list[Any],
 ) -> None:
     """Scan namespace for decorated validators and register them."""
-    for attr_name, attr_value in list(namespace.items()):
+    for _attr_name, attr_value in list(namespace.items()):
         if not (callable(attr_value) or isinstance(attr_value, classmethod)):
             continue
         fn = _unwrap_function(attr_value)
@@ -525,7 +525,7 @@ class BaseModel(metaclass=_ModelMeta):
         instance = type(self).model_validate(data, _internal=True)
         for field_name in type(self).model_fields:
             object.__setattr__(self, field_name, getattr(instance, field_name))
-        object.__setattr__(self, "__pydantic_extra__", getattr(instance, "__pydantic_extra__"))
+        object.__setattr__(self, "__pydantic_extra__", instance.__pydantic_extra__)
 
     def __getattr__(self, name: str) -> Any:
         if name == "__pydantic_extra__":

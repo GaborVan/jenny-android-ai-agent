@@ -267,7 +267,7 @@ def _unknown_key_paths(raw: Any, dumped: Any, prefix: str = "") -> list[str]:
         if isinstance(raw_value, dict):
             unknown.extend(_unknown_key_paths(raw_value, dumped[key], f"{where}."))
         elif isinstance(raw_value, list) and isinstance(dumped.get(key), list):
-            for i, (raw_item, dumped_item) in enumerate(zip(raw_value, dumped[key])):
+            for i, (raw_item, dumped_item) in enumerate(zip(raw_value, dumped[key], strict=False)):
                 unknown.extend(_unknown_key_paths(raw_item, dumped_item, f"{where}[{i}]."))
     return unknown
 
@@ -333,7 +333,7 @@ def _resolve_in_place(obj: Any) -> Any:
         return resolved if any(resolved[k] is not obj[k] for k in obj) else obj
     if isinstance(obj, list):
         resolved = [_resolve_in_place(v) for v in obj]
-        return resolved if any(nv is not ov for nv, ov in zip(resolved, obj)) else obj
+        return resolved if any(nv is not ov for nv, ov in zip(resolved, obj, strict=True)) else obj
     return obj
 
 

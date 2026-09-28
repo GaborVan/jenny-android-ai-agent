@@ -267,7 +267,7 @@ def test_io_fileio_is_untouched_for_host_code(sandbox) -> None:
     assert stderr == ""
     assert host_io.FileIO(outside / "secret.txt").read() == b"secret"
     assert not hasattr(
-        getattr(host_io.FileIO, "_jenny_real_fileio"), "_jenny_real_fileio"
+        host_io.FileIO._jenny_real_fileio, "_jenny_real_fileio"
     )
 
 

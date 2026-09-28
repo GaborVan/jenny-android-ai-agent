@@ -350,7 +350,7 @@ def test_subagent_result_does_not_create_consecutive_assistant_messages(tmp_path
         current_role="assistant",
     )
 
-    for left, right in zip(messages, messages[1:]):
+    for left, right in zip(messages, messages[1:], strict=False):
         assert not (left.get("role") == right.get("role") == "assistant")
 
 

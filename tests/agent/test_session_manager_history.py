@@ -570,8 +570,8 @@ def test_enforce_file_cap_no_duplicate_archive_in_else_branch():
     # Verify archived messages have NO overlap with retained
     if archive_fn.called:
         archived = archive_fn.call_args.args[0]
-        archived_ids = set(id(m) for m in archived)
-        retained_ids = set(id(m) for m in session.messages)
+        archived_ids = {id(m) for m in archived}
+        retained_ids = {id(m) for m in session.messages}
         assert not archived_ids & retained_ids, (
             f"Duplicate messages in archive and retained: "
             f"overlap contents = {[m['content'] for m in archived if id(m) in retained_ids]}"
@@ -598,12 +598,12 @@ def test_enforce_file_cap_no_message_loss_in_else_branch():
     session.enforce_file_cap(on_archive=archive_fn, limit=6)
 
     # Collect all messages accounted for (retained + archived)
-    accounted = set(id(m) for m in session.messages)
+    accounted = {id(m) for m in session.messages}
     if archive_fn.called:
         for m in archive_fn.call_args.args[0]:
             accounted.add(id(m))
 
-    all_ids = set(id(m) for m in all_messages)
+    all_ids = {id(m) for m in all_messages}
     missing = all_ids - accounted
     assert not missing, (
         f"Lost {len(missing)} message(s) — neither retained nor archived"

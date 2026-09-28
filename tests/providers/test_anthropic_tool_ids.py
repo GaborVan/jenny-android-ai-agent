@@ -236,7 +236,7 @@ async def test_two_large_results_no_longer_collide_on_disk(tmp_path: Path) -> No
     tool_calls = await _stream_tool_calls("call_dup", "call_dup")
     payloads = ["A" * 4000, "B" * 4000]
 
-    for tool_call, payload in zip(tool_calls, payloads):
+    for tool_call, payload in zip(tool_calls, payloads, strict=True):
         maybe_persist_tool_result(
             tmp_path, "unified:default", tool_call.id, payload, max_chars=100,
         )

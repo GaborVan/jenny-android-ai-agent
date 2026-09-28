@@ -47,13 +47,13 @@ RECENT_KEYS = {
 def _manager(tmp_path: Path, **kw) -> SubagentManager:
     provider = MagicMock()
     provider.get_default_model.return_value = "test-model"
-    defaults = dict(
-        provider=provider,
-        workspace=tmp_path,
-        bus=MessageBus(),
-        max_tool_result_chars=16_000,
-        max_concurrent_subagents=8,
-    )
+    defaults = {
+        "provider": provider,
+        "workspace": tmp_path,
+        "bus": MessageBus(),
+        "max_tool_result_chars": 16_000,
+        "max_concurrent_subagents": 8,
+    }
     defaults.update(kw)
     return SubagentManager(**defaults)
 

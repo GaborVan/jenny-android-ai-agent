@@ -317,7 +317,7 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
                 name=block.get("name", ""),
                 arguments=block.get("input", {}),
             )
-            for block, unique_id in zip(tool_uses, cls._unique_call_ids(tool_uses))
+            for block, unique_id in zip(tool_uses, cls._unique_call_ids(tool_uses), strict=True)
         ]
 
         stop_reason = response.get("stop_reason") or "stop"
@@ -603,7 +603,7 @@ class AnthropicProvider(AnthropicConversionMixin, LLMProvider):
                 name=buf.get("name", ""),
                 arguments=parse_tool_arguments(buf.get("arguments", "{}")),
             )
-            for buf, unique_id in zip(bufs, self._unique_call_ids(bufs))
+            for buf, unique_id in zip(bufs, self._unique_call_ids(bufs), strict=True)
         ]
         return LLMResponse(
             content="".join(content_parts) or None,

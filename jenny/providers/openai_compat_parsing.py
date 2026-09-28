@@ -189,7 +189,7 @@ class ResponseParsingMixin:
             replacement=lambda _raw, _idx: _short_tool_id(),
         )
         parsed_tool_calls = []
-        for tc, unique_id in zip(raw_tool_calls, unique_ids):
+        for tc, unique_id in zip(raw_tool_calls, unique_ids, strict=True):
             tc_map = self._maybe_mapping(tc) or {}
             fn = self._maybe_mapping(tc_map.get("function")) or {}
             args = parse_tool_arguments(fn.get("arguments", {}))
@@ -303,6 +303,7 @@ class ResponseParsingMixin:
                 [b["id"] for b in bufs],
                 replacement=lambda _raw, _idx: _short_tool_id(),
             ),
+            strict=True,
         ):
             buf["id"] = unique_id
 

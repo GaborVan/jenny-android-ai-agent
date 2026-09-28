@@ -1651,8 +1651,8 @@ class PythonNamespace:
                 raise ImportError(f"Module '{name}' is not in the allowed modules list")
         try:
             mod = importlib.import_module(name)
-        except ImportError:
-            raise ImportError(f"Module '{name}' is not available on this platform (blocked or missing)")
+        except ImportError as exc:
+            raise ImportError(f"Module '{name}' is not available on this platform (blocked or missing)") from exc
         if base == "sys":
             # Never hand out the real `sys` module: it carries the
             # unfiltered `sys.modules` table, which would let guarded code

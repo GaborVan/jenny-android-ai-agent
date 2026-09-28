@@ -139,7 +139,7 @@ def test_coordination_flags_are_single_source_for_both_lists() -> None:
 
     assert set(_NON_FINAL_METADATA_FLAGS) == set(COORDINATION_FLAGS) | {"_mirror"}
     # Telegram deriva letteralmente dal core, senza ``_mirror``.
-    sample = {flag: True for flag in COORDINATION_FLAGS}
+    sample = dict.fromkeys(COORDINATION_FLAGS, True)
     for flag in COORDINATION_FLAGS:
         assert TelegramChannel._is_webui_only_event({flag: True}) is True
     assert TelegramChannel._is_webui_only_event(sample) is True

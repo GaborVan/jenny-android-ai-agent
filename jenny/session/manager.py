@@ -258,7 +258,7 @@ class Session:
         # Compute actually-dropped messages using identity comparison so that
         # even when retained is a non-contiguous slice of original (the else
         # branch above), we never duplicate or lose messages.
-        retained_ids = set(id(m) for m in retained)
+        retained_ids = {id(m) for m in retained}
         dropped = [m for m in original if id(m) not in retained_ids]
 
         # Count how many dropped messages were in the already-consolidated

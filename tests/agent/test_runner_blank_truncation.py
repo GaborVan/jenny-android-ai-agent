@@ -36,15 +36,15 @@ def _make_spec(**overrides):
 
     tools = MagicMock()
     tools.get_definitions.return_value = []
-    kwargs = dict(
-        initial_messages=[{"role": "user", "content": "make an animated dice app"}],
-        tools=tools,
-        model="test-model",
-        max_iterations=6,
-        max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
-        max_tokens=8192,
-        context_window_tokens=65536,
-    )
+    kwargs = {
+        "initial_messages": [{"role": "user", "content": "make an animated dice app"}],
+        "tools": tools,
+        "model": "test-model",
+        "max_iterations": 6,
+        "max_tool_result_chars": _MAX_TOOL_RESULT_CHARS,
+        "max_tokens": 8192,
+        "context_window_tokens": 65536,
+    }
     kwargs.update(overrides)
     return AgentRunSpec(**kwargs)
 

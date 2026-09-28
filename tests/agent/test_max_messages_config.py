@@ -208,6 +208,7 @@ class TestSchemaConfig:
 
     def test_schema_rejects_negative(self) -> None:
         from jenny.config.schema import AgentDefaults
+        from jenny.pydantic_compat import ValidationError
 
-        with pytest.raises(Exception):  # Pydantic validation error
+        with pytest.raises(ValidationError):
             AgentDefaults(max_messages=-1)

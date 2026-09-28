@@ -6,6 +6,7 @@ import pytest
 
 from jenny.config.schema import Config, ToolsConfig
 from jenny.config.tool_schemas import SshConfig, SshHostConfig
+from jenny.pydantic_compat import ValidationError
 
 
 def test_defaults_are_closed():
@@ -52,7 +53,7 @@ def test_password_host_round_trips():
 @pytest.mark.parametrize("auth", ["", "totp", "keyboard-interactive", "KEY"])
 def test_unknown_auth_mode_is_rejected(auth: str):
     """Un modo sconosciuto deve fallire subito, non silenziosamente cadere su key."""
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         SshHostConfig(alias="x", host="h", username="u", auth=auth)
 
 
@@ -145,11 +146,11 @@ def test_camel_case_aliases_load():
     ],
 )
 def test_bounds_enforced(field: str, value: object):
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         SshConfig(**{field: value})
 
 
 @pytest.mark.parametrize("port", [0, 65536])
 def test_host_port_bounds_enforced(port: int):
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         SshHostConfig(alias="x", host="h", username="u", port=port)

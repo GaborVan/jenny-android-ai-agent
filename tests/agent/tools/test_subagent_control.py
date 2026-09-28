@@ -47,17 +47,17 @@ ORCHESTRATOR_LOSES = {
 
 
 def _ctx(tmp_path: Path, **kw: Any) -> ToolContext:
-    defaults: dict[str, Any] = dict(
-        config=ToolsConfig(),
-        workspace=str(tmp_path),
-        file_states=FileStates(),
-        bus=MessageBus(),
-        subagent_manager=MagicMock(),
-        cron_service=MagicMock(),
-        sessions=MagicMock(),
-        ui_query_service=MagicMock(),
-        android_context=object(),
-    )
+    defaults: dict[str, Any] = {
+        "config": ToolsConfig(),
+        "workspace": str(tmp_path),
+        "file_states": FileStates(),
+        "bus": MessageBus(),
+        "subagent_manager": MagicMock(),
+        "cron_service": MagicMock(),
+        "sessions": MagicMock(),
+        "ui_query_service": MagicMock(),
+        "android_context": object(),
+    }
     defaults.update(kw)
     return ToolContext(**defaults)
 

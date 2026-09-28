@@ -15,7 +15,7 @@ _MAX_TOOL_RESULT_CHARS = AgentDefaults().max_tool_result_chars
 def _spec(task: str = "do task", label: str = "label", **kw):
     from jenny.agent.subagent import SubagentSpec
 
-    defaults = dict(origin_channel="test", origin_chat_id="c1")
+    defaults = {"origin_channel": "test", "origin_chat_id": "c1"}
     defaults.update(kw)
     return SubagentSpec(task=task, label=label, **defaults)
 

@@ -16,7 +16,7 @@ from jenny.bus.queue import MessageBus
 
 
 def _inbound(**overrides) -> InboundMessage:
-    defaults = dict(channel="websocket", sender_id="u1", chat_id="c1", content="ciao")
+    defaults = {"channel": "websocket", "sender_id": "u1", "chat_id": "c1", "content": "ciao"}
     defaults.update(overrides)
     return InboundMessage(**defaults)
 
