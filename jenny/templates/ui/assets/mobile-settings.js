@@ -2498,9 +2498,12 @@ export class SettingsController {
   }
 
   /* keepStoredKey: il provider ha già una chiave salvata, quindi un campo
-     vuoto significa "lasciala com'è" e non va segnalato come errore. */
-  async _saveProvider(name, format, apiKey, apiBase, { keepStoredKey = false } = {}) {
-    if (!name || (!apiKey && !keepStoredKey)) {
+     vuoto significa "lasciala com'è" e non va segnalato come errore.
+     tier: un profilo ``local``/``subscription`` non ha una chiave, ed è lui a
+     dire al backend che non è un errore averla lasciata vuota. */
+  async _saveProvider(name, format, apiKey, apiBase, { keepStoredKey = false, tier = 'api' } = {}) {
+    const keyOptional = keepStoredKey || tier !== 'api';
+    if (!name || (!apiKey && !keyOptional)) {
       showToast(i18n.t('settings.nameAndKeyRequired'), 'error');
       return;
     }
@@ -2516,7 +2519,7 @@ export class SettingsController {
     buttons.forEach(b => { b.disabled = true; });
 
     try {
-      await api.updateProvider({ name, format, api_key: apiKey, api_base: apiBase });
+      await api.updateProvider({ name, format, api_key: apiKey, api_base: apiBase, tier });
     } catch (e) {
       showToast(e.message, 'error');
       return;
@@ -2665,6 +2668,10 @@ export class SettingsController {
     const keyPlaceholder = hasStoredKey
       ? existingProvider.api_key_hint
       : i18n.t('settings.apiKeyPlaceholder');
+    // Il tier decide se la chiave è obbligatoria: un endpoint locale o un
+    // bridge di abbonamento non ne hanno una, e pretenderla era l'unico modo
+    // per cui non si potevano salvare dalla UI.
+    const tier = (isEdit && existingProvider.tier) || 'api';
     const dialog = document.createElement('dialog');
     dialog.className = 'oc-dialog';
     dialog.id = 'provider-dialog';
@@ -2698,6 +2705,15 @@ export class SettingsController {
           <input type="text" class="settings-input" id="dlg-api-base" placeholder="https://api.openai.com/v1"
             value="${isEdit ? escapeHtml(existingProvider.api_base || '') : ''}" />
         </div>
+        <div class="settings-field">
+          <label class="settings-label">${i18n.t('settings.providerTier')}</label>
+          <select class="settings-select" id="dlg-provider-tier">
+            <option value="api" ${tier === 'api' ? 'selected' : ''}>${i18n.t('settings.tierApi')}</option>
+            <option value="subscription" ${tier === 'subscription' ? 'selected' : ''}>${i18n.t('settings.tierSubscription')}</option>
+            <option value="local" ${tier === 'local' ? 'selected' : ''}>${i18n.t('settings.tierLocal')}</option>
+          </select>
+          <span class="settings-field-hint">${i18n.t('settings.tierHint')}</span>
+        </div>
         <div class="oc-dialog-buttons" style="margin-top:16px">
           <button class="oc-btn oc-btn-cancel" id="dlg-provider-cancel">${i18n.t('common.cancel')}</button>
           <button class="oc-btn oc-btn-confirm" id="dlg-provider-save">${i18n.t('settings.save')}</button>
@@ -2727,9 +2743,10 @@ export class SettingsController {
       const format = dialog.querySelector('#dlg-provider-format').value;
       const apiKey = dialog.querySelector('#dlg-api-key').value.trim();
       const apiBase = dialog.querySelector('#dlg-api-base').value.trim();
+      const tier = dialog.querySelector('#dlg-provider-tier').value;
       // In modifica il campo vuoto vale sempre "tieni la chiave salvata":
       // il provider esiste già, non serve ridigitarla per cambiare l'URL.
-      this._saveProvider(name, format, apiKey, apiBase, { keepStoredKey: isEdit });
+      this._saveProvider(name, format, apiKey, apiBase, { keepStoredKey: isEdit, tier });
     });
     // Il congedo (Indietro, Esc, catena della shell) passa da un `cancel`
     // annullabile: durante un salvataggio in volo lo si rifiuta, altrimenti il

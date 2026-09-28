@@ -763,6 +763,10 @@ def _provider_list_simple(config: Any = None) -> list[dict[str, Any]]:
             "api_base": p.api_base,
             "configured": bool(p.api_key or p.api_base),
             "api_type": p.api_type,
+            # Come si paga l'endpoint: la UI lo usa per etichettare il profilo
+            # (a consumo / abbonamento / in locale) e per sapere che una api_key
+            # vuota è normale, non un profilo incompleto.
+            "tier": p.tier,
         })
     return result
 
@@ -1106,9 +1110,10 @@ async def update_provider(data: dict[str, Any]) -> dict[str, Any]:
 
     api_key = (data.get("api_key") or "").strip() or None
     api_base = (data.get("api_base") or "").strip() or None
+    tier = (data.get("tier") or "").strip() or None
 
     def _apply(config: Config) -> None:
-        _upsert_provider(config, name, fmt, api_key, api_base)
+        _upsert_provider(config, name, fmt, api_key, api_base, tier)
 
     await store.mutate(_apply)
     return settings_payload()
@@ -1120,6 +1125,7 @@ def _upsert_provider(
     fmt: str,
     api_key: str | None,
     api_base: str | None,
+    tier: str | None = None,
 ) -> None:
     """Inserisce o aggiorna il provider *name* dentro *config*."""
     providers = config.providers.providers
@@ -1134,6 +1140,10 @@ def _upsert_provider(
             if api_key and api_key != _mask_api_key(p.api_key):
                 p.api_key = api_key
             p.api_base = api_base or p.api_base
+            # ``tier`` assente = payload di un client che non lo conosce: si
+            # lascia quello salvato, non lo si riporta al default.
+            if tier in ("api", "subscription", "local"):
+                p.tier = tier
             break
     else:
         from jenny.config.schema import ProviderConfig
@@ -1143,6 +1153,7 @@ def _upsert_provider(
             format=fmt,
             api_key=api_key,
             api_base=api_base,
+            tier=tier if tier in ("api", "subscription", "local") else "api",
         ))
 
     if not config.providers.default:

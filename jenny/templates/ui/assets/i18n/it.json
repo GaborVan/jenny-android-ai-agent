@@ -487,7 +487,12 @@
     "updates": {
       "title": "Aggiornamenti",
       "hint": "Qui l'app controlla GitHub per una versione nuova — premi \"Controlla ora\" quando vuoi, o apri questa sezione dopo una release per trovarla offerta subito."
-    }
+    },
+    "providerTier": "Come si paga",
+    "tierApi": "Chiave API (a consumo)",
+    "tierSubscription": "Bridge di abbonamento (senza chiave)",
+    "tierLocal": "Server locale",
+    "tierHint": "Gli endpoint locali e di abbonamento non richiedono una chiave API."
   },
   "common": {
     "loading": "Caricamento...",

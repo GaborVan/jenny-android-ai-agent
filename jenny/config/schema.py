@@ -482,6 +482,19 @@ class ProviderConfig(Base):
     extra_body: dict[str, Any] | None = None
     extra_query: dict[str, str] | None = None
     api_type: Literal["auto", "chat_completions", "responses"] = "auto"
+    # Come si paga questo endpoint, non come parla. Serve a una cosa sola, ma
+    # vera: un endpoint ``local`` o ``subscription`` non deve *pretendere* una
+    # api_key. Prima l'unico modo di configurare il modello di casa — o un
+    # bridge che espone un abbonamento — era inventarsi una chiave finta, e
+    # chi non lo faceva vedeva il provider rifiutato all'avvio.
+    #
+    # ``api``      : servizio a consumo, con la tua chiave.
+    # ``subscription``: un bridge sul tuo PC che espone un abbonamento
+    #                (Codex/Claude/Gemini CLI) dietro un endpoint
+    #                OpenAI-compatibile.
+    # ``local``    : un modello che gira su una macchina tua (loopback, LAN,
+    #                Tailscale).
+    tier: Literal["api", "subscription", "local"] = "api"
 
 
 class ProvidersConfig(Base):

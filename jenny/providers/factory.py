@@ -20,7 +20,12 @@ def _make_provider_core(config: Config) -> LLMProvider:
     defaults = config.agents.defaults
     model = defaults.model
 
-    if not p.api_key:
+    # Solo un provider a consumo pretende una chiave. ``local`` e
+    # ``subscription`` sono macchine dell'utente (o un bridge che parla per un
+    # abbonamento): se una chiave c'è si usa, se non c'è non è un errore —
+    # chiedere all'utente di inventarne una finta era l'unico modo di
+    # configurarli prima di ``ProviderConfig.tier``.
+    if not p.api_key and p.tier == "api":
         raise RuntimeError(f"Provider '{p.name}': api_key is required.")
 
     if backend == "anthropic":

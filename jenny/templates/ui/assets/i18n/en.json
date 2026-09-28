@@ -487,7 +487,12 @@
     "updates": {
       "title": "Updates",
       "hint": "The app checks GitHub for a new version here — tap \"Check now\" whenever you want, or open this section after a release to see it offered right away."
-    }
+    },
+    "providerTier": "How it's paid",
+    "tierApi": "API key (pay per use)",
+    "tierSubscription": "Subscription bridge (no key)",
+    "tierLocal": "Local model server",
+    "tierHint": "Local and subscription endpoints don't need an API key."
   },
   "common": {
     "loading": "Loading...",
