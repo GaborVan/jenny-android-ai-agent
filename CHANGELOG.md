@@ -10,6 +10,17 @@ carries the reasoning that outlives them.
 
 ### Added
 
+- **The home bridge is configured out of the box.** A fresh install now starts
+  with a single provider — the Tailscale bridge, `tier: local`, no key — already
+  saved and already active, so the first message does not require pasting a long
+  `.ts.net` URL into Settings by hand. The seed runs once, in
+  `config/bootstrap.py`, and only when the config has never carried a
+  `providers` key: a config that already has providers is left untouched, and a
+  provider the user deleted is never resurrected (deleting leaves the key with
+  an empty list, and that is a decision, not a gap). The seeded profile is an
+  ordinary `ProviderConfig` — editable and deletable like any other. Covered by
+  `tests/config/test_default_provider_seed.py`, including an end-to-end
+  `make_provider` call and a check that the seeded URL matches the UI preset.
 - **Voice input.** A Telegram voice note is now transcribed on the phone and
   delivered to the agent as text, with the audio still attached, and a new
   `transcribe_audio` tool does the same for an audio file already in the
@@ -61,6 +72,17 @@ carries the reasoning that outlives them.
 
 ### Changed
 
+- **CI signs the APK with the release key, so updates install over the previous
+  build.** Every CI run used to mint a fresh debug keystore, and Android refuses
+  an update whose signer differs — which is why each release required an
+  uninstall first. `build-apk.yml` now materialises the release keystore from
+  the `KEYSTORE_BASE64` secret into the runner's temp dir and builds
+  `assembleRelease` when the four signing secrets are present, falling back to
+  the debug build when they are not, so a fork without secrets still produces an
+  APK instead of failing. `android/app/build.gradle.kts` already read the
+  credentials from `JENNY_KEYSTORE_*`; the workflow is what now supplies them.
+  The signing certificate is reused, not regenerated: an update only installs
+  over builds carrying the same certificate.
 - **Privacy documentation updated for voice.** Recognising speech sends the
   audio to whichever engine the phone has installed, and that engine may upload
   it: [Privacy](docs/internals/privacy.md) now lists it as the sixth data

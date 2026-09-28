@@ -30,13 +30,64 @@ jobs:
       - name: Grant gradlew exec
         run: chmod +x android/gradlew
 
-      - name: Build debug APK
+      # Signing credentials are optional BY DESIGN: a fork without secrets has
+      # to keep producing a debug APK, not fail. `secrets` is not available in
+      # a step `if`, so the decision is made once here and the build steps
+      # branch on this output instead.
+      - name: Check signing secrets
+        id: signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ] && [ -n "$KEYSTORE_PASSWORD" ] &&
+             [ -n "$KEY_ALIAS" ] && [ -n "$KEY_PASSWORD" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The keystore itself never lives in the repo: it arrives base64-encoded
+      # in a secret and is materialised in the runner's temp dir, which is
+      # discarded with the job.
+      - name: Decode signing keystore
+        if: steps.signing.outputs.available == 'true'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/jenny-release.p12"
+          chmod 600 "$RUNNER_TEMP/jenny-release.p12"
+
+      # Release APK, signed with our own key: same signer as the previous
+      # published builds, so Android installs it *over* them. This is the whole
+      # point — a debug key regenerated per run forces an uninstall every time.
+      - name: Build signed release APK
+        if: steps.signing.outputs.available == 'true'
+        working-directory: android
+        env:
+          JENNY_KEYSTORE_PATH: ${{ runner.temp }}/jenny-release.p12
+          JENNY_KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          JENNY_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          JENNY_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: ./gradlew :app:assembleRelease --no-daemon
+
+      - name: Build debug APK (no signing secrets)
+        if: steps.signing.outputs.available != 'true'
         working-directory: android
         run: ./gradlew :app:assembleDebug --no-daemon
+
+      - name: Verify APK signature
+        if: steps.signing.outputs.available == 'true'
+        run: |
+          APK=$(ls android/app/build/outputs/apk/release/*.apk | head -n1)
+          echo "Verifying $APK"
+          "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --print-certs "$APK"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: jenny-debug-apk
-          path: android/app/build/outputs/apk/debug/*.apk
+          name: jenny-apk
+          path: android/app/build/outputs/apk/**/*.apk
           if-no-files-found: error
