@@ -36,6 +36,10 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+          # Il download delle dipendenze e' la voce piu' lenta di questo job e le
+          # dipendenze cambiano di rado: setup-python cachea la cache delle wheel
+          # di pip, con l'hash dei file di dipendenze come chiave.
+          cache: pip
       # Node 24, not 20: Node 20 went end-of-life in April 2026. It only has to
       # run the pinned pyright below, which is version-pinned separately.
       - uses: actions/setup-node@v7
@@ -50,6 +54,12 @@ jobs:
       - run: npx --yes pyright@1.1.411 jenny/bus jenny/command jenny/runtime jenny/session
       # NON-BLOCKING visibility: full perimeter, surfaces residual errors without failing CI.
       - run: npx --yes pyright@1.1.411 || true
+      # pip-audit: le CVE note nelle dipendenze *installate* sono un cancello, non
+      # un avviso. Gira qui e non nel job `test` perche' quello installa anche i
+      # backend di solo sviluppo (`cryptography`, `asyncssh`, mai nell'APK): qui
+      # l'audit guarda esattamente il set runtime che l'app si porta dietro.
+      - run: pip install pip-audit
+      - run: pip-audit --skip-editable
 
   test:
     runs-on: ubuntu-latest
@@ -64,6 +74,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
       # Node serve a QUESTO job, non solo al lint: una ventina di suite della
       # WebUI eseguono il JS reale con `node` e si SALTANO se manca. Passavano
       # solo perche' l'immagine ubuntu-latest lo include di suo — il giorno che
@@ -109,3 +120,26 @@ jobs:
       # vederlo in locale: `pytest -q --cov=jenny`, sapendo che quelle prove
       # della sandbox falliranno e che il motivo è questo.
       - run: pytest -q
+
+  # Copertura: un job SEPARATO e non bloccante, non un `--cov` aggiunto al job
+  # `test`. La ragione sta nel commento lungo sopra `pytest -q` di quel job e
+  # vale ancora: la misura perturba cio' che misura non appena tocca le prove
+  # della sandbox di `python_exec`. Qui la misura gira su un sottoinsieme che
+  # quella sandbox non la esercita, e `continue-on-error` tiene il numero fuori
+  # dal cancello: e' una cifra da guardare, non una soglia da superare. Il job
+  # `test` resta l'unico che dice verde o rosso.
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e .
+      - run: pip install pytest pytest-asyncio pytest-cov
+      - run: >
+          pytest -q --cov=jenny --cov-report=term-missing
+          tests/config tests/utils tests/providers tests/session
