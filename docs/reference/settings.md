@@ -57,7 +57,7 @@ Below the catalog, "API keys" is a plain credential keychain — it does not ind
 - A masked key hint: the first 4 and last 4 characters of the stored key, joined with `...` (e.g. `sk-a...j8f9`) — the full key is never sent back to the browser
 - Edit and Delete actions
 
-**Add provider** opens a dialog with Name, Format, API Key, and Base URL. The base URL placeholder switches automatically with the format (`https://api.openai.com/v1` for OpenAI-compatible, `https://api.anthropic.com` for Anthropic).
+**Add provider** opens a dialog with Name, Format, API Key, Base URL, and **How it's paid**. The base URL placeholder switches automatically with the format (`https://api.openai.com/v1` for OpenAI-compatible, `https://api.anthropic.com` for Anthropic). How it's paid is the provider's `tier`: **API key (pay per use)** is the default and requires the key; **Subscription bridge (no key)** and **Local model server** do not, so the save button no longer refuses a keyless endpoint — see [Provider tiers](./providers.md#provider-tiers-pay-per-use-subscription-local).
 
 The UI refuses to delete the last remaining provider ("Cannot delete the last provider") — but this check is client-side only; there is no equivalent guard on the backend, so this protection exists only inside the WebUI, not as a data-level invariant.
 

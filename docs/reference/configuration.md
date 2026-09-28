@@ -183,6 +183,29 @@ One validation to be aware of: setting `host` to `0.0.0.0` or `::` **with an emp
 
 Pairing, the throttle, and the asymmetric view between Telegram and the WebUI: [Telegram bridge](../using/telegram.md).
 
+## voice
+
+Speech **input**: turning an incoming voice note into text, and the
+`transcribe_audio` tool that does the same for an audio file already in the
+workspace. The recognition engine is the one installed on the phone (Android's
+`SpeechRecognizer`) — Jenny ships no model, no key, and no service of its own.
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `voice.enable` | bool | `true` | Master switch. With it off, no transcription is attempted anywhere: a Telegram voice note is delivered to the agent as an audio file (the placeholder text it always had), and the `transcribe_audio` tool is not registered. |
+| `voice.prefer_offline` | bool | `false` | Asks the recognition service to stay on-device. It is a **request, not a guarantee**: the decision belongs to the engine, and with no offline model installed asking for one means not recognising at all. Set it to `true` if you would rather have no transcription than one that crosses the network. |
+
+Who actually hears the audio is the installed engine — usually Google's — and
+that engine may upload it. This is the one place where the switch matters most,
+so it is spelled out in [Privacy](../internals/privacy.md). Speech **output**
+(`speak`, `stop_speaking`) is a different, entirely local path, gated by
+`tools.tts.enable`.
+
+Two shapes of voice input are deliberately different. A Telegram voice note is
+transcribed by the channel while it downloads the file, so the agent receives
+text plus the audio attachment. In the app, the microphone button dictates
+straight into the composer (the WebView bridge), which never involves a file.
+
 ## drive_sync
 
 Cloud sync of the agent's memory files (`SOUL.md`, `USER.md`, and everything under `memory/`) between two devices through a Google Drive folder the user picks once (SAF, no storage permission). When the chosen folder is named **Apex-Pamyat**, a second, shared scope also syncs `<workspace>/shared/**` (profile/knowledge/notes) against the folder's real subfolders — see [Shared memory across devices](../using/shared-memory.md). Only a kill-switch lives in config: the chosen folder URI is stored in Android SharedPreferences and the sync state in `<workspace>/.jenny/drive_sync_state.json`.

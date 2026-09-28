@@ -273,6 +273,18 @@ Voice **output**. `speak` makes the phone read text aloud through the system tex
 
 Config: `tools.tts.enable` (default `true`). There is no Settings-screen switch, so it is `config.json`-only. The length and rate limits are constants in `jenny/runtime/tts.py`, not config keys.
 
+### transcribe_audio
+
+Speech **input** for a file that is already in the workspace: a voice note saved in `downloads/`, an audio file the user uploaded, a recording the agent was pointed at. It decodes the audio on the device and hands it to the phone's speech-recognition engine.
+
+- One parameter, `path` (required), resolved with the same workspace policy as the file tools — the agent can only transcribe files it is already allowed to read. An optional `language` tag (BCP-47) overrides the language the engine picks by itself.
+- Any format the phone can decode: ogg/opus, m4a, mp3, wav, amr, and the audio track of a video. A file whose extension is not audio is refused before the decoder sees it (`unsupported_audio`).
+- It reads a **file**. To dictate live, the user taps the microphone in the composer — that is a different bridge and it never involves a file.
+- Two failure modes are structural, not transient, and the tool says so: no recognition service installed (`stt_unavailable`), and Android below 13 (`stt_file_source_unsupported` — transcribing a file needs `EXTRA_AUDIO_SOURCE`). Do not retry either in a loop.
+- The audio goes to whichever engine the phone uses, and that engine may upload it. `voice.prefer_offline: true` asks it to stay on-device. The transcript itself never leaves the phone except as part of the conversation.
+
+Config: `voice.enable` (default `true`) — with it off the tool does not register at all — and `voice.prefer_offline` (default `false`). Both are `config.json`-only. A **Telegram voice note** is not this tool: the channel transcribes it while downloading, so the agent receives text plus the audio without asking.
+
 ---
 
 ## 5. Remote machines (SSH)
@@ -609,6 +621,7 @@ Settings → Tools in the WebUI governs exactly two things, and SSH gets a secti
 | Web search (engine, max results, timeout, fetch max chars) | Yes — Settings → Tools → Web Search | `tools.androidWeb.*` |
 | Location sharing | Yes — Settings → Tools → Location | `tools.location.enable` |
 | Voice output (`speak`, `stop_speaking`) | No | `tools.tts.enable` |
+| Voice input (`transcribe_audio`, Telegram voice notes) | No | `voice.enable` |
 | SSH access (on/off, hosts, keys, fingerprints) | Yes — Settings → SSH (its own section) | `tools.ssh.enable`, `tools.ssh.hosts` |
 | File tools (read/write/edit/patch/list/find/grep) | No | `tools.file.enable` |
 | Python execution | No | `tools.pythonExec.enable` (+ timeout, output cap, module lists) |

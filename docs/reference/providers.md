@@ -46,12 +46,48 @@ The full field set, only reachable by hand-editing `providers.providers[]` in `c
 |---|---|---|
 | `name` | yes | Free-form identifier, referenced by `providers.default` and by any `modelPresets.<preset>.provider`. |
 | `format` | yes | `"anthropic"` or `"openai_compat"`. The only field that picks the backend. |
-| `apiKey` | yes | The gateway refuses to start a provider without one — see the exact error below. Local servers that don't check keys still need a placeholder like `"EMPTY"`. |
-| `apiBase` | no | Full HTTP base URL, version path included where the service expects it (e.g. `/v1`). Omit to use the format's default. |
+| `apiKey` | yes for `tier: "api"`, no otherwise | A provider with `tier: "api"` refuses to start without one — see the exact error below. `tier: "local"` and `tier: "subscription"` do not need a key at all: that is the whole point of those tiers. |
+| `apiBase` | no | Full HTTP base URL, version path included where the service expects it (e.g. `/v1`). Omit to use the format's default. Anything goes here — a LAN address, a Tailscale hostname, a bridge on your own machine — subject to the HTTPS rule in [Local models](./local-models.md). |
+| `tier` | no | `"api"` (default), `"subscription"`, or `"local"`. Says how the endpoint is paid for, and the only thing it changes is whether `apiKey` is required. See [Provider tiers](#provider-tiers-pay-per-use-subscription-local). |
 | `apiType` | no, `openai_compat` only | `"auto"` (default), `"chat_completions"`, or `"responses"`. See [Chat Completions vs. Responses API](#chat-completions-vs-responses-api-openai_compat-only). Config-only — not in Settings. |
 | `extraHeaders` / `extraBody` / `extraQuery` | no | Extra request headers, body fields, and query params merged into every request to this provider. Config-only. |
 
 Keys may be written as camelCase or snake_case in the file; Jenny always writes camelCase back when it saves.
+
+### Provider tiers: pay-per-use, subscription, local
+
+A **profile** is one entry in `providers.providers`: its own `apiBase`, its own model, its own key or none. Several can coexist, and switching between them is a matter of which one `providers.default` names — or which one a `modelPresets` entry names for one conversation. Nothing else is needed: the agent loop asks the active profile for a completion and does not care where it points.
+
+| Tier | What it is | Key needed? |
+|---|---|---|
+| `api` (default) | A hosted service billed per token. | Yes — startup fails without one. |
+| `subscription` | A bridge on a machine you own that exposes a CLI subscription (Codex CLI, Claude CLI, Gemini CLI, …) behind an OpenAI-compatible endpoint. | No. |
+| `local` | A model server on a machine you own: loopback, LAN, or Tailscale. | No. |
+
+**Pointing Jenny at a local bridge.** On your PC, run the bridge on a port and terminate TLS in front of it, because Android refuses plaintext HTTP to anything but `127.0.0.1` — that rule and its reasons are in [Local models](./local-models.md), and it is the step people trip on. A Tailscale hostname with `tailscale serve` is the least fiddly way to get a valid certificate. Then, in `workspace/config.json`:
+
+```json
+{
+  "providers": {
+    "providers": [
+      { "name": "paid", "format": "openai_compat", "apiKey": "sk-real", "tier": "api" },
+      { "name": "bridge", "format": "openai_compat", "apiBase": "https://my-pc.tailnet-name.ts.net/v1", "tier": "subscription" }
+    ],
+    "default": "bridge"
+  },
+  "agents": { "defaults": { "model": "the-model-your-bridge-exposes" } },
+  "modelPresets": {
+    "cheap": { "provider": "bridge", "model": "the-model-your-bridge-exposes" },
+    "frontier": { "provider": "paid", "model": "gpt-5" }
+  }
+}
+```
+
+Or from **Settings → Model → Providers**: the add/edit dialog has a **How it's paid** selector with the same three tiers, and picking `subscription` or `local` makes the API-key field optional instead of mandatory. The field exists because the alternative was a false one: before tiers, a keyless endpoint could only be configured by inventing a dummy key.
+
+A keyless profile does not send an empty header: the request goes out with `Authorization: Bearer no-key`, the same placeholder a keyless provider always sent. Bridges and local servers ignore it; if yours rejects it, give the profile any string as `apiKey`.
+
+What a tier does **not** do: it does not change the timeout, the retry policy, or the SSRF guard. Provider traffic is never SSRF-checked in the first place (v. [Local models](./local-models.md)), and a LAN or Tailscale endpoint is treated as an ordinary remote endpoint for timeouts.
 
 ## Choosing the active provider
 

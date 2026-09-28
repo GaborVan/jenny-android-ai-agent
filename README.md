@@ -93,6 +93,12 @@ rather than a plain fetch, so JavaScript-rendered pages work.
 → [Scheduling](https://jenny.flagdizero.com/docs/using/scheduling/) ·
 [Tools](https://jenny.flagdizero.com/docs/reference/tools/)
 
+**🗣️ It speaks, and it listens.** A reply can be read aloud through the phone's own
+text-to-speech engine (`speak`), and a voice note sent to it on Telegram comes back to the
+agent as text — transcribed on the device by Android's speech recogniser, with no key and no
+service of ours behind it. → [Tools](https://jenny.flagdizero.com/docs/reference/tools/) ·
+[Privacy](https://jenny.flagdizero.com/docs/internals/privacy/)
+
 **🛠️ It writes its own Android mini-apps.** Describe one in chat — "something to track my
 plants" — and the agent builds it: UI, typed actions, persistent storage, installed into its
 own app grid. Each action becomes a callable tool, so the same app is usable by you, by the
@@ -141,10 +147,15 @@ is served on **loopback by default** (`127.0.0.1`) — no port exposed to your n
 to reverse-proxy, no inbound attack surface unless you deliberately rebind it. The API is
 token-gated even on loopback, because Android does not isolate loopback TCP between apps.
 
-Jenny makes six kinds of outbound connection — your provider, Bing when it searches,
+Jenny makes seven kinds of outbound connection — your provider, Bing when it searches,
 `api.telegram.org` if you enabled the bridge, any URL you or the agent explicitly fetch,
-OpenRouter's attribution headers when that's your provider, and a daily check for a new
-release. **None of them carries anything about you.** The update check is a plain `GET` of the
+OpenRouter's attribution headers when that's your provider, your phone's speech-recognition
+engine when you send a voice note, and a daily check for a new
+release. **None of them carries anything about you** — no identifier, no install ID, no
+analytics, no query string of ours. Two of them do carry content you chose to send: your
+messages go to your provider and to Telegram, and a voice note's audio goes to whichever
+speech engine your phone uses (`voice.prefer_offline` asks it to do the work on-device
+instead). The update check is a plain `GET` of the
 `latest.json` published with the release: no identifier, no version, no headers of ours, no
 query string — a public file fetched and compared on the device. It is the only one that goes
 to a server this project controls, and the only one you did not switch on: it runs every 24h,
