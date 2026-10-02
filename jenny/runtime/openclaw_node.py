@@ -171,6 +171,17 @@ def command_names() -> list[str]:
     return ["ui.dump", "clipboard.get", "clipboard.set", "voice.speak"]
 
 
+def command_error(code: str, message: str) -> dict[str, Any]:
+    """Errore nel formato che il gateway pretende per ``node.invoke.result``.
+
+    Lo schema impone che ``error`` sia un oggetto (``code``/``message``), mai
+    una stringa: una stringa fa fallire la validazione con ``INVALID_REQUEST``
+    e la risposta viene scartata, così l'invocazione resta appesa fino al
+    timeout.
+    """
+    return {"ok": False, "error": {"code": code, "message": message}}
+
+
 async def dispatch_command(
     command: str,
     params: dict[str, Any],
@@ -183,11 +194,11 @@ async def dispatch_command(
 ) -> dict[str, Any]:
     """Esegue un comando ammesso e restituisce il payload di ``node.invoke.result``."""
     if command not in command_names():
-        return {"ok": False, "error": "unsupported_command"}
+        return command_error("unsupported_command", "unsupported_command")
     if not isinstance(params, dict):
-        return {"ok": False, "error": "invalid_params"}
+        return command_error("invalid_params", "invalid_params")
     if command in {"clipboard.set", "voice.speak"} and not isinstance(params.get("text"), str):
-        return {"ok": False, "error": "invalid_params"}
+        return command_error("invalid_params", "invalid_params")
     try:
         async with asyncio.timeout(timeout):
             if command == "ui.dump":
@@ -205,17 +216,17 @@ async def dispatch_command(
                     or not isinstance(rate, (int, float))
                     or not math.isfinite(rate)
                 ):
-                    return {"ok": False, "error": "invalid_params"}
+                    return command_error("invalid_params", "invalid_params")
                 result = await speak(params["text"], language=language, rate=float(rate))
         if result is None:
-            return {"ok": False, "error": "bridge_unavailable"}
+            return command_error("bridge_unavailable", "bridge_unavailable")
         if result.get("ok") is False:
-            return {"ok": False, "error": str(result.get("error", "command_failed"))}
+            return command_error("command_failed", str(result.get("error") or "command_failed"))
         return {"ok": True, "payload": result}
     except TimeoutError:
-        return {"ok": False, "error": "timeout"}
+        return command_error("timeout", "timeout")
     except Exception:  # noqa: BLE001 - un handler rotto non deve uccidere la connessione
-        return {"ok": False, "error": "command_failed"}
+        return command_error("command_failed", "command_failed")
 
 
 def next_backoff(
@@ -391,7 +402,7 @@ class OpenClawNodeClient:
                 {
                     "minProtocol": 4,
                     "maxProtocol": 4,
-                    "client": {"id": "openclaw-android", "version": "0.9.19", "platform": "android", "mode": "node"},
+                    "client": {"id": "openclaw-android", "version": "0.9.20", "platform": "android", "mode": "node"},
                     "role": "node",
                     "scopes": [],
                     "caps": ["screen", "voice"],
@@ -399,7 +410,7 @@ class OpenClawNodeClient:
                     "permissions": {},
                     "auth": dict(auth),
                     "locale": "en-US",
-                    "userAgent": "openclaw-android/jenny-0.9.19",
+                    "userAgent": "openclaw-android/jenny-0.9.20",
                     "device": {
                         "id": self.settings.device_id,
                         "publicKey": self._public_key,
@@ -474,7 +485,7 @@ class OpenClawNodeClient:
                     timeout=timeout,
                 )
             except (ValueError, TypeError):
-                result = {"ok": False, "error": "invalid_params"}
+                result = command_error("invalid_params", "invalid_params")
             await self._send(
                 ws,
                 "node.invoke.result",

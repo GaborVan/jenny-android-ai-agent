@@ -77,14 +77,20 @@ async def test_dispatch(command, handler, params, args, kwargs):
 
 
 async def test_dispatch_errors():
-    assert await node.dispatch_command("unknown", {}, **handlers()) == {"ok": False, "error": "unsupported_command"}
-    assert await node.dispatch_command("ui.dump", {}, **handlers()) == {"ok": False, "error": "bridge_unavailable"}
-    assert await node.dispatch_command("ui.dump", {}, **handlers({"ok": False, "error": "access_denied"})) == {"ok": False, "error": "access_denied"}
+    assert await node.dispatch_command("unknown", {}, **handlers()) == {
+        "ok": False, "error": {"code": "unsupported_command", "message": "unsupported_command"}
+    }
+    assert await node.dispatch_command("ui.dump", {}, **handlers()) == {
+        "ok": False, "error": {"code": "bridge_unavailable", "message": "bridge_unavailable"}
+    }
+    assert await node.dispatch_command(
+        "ui.dump", {}, **handlers({"ok": False, "error": "access_denied"})
+    ) == {"ok": False, "error": {"code": "command_failed", "message": "access_denied"}}
     for command, params in [("clipboard.set", {}), ("voice.speak", {"text": 1}),
                             ("voice.speak", {"text": "x", "rate": "fast"}),
                             ("voice.speak", {"text": "x", "language": 2})]:
         mocks = handlers()
-        assert (await node.dispatch_command(command, params, **mocks))["error"] == "invalid_params"
+        assert (await node.dispatch_command(command, params, **mocks))["error"]["code"] == "invalid_params"
         assert not any(mock.await_count for mock in mocks.values())
 
 
@@ -93,7 +99,9 @@ async def test_dispatch_timeout():
         await asyncio.Event().wait()
     mocks = handlers()
     mocks["screen_dump"] = slow
-    assert await node.dispatch_command("ui.dump", {}, timeout=0.001, **mocks) == {"ok": False, "error": "timeout"}
+    assert await node.dispatch_command("ui.dump", {}, timeout=0.001, **mocks) == {
+        "ok": False, "error": {"code": "timeout", "message": "timeout"}
+    }
 
 
 def test_backoff():
@@ -186,14 +194,14 @@ async def test_invoke_json_params_timeout_and_unavailable(client, monkeypatch):
     mock.assert_awaited_once_with("hello")
     monkeypatch.setattr(node, "screen_dump", AsyncMock(return_value=None))
     await client._invoke(ws, {"id": "i2", "command": "ui.dump"})
-    assert ws.sent[-1]["params"]["error"] == "bridge_unavailable"
+    assert ws.sent[-1]["params"]["error"] == {"code": "bridge_unavailable", "message": "bridge_unavailable"}
     async def slow():
         await asyncio.Event().wait()
     monkeypatch.setattr(node, "screen_dump", slow)
     await client._invoke(ws, {"id": "i3", "command": "ui.dump", "timeoutMs": 1})
-    assert ws.sent[-1]["params"]["error"] == "timeout"
+    assert ws.sent[-1]["params"]["error"]["code"] == "timeout"
     await client._invoke(ws, {"id": "i4", "command": "ui.dump", "paramsJSON": "{"})
-    assert ws.sent[-1]["params"]["error"] == "invalid_params"
+    assert ws.sent[-1]["params"]["error"]["code"] == "invalid_params"
 
 
 async def test_cancel_abandons_invoke(client, monkeypatch):
