@@ -12,6 +12,7 @@ import re
 import time
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from loguru import logger
@@ -914,6 +915,7 @@ def settings_payload(
         "location": {
             "enabled": config.tools.location.enable,
         },
+        "openclaw_node": _openclaw_node_payload(config),
         # Il wakelock di servizio si prende una volta sola all'avvio: qui si
         # espone il valore scritto nel config, non lo stato del lock vivo. La UI
         # deve dire che il cambio vale dal prossimo riavvio.
@@ -1278,6 +1280,73 @@ def _apply_web_search_settings(config: Config, query: QueryParams) -> bool:
         set_fetch_value("max_chars", parsed_fetch_max_chars)
 
     return changed
+
+
+def _openclaw_node_payload(config: Config) -> dict[str, Any]:
+    """Sezione OpenClaw node: mai la credenziale, il device token o la chiave privata."""
+    from jenny.runtime.openclaw_node import active_status
+
+    node = config.openclaw_node
+    return {
+        "enable": node.enable,
+        "url": node.url,
+        "credential_kind": node.credential_kind,
+        "has_credential": bool(node.credential),
+        "device_id": node.device_id,
+        "paired": bool(node.device_token),
+        "status": active_status(),
+    }
+
+
+def openclaw_node_payload() -> dict[str, Any]:
+    """Payload corrente (config + stato vivo) per la rotta di stato."""
+    return _openclaw_node_payload(load_config())
+
+
+async def update_openclaw_node_settings(query: QueryParams) -> dict[str, Any]:
+    """Aggiorna enable/url/credenziale del nodo OpenClaw.
+
+    La credenziale arriva come ``credential_token`` (o ``credential``). Il nome
+    contiene ``token`` di proposito: ``redact_query_secrets`` maschera i valori
+    delle query il cui nome contiene quel marcatore, quindi né il setup code né
+    il token condiviso finiscono in chiaro nei log del gateway.
+    """
+
+    def _apply(config: Config) -> bool:
+        node = config.openclaw_node
+        changed = False
+        enable = _query_first(query, "enable")
+        if enable is not None:
+            value = parse_flag(enable)
+            if node.enable != value:
+                node.enable = value
+                changed = True
+        url = _query_first(query, "url")
+        if url is not None:
+            url = url.strip()
+            parsed = urlsplit(url)
+            if parsed.scheme not in {"ws", "wss"} or not parsed.hostname:
+                raise WebUISettingsError("url must be a ws:// or wss:// address")
+            if node.url != url:
+                node.url = url
+                changed = True
+        credential = _query_first_alias(query, "credential_token", "credential")
+        if credential is not None:
+            credential = credential.strip()
+            if not credential:
+                kind = ""
+            elif credential.startswith("oc-pair://"):
+                kind = "setup_code"
+            else:
+                kind = "token"
+            if node.credential != credential or node.credential_kind != kind:
+                node.credential = credential
+                node.credential_kind = kind
+                changed = True
+        return changed
+
+    await store.mutate(_apply)
+    return settings_payload()
 
 
 async def update_location_settings(query: QueryParams) -> dict[str, Any]:

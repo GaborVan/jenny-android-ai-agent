@@ -176,6 +176,7 @@ export class SettingsController {
   render() {
     const d = this.data;
     if (!d) return;
+    if (this._ocTimer) { clearInterval(this._ocTimer); this._ocTimer = null; }
 
     // Sezioni tematiche, una per asse mentale: preferenze d'interfaccia, motore
     // LLM, capacità dell'agente, la sua memoria, i lavoratori periodici che la
@@ -193,6 +194,7 @@ export class SettingsController {
       this._section('ssh', 'ti-terminal-2', i18n.t('settings.ssh.title'), this._renderSsh()),
       this._section('telegram', 'ti-brand-telegram', i18n.t('settings.telegram.title'), this._renderTelegram()),
       this._section('drivesync', 'ti-cloud-upload', i18n.t('settings.driveSync.title'), this._renderDriveSync()),
+      this._section('openclaw_node', 'ti-plug-connected', i18n.t('settings.openclawNode.title'), this._renderOpenClawNode(d)),
       this._section('backup', 'ti-database-export', i18n.t('backup.sectionTitle'), this._renderBackup()),
       this._section('system', 'ti-info-circle', i18n.t('settings.system'), this._renderSystem(d)),
     ].join('');
@@ -690,6 +692,115 @@ export class SettingsController {
         }
       });
     }
+  }
+
+  // ── OpenClaw node ────────────────────────────────────────────────────
+  //
+  // Registra l'app come nodo su un gateway OpenClaw. Off di default: quando è
+  // acceso il gateway può invocare ui.dump, clipboard.get/set e voice.speak.
+  // L'identità è un device_id Ed25519 persistito; l'operatore deve comunque
+  // approvare il pairing (`openclaw nodes approve <id>`) e mettere i comandi
+  // in `gateway.nodes.commands.allow`.
+  _renderOpenClawNode(d) {
+    const node = (d && d.openclaw_node) || {};
+    return `
+      <p class="settings-hint" style="margin:0 0 10px;font-size:12px;color:var(--text-faint)">${i18n.t('settings.openclawNode.hint')}</p>
+      <div id="openclaw-node-body">${this._openClawNodeBodyHtml(node)}</div>`;
+  }
+
+  _openClawNodeBodyHtml(node) {
+    const enabled = !!node.enable;
+    const configured = !!node.has_credential;
+    const placeholder = node.credential_kind === 'setup_code'
+      ? i18n.t('settings.openclawNode.credentialPlaceholderSetup')
+      : i18n.t('settings.openclawNode.credentialPlaceholderToken');
+    return `
+      <div class="settings-field settings-toggle-row">
+        <label class="settings-label">${i18n.t('settings.openclawNode.enable')}</label>
+        <label class="toggle-switch">
+          <input type="checkbox" id="oc-enable" ${enabled ? 'checked' : ''}>
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+      <div class="settings-field">
+        <label class="settings-label">${i18n.t('settings.openclawNode.url')}</label>
+        <input type="text" class="settings-input" id="oc-url" value="${escapeHtml(node.url || '')}">
+      </div>
+      <div class="settings-field">
+        <label class="settings-label">${i18n.t('settings.openclawNode.credential')} — ${configured ? i18n.t('settings.openclawNode.configured') : i18n.t('settings.openclawNode.notSet')}</label>
+        <input type="password" class="settings-input" id="oc-cred" placeholder="${escapeHtml(placeholder)}" autocomplete="off">
+      </div>
+      <div class="settings-actions" style="display:flex;gap:8px;margin-top:8px">
+        <button class="settings-btn-save" id="oc-save">${i18n.t('settings.openclawNode.save')}</button>
+        <button class="settings-btn-add" id="oc-connect"><i class="ti ti-plug-connected"></i> ${i18n.t('settings.openclawNode.connect')}</button>
+      </div>
+      <p class="settings-hint" id="oc-status" style="margin:8px 0 0;font-size:12px">${escapeHtml(this._openClawNodeStatusText(node.status || {}))}</p>`;
+  }
+
+  _openClawNodeStatusText(status) {
+    const state = (status && status.state) || 'disabled';
+    let text = i18n.t(`settings.openclawNode.state.${state}`);
+    if (state === 'pairing_required' && status.request_id) {
+      text += ` — ${i18n.t('settings.openclawNode.pairingHint', { id: status.request_id })}`;
+    } else if (state === 'error' && status.detail) {
+      text += ` — ${escapeHtml(String(status.detail))}`;
+    }
+    return text;
+  }
+
+  async _refreshOpenClawNode() {
+    const statusEl = this.contentEl.querySelector('#oc-status');
+    if (!statusEl) return;
+    try {
+      const node = await api.getOpenClawNodeStatus();
+      statusEl.textContent = this._openClawNodeStatusText(node.status || {});
+    } catch (e) {
+      /* Silenzioso: la sezione resta sullo stato precedente. */
+    }
+  }
+
+  _wireOpenClawNode() {
+    const save = this.contentEl.querySelector('#oc-save');
+    const connect = this.contentEl.querySelector('#oc-connect');
+    const collect = () => {
+      const urlEl = this.contentEl.querySelector('#oc-url');
+      const credEl = this.contentEl.querySelector('#oc-cred');
+      const enableEl = this.contentEl.querySelector('#oc-enable');
+      const params = { enable: enableEl && enableEl.checked ? '1' : '0', url: urlEl ? urlEl.value : '' };
+      // Vuoto = "non toccare": la credenziale salvata resta. Per svuotarla
+      // c'è la rotella: qui il campo password non rimanda mai l'hash indietro.
+      if (credEl && credEl.value) params.credential_token = credEl.value;
+      return params;
+    };
+    if (save) {
+      save.addEventListener('click', async () => {
+        save.disabled = true;
+        try {
+          await api.updateOpenClawNode(collect());
+          showToast(i18n.t('settings.openclawNode.saved'));
+          await this._refreshOpenClawNode();
+        } catch (e) {
+          showToast(i18n.t('settings.openclawNode.saveFailed'), 'error');
+        } finally {
+          save.disabled = false;
+        }
+      });
+    }
+    if (connect) {
+      connect.addEventListener('click', async () => {
+        connect.disabled = true;
+        try {
+          await api.connectOpenClawNode(collect());
+          showToast(i18n.t('settings.openclawNode.connectRequested'));
+          await this._refreshOpenClawNode();
+        } catch (e) {
+          showToast(i18n.t('settings.openclawNode.saveFailed'), 'error');
+        } finally {
+          connect.disabled = false;
+        }
+      });
+    }
+    if (!this._ocTimer) this._ocTimer = setInterval(() => this._refreshOpenClawNode(), 2000);
   }
 
   // ── Models & Providers ─────────────────────────────────────────────
@@ -2301,6 +2412,13 @@ export class SettingsController {
     // widget dedicato — la card non serve polling, solo un refresh dopo azioni).
     if (this.contentEl.querySelector('#drivesync-body')) {
       this._refreshDriveSyncStatus();
+    }
+
+    // OpenClaw node: stato vivo dal gateway, ridisegnato mentre la sezione è
+    // aperta (pairing/approvazione arrivano dal lato gateway, non da un evento).
+    if (this.contentEl.querySelector('#openclaw-node-body')) {
+      this._wireOpenClawNode();
+      this._refreshOpenClawNode();
     }
 
     // Attività in background: stessa card condivisa con onboarding e Telegram.

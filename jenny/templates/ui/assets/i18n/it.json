@@ -264,6 +264,30 @@
     "deleteProviderConfirm": "Eliminare il provider \"{name}\"?",
     "providerDeleted": "Provider eliminato",
     "saveError": "Errore nel salvataggio",
+    "openclawNode": {
+      "title": "Nodo OpenClaw",
+      "enable": "Registra come nodo OpenClaw",
+      "hint": "Consente a un gateway OpenClaw di pilotare questo telefono: legge l'albero dello schermo (ui.dump), legge/scrive gli appunti e parla col TTS di sistema. Dopo la connessione, approva il dispositivo sul gateway (openclaw nodes approve) e abilita i comandi. Per ui.dump serve il servizio di accessibilità.",
+      "url": "URL del gateway",
+      "credential": "Setup code o token",
+      "credentialPlaceholderSetup": "oc-pair://…",
+      "credentialPlaceholderToken": "Token del gateway",
+      "configured": "configurata",
+      "notSet": "non impostata",
+      "connect": "Connetti / Abbina",
+      "save": "Salva",
+      "saved": "Salvato",
+      "connectRequested": "Connessione richiesta",
+      "saveFailed": "Impossibile salvare le impostazioni del nodo OpenClaw",
+      "pairingHint": "approva la richiesta {id} sul gateway",
+      "state": {
+        "disabled": "Disattivato",
+        "connecting": "Connessione…",
+        "pairing_required": "In attesa di approvazione",
+        "connected": "Connesso",
+        "error": "Errore"
+      }
+    },
     "location": {
       "section": "Posizione",
       "enable": "Condividi la mia posizione",

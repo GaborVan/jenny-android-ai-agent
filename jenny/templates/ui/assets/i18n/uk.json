@@ -264,6 +264,30 @@
     "deleteProviderConfirm": "Видалити провайдера «{name}»?",
     "providerDeleted": "Провайдера видалено",
     "saveError": "Не вдалося зберегти",
+    "openclawNode": {
+      "title": "Вузол OpenClaw",
+      "enable": "Зареєструвати як вузол OpenClaw",
+      "hint": "Дозволяє шлюзу OpenClaw керувати цим телефоном: читати дерево екрана (ui.dump), читати/писати буфер обміну та озвучувати через системний TTS. Після під'єднання підтвердьте пристрій на шлюзі (openclaw nodes approve) і дозвольте команди. Для ui.dump потрібна служба спеціальних можливостей.",
+      "url": "Адреса шлюзу",
+      "credential": "Код налаштування або токен",
+      "credentialPlaceholderSetup": "oc-pair://…",
+      "credentialPlaceholderToken": "Токен шлюзу",
+      "configured": "налаштовано",
+      "notSet": "не задано",
+      "connect": "Під'єднати / Спарувати",
+      "save": "Зберегти",
+      "saved": "Збережено",
+      "connectRequested": "Запит на під'єднання надіслано",
+      "saveFailed": "Не вдалося зберегти налаштування вузла OpenClaw",
+      "pairingHint": "підтвердьте запит {id} на шлюзі",
+      "state": {
+        "disabled": "Вимкнено",
+        "connecting": "Під'єднання…",
+        "pairing_required": "Очікування підтвердження",
+        "connected": "Під'єднано",
+        "error": "Помилка"
+      }
+    },
     "location": {
       "section": "Локація",
       "enable": "Ділитися моєю локацією",

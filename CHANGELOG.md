@@ -10,6 +10,16 @@ carries the reasoning that outlives them.
 
 ### Added
 
+- **The app can register itself as an OpenClaw node.** A new Settings → OpenClaw node
+  section points Apex at an OpenClaw Gateway (`wss://…` or an `oc-pair://` setup link),
+  connects with an Ed25519 device identity, and — once the operator approves the pairing
+  and allowlists the commands — serves four node commands: `ui.dump` (the accessibility
+  tree of the current screen), `clipboard.get` / `clipboard.set`, and `voice.speak`
+  (through the existing Android TTS). The identity and the issued device token are
+  persisted, so a restart reuses the same pairing instead of minting a new request.
+  `ui.dump` and clipboard reads require the accessibility service / foreground rules the
+  node page documents. Config keys: `openclaw_node.*`.
+
 - **The home bridge is configured out of the box.** A fresh install now starts
   with a single provider — the Tailscale bridge, `tier: local`, no key — already
   saved and already active, so the first message does not require pasting a long

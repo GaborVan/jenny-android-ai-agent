@@ -825,6 +825,19 @@ CURRENT_CONFIG_VERSION = 1
 _ANNOUNCED_MIGRATIONS: set[int] = set()
 
 
+class OpenClawNodeConfig(Base):
+    """Connessione opzionale al gateway OpenClaw come nodo Android."""
+
+    enable: bool = False
+    url: str = "wss://gaborvan-nitro-an515-42-1.taild5ff76.ts.net:433"
+    credential: str = ""
+    credential_kind: Literal["setup_code", "token", ""] = ""
+    device_id: str = ""
+    device_private_key: str = ""
+    device_token: str = ""
+    device_scopes: list[str] = Field(default_factory=list)
+
+
 class Config(BaseSettings):
     """Root configuration for jenny."""
 
@@ -852,6 +865,7 @@ class Config(BaseSettings):
     # per estrarre e inlinare subito il testo di PDF/documenti.
     extract_document_text: bool = False
     websocket: dict[str, Any] = Field(default_factory=dict)
+    openclaw_node: OpenClawNodeConfig = Field(default_factory=OpenClawNodeConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
     drive_sync: DriveSyncConfig = Field(

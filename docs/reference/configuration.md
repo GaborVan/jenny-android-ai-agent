@@ -214,6 +214,23 @@ Cloud sync of the agent's memory files (`SOUL.md`, `USER.md`, and everything und
 |---|---|---|---|
 | `drive_sync.enabled` | bool | `true` | Master switch. When on (and a folder has been chosen from **Settings → Cloud sync**), a sync runs at gateway start and on every manual "Sync now". Per-file, last-writer-wins by mtime, ties broken by content hash. Never touches `config.json`, `.jenny/`, skills, sessions, or anything outside `SOUL.md`/`USER.md`/`memory/` — plus `shared/` when the chosen folder is the shared one (Apex-Pamyat). |
 
+## openclaw_node
+
+Optional: register the app as a **node** on an OpenClaw Gateway, so an OpenClaw agent can drive the device through four commands — `ui.dump` (accessibility tree of the current screen), `clipboard.get` / `clipboard.set`, and `voice.speak`. Off by default. Configure it from **Settings → OpenClaw node**; the credential can be an `oc-pair://…` setup link/code or the shared Gateway token, and the operator must still approve the device (`openclaw nodes approve <requestId>`) and allowlist the commands (`gateway.nodes.commands.allow`).
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `openclaw_node.enable` | bool | `false` | Master switch. When off, no WebSocket is opened and no client task is started. |
+| `openclaw_node.url` | string | `wss://gaborvan-nitro-an515-42-1.taild5ff76.ts.net:433` | Gateway WebSocket endpoint. `ws://`/`wss://` only. |
+| `openclaw_node.credential` | string | `""` | `oc-pair://…` setup code/link, or the shared Gateway token. Cleared automatically once the Gateway issues a device token from a setup code. |
+| `openclaw_node.credential_kind` | `"setup_code"` \| `"token"` \| `""` | `""` | How `credential` is interpreted. |
+| `openclaw_node.device_id` | string | `""` | Stable Ed25519 device id (sha256 of the raw public key), generated on first connect. |
+| `openclaw_node.device_private_key` | string | `""` | Base64url raw Ed25519 seed, persisted so an app restart reuses the same pairing instead of creating a new request. |
+| `openclaw_node.device_token` | string | `""` | Device token issued by the Gateway after approval; used on reconnects. |
+| `openclaw_node.device_scopes` | string[] | `[]` | Scopes negotiated for that token. |
+
+See [Nodes](https://docs.openclaw.ai/nodes) for the pairing and command-policy side.
+
 ## tools
 
 Toggles for the built-in tool groups. Only web search and location have UI controls; everything else here is config-only. Full behavior of each tool: [Tool reference](./tools.md).

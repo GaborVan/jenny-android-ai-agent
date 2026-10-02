@@ -102,6 +102,7 @@ def run_gateway(
         from jenny.runtime.location import reset_location_state
         from jenny.runtime.notifications import reset_notifications_state
         from jenny.runtime.notifier import reset_notifier_state
+        from jenny.runtime.openclaw_node import reset_openclaw_node_state
         from jenny.runtime.power import reset_power_state
         from jenny.runtime.stt import reset_stt_state
         from jenny.runtime.tts import reset_tts_state
@@ -121,6 +122,7 @@ def run_gateway(
         reset_notifications_state()
         reset_clipboard_state()
         reset_tts_state()
+        reset_openclaw_node_state()
         reset_stt_state()
         reset_drive_sync_bridge_state()
         # L'updater tiene una fase *sticky* e un ``UpdateBridge`` in cache: senza
