@@ -272,6 +272,7 @@ async def test_retries_pairing_then_uses_device_token(client, monkeypatch):
             return False
     monkeypatch.setattr(node, "connect", lambda *args, **kwargs: Connection())
     monkeypatch.setattr(node, "next_backoff", lambda attempt: 0)
+    monkeypatch.setattr(node, "next_pairing_backoff", lambda attempt: 0)
     async def receive(ws):
         if len(sockets) >= 3:
             connected.set()
@@ -288,3 +289,232 @@ async def test_retries_pairing_then_uses_device_token(client, monkeypatch):
     assert sockets[0].sent[0]["params"]["auth"] == sockets[1].sent[0]["params"]["auth"]
     assert "token" in sockets[2].sent[0]["params"]["auth"]
     assert client.status()["state"] == "disabled"
+
+
+@pytest.fixture
+def secure(monkeypatch):
+    secrets = {}
+
+    async def put(name, value):
+        secrets[name] = value
+        return True
+
+    async def remove(name):
+        secrets.pop(name, None)
+        return True
+
+    get = AsyncMock(side_effect=lambda name: secrets.get(name))
+    put_mock = AsyncMock(side_effect=put)
+    remove_mock = AsyncMock(side_effect=remove)
+    monkeypatch.setattr(node, "get_secret", get)
+    monkeypatch.setattr(node, "set_secret", put_mock)
+    monkeypatch.setattr(node, "remove_secret", remove_mock)
+    return secrets, get, put_mock, remove_mock
+
+
+@pytest.fixture
+def persisted(monkeypatch):
+    config = Config()
+
+    async def mutate(apply):
+        apply(config)
+        return config
+
+    monkeypatch.setattr(node, "mutate", AsyncMock(side_effect=mutate))
+    return config
+
+
+async def test_secure_token_persistence_and_restart(client, secure, persisted, monkeypatch):
+    monkeypatch.setattr(client, "_persist", node.OpenClawNodeClient._persist.__get__(client))
+    client.settings.credential = setup_code({"url": "ws://example.test", "bootstrapToken": "fixture"})
+    client.settings.credential_kind = "setup_code"
+    client.settings.url = "ws://example.test"
+    assert await client._handshake(Socket(), {"bootstrapToken": "fixture"})
+    secure[2].assert_awaited_once_with(node.OPENCLAW_NODE_TOKEN, "issued-fixture")
+    assert persisted.openclaw_node.device_token == ""
+    assert persisted.openclaw_node.credential == ""
+    assert persisted.openclaw_node.credential_kind == ""
+    states = []
+    second = node.OpenClawNodeClient(persisted.openclaw_node, lambda status: states.append(status["state"]))
+    second.settings.enable = True
+    second._crypto = client._crypto
+    second._public_key = client._public_key
+    ws = Socket()
+
+    class Connection:
+        async def __aenter__(self):
+            return ws
+
+        async def __aexit__(self, *args):
+            return False
+
+    async def receive(socket):
+        second.settings.enable = False
+
+    monkeypatch.setattr(node, "connect", lambda *args, **kwargs: Connection())
+    monkeypatch.setattr(second, "_receive", receive)
+    await second.run()
+    assert not second._is_setup()
+    assert ws.sent[0]["params"]["auth"] == {"token": "issued-fixture"}
+    assert states == ["connecting", "connected"]
+    assert second.status()["token_stored"]
+    assert persisted.openclaw_node.device_token == ""
+
+
+@pytest.mark.parametrize("available", [True, False])
+async def test_legacy_token_migration_and_fallback(available, secure, persisted):
+    secure[2].side_effect = None
+    secure[2].return_value = available
+    instance = node.OpenClawNodeClient(OpenClawNodeConfig(device_token="fixture"))
+    await instance._resolve_token()
+    await instance._persist()
+    assert instance.settings.device_token == "fixture"
+    assert persisted.openclaw_node.device_token == ("" if available else "fixture")
+
+
+async def test_issued_token_plaintext_fallback(client, persisted, monkeypatch):
+    monkeypatch.setattr(node, "set_secret", AsyncMock(return_value=False))
+    monkeypatch.setattr(client, "_persist", node.OpenClawNodeClient._persist.__get__(client))
+    assert await client._handshake(Socket(), {"bootstrapToken": "fixture"})
+    assert persisted.openclaw_node.device_token == "issued-fixture"
+
+
+async def test_pairing_required_keeps_setup(client, secure):
+    credential = setup_code({"url": "ws://example.test", "bootstrapToken": "fixture"})
+    client.settings.credential = credential
+    client.settings.credential_kind = "setup_code"
+    assert not await client._handshake(Socket(pairing=True), {"bootstrapToken": "fixture"})
+    assert client.settings.credential == credential
+    assert client.settings.credential_kind == "setup_code"
+    client._persist.assert_not_awaited()
+    secure[2].assert_not_awaited()
+
+
+def test_pairing_backoff():
+    for jitter in (0, 0.5, 1):
+        values = [node.next_pairing_backoff(i, jitter=lambda value=jitter: value) for i in range(100)]
+        assert values == sorted(values)
+        assert all(5 <= value <= 10 for value in values)
+    assert node.next_pairing_backoff(100000) == 10
+
+
+async def test_token_rejection_stops_loop(client, secure, persisted, monkeypatch):
+    secure[0][node.OPENCLAW_NODE_TOKEN] = "fixture"
+    monkeypatch.setattr(client, "_persist", node.OpenClawNodeClient._persist.__get__(client))
+    ws = Socket()
+
+    async def send(raw):
+        frame = json.loads(raw)
+        ws.sent.append(frame)
+        ws.queue.put_nowait(json.dumps({"type": "res", "id": frame["id"], "ok": False,
+                                      "error": {"code": "TOKEN_REJECTED"}}))
+
+    ws.send = send
+
+    async def connection(crypto):
+        assert not await client._handshake(ws, {"token": client.settings.device_token})
+
+    connect_mock = AsyncMock(side_effect=connection)
+    monkeypatch.setattr(client, "_connection", connect_mock)
+    sleep = AsyncMock()
+    monkeypatch.setattr(node.asyncio, "sleep", sleep)
+    await client.run()
+    secure[3].assert_awaited_once_with(node.OPENCLAW_NODE_TOKEN)
+    assert not secure[0]
+    assert persisted.openclaw_node.device_token == ""
+    assert client.settings.device_token == ""
+    assert client.status()["state"] == "token_rejected"
+    assert not client.status()["paired"]
+    connect_mock.assert_awaited_once()
+    sleep.assert_not_awaited()
+
+
+async def test_pairing_timeout_stops_loop(client, secure, monkeypatch):
+    monkeypatch.setattr(node, "_MAX_PAIRING_ATTEMPTS", 3)
+    client.settings.credential = "fixture"
+    client.settings.credential_kind = "setup_code"
+
+    async def connection(crypto):
+        await client._handshake(Socket(pairing=True), {"bootstrapToken": "fixture"})
+
+    connect_mock = AsyncMock(side_effect=connection)
+    monkeypatch.setattr(client, "_connection", connect_mock)
+    sleep = AsyncMock()
+    monkeypatch.setattr(node.asyncio, "sleep", sleep)
+    await client.run()
+    assert connect_mock.await_count == 3
+    assert sleep.await_count == 2
+    assert all(5 <= call.args[0] <= 10 for call in sleep.await_args_list)
+    assert client.status()["state"] == "pairing_timeout"
+    assert client.settings.credential == "fixture"
+    client._persist.assert_not_awaited()
+
+
+async def test_forget_token_clears_store_and_stops_client(client, persisted, monkeypatch):
+    from jenny.runtime import secure_store
+    from jenny.webui import settings_api
+
+    persisted.openclaw_node.device_token = "fixture"
+    persisted.openclaw_node.credential = "fixture"
+    persisted.openclaw_node.credential_kind = "token"
+    node.set_active_client(client)
+    remove = AsyncMock(return_value=True)
+    monkeypatch.setattr(secure_store, "remove_secret", remove)
+    monkeypatch.setattr(settings_api.store, "mutate", node.mutate)
+    monkeypatch.setattr(settings_api, "settings_payload", lambda: settings_api._openclaw_node_payload(persisted))
+    result = await settings_api.update_openclaw_node_settings({"forget_token": ["1"]})
+    remove.assert_awaited_once_with(node.OPENCLAW_NODE_TOKEN)
+    assert not persisted.openclaw_node.device_token
+    assert not persisted.openclaw_node.credential
+    assert not persisted.openclaw_node.credential_kind
+    assert not result["paired"]
+    assert node.active_status()["state"] == "disabled"
+
+
+async def test_payload_reports_secure_pairing(client, secure, persisted):
+    from jenny.webui.settings_api import _openclaw_node_payload
+
+    secure[0][node.OPENCLAW_NODE_TOKEN] = "fixture"
+    await client._resolve_token()
+    node.set_active_client(client)
+    try:
+        payload = _openclaw_node_payload(persisted)
+        assert payload["paired"]
+        assert payload["token_stored"]
+        assert not payload["has_credential"]
+    finally:
+        node.set_active_client(None)
+
+
+async def test_hello_without_token_keeps_setup(client, secure):
+    client.settings.credential = "fixture"
+    client.settings.credential_kind = "setup_code"
+    ws = Socket()
+
+    async def send(raw):
+        frame = json.loads(raw)
+        ws.queue.put_nowait(json.dumps({"type": "res", "id": frame["id"], "ok": True,
+                                      "payload": {"type": "hello-ok"}}))
+
+    ws.send = send
+    assert await client._handshake(ws, {"bootstrapToken": "fixture"})
+    assert client.settings.credential == "fixture"
+    assert client.settings.credential_kind == "setup_code"
+    secure[2].assert_not_awaited()
+
+
+async def test_normal_disconnect_uses_existing_backoff(client, secure, monkeypatch):
+    async def connection(crypto):
+        raise OSError("fixture disconnect")
+
+    async def sleep(delay):
+        client.settings.enable = False
+
+    normal = AsyncMock(side_effect=sleep)
+    monkeypatch.setattr(client, "_connection", connection)
+    monkeypatch.setattr(node.asyncio, "sleep", normal)
+    monkeypatch.setattr(node, "next_backoff", lambda attempt: 42)
+    await client.run()
+    normal.assert_awaited_once_with(42)
+    secure[3].assert_not_awaited()
+    assert client.status()["state"] == "error"

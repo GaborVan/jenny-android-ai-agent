@@ -8,6 +8,19 @@ carries the reasoning that outlives them.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The OpenClaw node pairing survives restarts and app updates.** The device token the
+  gateway issues now lives in an Android Keystore-encrypted store (`SecureStoreBridge`,
+  AES-GCM, app-private prefs) instead of plain `config.json`, so a restart or an in-place
+  APK update reconnects silently — no new code. A legacy plaintext token is migrated into
+  the Keystore once. While the gateway reports `PAIRING_REQUIRED` the client retries every
+  5–10 s (bounded, up to 120 attempts) and completes the pairing on its own as soon as the
+  operator approves it; the single-use setup code is kept until a token actually arrives.
+  If the gateway rejects the stored token the client clears it, stops the loop, and shows
+  “token rejected — enter a new code” with an *Enter a new code* button. New node states:
+  `token_rejected`, `pairing_timeout`.
+
 ### Added
 
 - **The app can register itself as an OpenClaw node.** A new Settings → OpenClaw node

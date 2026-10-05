@@ -710,7 +710,7 @@ export class SettingsController {
 
   _openClawNodeBodyHtml(node) {
     const enabled = !!node.enable;
-    const configured = !!node.has_credential;
+    const configured = !!node.has_credential || !!node.paired;
     const placeholder = node.credential_kind === 'setup_code'
       ? i18n.t('settings.openclawNode.credentialPlaceholderSetup')
       : i18n.t('settings.openclawNode.credentialPlaceholderToken');
@@ -718,7 +718,7 @@ export class SettingsController {
       <div class="settings-field">
         <label class="settings-label">${i18n.t('settings.openclawNode.statusTitle')}</label>
         <div id="openclaw-node-status-rows" style="font-size:12px;line-height:1.8">
-          <div><strong>${i18n.t('settings.openclawNode.nodeRow')}:</strong> <span id="oc-node-state">${escapeHtml(this._openClawNodeStatusText(node.status || {}))}</span></div>
+          <div><strong>${i18n.t('settings.openclawNode.nodeRow')}:</strong> <span id="oc-node-state">${escapeHtml(this._openClawNodeStatusText(node.status || {}, node.paired))}</span></div>
           <div><strong>${i18n.t('settings.openclawNode.screenRow')}:</strong> <span id="oc-a11y-state">${escapeHtml(i18n.t('settings.openclawNode.checking'))}</span></div>
           <div><strong>${i18n.t('settings.openclawNode.clipboardRow')}:</strong> <span id="oc-clipboard-state">${escapeHtml(i18n.t('settings.openclawNode.checking'))}</span></div>
         </div>
@@ -737,12 +737,13 @@ export class SettingsController {
         <input type="text" class="settings-input" id="oc-url" value="${escapeHtml(node.url || '')}">
       </div>
       <div class="settings-field">
-        <label class="settings-label">${i18n.t('settings.openclawNode.credential')} — ${configured ? i18n.t('settings.openclawNode.configured') : i18n.t('settings.openclawNode.notSet')}</label>
+        <label class="settings-label">${i18n.t('settings.openclawNode.credential')} — <span id="oc-credential-state">${configured ? i18n.t('settings.openclawNode.configured') : i18n.t('settings.openclawNode.notSet')}</span></label>
         <input type="password" class="settings-input" id="oc-cred" placeholder="${escapeHtml(placeholder)}" autocomplete="off">
       </div>
-      <div class="settings-actions" style="display:flex;gap:8px;margin-top:8px">
+      <div class="settings-actions" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px">
         <button class="settings-btn-save" id="oc-save">${i18n.t('settings.openclawNode.save')}</button>
         <button class="settings-btn-add" id="oc-connect"><i class="ti ti-plug-connected"></i> ${i18n.t('settings.openclawNode.connect')}</button>
+        <button class="settings-btn-add" id="oc-new-code">${i18n.t('settings.openclawNode.newCode')}</button>
       </div>`;
   }
 
@@ -757,7 +758,7 @@ export class SettingsController {
     return state.clipboard ? i18n.t('settings.openclawNode.clipboardAvailable') : i18n.t('settings.openclawNode.statusUnavailable');
   }
 
-  _openClawNodeStatusText(status) {
+  _openClawNodeStatusText(status, paired = false) {
     const state = (status && status.state) || 'disabled';
     let text = i18n.t(`settings.openclawNode.state.${state}`);
     if (state === 'pairing_required' && status.request_id) {
@@ -765,6 +766,7 @@ export class SettingsController {
     } else if (state === 'error' && status.detail) {
       text += ` — ${escapeHtml(String(status.detail))}`;
     }
+    if (paired) text += ` — ${i18n.t('settings.openclawNode.tokenStored')}`;
     return text;
   }
 
@@ -773,7 +775,11 @@ export class SettingsController {
     if (!statusEl) return;
     try {
       const node = await api.getOpenClawNodeStatus();
-      statusEl.textContent = this._openClawNodeStatusText(node.status || {});
+      statusEl.textContent = this._openClawNodeStatusText(node.status || {}, node.paired);
+      const credentialState = this.contentEl.querySelector('#oc-credential-state');
+      if (credentialState) credentialState.textContent = i18n.t(
+        node.paired || node.has_credential ? 'settings.openclawNode.configured' : 'settings.openclawNode.notSet'
+      );
     } catch (e) {
       /* Silenzioso: la sezione resta sullo stato precedente. */
     }
@@ -797,7 +803,7 @@ export class SettingsController {
       const enableEl = this.contentEl.querySelector('#oc-enable');
       const params = { enable: enableEl && enableEl.checked ? '1' : '0', url: urlEl ? urlEl.value : '' };
       // Vuoto = "non toccare": la credenziale salvata resta. Per svuotarla
-      // c'è la rotella: qui il campo password non rimanda mai l'hash indietro.
+      // c'è il pulsante «nuovo codice»: non rimandare la credenziale salvata.
       if (credEl && credEl.value) params.credential_token = credEl.value;
       return params;
     };
@@ -826,6 +832,25 @@ export class SettingsController {
           showToast(i18n.t('settings.openclawNode.saveFailed'), 'error');
         } finally {
           connect.disabled = false;
+        }
+      });
+    }
+    const newCode = this.contentEl.querySelector('#oc-new-code');
+    if (newCode) {
+      newCode.addEventListener('click', async () => {
+        newCode.disabled = true;
+        try {
+          await api.updateOpenClawNode({ forget_token: '1' });
+          const credential = this.contentEl.querySelector('#oc-cred');
+          if (credential) {
+            credential.value = '';
+            credential.focus();
+          }
+          await this._refreshOpenClawNode();
+        } catch (e) {
+          showToast(i18n.t('settings.openclawNode.saveFailed'), 'error');
+        } finally {
+          newCode.disabled = false;
         }
       });
     }

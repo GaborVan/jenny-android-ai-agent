@@ -1287,14 +1287,17 @@ def _openclaw_node_payload(config: Config) -> dict[str, Any]:
     from jenny.runtime.openclaw_node import active_status
 
     node = config.openclaw_node
+    status = active_status()
+    paired = bool(node.device_token) or bool(status.get("paired"))
     return {
         "enable": node.enable,
         "url": node.url,
         "credential_kind": node.credential_kind,
         "has_credential": bool(node.credential),
         "device_id": node.device_id,
-        "paired": bool(node.device_token),
-        "status": active_status(),
+        "paired": paired,
+        "token_stored": paired and not bool(node.device_token),
+        "status": status,
     }
 
 
@@ -1324,6 +1327,14 @@ async def update_openclaw_node_settings(query: QueryParams) -> dict[str, Any]:
     delle query il cui nome contiene quel marcatore, quindi né il setup code né
     il token condiviso finiscono in chiaro nei log del gateway.
     """
+
+    forget = parse_flag(_query_first(query, "forget_token") or "0")
+    if forget:
+        from jenny.runtime.openclaw_node import stop_active_client
+        from jenny.runtime.secure_store import OPENCLAW_NODE_TOKEN, remove_secret
+
+        await stop_active_client()
+        await remove_secret(OPENCLAW_NODE_TOKEN)
 
     def _apply(config: Config) -> bool:
         node = config.openclaw_node
@@ -1356,6 +1367,11 @@ async def update_openclaw_node_settings(query: QueryParams) -> dict[str, Any]:
                 node.credential = credential
                 node.credential_kind = kind
                 changed = True
+        if forget:
+            node.credential = ""
+            node.credential_kind = ""
+            node.device_token = ""
+            changed = True
         return changed
 
     await store.mutate(_apply)

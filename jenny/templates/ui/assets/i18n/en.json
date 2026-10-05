@@ -265,6 +265,8 @@
     "providerDeleted": "Provider deleted",
     "saveError": "Couldn't save",
     "openclawNode": {
+      "newCode": "Enter a new code",
+      "tokenStored": "Token saved — no code needed after restarting or updating the app.",
       "title": "OpenClaw node",
       "enable": "Register as OpenClaw node",
       "hint": "Lets an OpenClaw gateway drive this phone: it can read the screen tree (ui.dump), read/write the clipboard, and speak through the system TTS. After connecting, approve the device on the gateway (openclaw nodes approve) and allow the commands. The accessibility service must be enabled for ui.dump. The service is shown in the system as “Apex UI control”.",
@@ -293,6 +295,8 @@
       "enableService": "Enable the screen-reading service",
       "serviceHint": "Enable “Apex UI control”, then come back to the app.",
       "state": {
+        "token_rejected": "Token rejected — enter a new code.",
+        "pairing_timeout": "Pairing timed out — enter a new code.",
         "disabled": "Disabled",
         "connecting": "Connecting…",
         "pairing_required": "Waiting for pairing approval",

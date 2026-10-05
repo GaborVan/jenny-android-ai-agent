@@ -24,11 +24,18 @@ from urllib.parse import urlsplit
 
 from websockets.asyncio.client import connect
 
+from jenny import __version__
 from jenny.config.schema import Config, OpenClawNodeConfig
 from jenny.config.store import mutate
 from jenny.runtime.chaquopy_bridge import BridgeCache
 from jenny.runtime.clipboard import clipboard_get, clipboard_set
 from jenny.runtime.context import get_android_context
+from jenny.runtime.secure_store import (
+    OPENCLAW_NODE_TOKEN,
+    get_secret,
+    remove_secret,
+    set_secret,
+)
 from jenny.runtime.tts import speak
 from jenny.runtime.ui_automation import screen_dump
 
@@ -46,6 +53,7 @@ _MIN_PAYLOAD = 1024
 _MAX_PAYLOAD = 16 * 1024 * 1024
 _DEFAULT_PAYLOAD = 65536
 _DEFAULT_TICK_SECONDS = 30.0
+_MAX_PAIRING_ATTEMPTS = 120
 
 
 def reset_openclaw_node_state() -> None:
@@ -65,6 +73,14 @@ def active_status() -> dict[str, Any]:
     if client is None:
         return {"state": "disabled", "detail": "", "request_id": None, "last_error": None}
     return client.status()
+
+
+async def stop_active_client() -> None:
+    """Ferma il client prima di cancellare le credenziali persistenti."""
+    global _ACTIVE
+    if _ACTIVE is not None:
+        await _ACTIVE.stop()
+        _ACTIVE = None
 
 
 async def restart_active_client() -> dict[str, Any]:
@@ -241,6 +257,17 @@ def next_backoff(
     return min(cap, base * 2**exponent * (1 + 0.25 * jitter()))
 
 
+def next_pairing_backoff(
+    attempt: int,
+    *,
+    base: float = 5.0,
+    cap: float = 10.0,
+    jitter: Callable[[], float] = random.random,
+) -> float:
+    """Attesa breve e limitata per intercettare l'approvazione del gateway."""
+    return next_backoff(attempt, base=base, cap=cap, jitter=jitter)
+
+
 class OpenClawNodeClient:
     """Una sola connessione alla volta, con task degli invoke limitati alla sua durata."""
 
@@ -257,18 +284,23 @@ class OpenClawNodeClient:
         self._crypto: Any = None
         self._public_key = ""
         self._counter = 0
+        self._token_stored = False
         self._max_payload = _DEFAULT_PAYLOAD
         self._tick_seconds = _DEFAULT_TICK_SECONDS
 
     def status(self) -> dict[str, Any]:
-        return dict(self._status)
+        return {
+            **self._status,
+            "paired": bool(self.settings.device_token),
+            "token_stored": self._token_stored and bool(self.settings.device_token),
+        }
 
     def _set_status(self, state: str, detail: str = "", request_id: str | None = None) -> None:
         self._status = {
             "state": state,
             "detail": detail,
             "request_id": request_id,
-            "last_error": detail if state in {"error", "pairing_required"} else None,
+            "last_error": detail if state in {"error", "pairing_required", "token_rejected", "pairing_timeout"} else None,
         }
         if self._callback:
             try:
@@ -288,7 +320,10 @@ class OpenClawNodeClient:
         self._set_status("disabled")
 
     def _is_setup(self) -> bool:
-        return self.settings.credential_kind == "setup_code" or self.settings.credential.startswith("oc-pair://")
+        return not self.settings.device_token and (
+            self.settings.credential_kind == "setup_code"
+            or self.settings.credential.startswith("oc-pair://")
+        )
 
     async def _persist(self, *, enrolled: bool = False) -> None:
         def apply(config: Config) -> None:
@@ -298,10 +333,20 @@ class OpenClawNodeClient:
             target.credential_kind = self.settings.credential_kind
             target.device_id = self.settings.device_id
             target.device_private_key = self.settings.device_private_key
-            target.device_token = self.settings.device_token
+            target.device_token = "" if self._token_stored else self.settings.device_token
             target.device_scopes = list(self.settings.device_scopes)
 
         await mutate(apply)
+
+    async def _resolve_token(self) -> None:
+        """Migra il token legacy oppure recupera quello custodito dal Keystore."""
+        if self.settings.device_token:
+            self._token_stored = await set_secret(OPENCLAW_NODE_TOKEN, self.settings.device_token)
+            if self._token_stored:
+                await self._persist()
+        else:
+            self.settings.device_token = await get_secret(OPENCLAW_NODE_TOKEN) or ""
+            self._token_stored = bool(self.settings.device_token)
 
     async def _identity(self) -> Any:
         if self._crypto is not None and self._public_key:
@@ -327,6 +372,9 @@ class OpenClawNodeClient:
 
     async def run(self) -> None:
         attempt = 0
+        pairing_attempt = 0
+        if self.settings.enable:
+            await self._resolve_token()
         while self.settings.enable:
             try:
                 self._set_status("connecting")
@@ -335,15 +383,24 @@ class OpenClawNodeClient:
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001
-                if self._status["state"] != "pairing_required":
+                if self._status["state"] not in {"pairing_required", "token_rejected"}:
                     self._set_status("error", "connection_failed")
             finally:
                 for task in self._invokes.values():
                     task.cancel()
                 await asyncio.gather(*self._invokes.values(), return_exceptions=True)
                 self._invokes.clear()
-            if not self.settings.enable:
+            if not self.settings.enable or self._status["state"] == "token_rejected":
                 break
+            if self._status["state"] == "pairing_required":
+                pairing_attempt += 1
+                if pairing_attempt >= _MAX_PAIRING_ATTEMPTS:
+                    self._set_status("pairing_timeout", "pairing_timeout")
+                    break
+                await asyncio.sleep(next_pairing_backoff(pairing_attempt - 1))
+                continue
+            if self._status["state"] == "connected":
+                pairing_attempt = 0
             attempt = 0 if self._status["state"] == "connected" else attempt + 1
             await asyncio.sleep(next_backoff(attempt))
 
@@ -402,7 +459,7 @@ class OpenClawNodeClient:
                 {
                     "minProtocol": 4,
                     "maxProtocol": 4,
-                    "client": {"id": "openclaw-android", "version": "0.9.21", "platform": "android", "mode": "node"},
+                    "client": {"id": "openclaw-android", "version": __version__, "platform": "android", "mode": "node"},
                     "role": "node",
                     "scopes": [],
                     "caps": ["screen", "voice"],
@@ -410,7 +467,7 @@ class OpenClawNodeClient:
                     "permissions": {},
                     "auth": dict(auth),
                     "locale": "en-US",
-                    "userAgent": "openclaw-android/jenny-0.9.21",
+                    "userAgent": f"openclaw-android/jenny-{__version__}",
                     "device": {
                         "id": self.settings.device_id,
                         "publicKey": self._public_key,
@@ -425,9 +482,19 @@ class OpenClawNodeClient:
                 if response.get("type") == "res" and response.get("id") == request_id:
                     break
         if not response.get("ok"):
-            details = (response.get("error") or {}).get("details") or {}
-            if details.get("code") == "PAIRING_REQUIRED":
+            error = response.get("error") or {}
+            details = error.get("details") or {}
+            if details.get("code") == "PAIRING_REQUIRED" or error.get("code") == "PAIRING_REQUIRED":
                 self._set_status("pairing_required", "PAIRING_REQUIRED", details.get("requestId"))
+                return False
+            if "token" in auth:
+                await remove_secret(OPENCLAW_NODE_TOKEN)
+                self.settings.device_token = ""
+                self.settings.credential = ""
+                self.settings.credential_kind = ""
+                self._token_stored = False
+                self._set_status("token_rejected", "token_rejected")
+                await self._persist()
                 return False
             raise ValueError("connect_rejected")
         hello = response.get("payload") or {}
@@ -437,18 +504,16 @@ class OpenClawNodeClient:
         issued = auth_info.get("deviceToken")
         if isinstance(issued, str) and issued:
             self.settings.device_token = issued
+            self._token_stored = await set_secret(OPENCLAW_NODE_TOKEN, issued)
+            # La credenziale iniziale resta valida finché non arriva il token.
+            self.settings.credential = ""
+            self.settings.credential_kind = ""
         scopes = auth_info.get("scopes")
         if isinstance(scopes, list):
             self.settings.device_scopes = [str(scope) for scope in scopes]
         policy = hello.get("policy") or {}
         self._max_payload = max(_MIN_PAYLOAD, min(_MAX_PAYLOAD, int(policy.get("maxPayload", _DEFAULT_PAYLOAD))))
         self._tick_seconds = max(1.0, min(300.0, float(policy.get("tickIntervalMs", 30000)) / 1000))
-        # Un setup code è monouso: consumato per ottenere il device token, va
-        # cancellato *prima* di persistere, altrimenti al prossimo avvio il
-        # codice scaduto verrebbe ritentato al posto del device token buono.
-        if issued and "bootstrapToken" in auth:
-            self.settings.credential = ""
-            self.settings.credential_kind = ""
         await self._persist(enrolled=bool(issued))
         self._set_status("connected")
         return True
