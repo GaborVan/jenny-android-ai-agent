@@ -402,7 +402,7 @@ class OpenClawNodeClient:
                 {
                     "minProtocol": 4,
                     "maxProtocol": 4,
-                    "client": {"id": "openclaw-android", "version": "0.9.20", "platform": "android", "mode": "node"},
+                    "client": {"id": "openclaw-android", "version": "0.9.21", "platform": "android", "mode": "node"},
                     "role": "node",
                     "scopes": [],
                     "caps": ["screen", "voice"],
@@ -410,7 +410,7 @@ class OpenClawNodeClient:
                     "permissions": {},
                     "auth": dict(auth),
                     "locale": "en-US",
-                    "userAgent": "openclaw-android/jenny-0.9.20",
+                    "userAgent": "openclaw-android/jenny-0.9.21",
                     "device": {
                         "id": self.settings.device_id,
                         "publicKey": self._public_key,
