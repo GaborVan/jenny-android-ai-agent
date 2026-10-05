@@ -715,6 +715,16 @@ export class SettingsController {
       ? i18n.t('settings.openclawNode.credentialPlaceholderSetup')
       : i18n.t('settings.openclawNode.credentialPlaceholderToken');
     return `
+      <div class="settings-field">
+        <label class="settings-label">${i18n.t('settings.openclawNode.statusTitle')}</label>
+        <div id="openclaw-node-status-rows" style="font-size:12px;line-height:1.8">
+          <div><strong>${i18n.t('settings.openclawNode.nodeRow')}:</strong> <span id="oc-node-state">${escapeHtml(this._openClawNodeStatusText(node.status || {}))}</span></div>
+          <div><strong>${i18n.t('settings.openclawNode.screenRow')}:</strong> <span id="oc-a11y-state">${escapeHtml(i18n.t('settings.openclawNode.checking'))}</span></div>
+          <div><strong>${i18n.t('settings.openclawNode.clipboardRow')}:</strong> <span id="oc-clipboard-state">${escapeHtml(i18n.t('settings.openclawNode.checking'))}</span></div>
+        </div>
+        <button class="settings-btn-add" id="oc-enable-service" style="margin-top:8px"><i class="ti ti-accessibility"></i> ${i18n.t('settings.openclawNode.enableService')}</button>
+        <p class="settings-hint" style="margin:8px 0 0;font-size:12px;color:var(--text-faint)">${i18n.t('settings.openclawNode.serviceHint')}</p>
+      </div>
       <div class="settings-field settings-toggle-row">
         <label class="settings-label">${i18n.t('settings.openclawNode.enable')}</label>
         <label class="toggle-switch">
@@ -733,8 +743,18 @@ export class SettingsController {
       <div class="settings-actions" style="display:flex;gap:8px;margin-top:8px">
         <button class="settings-btn-save" id="oc-save">${i18n.t('settings.openclawNode.save')}</button>
         <button class="settings-btn-add" id="oc-connect"><i class="ti ti-plug-connected"></i> ${i18n.t('settings.openclawNode.connect')}</button>
-      </div>
-      <p class="settings-hint" id="oc-status" style="margin:8px 0 0;font-size:12px">${escapeHtml(this._openClawNodeStatusText(node.status || {}))}</p>`;
+      </div>`;
+  }
+
+  _openClawNodeAccessibilityText(state) {
+    if (!state || state.android !== true) return i18n.t('settings.openclawNode.statusUnavailable');
+    if (state.enabled) return i18n.t('settings.openclawNode.screenReadingOn');
+    return `${i18n.t('settings.openclawNode.screenReadingOff')} — ${i18n.t('settings.openclawNode.screenReadingOffCommands')}`;
+  }
+
+  _openClawNodeClipboardText(state) {
+    if (!state || state.android !== true) return i18n.t('settings.openclawNode.statusUnavailable');
+    return state.clipboard ? i18n.t('settings.openclawNode.clipboardAvailable') : i18n.t('settings.openclawNode.statusUnavailable');
   }
 
   _openClawNodeStatusText(status) {
@@ -749,13 +769,22 @@ export class SettingsController {
   }
 
   async _refreshOpenClawNode() {
-    const statusEl = this.contentEl.querySelector('#oc-status');
+    const statusEl = this.contentEl.querySelector('#oc-node-state');
     if (!statusEl) return;
     try {
       const node = await api.getOpenClawNodeStatus();
       statusEl.textContent = this._openClawNodeStatusText(node.status || {});
     } catch (e) {
       /* Silenzioso: la sezione resta sullo stato precedente. */
+    }
+    try {
+      const access = await api.getAccessibilityStatus();
+      const a11yEl = this.contentEl.querySelector('#oc-a11y-state');
+      const clipEl = this.contentEl.querySelector('#oc-clipboard-state');
+      if (a11yEl) a11yEl.textContent = this._openClawNodeAccessibilityText(access);
+      if (clipEl) clipEl.textContent = this._openClawNodeClipboardText(access);
+    } catch (e) {
+      /* Silenzioso */
     }
   }
 
@@ -797,6 +826,19 @@ export class SettingsController {
           showToast(i18n.t('settings.openclawNode.saveFailed'), 'error');
         } finally {
           connect.disabled = false;
+        }
+      });
+    }
+    const enableService = this.contentEl.querySelector('#oc-enable-service');
+    if (enableService) {
+      enableService.addEventListener('click', async () => {
+        enableService.disabled = true;
+        try {
+          await api.openAccessibilitySettings();
+        } catch (e) {
+          showToast(i18n.t('settings.openclawNode.saveFailed'), 'error');
+        } finally {
+          enableService.disabled = false;
         }
       });
     }

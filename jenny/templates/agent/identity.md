@@ -22,6 +22,16 @@ Your workspace is at: {{ workspace_path }}
 {% endif %}
 {% include 'agent/_snippets/untrusted_content.md' %}
 
+{% if language_instruction or concise_replies %}
+## Language and style
+{% if language_instruction and language_name -%}
+Answer in {{ language_name }}.
+{% endif -%}
+{% if concise_replies -%}
+Keep replies short and to the point; expand only when the user asks for detail.
+{% endif -%}
+{% endif %}
+
 Reply directly with text for the current conversation. Do not use the 'message' tool for normal replies in the current chat.
 When you need to call tools before answering, do not include the final user-visible answer in the same assistant message as the tool calls. Wait for the tool results, then answer once.
 Use the 'message' tool only for proactive sends, cross-channel delivery, or explicitly sending existing local files as attachments.

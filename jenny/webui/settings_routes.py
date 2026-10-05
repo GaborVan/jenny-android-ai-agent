@@ -17,6 +17,7 @@ from websockets.http11 import Response
 from jenny.bus.queue import MessageBus
 from jenny.webui.settings_api import (
     WebUISettingsError,
+    accessibility_status_payload,
     delete_provider,
     openclaw_node_payload,
     power_diagnostics_payload,
@@ -119,6 +120,10 @@ class WebUISettingsRouter:
             )
         if path == "/api/settings/openclaw-node/connect":
             return await self._handle_openclaw_node_connect(request)
+        if path == "/api/settings/accessibility/status":
+            return await self._handle_accessibility_status(request)
+        if path == "/api/settings/accessibility/open":
+            return await self._handle_accessibility_open(request)
         if path == "/api/settings/ssh":
             return self._handle_ssh_settings(request)
         if path == "/api/settings/ssh/update":
@@ -330,6 +335,24 @@ class WebUISettingsRouter:
             self.logger.exception("openclaw node connect failed")
             return self._error_response(500, "openclaw node connect failed")
         return self._json_response(openclaw_node_payload())
+
+    async def _handle_accessibility_status(self, request: WsRequest) -> Response:
+        if not self._authorized(request):
+            return self._unauthorized()
+        return self._json_response(await accessibility_status_payload())
+
+    async def _handle_accessibility_open(self, request: WsRequest) -> Response:
+        """Apre le Impostazioni di Accessibilità del sistema Android."""
+        if not self._authorized(request):
+            return self._unauthorized()
+        from jenny.runtime.ui_automation import open_accessibility_settings
+
+        result = await open_accessibility_settings()
+        if result is None:
+            return self._error_response(503, "android_unavailable")
+        if result.get("ok") is False:
+            return self._error_response(500, str(result.get("error") or "open_failed"))
+        return self._json_response({"ok": True})
 
     async def _handle_settings_power_update(self, request: WsRequest) -> Response:
         if not self._authorized(request):

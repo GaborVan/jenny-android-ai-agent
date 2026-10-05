@@ -145,3 +145,29 @@ async def test_execute_returns_unavailable_error(monkeypatch):
     tool = tools_module.UiStatusTool(config=_FakeConfig().ui_automation)
     out = await tool.execute()
     assert '"error"' in out and "ui_automation_unavailable" in out
+
+
+async def test_accessibility_enabled_without_android_context(monkeypatch):
+    monkeypatch.setattr(ui_automation, "get_android_context", lambda: None)
+    assert await ui_automation.accessibility_enabled() is None
+
+
+async def test_accessibility_enabled_reports_the_bridge(monkeypatch):
+    monkeypatch.setattr(
+        ui_automation, "_BRIDGE", ui_automation.BridgeCache("com.flagdizero.jenny.UiAutomationBridge")
+    )
+
+    class _FakeBridge:
+        enabled = True
+
+        def __init__(self, context):
+            pass
+
+        def isEnabled(self):  # noqa: N802
+            return self.enabled
+
+    monkeypatch.setattr(ui_automation, "_resolve_bridge_class", lambda: _FakeBridge)
+    monkeypatch.setattr(ui_automation, "get_android_context", lambda: object())
+    assert await ui_automation.accessibility_enabled() is True
+    _FakeBridge.enabled = False
+    assert await ui_automation.accessibility_enabled() is False

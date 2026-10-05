@@ -20,6 +20,20 @@ carries the reasoning that outlives them.
   `ui.dump` and clipboard reads require the accessibility service / foreground rules the
   node page documents. Config keys: `openclaw_node.*`.
 
+- **The OpenClaw node page says what is missing, and the service has a name.** The
+  section now shows three status lines — node connection, screen reading, clipboard —
+  and a button that opens Android's Accessibility settings directly. The hint names the
+  service exactly as the system shows it (`«Керування інтерфейсом Apex»` / “Apex UI
+  control”), and a disabled service is reported with the command it blocks (`ui.dump`).
+  New routes: `GET /api/settings/accessibility/status`, `GET /api/settings/accessibility/open`.
+
+- **Agent replies follow the device language and stay short by default.** A new identity
+  block tells the model which language to answer in and to keep replies brief; both are
+  configurable (`agents.defaults.languageInstruction`, `agents.defaults.conciseReplies`).
+  The default language is now *auto*: resolved at load from the device locale (Ukrainian
+  → `uk`, otherwise the previous `it`). An existing `language: "it"` is migrated to auto
+  once (config schema v2).
+
 - **The home bridge is configured out of the box.** A fresh install now starts
   with a single provider — the Tailscale bridge, `tier: local`, no key — already
   saved and already active, so the first message does not require pasting a long

@@ -1303,6 +1303,19 @@ def openclaw_node_payload() -> dict[str, Any]:
     return _openclaw_node_payload(load_config())
 
 
+async def accessibility_status_payload() -> dict[str, Any]:
+    """Stato del servizio di accessibilità per la WebUI.
+
+    ``android`` è False fuori dal telefono: la UI mostra "недоступно" invece di
+    accusare l'utente di non aver abilitato un servizio che non esiste.
+    """
+    from jenny.runtime.ui_automation import accessibility_enabled
+
+    enabled = await accessibility_enabled()
+    android = enabled is not None
+    return {"android": android, "enabled": bool(enabled), "clipboard": android}
+
+
 async def update_openclaw_node_settings(query: QueryParams) -> dict[str, Any]:
     """Aggiorna enable/url/credenziale del nodo OpenClaw.
 

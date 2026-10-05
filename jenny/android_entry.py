@@ -71,6 +71,11 @@ def run_gateway(
             device_tz or "unknown",
             tzdata_available(),
         )
+        from jenny.utils.device_locale import detect_device_locale
+
+        device_locale = detect_device_locale()
+        get_runtime_context().device_locale = device_locale
+        logger.info("Device locale: {}", device_locale or "unknown")
     except Exception:
         logger.opt(exception=True).debug("Could not detect device timezone")
 

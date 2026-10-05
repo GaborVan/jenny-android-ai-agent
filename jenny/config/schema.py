@@ -399,7 +399,22 @@ class AgentDefaults(Base):
     timezone: str = ""
     bot_name: str = "Jenny"
     bot_icon: str = "✿"
-    language: str = "it"
+    # Lingua delle risposte dell'agente. Stringa vuota = auto: risolta una volta
+    # per load in ``loader._resolve_default_language`` dal locale del dispositivo
+    # (ucraino -> "uk"), altrimenti il vecchio default "it".
+    language: str = ""
+    # Inietta nel prompt l'istruzione di rispondere nella lingua di ``language``.
+    language_instruction: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("languageInstruction", "language_instruction"),
+        serialization_alias="languageInstruction",
+    )
+    # Inietta nel prompt l'istruzione di tenere le risposte brevi.
+    concise_replies: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("conciseReplies", "concise_replies"),
+        serialization_alias="conciseReplies",
+    )
     tool_choice: Literal["auto", "any", "none", "required"] = Field(
         default="auto",
         validation_alias=AliasChoices("toolChoice", "tool_choice"),
@@ -816,7 +831,7 @@ class ModelPresetConfig(Base):
 
 # Versione corrente dello schema del config. Alzala di uno ogni volta che
 # aggiungi un ramo a ``Config._migrate_by_version``, mai altrimenti.
-CURRENT_CONFIG_VERSION = 1
+CURRENT_CONFIG_VERSION = 2
 
 # Migrazioni gia annunciate in questo processo. Solo per il log: la migrazione
 # resta idempotente e rigira a ogni parse finche il file non viene riscritto (lo
@@ -942,6 +957,24 @@ class Config(BaseSettings):
                             agents = {**agents, "defaults": defaults}
                             data = {**data, "agents": agents}
                             break
+        # v2: la lingua non aveva un valore "auto". Il vecchio default "it" era
+        # scritto nel file di ogni installazione, quindi il locale del dispositivo
+        # (ucraino) non poteva mai sceglierla. Riportiamo "it" a "" (= auto): la
+        # risoluzione in loader sceglie "uk" sui dispositivi ucraini e "it" altrove.
+        if version < 2:
+            agents = data.get("agents")
+            if isinstance(agents, dict):
+                defaults = agents.get("defaults")
+                if isinstance(defaults, dict) and defaults.get("language") == "it":
+                    if 2 not in _ANNOUNCED_MIGRATIONS:
+                        _ANNOUNCED_MIGRATIONS.add(2)
+                        logger.warning(
+                            "Config migration v2: language 'it' -> auto "
+                            "(follows the device locale; set it explicitly to override)"
+                        )
+                    defaults = {**defaults, "language": ""}
+                    agents = {**agents, "defaults": defaults}
+                    data = {**data, "agents": agents}
         return data
 
     @model_validator(mode="after")

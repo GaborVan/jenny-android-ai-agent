@@ -254,6 +254,9 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
         hooks: list[AgentHook] | None = None,
         disabled_skills: list[str] | None = None,
         wiki_directory_max_tokens: int | None = None,
+        language: str = "",
+        language_instruction: bool = False,
+        concise_replies: bool = False,
         projects_subdir: str = "wikis",
         tools_config: ToolsConfig | None = None,
         runtime_events: RuntimeEventBus | None = None,
@@ -343,6 +346,9 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             orchestrator=self.orchestrator_mode,
             available_tools=lambda: self.tools.tool_names,
             wiki_directory_max_tokens=wiki_directory_max_tokens,
+            language=language,
+            language_instruction=language_instruction,
+            concise_replies=concise_replies,
         )
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
@@ -486,6 +492,9 @@ class AgentLoop(StateHandlersMixin, ProviderPresetMixin, TurnPersistenceMixin, L
             extract_document_text=config.extract_document_text,
             timezone=defaults.timezone,
             disabled_skills=defaults.disabled_skills,
+            language=defaults.language,
+            language_instruction=defaults.language_instruction,
+            concise_replies=defaults.concise_replies,
             wiki_directory_max_tokens=defaults.atlas.max_context_tokens,
             projects_subdir=config.wiki.wikis_dir,
             session_ttl_minutes=defaults.session_ttl_minutes,

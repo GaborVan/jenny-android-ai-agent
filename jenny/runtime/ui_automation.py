@@ -122,6 +122,23 @@ async def open_accessibility_settings() -> dict[str, Any] | None:
     return _parse_result(raw) or _error("bridge_unavailable")
 
 
+async def accessibility_enabled() -> bool | None:
+    """True se il servizio di accessibilità è connesso; ``None`` fuori da Android.
+
+    Chiamata sincrona e leggera sul bridge Kotlin (``isEnabled``), pensata per
+    essere interrogata dalla UI: distinta da ``ui_status`` che fa un dump.
+    """
+    context = get_android_context()
+    if context is None:
+        return None
+    try:
+        bridge = await _get_bridge(context)
+        return bool(await asyncio.to_thread(bridge.isEnabled))
+    except Exception:  # noqa: BLE001
+        logger.opt(exception=True).debug("UiAutomationBridge.isEnabled failed")
+        return None
+
+
 async def screen_dump() -> dict[str, Any] | None:
     """Dump JSON dell'albero di accessibilità della finestra attiva.
 

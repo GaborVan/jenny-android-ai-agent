@@ -73,6 +73,7 @@ def load_config_with_raw(
 
     _apply_ssrf_whitelist(config)
     _resolve_default_timezone(config)
+    _resolve_default_language(config)
     return config, raw
 
 
@@ -203,6 +204,7 @@ def save_config(
 
     data = config.model_dump(mode="json", by_alias=True)
     _unresolve_default_timezone(data)
+    _unresolve_default_language(data)
     if preserve_unknown_from:
         data = _merge_unknown(preserve_unknown_from, data)
 
@@ -289,6 +291,41 @@ def _unresolve_default_timezone(data: dict[str, Any]) -> None:
     defaults = data.get("agents", {}).get("defaults")
     if isinstance(defaults, dict) and defaults.get("timezone") == device_tz:
         defaults["timezone"] = ""
+
+
+def _resolve_default_language(config: Config) -> None:
+    """Risolve la lingua "auto" (stringa vuota) dal locale del dispositivo.
+
+    Ucraino -> ``"uk"``; in ogni altro caso resta il vecchio default ``"it"``.
+    Avviene nel funnel unico di caricamento, così tutti i consumer a valle
+    (prompt, TTS, STT, messaggi dei canali) vedono un codice concreto.
+    """
+    if config.agents.defaults.language.strip():
+        return
+    from jenny.runtime.context import get_runtime_context
+
+    locale = (get_runtime_context().device_locale or "").strip().lower()
+    config.agents.defaults.language = "uk" if locale == "uk" else "it"
+
+
+def _unresolve_default_language(data: dict[str, Any]) -> None:
+    """Riporta a "auto" la lingua risolta prima della persistenza.
+
+    Simmetrico a ``_unresolve_default_timezone``: senza questo passo la prima
+    scrittura congelerebbe "it"/"uk" come scelta esplicita e la lingua non
+    seguirebbe più il locale del dispositivo.
+    """
+    from jenny.runtime.context import get_runtime_context
+
+    locale = (get_runtime_context().device_locale or "").strip().lower()
+    if not locale:
+        return
+    default = "uk" if locale == "uk" else "it"
+    agents = data.get("agents")
+    if isinstance(agents, dict):
+        defaults = agents.get("defaults")
+        if isinstance(defaults, dict) and defaults.get("language") == default:
+            defaults["language"] = ""
 
 
 _ENV_REF_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")

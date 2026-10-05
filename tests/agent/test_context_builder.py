@@ -1179,3 +1179,15 @@ class TestWhichFileAFactBelongsIn:
 
         assert "timezone" in contract
         assert "stale the moment it is saved" in contract
+
+
+def test_identity_language_and_brevity_are_configurable(tmp_path):
+    builder = ContextBuilder(
+        tmp_path, language="uk", language_instruction=True, concise_replies=True,
+    )
+    identity = builder._get_identity()
+    assert "Answer in Ukrainian." in identity
+    assert "Keep replies short" in identity
+    default_identity = ContextBuilder(tmp_path)._get_identity()
+    assert "Answer in Ukrainian." not in default_identity
+    assert "Keep replies short" not in default_identity

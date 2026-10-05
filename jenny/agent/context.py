@@ -41,6 +41,21 @@ from jenny.utils.wiki_paths import (
     wiki_schema_file,
 )
 
+# Nomi leggibili per l'istruzione di lingua nel prompt. Un codice sconosciuto
+# viene passato com'è: meglio "Answer in de." che nessuna istruzione.
+_LANGUAGE_NAMES: dict[str, str] = {
+    "uk": "Ukrainian",
+    "it": "Italian",
+    "en": "English",
+    "ru": "Russian",
+}
+
+
+def _language_name(code: str) -> str:
+    key = (code or "").strip().lower()
+    return _LANGUAGE_NAMES.get(key, code.strip())
+
+
 # Tetto sulla mappa di progetto iniettata nel blocco (T3). Si paga a **ogni**
 # turno del progetto, quindi e' una soglia sui caratteri e non sui token: e'
 # quella che si legge a occhio nel file, ed e' il numero che il lint usa per dire
@@ -505,6 +520,9 @@ class ContextBuilder:
         orchestrator: bool = False,
         available_tools: Callable[[], list[str]] | None = None,
         wiki_directory_max_tokens: int | None = None,
+        language: str = "",
+        language_instruction: bool = False,
+        concise_replies: bool = False,
     ):
         self.workspace = workspace
         self.timezone = timezone
@@ -518,6 +536,9 @@ class ContextBuilder:
         # descrive tool assenti non e solo contesto sprecato: invita il modello a
         # chiamarli.
         self.orchestrator = orchestrator
+        self.language = language
+        self.language_instruction = language_instruction
+        self.concise_replies = concise_replies
         # Tetto del blocco "Wiki Directory" compilato da Atlas. ``None`` lascia
         # il default dello schema; il valore reale arriva da AgentLoop.from_config.
         self.wiki_directory_max_tokens = wiki_directory_max_tokens or _DEFAULT_WIKI_DIRECTORY_TOKENS
@@ -968,6 +989,9 @@ class ContextBuilder:
 
         return render_template(
             "agent/identity.md",
+            language_name=_language_name(self.language) if self.language_instruction else "",
+            language_instruction=self.language_instruction,
+            concise_replies=self.concise_replies,
             workspace_path=workspace_path,
             install_path=str(_absolute_workspace(self.workspace)),
             runtime=runtime,

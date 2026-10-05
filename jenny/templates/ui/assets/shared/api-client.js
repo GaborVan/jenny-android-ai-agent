@@ -455,6 +455,18 @@ class ApiClient {
     return this._openclawNodeCall('/api/settings/openclaw-node/connect', params);
   }
 
+  async getAccessibilityStatus() {
+    const res = await this._fetch('/api/settings/accessibility/status');
+    if (!res.ok) throw new Error(await this._errorText(res, 'Accessibility status failed'));
+    return res.json();
+  }
+
+  async openAccessibilitySettings() {
+    const res = await this._fetch('/api/settings/accessibility/open');
+    if (!res.ok) throw new Error(await this._errorText(res, 'Open accessibility settings failed'));
+    return res.json();
+  }
+
   // ── SSH APIs ──
   // Helper dedicato invece di _postWithQuery: quello scarta i valori vuoti, e
   // qui un campo svuotato (es. la descrizione di un host) deve poter arrivare

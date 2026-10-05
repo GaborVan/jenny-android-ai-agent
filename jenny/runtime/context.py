@@ -28,6 +28,10 @@ class RuntimeContext:
     # IANA ID rilevato dal dispositivo (es. "Europe/Rome"), scritto una volta
     # al boot da ``android_entry``; None su host o se il rilevamento fallisce.
     device_timezone: str | None = None
+    # Codice lingua ISO-639-1 della locale del device (es. "uk"), scritto una
+    # volta al boot da ``android_entry``; None su host o se il rilevamento
+    # fallisce. Usato da ``config.loader`` come default della lingua.
+    device_locale: str | None = None
     # Impostato da ``config.loader`` quando `config.json` era illeggibile e si è
     # dovuto ripiegare: "backup" (recuperato dal .bak) o "defaults" (ripartiti
     # da zero). La WebUI lo mostra: ripartire con impostazioni diverse da quelle

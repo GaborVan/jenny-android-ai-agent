@@ -23,6 +23,7 @@ from jenny.runtime.context import get_runtime_context
 from jenny.webui.settings_api import (
     WebUISettingsError,
     _openclaw_node_payload,
+    accessibility_status_payload,
     settings_payload,
     update_openclaw_node_settings,
 )
@@ -195,3 +196,60 @@ async def test_connect_route_forces_enable_and_restarts(config_path, monkeypatch
     assert response.status_code == 200
     assert calls == ["restart"]
     assert load_config().openclaw_node.enable is True
+
+
+@pytest.mark.parametrize("enabled", [None, True, False])
+async def test_accessibility_payload_is_android_gated(monkeypatch, enabled):
+    async def fake_enabled():
+        return enabled
+
+    monkeypatch.setattr("jenny.runtime.ui_automation.accessibility_enabled", fake_enabled)
+    assert await accessibility_status_payload() == {
+        "android": enabled is not None,
+        "enabled": bool(enabled),
+        "clipboard": enabled is not None,
+    }
+
+
+@pytest.mark.parametrize("action", ["status", "open"])
+async def test_accessibility_status_route_requires_auth(action):
+    path = f"/api/settings/accessibility/{action}"
+    response = await _router().dispatch(_request(path, token=None), path)
+    assert response.status_code == 401
+
+
+async def test_accessibility_status_route_returns_the_flags(monkeypatch):
+    async def fake_enabled():
+        return True
+
+    monkeypatch.setattr("jenny.runtime.ui_automation.accessibility_enabled", fake_enabled)
+    path = "/api/settings/accessibility/status"
+    response = await _router().dispatch(_request(path), path)
+    assert response.status_code == 200
+    assert _json(response) == {"android": True, "enabled": True, "clipboard": True}
+
+
+async def test_accessibility_open_route_calls_the_bridge(monkeypatch):
+    calls = []
+
+    async def fake_open():
+        calls.append("open")
+        return {"ok": True}
+
+    monkeypatch.setattr("jenny.runtime.ui_automation.open_accessibility_settings", fake_open)
+    path = "/api/settings/accessibility/open"
+    response = await _router().dispatch(_request(path), path)
+    assert response.status_code == 200
+    assert _json(response) == {"ok": True}
+    assert calls == ["open"]
+
+
+@pytest.mark.parametrize("result, status", [(None, 503), ({"ok": False, "error": "failed"}, 500)])
+async def test_accessibility_open_route_reports_failure(monkeypatch, result, status):
+    async def fake_open():
+        return result
+
+    monkeypatch.setattr("jenny.runtime.ui_automation.open_accessibility_settings", fake_open)
+    path = "/api/settings/accessibility/open"
+    response = await _router().dispatch(_request(path), path)
+    assert response.status_code == status
