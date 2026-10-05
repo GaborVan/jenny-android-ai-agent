@@ -1,5 +1,9 @@
 package com.flagdizero.jenny
 
+import android.Manifest
+import android.content.ComponentName
+import android.content.pm.PackageManager
+import androidx.core.content.ContextCompat
 import android.content.Context
 import android.content.Intent
 import android.media.AudioFormat
@@ -11,6 +15,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
+import android.speech.RecognitionService
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -18,6 +23,8 @@ import android.util.Log
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.math.max
@@ -27,12 +34,9 @@ import kotlin.math.max
  * a Python via Chaquopy (`jclass`) — stesso pattern di `ClipboardBridge`: classe
  * semplice costruita col Context, istanza cachata in `runtime/stt.py`.
  *
- * Serve a una cosa sola: **trascrivere un file audio**, cioè il messaggio
- * vocale che arriva da un altro canale (Telegram), dove non c'è nessun
- * microfono da ascoltare e nessuna WebView che detti. La dettatura dal vivo
- * dentro l'app resta dove stava (`SpeechBridge`, che parla con la WebView): qui
- * non si tocca il microfono, quindi non serve né il foreground-service di tipo
- * microfono né che l'app sia in primo piano.
+ * Trascrive file audio e ascolta il microfono su richiesta. La dettatura WebView
+ * resta in SpeechBridge. Il percorso microfono richiede RECORD_AUDIO concesso
+ * dall'utente; il servizio decide l'accesso secondo i vincoli di foreground.
  *
  * Confine di fiducia: il file viene decodificato **sul dispositivo**
  * (`MediaExtractor` + `MediaCodec`) e consegnato al motore di riconoscimento
@@ -66,6 +70,9 @@ class SttBridge(context: Context) {
 
     @Volatile
     private var recognizer: SpeechRecognizer? = null
+
+    private var micRecognizer: SpeechRecognizer? = null
+    private var cancelMic: (() -> Unit)? = null
 
     fun isAvailable(): Boolean = SpeechRecognizer.isRecognitionAvailable(appContext)
 
@@ -115,6 +122,141 @@ class SttBridge(context: Context) {
         }
     }
 
+    private fun preferredRecognitionComponent(): ComponentName? {
+        return try {
+            val intent = Intent(RecognitionService.SERVICE_INTERFACE)
+            appContext.packageManager.queryIntentServices(intent, 0)
+                .mapNotNull { it.serviceInfo }
+                .map { ComponentName(it.packageName, it.name) }
+                .firstOrNull {
+                    it.packageName.contains("googlequicksearchbox", ignoreCase = true) ||
+                        it.packageName.contains("google", ignoreCase = true)
+                }
+        } catch (e: Exception) {
+            Log.w(TAG, "queryIntentServices failed", e)
+            null
+        }
+    }
+
+    private fun createRecognizer(component: ComponentName?): SpeechRecognizer =
+        if (component != null) SpeechRecognizer.createSpeechRecognizer(appContext, component)
+        else SpeechRecognizer.createSpeechRecognizer(appContext)
+
+    /** Il latch mantiene la chiamata Chaquopy fuori dal main thread. */
+    fun listen(seconds: Int, languageTag: String): String {
+        val done = AtomicBoolean(false)
+        val latch = CountDownLatch(1)
+        var result = errorJson("stt_error")
+        var created: SpeechRecognizer? = null
+        var stop: Runnable? = null
+        fun release() {
+            stop?.let { mainHandler.removeCallbacks(it) }
+            releaseRecognizer(created)
+            if (micRecognizer === created) {
+                micRecognizer = null
+                cancelMic = null
+            }
+            created = null
+        }
+        fun finish(payload: String) {
+            if (done.compareAndSet(false, true)) {
+                result = payload
+                release()
+                latch.countDown()
+            }
+        }
+        return try {
+            if (!isAvailable()) {
+                return errorJson("stt_unavailable", "No speech recognition service is installed or enabled.")
+            }
+            if (ContextCompat.checkSelfPermission(appContext, Manifest.permission.RECORD_AUDIO) !=
+                PackageManager.PERMISSION_GRANTED) {
+                return errorJson("permission_denied", "Please grant microphone permission for Apex.")
+            }
+            val bounded = seconds.coerceIn(1, 15)
+            val tag = languageTag.ifBlank { Locale.getDefault().toLanguageTag() }
+            mainHandler.post {
+                if (done.get()) return@post
+                if (micRecognizer != null) {
+                    finish(errorJson("stt_busy"))
+                    return@post
+                }
+                cancelMic = {
+                    try { created?.cancel() } catch (e: Exception) {
+                        Log.w(TAG, "mic cancel failed", e)
+                    }
+                    finish(errorJson("stt_client"))
+                }
+                fun begin(forceLanguage: Boolean) {
+                    if (done.get()) return
+                    try {
+                        val rec = createRecognizer(preferredRecognitionComponent())
+                        created = rec
+                        micRecognizer = rec
+                        rec.setRecognitionListener(object : RecognitionListener {
+                            override fun onReadyForSpeech(params: Bundle?) {}
+                            override fun onBeginningOfSpeech() {}
+                            override fun onRmsChanged(rmsdB: Float) {}
+                            override fun onBufferReceived(buffer: ByteArray?) {}
+                            override fun onEndOfSpeech() {}
+                            override fun onPartialResults(partialResults: Bundle?) {}
+                            override fun onEvent(eventType: Int, params: Bundle?) {}
+                            override fun onResults(results: Bundle?) {
+                                if (created !== rec || done.get()) return
+                                val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                                    ?.firstOrNull()?.trim().orEmpty()
+                                finish(if (text.isEmpty()) errorJson("stt_no_match", "No speech recognised.")
+                                    else JSONObject().put("ok", true).put("text", text)
+                                        .put("language", tag).toString())
+                            }
+                            override fun onError(error: Int) {
+                                if (created !== rec || done.get()) return
+                                if (error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED && forceLanguage) {
+                                    // Una sola riprova senza lingua, sullo stesso latch.
+                                    stop?.let { mainHandler.removeCallbacks(it) }
+                                    releaseRecognizer(rec)
+                                    created = null
+                                    micRecognizer = null
+                                    begin(false)
+                                } else finish(errorJson(errorName(error)))
+                            }
+                        })
+                        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                            if (forceLanguage) putExtra(RecognizerIntent.EXTRA_LANGUAGE, tag)
+                        }
+                        rec.startListening(intent)
+                        stop = Runnable {
+                            if (created === rec && !done.get()) {
+                                try { rec.stopListening() } catch (e: Exception) {
+                                    finish(errorJson("stt_error", e.message))
+                                }
+                            }
+                        }
+                        mainHandler.postDelayed(stop!!, bounded * 1000L)
+                    } catch (e: Exception) {
+                        finish(errorJson("stt_error", e.message))
+                    }
+                }
+                begin(true)
+            }
+            if (!latch.await((bounded + 12).toLong(), TimeUnit.SECONDS)) {
+                done.set(true)
+                mainHandler.post {
+                    try { created?.cancel() } catch (e: Exception) {
+                        Log.w(TAG, "mic timeout cancel failed", e)
+                    } finally { release() }
+                }
+                errorJson("stt_timeout", "The recognition service did not answer in time.")
+            } else result
+        } catch (e: Exception) {
+            done.set(true)
+            mainHandler.post { release() }
+            if (e is InterruptedException) Thread.currentThread().interrupt()
+            errorJson("stt_error", e.message)
+        }
+    }
+
     /** Annulla una trascrizione in corso (idempotente). */
     fun cancel(): String {
         mainHandler.post {
@@ -122,6 +264,9 @@ class SttBridge(context: Context) {
                 recognizer?.cancel()
             } catch (e: Exception) {
                 Log.w(TAG, "cancel failed", e)
+            } finally {
+                releaseRecognizer(recognizer)
+                cancelMic?.invoke()
             }
         }
         return """{"ok":true}"""

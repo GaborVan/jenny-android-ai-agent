@@ -10,7 +10,11 @@ Stesso pattern degli altri runtime: classe Kotlin esposta via Chaquopy
 (``jclass``), istanza cachata in un ``BridgeCache``; fuori da Android tutto
 degrada a ``None``.
 
-Una differenza voluta rispetto agli altri runtime: **non è un tool**. Lo chiama
+Ascolta anche il microfono su richiesta del nodo OpenClaw: servono RECORD_AUDIO
+e, da Android 10, app in primo piano o foreground service di tipo microfono.
+Il permesso resta una scelta dell’utente.
+
+La trascrizione da file **non è un tool**. La chiama
 il canale che ha appena scaricato il messaggio vocale (``channels/telegram.py``),
 sul file che ha scaricato lui. Se fosse un tool, il modello potrebbe nominare un
 path arbitrario del workspace e far leggere audio a un motore di terze parti:
@@ -117,5 +121,23 @@ async def transcribe_file(
         )
     except Exception:  # noqa: BLE001
         logger.opt(exception=True).debug("SttBridge.transcribeFile failed")
+        return _error("bridge_unavailable")
+    return _parse_result(raw) or _error("bridge_unavailable")
+
+
+async def listen(seconds: int = 5, *, language: str = "") -> dict[str, Any] | None:
+    """Ascolta il microfono su richiesta, con permesso concesso dall'utente."""
+    context = get_android_context()
+    if context is None:
+        return None
+    try:
+        secs = max(1, min(15, int(seconds)))
+    except (TypeError, ValueError, OverflowError):
+        return _error("invalid_seconds")
+    try:
+        bridge = await _get_bridge(context)
+        raw = await asyncio.to_thread(bridge.listen, secs, language_tag_for(language))
+    except Exception:  # noqa: BLE001
+        logger.opt(exception=True).debug("SttBridge.listen failed")
         return _error("bridge_unavailable")
     return _parse_result(raw) or _error("bridge_unavailable")

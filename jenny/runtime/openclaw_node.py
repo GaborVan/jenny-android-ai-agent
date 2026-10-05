@@ -1,9 +1,9 @@
-"""Client nodo OpenClaw: identità Android, pairing e quattro comandi limitati.
+"""Client nodo OpenClaw: identità Android, pairing e nove comandi limitati.
 
 Il gateway parla il protocollo WebSocket delle *nodi* OpenClaw (versione 4). Qui
-vivono solo la macchina a stati del collegamento e i quattro handler ammessi:
+vivono solo la macchina a stati del collegamento e i nove handler ammessi:
 le capacità Android arrivano dai runtime esistenti (``ui_automation``,
-``clipboard``, ``tts``), la firma Ed25519 dal bridge Kotlin ``NodeCryptoBridge``.
+``clipboard``, ``tts``, ``stt``), la firma Ed25519 dal bridge Kotlin ``NodeCryptoBridge``.
 
 Fuori da Android tutto degrada: senza context non c'è bridge, quindi nessuna
 identità e nessuna connessione. I test iniettano un finto crypto bridge.
@@ -36,8 +36,9 @@ from jenny.runtime.secure_store import (
     remove_secret,
     set_secret,
 )
+from jenny.runtime.stt import listen
 from jenny.runtime.tts import speak
-from jenny.runtime.ui_automation import screen_dump
+from jenny.runtime.ui_automation import press_global, screen_dump, swipe, tap_target, type_text_into
 
 _BRIDGE = BridgeCache("com.flagdizero.jenny.NodeCryptoBridge")
 Handler = Callable[..., Awaitable[dict[str, Any] | None]]
@@ -184,7 +185,10 @@ def decode_pairing_setup_code(raw: str) -> dict[str, Any]:
 
 
 def command_names() -> list[str]:
-    return ["ui.dump", "clipboard.get", "clipboard.set", "voice.speak"]
+    return [
+        "ui.dump", "ui.tap", "ui.swipe", "ui.type", "ui.press",
+        "clipboard.get", "clipboard.set", "voice.speak", "voice.listen",
+    ]
 
 
 def command_error(code: str, message: str) -> dict[str, Any]:
@@ -198,6 +202,13 @@ def command_error(code: str, message: str) -> dict[str, Any]:
     return {"ok": False, "error": {"code": code, "message": message}}
 
 
+_PASSTHROUGH_ERRORS = {
+    "service_not_enabled", "no_screen_dump", "element_not_found",
+    "permission_denied", "permission_pending",
+    "microphone_unavailable", "stt_unavailable", "stt_no_match", "stt_timeout",
+}
+
+
 async def dispatch_command(
     command: str,
     params: dict[str, Any],
@@ -206,6 +217,11 @@ async def dispatch_command(
     clipboard_get: Handler,
     clipboard_set: Handler,
     speak: Handler,
+    tap: Handler,
+    swipe: Handler,
+    type_text: Handler,
+    press_global: Handler,
+    listen: Handler,
     timeout: float = 15.0,
 ) -> dict[str, Any]:
     """Esegue un comando ammesso e restituisce il payload di ``node.invoke.result``."""
@@ -215,10 +231,63 @@ async def dispatch_command(
         return command_error("invalid_params", "invalid_params")
     if command in {"clipboard.set", "voice.speak"} and not isinstance(params.get("text"), str):
         return command_error("invalid_params", "invalid_params")
+    invalid = command_error("invalid_params", "invalid_params")
+    target: dict[str, Any] = {}
+    if command in {"ui.tap", "ui.type"}:
+        if "index" in params:
+            if type(params["index"]) is not int:
+                return invalid
+            target["index"] = params["index"]
+        if "id" in params:
+            if not isinstance(params["id"], str) or not params["id"]:
+                return invalid
+            target["node_id"] = params["id"]
+        if len(target) > 1:
+            return invalid
+        if command == "ui.tap":
+            if set(params) == {"x", "y"}:
+                if any(type(params[key]) is not int for key in ("x", "y")):
+                    return invalid
+                target = {"x": params["x"], "y": params["y"]}
+            elif set(params) not in ({"index"}, {"id"}):
+                return invalid
+        elif not isinstance(params.get("text"), str) or not params["text"]:
+            return invalid
+    if command == "ui.swipe":
+        if any(type(params.get(key)) is not int for key in ("x1", "y1", "x2", "y2")):
+            return invalid
+        if type(params.get("durationMs", 300)) is not int:
+            return invalid
+    action = params.get("action", "")
+    if command == "ui.press":
+        if not isinstance(action, str) or action.lower() not in {"back", "home", "recents", "notifications"}:
+            return invalid
+        action = action.lower()
+    seconds = params.get("seconds", 5)
+    language = params.get("language", "")
+    if command == "voice.listen":
+        if (
+            isinstance(seconds, bool) or not isinstance(seconds, (int, float))
+            or (isinstance(seconds, float) and not math.isfinite(seconds))
+            or not isinstance(language, str)
+        ):
+            return invalid
+        seconds = max(1, min(15, seconds))
+        timeout = min(60.0, max(timeout, seconds + 6.0))
     try:
         async with asyncio.timeout(timeout):
             if command == "ui.dump":
                 result = await screen_dump()
+            elif command == "ui.tap":
+                result = await tap(**target)
+            elif command == "ui.swipe":
+                result = await swipe(params["x1"], params["y1"], params["x2"], params["y2"], params.get("durationMs", 300))
+            elif command == "ui.type":
+                result = await type_text(params["text"], **target)
+            elif command == "ui.press":
+                result = await press_global(action)
+            elif command == "voice.listen":
+                result = await listen(seconds, language=language)
             elif command == "clipboard.get":
                 result = await clipboard_get()
             elif command == "clipboard.set":
@@ -237,6 +306,9 @@ async def dispatch_command(
         if result is None:
             return command_error("bridge_unavailable", "bridge_unavailable")
         if result.get("ok") is False:
+            error = result.get("error")
+            if isinstance(error, str) and error in _PASSTHROUGH_ERRORS:
+                return command_error(error, result.get("hint") or error)
             return command_error("command_failed", str(result.get("error") or "command_failed"))
         return {"ok": True, "payload": result}
     except TimeoutError:
@@ -547,6 +619,11 @@ class OpenClawNodeClient:
                     clipboard_get=clipboard_get,
                     clipboard_set=clipboard_set,
                     speak=speak,
+                    tap=tap_target,
+                    swipe=swipe,
+                    type_text=type_text_into,
+                    press_global=press_global,
+                    listen=listen,
                     timeout=timeout,
                 )
             except (ValueError, TypeError):

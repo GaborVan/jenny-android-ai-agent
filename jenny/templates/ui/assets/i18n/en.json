@@ -265,11 +265,12 @@
     "providerDeleted": "Provider deleted",
     "saveError": "Couldn't save",
     "openclawNode": {
+      "commandsRow": "Commands",
       "newCode": "Enter a new code",
       "tokenStored": "Token saved — no code needed after restarting or updating the app.",
       "title": "OpenClaw node",
       "enable": "Register as OpenClaw node",
-      "hint": "Lets an OpenClaw gateway drive this phone: it can read the screen tree (ui.dump), read/write the clipboard, and speak through the system TTS. After connecting, approve the device on the gateway (openclaw nodes approve) and allow the commands. The accessibility service must be enabled for ui.dump. The service is shown in the system as “Apex UI control”.",
+      "hint": "Lets an OpenClaw gateway drive this phone: it can read the screen tree (ui.dump), read/write the clipboard, and speak through the system TTS. After connecting, approve the device on the gateway (openclaw nodes approve) and allow the commands. The accessibility service must be enabled for ui.dump. The service is shown in the system as “Apex UI control”. Supports touch gestures, text input, navigation, and voice input from the microphone.",
       "url": "Gateway URL",
       "credential": "Setup code or token",
       "credentialPlaceholderSetup": "oc-pair://…",

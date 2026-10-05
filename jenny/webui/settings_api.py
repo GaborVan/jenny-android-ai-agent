@@ -1284,7 +1284,7 @@ def _apply_web_search_settings(config: Config, query: QueryParams) -> bool:
 
 def _openclaw_node_payload(config: Config) -> dict[str, Any]:
     """Sezione OpenClaw node: mai la credenziale, il device token o la chiave privata."""
-    from jenny.runtime.openclaw_node import active_status
+    from jenny.runtime.openclaw_node import active_status, command_names
 
     node = config.openclaw_node
     status = active_status()
@@ -1297,6 +1297,7 @@ def _openclaw_node_payload(config: Config) -> dict[str, Any]:
         "device_id": node.device_id,
         "paired": paired,
         "token_stored": paired and not bool(node.device_token),
+        "commands": command_names(),
         "status": status,
     }
 

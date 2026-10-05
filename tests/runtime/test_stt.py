@@ -185,3 +185,43 @@ async def test_the_engine_refusing_is_passed_through(monkeypatch: Any, tmp_path:
         "error": "stt_file_source_unsupported",
         "hint": "needs Android 13",
     }
+
+
+@pytest.mark.parametrize("kwargs,expected", [
+    ({}, (5, "")), ({"seconds": 0}, (1, "")), ({"seconds": 99}, (15, "")),
+    ({"seconds": "3", "language": "uk"}, (3, "uk-UA")),
+    ({"language": "en_US"}, (5, "en-US")),
+])
+async def test_listen_bridge(monkeypatch, kwargs, expected):
+    from unittest.mock import AsyncMock, Mock
+
+    bridge = Mock()
+    bridge.listen.return_value = '{"ok":true,"text":"hello","language":"en-US"}'
+    monkeypatch.setattr(stt, "get_android_context", lambda: object())
+    monkeypatch.setattr(stt, "_get_bridge", AsyncMock(return_value=bridge))
+    assert await stt.listen(**kwargs) == {"ok": True, "text": "hello", "language": "en-US"}
+    bridge.listen.assert_called_once_with(*expected)
+
+
+@pytest.mark.parametrize("reply,expected", [
+    ('{"ok":false,"error":"stt_unavailable"}', "stt_unavailable"),
+    ('bad json', "bridge_unavailable"), ('[]', "bridge_unavailable"),
+])
+async def test_listen_errors(monkeypatch, reply, expected):
+    from unittest.mock import AsyncMock, Mock
+
+    bridge = Mock()
+    bridge.listen.return_value = reply
+    monkeypatch.setattr(stt, "get_android_context", lambda: object())
+    monkeypatch.setattr(stt, "_get_bridge", AsyncMock(return_value=bridge))
+    assert (await stt.listen())["error"] == expected
+    bridge.listen.side_effect = RuntimeError("broken")
+    assert (await stt.listen())["error"] == "bridge_unavailable"
+
+
+async def test_listen_off_android_and_invalid_seconds(monkeypatch):
+    monkeypatch.setattr(stt, "get_android_context", lambda: None)
+    assert await stt.listen() is None
+    monkeypatch.setattr(stt, "get_android_context", lambda: object())
+    for seconds in (None, "bad", float("nan"), float("inf")):
+        assert (await stt.listen(seconds))["error"] == "invalid_seconds"

@@ -171,3 +171,93 @@ async def test_accessibility_enabled_reports_the_bridge(monkeypatch):
     assert await ui_automation.accessibility_enabled() is True
     _FakeBridge.enabled = False
     assert await ui_automation.accessibility_enabled() is False
+
+
+@pytest.mark.parametrize("target", [{"index": 0}, {"node_id": "field"}])
+async def test_tap_cached_target(monkeypatch, target):
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(ui_automation, "_LAST_NODES", [{"id": "field", "bounds": [10, 20, 31, 61]}])
+    tap = AsyncMock(return_value={"ok": True})
+    monkeypatch.setattr(ui_automation, "tap", tap)
+    assert await ui_automation.tap_target(**target) == {"ok": True}
+    tap.assert_awaited_once_with(20, 40)
+
+
+@pytest.mark.parametrize("nodes,target,error", [
+    ([], {"index": 0}, "no_screen_dump"),
+    ([{"id": "field"}], {"index": -1}, "element_not_found"),
+    ([{"id": "field"}], {"index": 1}, "element_not_found"),
+    ([{"id": "field"}], {"node_id": "FIELD"}, "element_not_found"),
+    ([{"id": "field"}], {"index": 0}, "element_not_found"),
+])
+async def test_tap_target_errors(monkeypatch, nodes, target, error):
+    monkeypatch.setattr(ui_automation, "_LAST_NODES", nodes)
+    assert (await ui_automation.tap_target(**target))["error"] == error
+
+
+@pytest.mark.parametrize("bounds", [None, [], [1, 2], "1234", [0, 0, 0, 10],
+                                        [2, 0, 1, 10], [0, 0, True, 10], [0, 0, float("nan"), 10]])
+def test_malformed_node_bounds(bounds):
+    assert ui_automation._node_center({"bounds": bounds}) is None
+
+
+async def test_target_off_android(monkeypatch):
+    monkeypatch.setattr(ui_automation, "get_android_context", lambda: None)
+    monkeypatch.setattr(ui_automation, "_LAST_NODES", [{"bounds": [0, 0, 10, 10]}])
+    assert await ui_automation.tap_target(index=0) is None
+    assert await ui_automation.tap_target(x=1, y=2) is None
+    assert await ui_automation.type_text_into("hi", index=0) is None
+
+
+@pytest.mark.parametrize("target", [{}, {"index": 0}, {"node_id": "field"}])
+async def test_type_target_focus_order(monkeypatch, target):
+    from unittest.mock import AsyncMock, Mock, call
+
+    calls = Mock()
+    calls.attach_mock(AsyncMock(return_value={"ok": True}), "tap")
+    calls.attach_mock(AsyncMock(), "sleep")
+    calls.attach_mock(AsyncMock(return_value={"ok": True}), "type")
+    monkeypatch.setattr(ui_automation, "tap_target", calls.tap)
+    monkeypatch.setattr(ui_automation.asyncio, "sleep", calls.sleep)
+    monkeypatch.setattr(ui_automation, "type_text", calls.type)
+    assert await ui_automation.type_text_into("hi", **target) == {"ok": True}
+    expected = []
+    if target:
+        expected = [call.tap(index=target.get("index"), node_id=target.get("node_id")), call.sleep(0.3)]
+    assert calls.mock_calls == expected + [call.type("hi")]
+
+
+@pytest.mark.parametrize("result", [None, {"ok": False, "error": "service_not_enabled"}])
+async def test_type_target_stops_after_failed_tap(monkeypatch, result):
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(ui_automation, "tap_target", AsyncMock(return_value=result))
+    type_mock = AsyncMock()
+    monkeypatch.setattr(ui_automation, "type_text", type_mock)
+    assert await ui_automation.type_text_into("hi", index=0) == result
+    type_mock.assert_not_awaited()
+
+
+async def test_dump_cache_refresh_and_reset(monkeypatch):
+    from unittest.mock import AsyncMock, Mock
+
+    bridge = Mock()
+    bridge.screenDump.side_effect = [
+        '{"ok":true,"nodes":[{"id":"first"}]}',
+        '{"ok":true,"nodes":[{"id":"second"}]}',
+        '{"ok":false,"error":"service_not_enabled"}',
+    ]
+    monkeypatch.setattr(ui_automation, "get_android_context", lambda: object())
+    monkeypatch.setattr(ui_automation, "_get_bridge", AsyncMock(return_value=bridge))
+    ui_automation.reset_ui_automation_state()
+    for name in ("first", "second"):
+        result = await ui_automation.screen_dump()
+        assert ui_automation.last_dump_nodes() == result["nodes"] == [{"id": name}]
+        copy = ui_automation.last_dump_nodes()
+        copy.clear()
+        assert ui_automation.last_dump_nodes()
+    await ui_automation.screen_dump()
+    assert ui_automation.last_dump_nodes() == [{"id": "second"}]
+    ui_automation.reset_ui_automation_state()
+    assert ui_automation.last_dump_nodes() == []

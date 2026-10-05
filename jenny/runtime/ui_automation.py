@@ -34,6 +34,7 @@ from jenny.runtime.chaquopy_bridge import BridgeCache
 from jenny.runtime.context import get_android_context
 
 _BRIDGE = BridgeCache("com.flagdizero.jenny.UiAutomationBridge")
+_LAST_NODES: list[dict[str, Any]] = []
 
 # Azioni globali accettate (whitelist: niente free-string verso il bridge).
 _GLOBAL_KEYS = {"back", "home", "recents", "notifications"}
@@ -47,6 +48,7 @@ def reset_ui_automation_state() -> None:
     in-process. Chiamato da ``android_entry.run_gateway``.
     """
     _BRIDGE.reset()
+    _LAST_NODES.clear()
 
 
 def _resolve_bridge_class() -> Any:
@@ -79,9 +81,9 @@ def _parse_result(raw: Any) -> dict[str, Any] | None:
         return None
 
 
-def _error(message: str) -> dict[str, Any]:
+def _error(message: str, **extra: Any) -> dict[str, Any]:
     """Dict d'errore uniforme per il tool (stesso shape del bridge Kotlin)."""
-    return {"ok": False, "error": message}
+    return {"ok": False, "error": message, **extra}
 
 
 async def ui_status() -> dict[str, Any] | None:
@@ -154,7 +156,10 @@ async def screen_dump() -> dict[str, Any] | None:
     except Exception:  # noqa: BLE001
         logger.opt(exception=True).debug("UiAutomationBridge.screenDump failed")
         return _error("bridge_unavailable")
-    return _parse_result(raw) or _error("bridge_unavailable")
+    result = _parse_result(raw) or _error("bridge_unavailable")
+    if result.get("ok") is True and isinstance(result.get("nodes"), list):
+        _LAST_NODES[:] = result["nodes"]
+    return result
 
 
 async def screenshot(save_dir: str | None = None) -> dict[str, Any] | None:
@@ -272,3 +277,60 @@ def _not_enabled() -> dict[str, Any]:
             "to), then run ui_status to verify before acting on the screen."
         ),
     }
+
+
+def last_dump_nodes() -> list[dict[str, Any]]:
+    return list(_LAST_NODES)
+
+
+def _find_node(
+    nodes: list[dict[str, Any]], *, index: int | None = None, node_id: str | None = None,
+) -> dict[str, Any] | None:
+    if index is not None:
+        return nodes[index] if 0 <= index < len(nodes) else None
+    return next((node for node in nodes if node_id is not None and node.get("id") == node_id), None)
+
+
+def _node_center(node: dict[str, Any]) -> tuple[int, int] | None:
+    bounds = node.get("bounds")
+    if not isinstance(bounds, list) or len(bounds) != 4:
+        return None
+    if any(type(value) is not int for value in bounds):
+        return None
+    left, top, right, bottom = bounds
+    if right <= left or bottom <= top:
+        return None
+    return (left + right) // 2, (top + bottom) // 2
+
+
+async def tap_target(
+    *, x: int | None = None, y: int | None = None,
+    index: int | None = None, node_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Tocca il centro del nodo dell'ultimo dump; richiede accessibilità abilitata."""
+    if x is not None and y is not None:
+        return await tap(x, y)
+    if not _LAST_NODES:
+        return _error("no_screen_dump", hint="Run ui.dump first, then tap by index/id.")
+    node = _find_node(_LAST_NODES, index=index, node_id=node_id)
+    if node is None:
+        return _error("element_not_found")
+    center = _node_center(node)
+    if center is None:
+        return _error("element_not_found", hint="The element has no bounds on screen.")
+    return await tap(*center)
+
+
+async def type_text_into(
+    text: str, *, index: int | None = None, node_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Con accessibilità abilitata, un tap prima del testo assegna il focus al campo.
+
+    La breve attesa lascia stabilizzare il focus prima di ACTION_SET_TEXT.
+    """
+    if index is not None or node_id is not None:
+        tapped = await tap_target(index=index, node_id=node_id)
+        if tapped is None or tapped.get("ok") is False:
+            return tapped
+        await asyncio.sleep(0.3)
+    return await type_text(text)

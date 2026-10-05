@@ -718,6 +718,7 @@ export class SettingsController {
       <div class="settings-field">
         <label class="settings-label">${i18n.t('settings.openclawNode.statusTitle')}</label>
         <div id="openclaw-node-status-rows" style="font-size:12px;line-height:1.8">
+          <div><strong>${i18n.t('settings.openclawNode.commandsRow')}:</strong> <span id="oc-commands">${escapeHtml((node.commands || []).join(', ') || '—')}</span></div>
           <div><strong>${i18n.t('settings.openclawNode.nodeRow')}:</strong> <span id="oc-node-state">${escapeHtml(this._openClawNodeStatusText(node.status || {}, node.paired))}</span></div>
           <div><strong>${i18n.t('settings.openclawNode.screenRow')}:</strong> <span id="oc-a11y-state">${escapeHtml(i18n.t('settings.openclawNode.checking'))}</span></div>
           <div><strong>${i18n.t('settings.openclawNode.clipboardRow')}:</strong> <span id="oc-clipboard-state">${escapeHtml(i18n.t('settings.openclawNode.checking'))}</span></div>

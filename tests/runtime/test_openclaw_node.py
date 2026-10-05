@@ -58,11 +58,23 @@ def test_invalid_setup_fields(data):
 def handlers(result=None):
     return {name: AsyncMock(return_value=result) for name in (
         "screen_dump", "clipboard_get", "clipboard_set", "speak",
+        "tap", "swipe", "type_text", "press_global", "listen",
     )}
 
 
 @pytest.mark.parametrize("command,handler,params,args,kwargs", [
     ("ui.dump", "screen_dump", {}, (), {}),
+    ("ui.tap", "tap", {"x": 10, "y": 20}, (), {"x": 10, "y": 20}),
+    ("ui.tap", "tap", {"index": 0}, (), {"index": 0}),
+    ("ui.tap", "tap", {"id": "field"}, (), {"node_id": "field"}),
+    ("ui.swipe", "swipe", {"x1": 1, "y1": 2, "x2": 3, "y2": 4}, (1, 2, 3, 4, 300), {}),
+    ("ui.swipe", "swipe", {"x1": 1, "y1": 2, "x2": 3, "y2": 4, "durationMs": 500}, (1, 2, 3, 4, 500), {}),
+    ("ui.type", "type_text", {"text": "hi"}, ("hi",), {}),
+    ("ui.type", "type_text", {"text": "hi", "index": 1}, ("hi",), {"index": 1}),
+    ("ui.type", "type_text", {"text": "hi", "id": "field"}, ("hi",), {"node_id": "field"}),
+    ("ui.press", "press_global", {"action": "BACK"}, ("back",), {}),
+    ("voice.listen", "listen", {}, (5,), {"language": ""}),
+    ("voice.listen", "listen", {"seconds": 8, "language": "uk"}, (8,), {"language": "uk"}),
     ("clipboard.get", "clipboard_get", {}, (), {}),
     ("clipboard.set", "clipboard_set", {"text": "hello"}, ("hello",), {}),
     ("voice.speak", "speak", {"text": "hello", "language": "it", "rate": 1.2},
@@ -518,3 +530,51 @@ async def test_normal_disconnect_uses_existing_backoff(client, secure, monkeypat
     normal.assert_awaited_once_with(42)
     secure[3].assert_not_awaited()
     assert client.status()["state"] == "error"
+
+
+def test_command_names():
+    assert node.command_names() == [
+        "ui.dump", "ui.tap", "ui.swipe", "ui.type", "ui.press",
+        "clipboard.get", "clipboard.set", "voice.speak", "voice.listen",
+    ]
+
+
+@pytest.mark.parametrize("command,params", [
+    ("ui.tap", {}), ("ui.tap", {"x": 1}), ("ui.tap", {"x": True, "y": 2}),
+    ("ui.tap", {"index": False}), ("ui.tap", {"id": ""}),
+    ("ui.tap", {"index": 0, "id": "a"}), ("ui.tap", {"index": 0, "x": 1, "y": 2}),
+    ("ui.tap", {"x": float("inf"), "y": 2}), ("ui.tap", {"index": 1.0}),
+    ("ui.swipe", {}), ("ui.swipe", {"x1": 0, "y1": 0, "x2": 1, "y2": True}),
+    ("ui.swipe", {"x1": 0, "y1": 0, "x2": 1, "y2": 2, "durationMs": False}),
+    ("ui.type", {}), ("ui.type", {"text": ""}), ("ui.type", {"text": 1}),
+    ("ui.type", {"text": "hi", "index": True}), ("ui.type", {"text": "hi", "id": ""}),
+    ("ui.type", {"text": "hi", "index": 0, "id": "a"}),
+    ("ui.press", {}), ("ui.press", {"action": 1}), ("ui.press", {"action": "delete"}),
+    ("voice.listen", {"seconds": "5"}), ("voice.listen", {"seconds": True}),
+    ("voice.listen", {"seconds": float("nan")}), ("voice.listen", {"seconds": float("inf")}),
+    ("voice.listen", {"language": 1}),
+])
+async def test_new_dispatch_invalid_params(command, params):
+    mocks = handlers()
+    assert await node.dispatch_command(command, params, **mocks) == node.command_error("invalid_params", "invalid_params")
+    assert not any(mock.await_count for mock in mocks.values())
+
+
+@pytest.mark.parametrize("code", sorted(node._PASSTHROUGH_ERRORS))
+@pytest.mark.parametrize("hint", [None, "Enable the service"])
+async def test_dispatch_passthrough(code, hint):
+    result = await node.dispatch_command("ui.tap", {"index": 0}, **handlers({"ok": False, "error": code, "hint": hint}))
+    assert result == node.command_error(code, hint or code)
+
+
+@pytest.mark.parametrize("seconds,expected", [(0, 1), (99, 15), (2.5, 2.5)])
+async def test_listen_clamp_and_timeout(monkeypatch, seconds, expected):
+    from unittest.mock import Mock
+
+    original = asyncio.timeout
+    timeout = Mock(side_effect=original)
+    monkeypatch.setattr(node.asyncio, "timeout", timeout)
+    mocks = handlers({"ok": True})
+    assert (await node.dispatch_command("voice.listen", {"seconds": seconds}, timeout=1, **mocks))["ok"]
+    mocks["listen"].assert_awaited_once_with(expected, language="")
+    timeout.assert_called_once_with(expected + 6.0)

@@ -20,6 +20,7 @@ from jenny.channels.http_utils import check_api_secret, http_error, http_json_re
 from jenny.config.loader import load_config, save_config
 from jenny.config.schema import Config
 from jenny.runtime.context import get_runtime_context
+from jenny.runtime.openclaw_node import command_names
 from jenny.webui.settings_api import (
     WebUISettingsError,
     _openclaw_node_payload,
@@ -80,6 +81,7 @@ def test_payload_never_contains_secrets() -> None:
 
     payload = _openclaw_node_payload(config)
     blob = json.dumps(payload)
+    assert payload["commands"] == command_names()
 
     assert payload["has_credential"] is True
     assert payload["paired"] is True

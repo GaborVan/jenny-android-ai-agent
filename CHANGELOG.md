@@ -8,6 +8,12 @@ carries the reasoning that outlives them.
 
 ## [Unreleased]
 
+### Added
+
+- OpenClaw node commands `ui.tap`, `ui.swipe`, `ui.type`, `ui.press`, and
+  `voice.listen` for gestures, text input, navigation, and microphone dictation,
+  with the announced command list visible in Settings.
+
 ### Fixed
 
 - **The OpenClaw node pairing survives restarts and app updates.** The device token the

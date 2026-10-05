@@ -265,11 +265,12 @@
     "providerDeleted": "Provider eliminato",
     "saveError": "Errore nel salvataggio",
     "openclawNode": {
+      "commandsRow": "Comandi",
       "newCode": "Inserisci un nuovo codice",
       "tokenStored": "Token salvato — nessun codice necessario dopo il riavvio o aggiornamento dell’app.",
       "title": "Nodo OpenClaw",
       "enable": "Registra come nodo OpenClaw",
-      "hint": "Consente a un gateway OpenClaw di pilotare questo telefono: legge l'albero dello schermo (ui.dump), legge/scrive gli appunti e parla col TTS di sistema. Dopo la connessione, approva il dispositivo sul gateway (openclaw nodes approve) e abilita i comandi. Per ui.dump serve il servizio di accessibilità. Il servizio compare nel sistema come “Apex UI control”.",
+      "hint": "Consente a un gateway OpenClaw di pilotare questo telefono: legge l'albero dello schermo (ui.dump), legge/scrive gli appunti e parla col TTS di sistema. Dopo la connessione, approva il dispositivo sul gateway (openclaw nodes approve) e abilita i comandi. Per ui.dump serve il servizio di accessibilità. Il servizio compare nel sistema come “Apex UI control”. Supporta gesti sullo schermo, inserimento di testo, navigazione e input vocale dal microfono.",
       "url": "URL del gateway",
       "credential": "Setup code o token",
       "credentialPlaceholderSetup": "oc-pair://…",
