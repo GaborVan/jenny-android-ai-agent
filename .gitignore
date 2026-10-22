@@ -125,3 +125,6 @@ temp/
 exp/
 .playwright-mcp/
 /roadmap
+
+# jsdom is installed ad hoc for the WebUI suites (see .github/workflows/ci.yml)
+node_modules/
