@@ -908,7 +908,7 @@ class TestThePromptFragments:
         state = CronJobState(
             task_checks={
                 task.id: CronTaskCheckState(consecutive_could_not_check=streak)
-                for task, streak in zip(tasks, streaks)
+                for task, streak in zip(tasks, streaks, strict=False)
             }
         )
         return tasks_due_for_escalation(state, tasks)

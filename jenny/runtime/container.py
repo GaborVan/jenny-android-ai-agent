@@ -47,6 +47,7 @@ class GatewayContainer:
         self.session_manager: Any = None
         self.cron: Any = None
         self.snapshot: Any = None
+        self.openclaw_node: Any = None
         self.channels: Any = None
         self._deliverer: Any = None
         self._deliver_to_channel: Any = None
@@ -311,6 +312,11 @@ class GatewayContainer:
             __logo__, __version__, self.port,
         )
         self._sync_templates()
+        if config.openclaw_node.enable:
+            from jenny.runtime.openclaw_node import OpenClawNodeClient, set_active_client
+
+            self.openclaw_node = OpenClawNodeClient(config.openclaw_node)
+            set_active_client(self.openclaw_node)
 
         # Backpressure su dispositivi memory-constrained (Android): code limitate.
         # I delta di streaming/progress usano try_publish_outbound (scartabili),
@@ -606,9 +612,18 @@ class GatewayContainer:
             # processo, e nessun altro la consuma.
             from jenny.runtime.gap_history import record_startup_gap
             await record_startup_gap()
+            # Cloud sync (Drive): fire-and-forget. Nessuna cartella scelta o
+            # bridge assente sono l'esito normale finché l'utente non la
+            # configura da Settings; un fallimento di rete non deve mai
+            # ritardare l'avvio dell'agente.
+            from jenny.config.paths import get_workspace_path
+            from jenny.runtime.drive_sync import run_startup_sync
+            asyncio.create_task(run_startup_sync(get_workspace_path()))
             await self.cron.start()
             await self.snapshot.start()
             tasks = [self.channels.start()]
+            if getattr(self, "openclaw_node", None):
+                tasks.append(self.openclaw_node.start())
             if self._agent:
                 tasks.append(self._agent.run())
             else:
@@ -620,6 +635,9 @@ class GatewayContainer:
             logger.opt(exception=True).error("Gateway crashed unexpectedly")
             raise
         finally:
+            openclaw_node = getattr(self, "openclaw_node", None)
+            if openclaw_node:
+                await openclaw_node.stop()
             self.cron.stop()
             self.snapshot.stop()
             if self._agent:

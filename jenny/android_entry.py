@@ -71,6 +71,11 @@ def run_gateway(
             device_tz or "unknown",
             tzdata_available(),
         )
+        from jenny.utils.device_locale import detect_device_locale
+
+        device_locale = detect_device_locale()
+        get_runtime_context().device_locale = device_locale
+        logger.info("Device locale: {}", device_locale or "unknown")
     except Exception:
         logger.opt(exception=True).debug("Could not detect device timezone")
 
@@ -98,10 +103,15 @@ def run_gateway(
         from jenny.agent.tools.ssh_transport import reset_ssh_backend
         from jenny.config.store import reset_config_store_state
         from jenny.runtime.clipboard import reset_clipboard_state
+        from jenny.runtime.drive_sync_bridge import reset_drive_sync_bridge_state
         from jenny.runtime.location import reset_location_state
         from jenny.runtime.notifications import reset_notifications_state
         from jenny.runtime.notifier import reset_notifier_state
+        from jenny.runtime.openclaw_node import reset_openclaw_node_state
         from jenny.runtime.power import reset_power_state
+        from jenny.runtime.secure_store import reset_secure_store_state
+        from jenny.runtime.stt import reset_stt_state
+        from jenny.runtime.tts import reset_tts_state
         from jenny.runtime.ui_automation import reset_ui_automation_state
         from jenny.runtime.update_install import reset_install_state
         from jenny.webui.android_apps_api import reset_installed_apps_state
@@ -117,6 +127,11 @@ def run_gateway(
         reset_ui_automation_state()
         reset_notifications_state()
         reset_clipboard_state()
+        reset_tts_state()
+        reset_openclaw_node_state()
+        reset_secure_store_state()
+        reset_stt_state()
+        reset_drive_sync_bridge_state()
         # L'updater tiene una fase *sticky* e un ``UpdateBridge`` in cache: senza
         # questo reset un gateway che riparte nello stesso processo mostrerebbe
         # la fase del run precedente (e rifiuterebbe di installare, credendo di

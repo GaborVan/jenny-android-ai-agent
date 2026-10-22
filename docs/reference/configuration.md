@@ -183,6 +183,54 @@ One validation to be aware of: setting `host` to `0.0.0.0` or `::` **with an emp
 
 Pairing, the throttle, and the asymmetric view between Telegram and the WebUI: [Telegram bridge](../using/telegram.md).
 
+## voice
+
+Speech **input**: turning an incoming voice note into text, and the
+`transcribe_audio` tool that does the same for an audio file already in the
+workspace. The recognition engine is the one installed on the phone (Android's
+`SpeechRecognizer`) — Jenny ships no model, no key, and no service of its own.
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `voice.enable` | bool | `true` | Master switch. With it off, no transcription is attempted anywhere: a Telegram voice note is delivered to the agent as an audio file (the placeholder text it always had), and the `transcribe_audio` tool is not registered. |
+| `voice.prefer_offline` | bool | `false` | Asks the recognition service to stay on-device. It is a **request, not a guarantee**: the decision belongs to the engine, and with no offline model installed asking for one means not recognising at all. Set it to `true` if you would rather have no transcription than one that crosses the network. |
+
+Who actually hears the audio is the installed engine — usually Google's — and
+that engine may upload it. This is the one place where the switch matters most,
+so it is spelled out in [Privacy](../internals/privacy.md). Speech **output**
+(`speak`, `stop_speaking`) is a different, entirely local path, gated by
+`tools.tts.enable`.
+
+Two shapes of voice input are deliberately different. A Telegram voice note is
+transcribed by the channel while it downloads the file, so the agent receives
+text plus the audio attachment. In the app, the microphone button dictates
+straight into the composer (the WebView bridge), which never involves a file.
+
+## drive_sync
+
+Cloud sync of the agent's memory files (`SOUL.md`, `USER.md`, and everything under `memory/`) between two devices through a Google Drive folder the user picks once (SAF, no storage permission). When the chosen folder is named **Apex-Pamyat**, a second, shared scope also syncs `<workspace>/shared/**` (profile/knowledge/notes) against the folder's real subfolders — see [Shared memory across devices](../using/shared-memory.md). Only a kill-switch lives in config: the chosen folder URI is stored in Android SharedPreferences and the sync state in `<workspace>/.jenny/drive_sync_state.json`.
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `drive_sync.enabled` | bool | `true` | Master switch. When on (and a folder has been chosen from **Settings → Cloud sync**), a sync runs at gateway start and on every manual "Sync now". Per-file, last-writer-wins by mtime, ties broken by content hash. Never touches `config.json`, `.jenny/`, skills, sessions, or anything outside `SOUL.md`/`USER.md`/`memory/` — plus `shared/` when the chosen folder is the shared one (Apex-Pamyat). |
+
+## openclaw_node
+
+Optional: register the app as a **node** on an OpenClaw Gateway, so an OpenClaw agent can drive the device through four commands — `ui.dump` (accessibility tree of the current screen), `clipboard.get` / `clipboard.set`, and `voice.speak`. Off by default. Configure it from **Settings → OpenClaw node**; the credential can be an `oc-pair://…` setup link/code or the shared Gateway token, and the operator must still approve the device (`openclaw nodes approve <requestId>`) and allowlist the commands (`gateway.nodes.commands.allow`).
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `openclaw_node.enable` | bool | `false` | Master switch. When off, no WebSocket is opened and no client task is started. |
+| `openclaw_node.url` | string | `wss://gaborvan-nitro-an515-42-1.taild5ff76.ts.net:433` | Gateway WebSocket endpoint. `ws://`/`wss://` only. |
+| `openclaw_node.credential` | string | `""` | `oc-pair://…` setup code/link, or the shared Gateway token. Cleared automatically once the Gateway issues a device token from a setup code. |
+| `openclaw_node.credential_kind` | `"setup_code"` \| `"token"` \| `""` | `""` | How `credential` is interpreted. |
+| `openclaw_node.device_id` | string | `""` | Stable Ed25519 device id (sha256 of the raw public key), generated on first connect. |
+| `openclaw_node.device_private_key` | string | `""` | Base64url raw Ed25519 seed, persisted so an app restart reuses the same pairing instead of creating a new request. |
+| `openclaw_node.device_token` | string | `""` | Device token issued by the Gateway after approval; used on reconnects. |
+| `openclaw_node.device_scopes` | string[] | `[]` | Scopes negotiated for that token. |
+
+See [Nodes](https://docs.openclaw.ai/nodes) for the pairing and command-policy side.
+
 ## tools
 
 Toggles for the built-in tool groups. Only web search and location have UI controls; everything else here is config-only. Full behavior of each tool: [Tool reference](./tools.md).
@@ -231,6 +279,14 @@ Defaults — allowed: `os`, `sys`, `pathlib`, `json`, `re`, `math`, `datetime`, 
 | `tools.location.freshTimeoutS` | int 1–60 | `15` | How long `get_location precise=true` waits for a fresh GPS fix. |
 
 See [Location](../using/location.md).
+
+### tools.tts
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `tools.tts.enable` | bool | `true` | Registers `speak` and `stop_speaking`, which read text aloud through the system Android text-to-speech engine. Nothing leaves the device and no permission is involved; an unsupported language or a missing engine is reported as a tool error, not a crash. There is no Settings-screen switch for it. |
+
+The length cap (4000 characters) and the rate range (0.5–2.0) are constants in `jenny/runtime/tts.py`, not config keys. See [Tools](../reference/tools.md).
 
 ### tools.ssh
 

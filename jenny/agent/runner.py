@@ -406,7 +406,7 @@ class AgentRunner(RequestExecutionMixin, ToolExecutionMixin):
                 continue
             if isinstance(item, dict):
                 continue
-            content = getattr(item, "content") if hasattr(item, "content") else str(item)
+            content = item.content if hasattr(item, "content") else str(item)
             if self._has_injection_content(content):
                 injected_messages.append({"role": "user", "content": content})
         if len(injected_messages) > _MAX_INJECTIONS_PER_TURN:
@@ -742,13 +742,13 @@ class AgentRunner(RequestExecutionMixin, ToolExecutionMixin):
         state.tool_events.extend(new_events)
         state.tools_used.extend(
             tool_call.name
-            for tool_call, event in zip(response.tool_calls, new_events)
+            for tool_call, event in zip(response.tool_calls, new_events, strict=True)
             if event.get("status") == "ok"
         )
         context.tool_results = list(results)
         context.tool_events = list(new_events)
         completed_tool_results: list[dict[str, Any]] = []
-        for tool_call, result in zip(response.tool_calls, results):
+        for tool_call, result in zip(response.tool_calls, results, strict=True):
             tool_message = {
                 "role": "tool",
                 "tool_call_id": tool_call.id,

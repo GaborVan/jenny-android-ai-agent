@@ -18,7 +18,9 @@ from jenny.config.tool_schemas import (
     PythonExecConfig,
     SkillCreatorConfig,
     SshConfig,
+    TtsConfig,
     UiAutomationConfig,
+    VoiceConfig,
 )
 from jenny.config_base import Base
 from jenny.cron.types import CronSchedule
@@ -397,7 +399,22 @@ class AgentDefaults(Base):
     timezone: str = ""
     bot_name: str = "Jenny"
     bot_icon: str = "✿"
-    language: str = "it"
+    # Lingua delle risposte dell'agente. Stringa vuota = auto: risolta una volta
+    # per load in ``loader._resolve_default_language`` dal locale del dispositivo
+    # (ucraino -> "uk"), altrimenti il vecchio default "it".
+    language: str = ""
+    # Inietta nel prompt l'istruzione di rispondere nella lingua di ``language``.
+    language_instruction: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("languageInstruction", "language_instruction"),
+        serialization_alias="languageInstruction",
+    )
+    # Inietta nel prompt l'istruzione di tenere le risposte brevi.
+    concise_replies: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("conciseReplies", "concise_replies"),
+        serialization_alias="conciseReplies",
+    )
     tool_choice: Literal["auto", "any", "none", "required"] = Field(
         default="auto",
         validation_alias=AliasChoices("toolChoice", "tool_choice"),
@@ -480,6 +497,19 @@ class ProviderConfig(Base):
     extra_body: dict[str, Any] | None = None
     extra_query: dict[str, str] | None = None
     api_type: Literal["auto", "chat_completions", "responses"] = "auto"
+    # Come si paga questo endpoint, non come parla. Serve a una cosa sola, ma
+    # vera: un endpoint ``local`` o ``subscription`` non deve *pretendere* una
+    # api_key. Prima l'unico modo di configurare il modello di casa — o un
+    # bridge che espone un abbonamento — era inventarsi una chiave finta, e
+    # chi non lo faceva vedeva il provider rifiutato all'avvio.
+    #
+    # ``api``      : servizio a consumo, con la tua chiave.
+    # ``subscription``: un bridge sul tuo PC che espone un abbonamento
+    #                (Codex/Claude/Gemini CLI) dietro un endpoint
+    #                OpenAI-compatibile.
+    # ``local``    : un modello che gira su una macchina tua (loopback, LAN,
+    #                Tailscale).
+    tier: Literal["api", "subscription", "local"] = "api"
 
 
 class ProvidersConfig(Base):
@@ -538,6 +568,11 @@ class ToolsConfig(Base):
     clipboard: ClipboardConfig = Field(
         default_factory=ClipboardConfig,
         validation_alias=AliasChoices("clipboard", "clipboard"),
+    )
+    # Sintesi vocale di sistema (tool speak/stop_speaking), altro tool solo Android.
+    tts: TtsConfig = Field(
+        default_factory=TtsConfig,
+        validation_alias=AliasChoices("tts", "tts"),
     )
     skill_creator: SkillCreatorConfig = Field(
         default_factory=SkillCreatorConfig,
@@ -771,6 +806,18 @@ class TelegramConfig(Base):
     poll_timeout_s: int = Field(default=50, ge=1, le=300)
 
 
+class DriveSyncConfig(Base):
+    """Kill-switch per la sync memoria↔Google Drive tra dispositivi.
+
+    Solo un booleano: la cartella scelta (URI SAF) vive nelle SharedPreferences
+    Android, letta dal bridge Kotlin; il manifest e il riepilogo dell'ultima
+    sync vivono in ``<workspace>/.jenny/drive_sync_state.json`` (stato di
+    dispositivo, non una scelta di config da portare nei backup/altro device).
+    """
+
+    enabled: bool = True
+
+
 class ModelPresetConfig(Base):
     """Named model preset configuration."""
     label: str | None = None
@@ -784,13 +831,26 @@ class ModelPresetConfig(Base):
 
 # Versione corrente dello schema del config. Alzala di uno ogni volta che
 # aggiungi un ramo a ``Config._migrate_by_version``, mai altrimenti.
-CURRENT_CONFIG_VERSION = 1
+CURRENT_CONFIG_VERSION = 2
 
 # Migrazioni gia annunciate in questo processo. Solo per il log: la migrazione
 # resta idempotente e rigira a ogni parse finche il file non viene riscritto (lo
 # fa ``store.persist_schema_migrations`` all'avvio), ma il config viene letto piu
 # volte per boot e una riga per lettura e rumore, non informazione.
 _ANNOUNCED_MIGRATIONS: set[int] = set()
+
+
+class OpenClawNodeConfig(Base):
+    """Connessione opzionale al gateway OpenClaw come nodo Android."""
+
+    enable: bool = False
+    url: str = "wss://gaborvan-nitro-an515-42-1.taild5ff76.ts.net:433"
+    credential: str = ""
+    credential_kind: Literal["setup_code", "token", ""] = ""
+    device_id: str = ""
+    device_private_key: str = ""
+    device_token: str = ""
+    device_scopes: list[str] = Field(default_factory=list)
 
 
 class Config(BaseSettings):
@@ -820,7 +880,13 @@ class Config(BaseSettings):
     # per estrarre e inlinare subito il testo di PDF/documenti.
     extract_document_text: bool = False
     websocket: dict[str, Any] = Field(default_factory=dict)
+    openclaw_node: OpenClawNodeConfig = Field(default_factory=OpenClawNodeConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
+    voice: VoiceConfig = Field(default_factory=VoiceConfig)
+    drive_sync: DriveSyncConfig = Field(
+        default_factory=DriveSyncConfig,
+        validation_alias=AliasChoices("driveSync", "drive_sync"),
+    )
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
@@ -891,6 +957,24 @@ class Config(BaseSettings):
                             agents = {**agents, "defaults": defaults}
                             data = {**data, "agents": agents}
                             break
+        # v2: la lingua non aveva un valore "auto". Il vecchio default "it" era
+        # scritto nel file di ogni installazione, quindi il locale del dispositivo
+        # (ucraino) non poteva mai sceglierla. Riportiamo "it" a "" (= auto): la
+        # risoluzione in loader sceglie "uk" sui dispositivi ucraini e "it" altrove.
+        if version < 2:
+            agents = data.get("agents")
+            if isinstance(agents, dict):
+                defaults = agents.get("defaults")
+                if isinstance(defaults, dict) and defaults.get("language") == "it":
+                    if 2 not in _ANNOUNCED_MIGRATIONS:
+                        _ANNOUNCED_MIGRATIONS.add(2)
+                        logger.warning(
+                            "Config migration v2: language 'it' -> auto "
+                            "(follows the device locale; set it explicitly to override)"
+                        )
+                    defaults = {**defaults, "language": ""}
+                    agents = {**agents, "defaults": defaults}
+                    data = {**data, "agents": agents}
         return data
 
     @model_validator(mode="after")

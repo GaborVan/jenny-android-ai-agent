@@ -44,6 +44,9 @@ class TelegramAPI:
         base_url: str = TELEGRAM_API_BASE,
     ):
         self._base = f"{base_url.rstrip('/')}/bot{token}"
+        # Base separata per il download file (``/file/bot<token>/<file_path>``),
+        # distinta dalla base RPC: non è un metodo ``getX``/``sendX``, è statico.
+        self._file_base = f"{base_url.rstrip('/')}/file/bot{token}"
         self._client = client or httpx.AsyncClient(timeout=30.0)
 
     async def close(self) -> None:
@@ -164,3 +167,25 @@ class TelegramAPI:
     async def set_my_commands(self, commands: list[dict[str, str]]) -> Any:
         """Registra il menu comandi del bot (chiamata best-effort lato caller)."""
         return await self._call("setMyCommands", {"commands": commands})
+
+    async def get_file(self, file_id: str) -> dict[str, Any]:
+        """Risolve un ``file_id`` in ``file_path`` (valido ~1h lato Telegram)."""
+        return await self._call("getFile", {"file_id": file_id})
+
+    async def download_file(self, file_path: str, *, max_bytes: int) -> bytes:
+        """Scarica un file già risolto da :meth:`get_file`, in streaming.
+
+        Interrompe il download (:class:`TelegramAPIError` 413) appena superato
+        *max_bytes*, senza mai accumulare oltre il cap in memoria — stesso
+        pattern difensivo di ``media_ingest._fetch_with_redirects``.
+        """
+        url = f"{self._file_base}/{file_path}"
+        async with self._client.stream("GET", url, timeout=60.0) as resp:
+            if resp.status_code != 200:
+                raise TelegramAPIError(resp.status_code, f"file download failed: {file_path}")
+            data = bytearray()
+            async for chunk in resp.aiter_bytes():
+                data.extend(chunk)
+                if len(data) > max_bytes:
+                    raise TelegramAPIError(413, f"file exceeds {max_bytes} bytes: {file_path}")
+            return bytes(data)

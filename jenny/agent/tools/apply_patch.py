@@ -170,8 +170,8 @@ class ApplyPatchTool(_FsTool):
                         raw = source.read_bytes()
                         try:
                             content = raw.decode("utf-8")
-                        except UnicodeDecodeError:
-                            raise _PatchError(f"file is not UTF-8 text: {path}")
+                        except UnicodeDecodeError as exc:
+                            raise _PatchError(f"file is not UTF-8 text: {path}") from exc
                         exists = True
                     else:
                         content = ""
@@ -215,8 +215,8 @@ class ApplyPatchTool(_FsTool):
                         raw = source.read_bytes()
                         try:
                             content = raw.decode("utf-8")
-                        except UnicodeDecodeError:
-                            raise _PatchError(f"file is not UTF-8 text: {path}")
+                        except UnicodeDecodeError as exc:
+                            raise _PatchError(f"file is not UTF-8 text: {path}") from exc
                     else:
                         raise _PatchError(f"file to update does not exist: {path}")
 

@@ -26,37 +26,37 @@ from jenny.providers.base import LLMProvider
 def _manager(tmp_path: Path, **kw) -> SubagentManager:
     provider = MagicMock(spec=LLMProvider)
     provider.get_default_model.return_value = "test-model"
-    defaults = dict(
-        provider=provider,
-        workspace=tmp_path,
-        bus=MessageBus(),
-        model="test-model",
-        max_tool_result_chars=16_000,
+    defaults = {
+        "provider": provider,
+        "workspace": tmp_path,
+        "bus": MessageBus(),
+        "model": "test-model",
+        "max_tool_result_chars": 16_000,
         # I test del ciclo di vita spawnano piu subagent senza esercitare il
         # limite di concorrenza (coperto a parte); alza il tetto di default.
-        max_concurrent_subagents=8,
-    )
+        "max_concurrent_subagents": 8,
+    }
     defaults.update(kw)
     return SubagentManager(**defaults)
 
 
 def _spec(task: str = "do task", label: str = "label", **kw) -> SubagentSpec:
-    defaults = dict(origin_channel="internal", origin_chat_id="direct")
+    defaults = {"origin_channel": "internal", "origin_chat_id": "direct"}
     defaults.update(kw)
     return SubagentSpec(task=task, label=label, **defaults)
 
 
 def _make_hook_context(**overrides) -> AgentHookContext:
-    defaults = dict(
-        iteration=1,
-        tool_calls=[],
-        tool_events=[],
-        messages=[],
-        usage={},
-        error=None,
-        stop_reason="completed",
-        final_content="ok",
-    )
+    defaults = {
+        "iteration": 1,
+        "tool_calls": [],
+        "tool_events": [],
+        "messages": [],
+        "usage": {},
+        "error": None,
+        "stop_reason": "completed",
+        "final_content": "ok",
+    }
     defaults.update(overrides)
     return AgentHookContext(**defaults)
 

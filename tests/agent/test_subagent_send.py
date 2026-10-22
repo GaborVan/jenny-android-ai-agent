@@ -27,16 +27,16 @@ from jenny.session.manager import SessionManager
 def _manager(tmp_path: Path, **kw) -> SubagentManager:
     provider = MagicMock(spec=LLMProvider)
     provider.get_default_model.return_value = "test-model"
-    defaults = dict(
-        provider=provider,
-        workspace=tmp_path,
-        bus=MessageBus(),
-        model="test-model",
-        max_tool_result_chars=16_000,
+    defaults = {
+        "provider": provider,
+        "workspace": tmp_path,
+        "bus": MessageBus(),
+        "model": "test-model",
+        "max_tool_result_chars": 16_000,
         # Watchdog spento: lo stallo ha i suoi test.
-        stall_threshold_s=0.0,
-        session_manager=SessionManager(tmp_path),
-    )
+        "stall_threshold_s": 0.0,
+        "session_manager": SessionManager(tmp_path),
+    }
     defaults.update(kw)
     return SubagentManager(**defaults)
 
@@ -74,7 +74,7 @@ async def _spawn_and_settle(sm: SubagentManager, **kw) -> str:
     await sm.spawn(task=kw.pop("task", "do it"), session_key="unified:default", **kw)
     task_id = next(iter(sm._task_statuses))
     lineage = sm._task_statuses[task_id].lineage_id
-    await asyncio.gather(*[t for t in sm._running_tasks.values()], return_exceptions=True)
+    await asyncio.gather(*list(sm._running_tasks.values()), return_exceptions=True)
     await asyncio.sleep(0)
     return lineage
 

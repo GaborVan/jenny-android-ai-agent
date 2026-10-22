@@ -54,10 +54,52 @@ def convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str
 
         if role == "tool":
             call_id, _ = split_tool_call_id(msg.get("tool_call_id"))
-            output_text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+            output_text = _tool_output_text(content)
             input_items.append({"type": "function_call_output", "call_id": call_id, "output": output_text})
 
     return system_prompt, input_items
+
+
+def _tool_output_text(content: Any) -> str:
+    """Render a tool message's content as ``function_call_output`` text.
+
+    Unlike Anthropic's ``tool_result``, the Responses API's
+    ``function_call_output`` only accepts plain text — it has no native image
+    block. A list containing ``image_url`` items (e.g. ``read_file`` on an
+    image, see ``build_image_content_blocks``) would otherwise be
+    JSON-stringified, dumping raw base64 into the prompt with no chance the
+    model can use it. Replace it with a text reference to the file instead,
+    which is already on disk since ``build_image_content_blocks`` always
+    stamps the source path in ``_meta``.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list) and any(
+        isinstance(item, dict) and item.get("type") == "image_url" for item in content
+    ):
+        return _image_tool_output_note(content)
+    return json.dumps(content, ensure_ascii=False)
+
+
+def _image_tool_output_note(content: list[dict[str, Any]]) -> str:
+    paths = [
+        (item.get("_meta") or {}).get("path")
+        for item in content
+        if isinstance(item, dict) and item.get("type") == "image_url"
+    ]
+    paths = [p for p in paths if p]
+    texts = [
+        item.get("text")
+        for item in content
+        if isinstance(item, dict) and item.get("type") == "text" and item.get("text")
+    ]
+    location = ", ".join(paths) if paths else "the workspace"
+    note = (
+        f"(Image saved to {location}. This provider (OpenAI Responses API) cannot embed "
+        "images inside tool results, so you cannot see this file's visual content here. "
+        "Say so rather than guessing, or ask the user to describe/share it directly.)"
+    )
+    return "\n".join([*texts, note])
 
 
 def convert_user_message(content: Any) -> dict[str, Any]:

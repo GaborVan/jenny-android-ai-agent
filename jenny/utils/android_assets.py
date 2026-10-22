@@ -184,6 +184,12 @@ _SKILLS_MANIFEST = [
     "llm-wiki/references/log-guide.md",
     "llm-wiki/references/schema-guide.md",
     "llm-wiki/references/tooling-tips.md",
+    # ui-automation (accessibility: eyes & hands on other apps)
+    "ui-automation/SKILL.md",
+    # notifications (ears: 2FA codes, messages, statuses)
+    "notifications/SKILL.md",
+    # clipboard (system clipboard read/write)
+    "clipboard/SKILL.md",
     # my
     "my/SKILL.md",
     "my/references/examples.md",
@@ -213,6 +219,7 @@ _UI_MANIFEST = [
     "assets/bootstrap.js",
     "assets/i18n/en.json",
     "assets/i18n/it.json",
+    "assets/i18n/uk.json",
     "assets/jenny-fall-color.webp",
     "assets/jenny-fall.webp",
     "assets/jenny-ground-color.webp",
@@ -263,6 +270,7 @@ _UI_MANIFEST = [
     "assets/shared/battery-exemption.js",
     "assets/shared/commands-chip.js",
     "assets/shared/dialog.js",
+    "assets/shared/drive-sync-flow.js",
     "assets/shared/home-view.js",
     "assets/shared/i18n.js",
     "assets/shared/image-handler.js",

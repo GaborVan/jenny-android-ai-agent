@@ -17,7 +17,9 @@ from websockets.http11 import Response
 from jenny.bus.queue import MessageBus
 from jenny.webui.settings_api import (
     WebUISettingsError,
+    accessibility_status_payload,
     delete_provider,
+    openclaw_node_payload,
     power_diagnostics_payload,
     provider_models_payload,
     run_update_check,
@@ -26,6 +28,7 @@ from jenny.webui.settings_api import (
     start_update_install,
     update_agent_settings,
     update_location_settings,
+    update_openclaw_node_settings,
     update_power_settings,
     update_provider,
     update_status_payload,
@@ -109,6 +112,18 @@ class WebUISettingsRouter:
             return await self._handle_settings_power_update(request)
         if path == "/api/settings/power/diagnostics":
             return await self._handle_settings_power_diagnostics(request)
+        if path == "/api/settings/openclaw-node/status":
+            return self._handle_openclaw_node_status(request)
+        if path == "/api/settings/openclaw-node/update":
+            return await self._handle_mutation(
+                request, update_openclaw_node_settings, "openclaw node settings update"
+            )
+        if path == "/api/settings/openclaw-node/connect":
+            return await self._handle_openclaw_node_connect(request)
+        if path == "/api/settings/accessibility/status":
+            return await self._handle_accessibility_status(request)
+        if path == "/api/settings/accessibility/open":
+            return await self._handle_accessibility_open(request)
         if path == "/api/settings/ssh":
             return self._handle_ssh_settings(request)
         if path == "/api/settings/ssh/update":
@@ -139,6 +154,12 @@ class WebUISettingsRouter:
             return await self._handle_telegram_unpair(request)
         if path == "/api/telegram/disable":
             return await self._handle_telegram_disable(request)
+        if path == "/api/drivesync/status":
+            return await self._handle_drivesync_status(request)
+        if path == "/api/drivesync/sync":
+            return await self._handle_drivesync_sync(request)
+        if path == "/api/drivesync/update":
+            return await self._handle_drivesync_update(request)
         return None
 
     def _query(self, request: WsRequest) -> QueryParams:
@@ -291,6 +312,47 @@ class WebUISettingsRouter:
             self.logger.exception("location settings update failed")
             return self._error_response(500, "failed to update location settings")
         return self._json_response(payload)
+
+    def _handle_openclaw_node_status(self, request: WsRequest) -> Response:
+        if not self._authorized(request):
+            return self._unauthorized()
+        return self._json_response(openclaw_node_payload())
+
+    async def _handle_openclaw_node_connect(self, request: WsRequest) -> Response:
+        """Abilita il nodo e lo (ri)avvia con la config appena salvata."""
+        if not self._authorized(request):
+            return self._unauthorized()
+        query = self._query(request)
+        query["enable"] = ["1"]
+        try:
+            await update_openclaw_node_settings(query)
+            from jenny.runtime.openclaw_node import restart_active_client
+
+            await restart_active_client()
+        except WebUISettingsError as e:
+            return self._error_response(e.status, e.message)
+        except Exception:
+            self.logger.exception("openclaw node connect failed")
+            return self._error_response(500, "openclaw node connect failed")
+        return self._json_response(openclaw_node_payload())
+
+    async def _handle_accessibility_status(self, request: WsRequest) -> Response:
+        if not self._authorized(request):
+            return self._unauthorized()
+        return self._json_response(await accessibility_status_payload())
+
+    async def _handle_accessibility_open(self, request: WsRequest) -> Response:
+        """Apre le Impostazioni di Accessibilità del sistema Android."""
+        if not self._authorized(request):
+            return self._unauthorized()
+        from jenny.runtime.ui_automation import open_accessibility_settings
+
+        result = await open_accessibility_settings()
+        if result is None:
+            return self._error_response(503, "android_unavailable")
+        if result.get("ok") is False:
+            return self._error_response(500, str(result.get("error") or "open_failed"))
+        return self._json_response({"ok": True})
 
     async def _handle_settings_power_update(self, request: WsRequest) -> Response:
         if not self._authorized(request):
@@ -540,6 +602,52 @@ class WebUISettingsRouter:
             self.logger.exception("telegram disable failed")
             return self._error_response(500, "failed to disable telegram")
         self._fire_telegram_changed()
+        return self._json_response(payload)
+
+    # -- Cloud sync (Google Drive) ------------------------------------------ #
+
+    async def _handle_drivesync_status(self, request: WsRequest) -> Response:
+        if not self._authorized(request):
+            return self._unauthorized()
+        from jenny.webui.drivesync_api import drive_sync_status_payload
+
+        try:
+            return self._json_response(await drive_sync_status_payload())
+        except Exception:
+            self.logger.exception("drive sync status failed")
+            return self._error_response(500, "failed to load drive sync status")
+
+    async def _handle_drivesync_sync(self, request: WsRequest) -> Response:
+        if not self._authorized(request):
+            return self._unauthorized()
+        from jenny.webui.drivesync_api import run_drive_sync_now
+
+        try:
+            payload = await run_drive_sync_now()
+        except Exception:
+            self.logger.exception("drive sync run failed")
+            return self._error_response(500, "drive sync failed")
+        self.logger.info(
+            "[drivesync] sync now: ok={} pushed={} pulled={} errors={}",
+            payload.get("ok"),
+            len(payload.get("pushed") or []),
+            len(payload.get("pulled") or []),
+            len(payload.get("errors") or []),
+        )
+        return self._json_response(payload)
+
+    async def _handle_drivesync_update(self, request: WsRequest) -> Response:
+        if not self._authorized(request):
+            return self._unauthorized()
+        from jenny.channels.http_utils import parse_flag
+        from jenny.webui.drivesync_api import update_drive_sync_settings
+
+        enabled = parse_flag(_query_param(self._query(request), "enabled"))
+        try:
+            payload = await update_drive_sync_settings(enabled)
+        except Exception:
+            self.logger.exception("drive sync settings update failed")
+            return self._error_response(500, "failed to update drive sync settings")
         return self._json_response(payload)
 
 

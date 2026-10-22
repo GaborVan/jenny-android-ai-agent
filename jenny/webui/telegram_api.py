@@ -40,6 +40,10 @@ _BOT_COMMANDS: dict[str, list[dict[str, str]]] = {
         {"command": "start", "description": "Quick guide"},
         {"command": "new", "description": "New conversation"},
     ],
+    "uk": [
+        {"command": "start", "description": "Швидкий гід"},
+        {"command": "new", "description": "Нова розмова"},
+    ],
 }
 
 

@@ -76,7 +76,7 @@ def _reindent_like_match(old_text: str, actual_text: str, new_text: str) -> str:
 
     comparable = [
         (old_line, actual_line)
-        for old_line, actual_line in zip(old_lines, actual_lines)
+        for old_line, actual_line in zip(old_lines, actual_lines, strict=True)
         if old_line.strip() and actual_line.strip()
     ]
     if not comparable or any(

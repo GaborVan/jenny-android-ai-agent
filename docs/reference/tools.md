@@ -235,7 +235,7 @@ Config: no dedicated toggle (always registered) — but **subagent-only** in the
 
 ## 4. Device
 
-`get_location` is Android-only — it needs the platform location bridge. `ui_view` is not gated on Android as such: it registers whenever a WebUI query service exists, which in the normal Android runtime is always, but the condition is the service, not the platform. Both are available to the orchestrator.
+`get_location` is Android-only — it needs the platform location bridge. `ui_view` is not gated on Android as such: it registers whenever a WebUI query service exists, which in the normal Android runtime is always, but the condition is the service, not the platform. `speak`/`stop_speaking` are Android-only too, and gated on their own config toggle. All are available to the orchestrator.
 
 ### get_location
 
@@ -258,6 +258,32 @@ A **pull** model for letting Jenny see the screen: there is no ambient screen ac
 - HTML returned is capped at 48 KB per block (view HTML and app HTML each capped separately).
 
 Config: no dedicated toggle — it registers whenever the underlying query service exists (the normal runtime always has it).
+
+### speak / stop_speaking
+
+Voice **output**. `speak` makes the phone read text aloud through the system text-to-speech engine; `stop_speaking` cuts off whatever is being spoken right now.
+
+- `speak` reads the `text` you give it **verbatim** — it is not a summariser. Pass a spoken-friendly version of a long answer rather than the written one; anything over 4000 characters is refused (`text_too_long`) instead of being read in full.
+- Optional `language` is a BCP-47 tag (`uk-UA`, `it-IT`, `en-US`); empty or omitted uses the device/engine default language. An unsupported tag returns `language_not_supported`.
+- Optional `rate` runs from 0.5 (slow) to 2.0 (fast), default 1.0; values outside the range are clamped.
+- `stop_speaking` takes no parameters, and stopping an idle engine is not an error.
+- Nothing leaves the device and no permission is involved: synthesis happens locally with whatever TTS engine is installed. This is the same `TextToSpeech` engine the chat bubble's read-aloud button uses.
+- If no usable engine exists on the device the call returns `{"ok":false,"error":"tts_unavailable"}` with a hint naming the setting to fix. That failure is not transient, and the tool description tells the model not to retry it in a loop.
+- Available to the orchestrator and to subagents.
+
+Config: `tools.tts.enable` (default `true`). There is no Settings-screen switch, so it is `config.json`-only. The length and rate limits are constants in `jenny/runtime/tts.py`, not config keys.
+
+### transcribe_audio
+
+Speech **input** for a file that is already in the workspace: a voice note saved in `downloads/`, an audio file the user uploaded, a recording the agent was pointed at. It decodes the audio on the device and hands it to the phone's speech-recognition engine.
+
+- One parameter, `path` (required), resolved with the same workspace policy as the file tools — the agent can only transcribe files it is already allowed to read. An optional `language` tag (BCP-47) overrides the language the engine picks by itself.
+- Any format the phone can decode: ogg/opus, m4a, mp3, wav, amr, and the audio track of a video. A file whose extension is not audio is refused before the decoder sees it (`unsupported_audio`).
+- It reads a **file**. To dictate live, the user taps the microphone in the composer — that is a different bridge and it never involves a file.
+- Two failure modes are structural, not transient, and the tool says so: no recognition service installed (`stt_unavailable`), and Android below 13 (`stt_file_source_unsupported` — transcribing a file needs `EXTRA_AUDIO_SOURCE`). Do not retry either in a loop.
+- The audio goes to whichever engine the phone uses, and that engine may upload it. `voice.prefer_offline: true` asks it to stay on-device. The transcript itself never leaves the phone except as part of the conversation.
+
+Config: `voice.enable` (default `true`) — with it off the tool does not register at all — and `voice.prefer_offline` (default `false`). Both are `config.json`-only. A **Telegram voice note** is not this tool: the channel transcribes it while downloading, so the agent receives text plus the audio without asking.
 
 ---
 
@@ -594,6 +620,8 @@ Settings → Tools in the WebUI governs exactly two things, and SSH gets a secti
 |---|---|---|
 | Web search (engine, max results, timeout, fetch max chars) | Yes — Settings → Tools → Web Search | `tools.androidWeb.*` |
 | Location sharing | Yes — Settings → Tools → Location | `tools.location.enable` |
+| Voice output (`speak`, `stop_speaking`) | No | `tools.tts.enable` |
+| Voice input (`transcribe_audio`, Telegram voice notes) | No | `voice.enable` |
 | SSH access (on/off, hosts, keys, fingerprints) | Yes — Settings → SSH (its own section) | `tools.ssh.enable`, `tools.ssh.hosts` |
 | File tools (read/write/edit/patch/list/find/grep) | No | `tools.file.enable` |
 | Python execution | No | `tools.pythonExec.enable` (+ timeout, output cap, module lists) |

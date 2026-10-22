@@ -19,6 +19,7 @@ from jenny.config.schema import (
     Config,
     GardenerConfig,
 )
+from jenny.pydantic_compat import ValidationError
 
 
 def test_defaults() -> None:
@@ -75,7 +76,7 @@ def test_reads_camel_case_input() -> None:
 def test_a_tick_of_zero_minutes_is_refused() -> None:
     """Zero significherebbe un tick continuo. I due orologi *possono* essere
     zero — spegnerli è una scelta legittima — ma il battito no."""
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         GardenerConfig(interval_min=0)
 
 
@@ -113,7 +114,7 @@ def test_a_value_over_the_ceiling_is_refused(field: str, over: int) -> None:
     questi tre rifiuti scomparirebbero tutti insieme, e il ``le=`` diventerebbe
     decorazione.
     """
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         GardenerConfig(**{field: over})
 
 
@@ -202,5 +203,5 @@ def test_a_non_numeric_value_is_not_guessed_at() -> None:
     """``clamp_raw`` limita numeri; non prova a interpretare una stringa. Un
     ``intervalMin: "presto"`` è un refuso, e la validazione del campo è il posto
     dove viene detto — non qui, indovinando."""
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         GardenerConfig.model_validate({"intervalMin": "presto"})

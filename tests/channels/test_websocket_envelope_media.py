@@ -22,6 +22,7 @@ from jenny.channels.websocket import (
     WebSocketConfig,
     _extract_data_url_mime,
 )
+from jenny.pydantic_compat import ValidationError
 from jenny.webui.gateway_services import build_gateway_services
 
 
@@ -93,7 +94,7 @@ def test_max_message_bytes_default_supports_multi_image_frame() -> None:
     # 4 images × 6 MB × 1.37 base64 overhead ≈ 33 MB
     assert default >= 33 * 1024 * 1024
     # Upper bound 40 MB matches plan
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         WebSocketConfig(max_message_bytes=41_943_040 + 1)
 
 

@@ -12,6 +12,7 @@ import re
 import time
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from loguru import logger
@@ -22,6 +23,8 @@ from jenny.channels.http_utils import FALSY_VALUES, TRUTHY_VALUES, parse_flag
 from jenny.config import store
 from jenny.config.loader import get_config_path, load_config
 from jenny.config.schema import KEEP_AWAKE_MODES, Config
+from jenny.providers.model_listing import model_id_from_row, model_rows
+from jenny.providers.presets import presets_payload as provider_presets_payload
 from jenny.security.workspace_access import workspace_sandbox_status
 from jenny.security.workspace_policy import _safe_expanduser
 from jenny.session.keys import UNIFIED_SESSION_KEY
@@ -279,6 +282,7 @@ _ANDROID_WEB_SEARCH_ENGINE = "bing"
 WELCOME_TEMPLATES: dict[str, str] = {
     "it": "Ciao sono {bot_name} e da oggi vivo sul tuo smartphone, molto piacere!",
     "en": "Hi, I'm {bot_name} and from today I live on your smartphone. Nice to meet you!",
+    "uk": "Привіт, я {bot_name}, і віднині я живу на твоєму смартфоні, дуже приємно!",
 }
 
 _CONTEXT_WINDOW_TOKEN_OPTIONS = {65_536, 262_144}
@@ -446,15 +450,7 @@ def _resolve_env_placeholders(value: str | None) -> str | None:
 
 
 def _model_id_from_row(row: Any) -> str | None:
-    if isinstance(row, str):
-        return row.strip() or None
-    if not isinstance(row, dict):
-        return None
-    for key in ("id", "name", "model"):
-        value = row.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
+    return model_id_from_row(row)
 
 
 def _model_context_window(row: Any) -> int | None:
@@ -497,9 +493,7 @@ def _model_row_payload(row: Any) -> dict[str, Any] | None:
 
 
 def _extract_model_rows(body: Any) -> list[dict[str, Any]]:
-    raw_rows = body.get("data") if isinstance(body, dict) else body
-    if not isinstance(raw_rows, list):
-        return []
+    raw_rows = model_rows(body)
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
     for raw_row in raw_rows:
@@ -762,6 +756,10 @@ def _provider_list_simple(config: Any = None) -> list[dict[str, Any]]:
             "api_base": p.api_base,
             "configured": bool(p.api_key or p.api_base),
             "api_type": p.api_type,
+            # Come si paga l'endpoint: la UI lo usa per etichettare il profilo
+            # (a consumo / abbonamento / in locale) e per sapere che una api_key
+            # vuota è normale, non un profilo incompleto.
+            "tier": p.tier,
         })
     return result
 
@@ -892,6 +890,10 @@ def settings_payload(
     payload = {
         "first_run": _is_first_run(config),
         "providers": _provider_list_simple(config),
+        # I profili precompilati (il bridge di casa dietro Tailscale) sono una
+        # costante del codice, non config: la UI li offre e poi salva un
+        # provider normale, che resta liberamente modificabile.
+        "provider_presets": provider_presets_payload(),
         "default_provider": config.providers.default,
         "agent": {
             "model": effective_preset.model,
@@ -913,6 +915,7 @@ def settings_payload(
         "location": {
             "enabled": config.tools.location.enable,
         },
+        "openclaw_node": _openclaw_node_payload(config),
         # Il wakelock di servizio si prende una volta sola all'avvio: qui si
         # espone il valore scritto nel config, non lo stato del lock vivo. La UI
         # deve dire che il cambio vale dal prossimo riavvio.
@@ -1105,9 +1108,10 @@ async def update_provider(data: dict[str, Any]) -> dict[str, Any]:
 
     api_key = (data.get("api_key") or "").strip() or None
     api_base = (data.get("api_base") or "").strip() or None
+    tier = (data.get("tier") or "").strip() or None
 
     def _apply(config: Config) -> None:
-        _upsert_provider(config, name, fmt, api_key, api_base)
+        _upsert_provider(config, name, fmt, api_key, api_base, tier)
 
     await store.mutate(_apply)
     return settings_payload()
@@ -1119,6 +1123,7 @@ def _upsert_provider(
     fmt: str,
     api_key: str | None,
     api_base: str | None,
+    tier: str | None = None,
 ) -> None:
     """Inserisce o aggiorna il provider *name* dentro *config*."""
     providers = config.providers.providers
@@ -1133,6 +1138,10 @@ def _upsert_provider(
             if api_key and api_key != _mask_api_key(p.api_key):
                 p.api_key = api_key
             p.api_base = api_base or p.api_base
+            # ``tier`` assente = payload di un client che non lo conosce: si
+            # lascia quello salvato, non lo si riporta al default.
+            if tier in ("api", "subscription", "local"):
+                p.tier = tier
             break
     else:
         from jenny.config.schema import ProviderConfig
@@ -1142,6 +1151,7 @@ def _upsert_provider(
             format=fmt,
             api_key=api_key,
             api_base=api_base,
+            tier=tier if tier in ("api", "subscription", "local") else "api",
         ))
 
     if not config.providers.default:
@@ -1270,6 +1280,103 @@ def _apply_web_search_settings(config: Config, query: QueryParams) -> bool:
         set_fetch_value("max_chars", parsed_fetch_max_chars)
 
     return changed
+
+
+def _openclaw_node_payload(config: Config) -> dict[str, Any]:
+    """Sezione OpenClaw node: mai la credenziale, il device token o la chiave privata."""
+    from jenny.runtime.openclaw_node import active_status, command_names
+
+    node = config.openclaw_node
+    status = active_status()
+    paired = bool(node.device_token) or bool(status.get("paired"))
+    return {
+        "enable": node.enable,
+        "url": node.url,
+        "credential_kind": node.credential_kind,
+        "has_credential": bool(node.credential),
+        "device_id": node.device_id,
+        "paired": paired,
+        "token_stored": paired and not bool(node.device_token),
+        "commands": command_names(),
+        "status": status,
+    }
+
+
+def openclaw_node_payload() -> dict[str, Any]:
+    """Payload corrente (config + stato vivo) per la rotta di stato."""
+    return _openclaw_node_payload(load_config())
+
+
+async def accessibility_status_payload() -> dict[str, Any]:
+    """Stato del servizio di accessibilità per la WebUI.
+
+    ``android`` è False fuori dal telefono: la UI mostra "недоступно" invece di
+    accusare l'utente di non aver abilitato un servizio che non esiste.
+    """
+    from jenny.runtime.ui_automation import accessibility_enabled
+
+    enabled = await accessibility_enabled()
+    android = enabled is not None
+    return {"android": android, "enabled": bool(enabled), "clipboard": android}
+
+
+async def update_openclaw_node_settings(query: QueryParams) -> dict[str, Any]:
+    """Aggiorna enable/url/credenziale del nodo OpenClaw.
+
+    La credenziale arriva come ``credential_token`` (o ``credential``). Il nome
+    contiene ``token`` di proposito: ``redact_query_secrets`` maschera i valori
+    delle query il cui nome contiene quel marcatore, quindi né il setup code né
+    il token condiviso finiscono in chiaro nei log del gateway.
+    """
+
+    forget = parse_flag(_query_first(query, "forget_token") or "0")
+    if forget:
+        from jenny.runtime.openclaw_node import stop_active_client
+        from jenny.runtime.secure_store import OPENCLAW_NODE_TOKEN, remove_secret
+
+        await stop_active_client()
+        await remove_secret(OPENCLAW_NODE_TOKEN)
+
+    def _apply(config: Config) -> bool:
+        node = config.openclaw_node
+        changed = False
+        enable = _query_first(query, "enable")
+        if enable is not None:
+            value = parse_flag(enable)
+            if node.enable != value:
+                node.enable = value
+                changed = True
+        url = _query_first(query, "url")
+        if url is not None:
+            url = url.strip()
+            parsed = urlsplit(url)
+            if parsed.scheme not in {"ws", "wss"} or not parsed.hostname:
+                raise WebUISettingsError("url must be a ws:// or wss:// address")
+            if node.url != url:
+                node.url = url
+                changed = True
+        credential = _query_first_alias(query, "credential_token", "credential")
+        if credential is not None:
+            credential = credential.strip()
+            if not credential:
+                kind = ""
+            elif credential.startswith("oc-pair://"):
+                kind = "setup_code"
+            else:
+                kind = "token"
+            if node.credential != credential or node.credential_kind != kind:
+                node.credential = credential
+                node.credential_kind = kind
+                changed = True
+        if forget:
+            node.credential = ""
+            node.credential_kind = ""
+            node.device_token = ""
+            changed = True
+        return changed
+
+    await store.mutate(_apply)
+    return settings_payload()
 
 
 async def update_location_settings(query: QueryParams) -> dict[str, Any]:

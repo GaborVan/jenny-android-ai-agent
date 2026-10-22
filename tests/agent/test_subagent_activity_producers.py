@@ -93,14 +93,14 @@ def _iteration_ctx(iteration: int = 1, tool_calls: list | None = None) -> AgentH
 def _manager(tmp_path: Path, **kw) -> SubagentManager:
     provider = MagicMock(spec=LLMProvider)
     provider.get_default_model.return_value = "test-model"
-    defaults = dict(
-        provider=provider,
-        workspace=tmp_path,
-        bus=MessageBus(),
-        model="test-model",
-        max_tool_result_chars=16_000,
-        stall_threshold_s=0.0,
-    )
+    defaults = {
+        "provider": provider,
+        "workspace": tmp_path,
+        "bus": MessageBus(),
+        "model": "test-model",
+        "max_tool_result_chars": 16_000,
+        "stall_threshold_s": 0.0,
+    }
     defaults.update(kw)
     sm = SubagentManager(**defaults)
     sm.bus.publish_inbound = AsyncMock()

@@ -120,3 +120,13 @@ async def test_persist_preserves_unknown_keys(tmp_path) -> None:
     await persist_schema_migrations(config_path=path)
     written = json.loads(path.read_text(encoding="utf-8"))
     assert written["somethingFromTheFuture"] == {"keep": "me"}
+
+
+def test_legacy_italian_language_becomes_auto():
+    config = Config.model_validate({"agents": {"defaults": {"language": "it"}}})
+    assert config.agents.defaults.language == ""
+
+
+def test_a_non_italian_language_is_left_alone():
+    config = Config.model_validate({"agents": {"defaults": {"language": "en"}}})
+    assert config.agents.defaults.language == "en"

@@ -167,6 +167,7 @@ def _finish_move(workspace: Path, old_key: str, new_key: str) -> bool:
     for src, dst in zip(
         project_trace_paths(workspace, old_key),
         project_trace_paths(workspace, new_key),
+        strict=False,
     ):
         if not src.exists():
             continue
@@ -257,6 +258,7 @@ def follow_renamed_project(
         for src, dst in zip(
             project_trace_paths(workspace, old_key),
             project_trace_paths(workspace, new_key),
+            strict=False,
         )
         if src.exists()
     ]

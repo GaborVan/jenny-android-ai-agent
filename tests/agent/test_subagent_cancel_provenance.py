@@ -35,14 +35,14 @@ from jenny.providers.base import LLMProvider
 def _manager(tmp_path: Path, **kw) -> SubagentManager:
     provider = MagicMock(spec=LLMProvider)
     provider.get_default_model.return_value = "test-model"
-    defaults = dict(
-        provider=provider,
-        workspace=tmp_path,
-        bus=MessageBus(),
-        model="test-model",
-        max_tool_result_chars=16_000,
-        max_concurrent_subagents=8,
-    )
+    defaults = {
+        "provider": provider,
+        "workspace": tmp_path,
+        "bus": MessageBus(),
+        "model": "test-model",
+        "max_tool_result_chars": 16_000,
+        "max_concurrent_subagents": 8,
+    }
     defaults.update(kw)
     manager = SubagentManager(**defaults)
     manager.bus.publish_inbound = AsyncMock()

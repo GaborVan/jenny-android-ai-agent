@@ -60,8 +60,8 @@ android {
         // 14 = 0.9.5 upstream (firmato con la chiave dell'autore). La nostra
         // fork riparte da 15 con la NOSTRA chiave di firma: dopo l'uninstall
         // iniziale ogni build successiva (16, 17, …) si aggiorna in place.
-        versionCode = 16
-        versionName = "0.9.6"
+        versionCode = 33
+        versionName = "0.9.23"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
@@ -259,6 +259,10 @@ dependencies {
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
+    // DocumentFile: enumerare/creare/cancellare figli di un albero SAF
+    // (OpenDocumentTree) senza riscrivere DocumentsContract a mano — usato da
+    // DriveSyncBridge per la cartella Drive scelta dall'utente.
+    implementation("androidx.documentfile:documentfile:1.0.1")
     // Chrome Custom Tabs: apre i link esterni della chat in un browser
     // in-app (con pulsante di chiusura) invece di dirottare la WebView SPA.
     implementation("androidx.browser:browser:1.7.0")

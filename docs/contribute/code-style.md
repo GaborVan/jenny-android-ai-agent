@@ -22,10 +22,10 @@ ruff check jenny/ tests/
 | Setting | Value |
 |---|---|
 | `line-length` | 100 |
-| `select` | `E`, `F`, `I`, `N`, `W` |
+| `select` | `E`, `F`, `I`, `N`, `W`, `B`, `C4` |
 | `ignore` | `E501` |
 
-`I` means imports are sorted and grouped by ruff — an unsorted import block fails CI. `N` enforces PEP 8 naming. `E501` (line too long) is deliberately ignored, so **100 columns is the target, not a hard gate**: keep to it for readability, but don't mangle a URL, a long string constant, or a call signature to fit. There is no auto-formatter step in CI (`ruff format` is not run), so match the layout of the file you're editing instead of reflowing it.
+`I` means imports are sorted and grouped by ruff — an unsorted import block fails CI. `N` enforces PEP 8 naming. `B` (flake8-bugbear) catches real defect patterns — `zip()` without an explicit `strict=`, exceptions raised inside an `except` without `from` — and `C4` (flake8-comprehensions) rewrites a `for`-loop that is only building a list/dict/set. Both are on as of September 2026 and the tree is clean under them. `E501` (line too long) is deliberately ignored, so **100 columns is the target, not a hard gate**: keep to it for readability, but don't mangle a URL, a long string constant, or a call signature to fit. There is no auto-formatter step in CI (`ruff format` is not run), so match the layout of the file you're editing instead of reflowing it.
 
 ## Type checking
 

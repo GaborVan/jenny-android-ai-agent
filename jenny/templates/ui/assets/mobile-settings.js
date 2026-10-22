@@ -22,6 +22,7 @@ import {
   runImportFlow,
   runSnapshotRestore,
 } from './shared/backup-flow.js';
+import { driveSyncNativeAvailable, pickDriveSyncFolder } from './shared/drive-sync-flow.js';
 
 // Ripiego per `power.modes` quando il payload arriva da un gateway più vecchio
 // del client: stesso ordine di `KEEP_AWAKE_MODES` in config/schema.py, dal più
@@ -175,6 +176,7 @@ export class SettingsController {
   render() {
     const d = this.data;
     if (!d) return;
+    if (this._ocTimer) { clearInterval(this._ocTimer); this._ocTimer = null; }
 
     // Sezioni tematiche, una per asse mentale: preferenze d'interfaccia, motore
     // LLM, capacità dell'agente, la sua memoria, i lavoratori periodici che la
@@ -182,6 +184,7 @@ export class SettingsController {
     this.contentEl.innerHTML = [
       this._renderConfigRecovery(d),
       this._renderCronRecovery(d),
+      this._section('updates', 'ti-refresh', i18n.t('settings.updates.title'), this._renderUpdates(d)),
       this._section('personalization', 'ti-palette', i18n.t('settings.personalization'), this._renderPersonalization(d)),
       this._section('models', 'ti-cpu', i18n.t('settings.model'), this._renderModelSettings(d)),
       this._section('tools', 'ti-tool', i18n.t('settings.tools'), this._renderTools(d)),
@@ -190,6 +193,8 @@ export class SettingsController {
       this._renderBatterySection(d),
       this._section('ssh', 'ti-terminal-2', i18n.t('settings.ssh.title'), this._renderSsh()),
       this._section('telegram', 'ti-brand-telegram', i18n.t('settings.telegram.title'), this._renderTelegram()),
+      this._section('drivesync', 'ti-cloud-upload', i18n.t('settings.driveSync.title'), this._renderDriveSync()),
+      this._section('openclaw_node', 'ti-plug-connected', i18n.t('settings.openclawNode.title'), this._renderOpenClawNode(d)),
       this._section('backup', 'ti-database-export', i18n.t('backup.sectionTitle'), this._renderBackup()),
       this._section('system', 'ti-info-circle', i18n.t('settings.system'), this._renderSystem(d)),
     ].join('');
@@ -599,6 +604,271 @@ export class SettingsController {
     // Il contenuto vero lo disegna il TelegramPairingWidget (condiviso con
     // l'onboarding) dentro questo placeholder, in _wireSections.
     return `<div id="settings-telegram-widget"></div>`;
+  }
+
+  // ── Cloud sync (Google Drive) ────────────────────────────────────────
+
+  /* Sincronizza SOUL.md/USER.md e memory/ tra due dispositivi via una
+     cartella Drive scelta dall'utente (SAF, nessun permesso storage); quando
+     la cartella scelta è la condivisa "Apex-Pamyat" sincronizza anche lo
+     specchio locale shared/ (profile/knowledge/notes). Niente config.json,
+     niente skills, niente sessioni: v. drive_sync.py per l'algoritmo
+     (last-writer-wins per mtime, pareggio per sha256). */
+  _renderDriveSync() {
+    return `
+      <p class="settings-hint" style="margin:0 0 10px;font-size:12px;color:var(--text-faint)">${i18n.t('settings.driveSync.intro')}</p>
+      <div id="drivesync-body">
+        <div class="settings-empty-state">${i18n.t('settings.loading')}</div>
+      </div>`;
+  }
+
+  _driveSyncBodyHtml(status) {
+    if (!status.available) {
+      return `<p class="settings-hint">${i18n.t('settings.driveSync.androidOnly')}</p>`;
+    }
+    const folder = status.folder;
+    const folderLine = folder
+      ? `<div class="settings-hint">${i18n.t('settings.driveSync.folderChosen', { name: escapeHtml(folder.name || '') })}</div>`
+      : `<div class="settings-hint">${i18n.t('settings.driveSync.noFolder')}</div>`;
+    const last = status.last_sync;
+    const lastLine = last
+      ? `<div class="settings-hint">${i18n.t('settings.driveSync.lastSync', { when: new Date(last.at * 1000).toLocaleString() })} — ${i18n.t('settings.driveSync.counts', { pushed: (last.pushed || []).length, pulled: (last.pulled || []).length })}</div>`
+      : `<div class="settings-hint">${i18n.t('settings.driveSync.neverSynced')}</div>`;
+    const chooseLabel = folder ? i18n.t('settings.driveSync.changeFolder') : i18n.t('settings.driveSync.chooseFolder');
+    const pickBtn = driveSyncNativeAvailable()
+      ? `<button class="settings-btn-add" id="btn-drivesync-pick"><i class="ti ti-folder"></i> ${chooseLabel}</button>`
+      : '';
+    const syncBtn = folder
+      ? `<button class="settings-btn-save settings-btn-block" id="btn-drivesync-sync"><i class="ti ti-refresh"></i> ${i18n.t('settings.driveSync.syncNow')}</button>`
+      : '';
+    return `${folderLine}${lastLine}${pickBtn}${syncBtn}`;
+  }
+
+  async _refreshDriveSyncStatus() {
+    const body = this.contentEl.querySelector('#drivesync-body');
+    if (!body) return;
+    let status;
+    try {
+      status = await api.getDriveSyncStatus();
+    } catch (e) {
+      body.innerHTML = `<div class="settings-empty-state">${escapeHtml(e.message || 'error')}</div>`;
+      return;
+    }
+    body.innerHTML = this._driveSyncBodyHtml(status);
+    this._wireDriveSyncButtons();
+  }
+
+  _wireDriveSyncButtons() {
+    const pickBtn = this.contentEl.querySelector('#btn-drivesync-pick');
+    if (pickBtn) {
+      pickBtn.addEventListener('click', async () => {
+        const { ok, name } = await pickDriveSyncFolder();
+        if (ok) {
+          showToast(i18n.t('settings.driveSync.folderPicked', { name }));
+        } else {
+          showToast(i18n.t('settings.driveSync.folderPickFailed'), 'error');
+        }
+        this._refreshDriveSyncStatus();
+      });
+    }
+    const syncBtn = this.contentEl.querySelector('#btn-drivesync-sync');
+    if (syncBtn) {
+      syncBtn.addEventListener('click', async () => {
+        syncBtn.disabled = true;
+        const original = syncBtn.innerHTML;
+        syncBtn.innerHTML = `<span class="onboarding-spinner tg-spinner-inline"></span> ${i18n.t('settings.driveSync.syncing')}`;
+        try {
+          const result = await api.runDriveSyncNow();
+          showToast(
+            result.ok ? i18n.t('settings.driveSync.syncSuccess') : i18n.t('settings.driveSync.syncFailed'),
+            result.ok ? undefined : 'error',
+          );
+        } catch (e) {
+          showToast(e.message || i18n.t('settings.driveSync.syncFailed'), 'error');
+        } finally {
+          syncBtn.disabled = false;
+          syncBtn.innerHTML = original;
+          this._refreshDriveSyncStatus();
+        }
+      });
+    }
+  }
+
+  // ── OpenClaw node ────────────────────────────────────────────────────
+  //
+  // Registra l'app come nodo su un gateway OpenClaw. Off di default: quando è
+  // acceso il gateway può invocare ui.dump, clipboard.get/set e voice.speak.
+  // L'identità è un device_id Ed25519 persistito; l'operatore deve comunque
+  // approvare il pairing (`openclaw nodes approve <id>`) e mettere i comandi
+  // in `gateway.nodes.commands.allow`.
+  _renderOpenClawNode(d) {
+    const node = (d && d.openclaw_node) || {};
+    return `
+      <p class="settings-hint" style="margin:0 0 10px;font-size:12px;color:var(--text-faint)">${i18n.t('settings.openclawNode.hint')}</p>
+      <div id="openclaw-node-body">${this._openClawNodeBodyHtml(node)}</div>`;
+  }
+
+  _openClawNodeBodyHtml(node) {
+    const enabled = !!node.enable;
+    const configured = !!node.has_credential || !!node.paired;
+    const placeholder = node.credential_kind === 'setup_code'
+      ? i18n.t('settings.openclawNode.credentialPlaceholderSetup')
+      : i18n.t('settings.openclawNode.credentialPlaceholderToken');
+    return `
+      <div class="settings-field">
+        <label class="settings-label">${i18n.t('settings.openclawNode.statusTitle')}</label>
+        <div id="openclaw-node-status-rows" style="font-size:12px;line-height:1.8">
+          <div><strong>${i18n.t('settings.openclawNode.commandsRow')}:</strong> <span id="oc-commands">${escapeHtml((node.commands || []).join(', ') || '—')}</span></div>
+          <div><strong>${i18n.t('settings.openclawNode.nodeRow')}:</strong> <span id="oc-node-state">${escapeHtml(this._openClawNodeStatusText(node.status || {}, node.paired))}</span></div>
+          <div><strong>${i18n.t('settings.openclawNode.screenRow')}:</strong> <span id="oc-a11y-state">${escapeHtml(i18n.t('settings.openclawNode.checking'))}</span></div>
+          <div><strong>${i18n.t('settings.openclawNode.clipboardRow')}:</strong> <span id="oc-clipboard-state">${escapeHtml(i18n.t('settings.openclawNode.checking'))}</span></div>
+        </div>
+        <button class="settings-btn-add" id="oc-enable-service" style="margin-top:8px"><i class="ti ti-accessibility"></i> ${i18n.t('settings.openclawNode.enableService')}</button>
+        <p class="settings-hint" style="margin:8px 0 0;font-size:12px;color:var(--text-faint)">${i18n.t('settings.openclawNode.serviceHint')}</p>
+      </div>
+      <div class="settings-field settings-toggle-row">
+        <label class="settings-label">${i18n.t('settings.openclawNode.enable')}</label>
+        <label class="toggle-switch">
+          <input type="checkbox" id="oc-enable" ${enabled ? 'checked' : ''}>
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+      <div class="settings-field">
+        <label class="settings-label">${i18n.t('settings.openclawNode.url')}</label>
+        <input type="text" class="settings-input" id="oc-url" value="${escapeHtml(node.url || '')}">
+      </div>
+      <div class="settings-field">
+        <label class="settings-label">${i18n.t('settings.openclawNode.credential')} — <span id="oc-credential-state">${configured ? i18n.t('settings.openclawNode.configured') : i18n.t('settings.openclawNode.notSet')}</span></label>
+        <input type="password" class="settings-input" id="oc-cred" placeholder="${escapeHtml(placeholder)}" autocomplete="off">
+      </div>
+      <div class="settings-actions" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px">
+        <button class="settings-btn-save" id="oc-save">${i18n.t('settings.openclawNode.save')}</button>
+        <button class="settings-btn-add" id="oc-connect"><i class="ti ti-plug-connected"></i> ${i18n.t('settings.openclawNode.connect')}</button>
+        <button class="settings-btn-add" id="oc-new-code">${i18n.t('settings.openclawNode.newCode')}</button>
+      </div>`;
+  }
+
+  _openClawNodeAccessibilityText(state) {
+    if (!state || state.android !== true) return i18n.t('settings.openclawNode.statusUnavailable');
+    if (state.enabled) return i18n.t('settings.openclawNode.screenReadingOn');
+    return `${i18n.t('settings.openclawNode.screenReadingOff')} — ${i18n.t('settings.openclawNode.screenReadingOffCommands')}`;
+  }
+
+  _openClawNodeClipboardText(state) {
+    if (!state || state.android !== true) return i18n.t('settings.openclawNode.statusUnavailable');
+    return state.clipboard ? i18n.t('settings.openclawNode.clipboardAvailable') : i18n.t('settings.openclawNode.statusUnavailable');
+  }
+
+  _openClawNodeStatusText(status, paired = false) {
+    const state = (status && status.state) || 'disabled';
+    let text = i18n.t(`settings.openclawNode.state.${state}`);
+    if (state === 'pairing_required' && status.request_id) {
+      text += ` — ${i18n.t('settings.openclawNode.pairingHint', { id: status.request_id })}`;
+    } else if (state === 'error' && status.detail) {
+      text += ` — ${escapeHtml(String(status.detail))}`;
+    }
+    if (paired) text += ` — ${i18n.t('settings.openclawNode.tokenStored')}`;
+    return text;
+  }
+
+  async _refreshOpenClawNode() {
+    const statusEl = this.contentEl.querySelector('#oc-node-state');
+    if (!statusEl) return;
+    try {
+      const node = await api.getOpenClawNodeStatus();
+      statusEl.textContent = this._openClawNodeStatusText(node.status || {}, node.paired);
+      const credentialState = this.contentEl.querySelector('#oc-credential-state');
+      if (credentialState) credentialState.textContent = i18n.t(
+        node.paired || node.has_credential ? 'settings.openclawNode.configured' : 'settings.openclawNode.notSet'
+      );
+    } catch (e) {
+      /* Silenzioso: la sezione resta sullo stato precedente. */
+    }
+    try {
+      const access = await api.getAccessibilityStatus();
+      const a11yEl = this.contentEl.querySelector('#oc-a11y-state');
+      const clipEl = this.contentEl.querySelector('#oc-clipboard-state');
+      if (a11yEl) a11yEl.textContent = this._openClawNodeAccessibilityText(access);
+      if (clipEl) clipEl.textContent = this._openClawNodeClipboardText(access);
+    } catch (e) {
+      /* Silenzioso */
+    }
+  }
+
+  _wireOpenClawNode() {
+    const save = this.contentEl.querySelector('#oc-save');
+    const connect = this.contentEl.querySelector('#oc-connect');
+    const collect = () => {
+      const urlEl = this.contentEl.querySelector('#oc-url');
+      const credEl = this.contentEl.querySelector('#oc-cred');
+      const enableEl = this.contentEl.querySelector('#oc-enable');
+      const params = { enable: enableEl && enableEl.checked ? '1' : '0', url: urlEl ? urlEl.value : '' };
+      // Vuoto = "non toccare": la credenziale salvata resta. Per svuotarla
+      // c'è il pulsante «nuovo codice»: non rimandare la credenziale salvata.
+      if (credEl && credEl.value) params.credential_token = credEl.value;
+      return params;
+    };
+    if (save) {
+      save.addEventListener('click', async () => {
+        save.disabled = true;
+        try {
+          await api.updateOpenClawNode(collect());
+          showToast(i18n.t('settings.openclawNode.saved'));
+          await this._refreshOpenClawNode();
+        } catch (e) {
+          showToast(i18n.t('settings.openclawNode.saveFailed'), 'error');
+        } finally {
+          save.disabled = false;
+        }
+      });
+    }
+    if (connect) {
+      connect.addEventListener('click', async () => {
+        connect.disabled = true;
+        try {
+          await api.connectOpenClawNode(collect());
+          showToast(i18n.t('settings.openclawNode.connectRequested'));
+          await this._refreshOpenClawNode();
+        } catch (e) {
+          showToast(i18n.t('settings.openclawNode.saveFailed'), 'error');
+        } finally {
+          connect.disabled = false;
+        }
+      });
+    }
+    const newCode = this.contentEl.querySelector('#oc-new-code');
+    if (newCode) {
+      newCode.addEventListener('click', async () => {
+        newCode.disabled = true;
+        try {
+          await api.updateOpenClawNode({ forget_token: '1' });
+          const credential = this.contentEl.querySelector('#oc-cred');
+          if (credential) {
+            credential.value = '';
+            credential.focus();
+          }
+          await this._refreshOpenClawNode();
+        } catch (e) {
+          showToast(i18n.t('settings.openclawNode.saveFailed'), 'error');
+        } finally {
+          newCode.disabled = false;
+        }
+      });
+    }
+    const enableService = this.contentEl.querySelector('#oc-enable-service');
+    if (enableService) {
+      enableService.addEventListener('click', async () => {
+        enableService.disabled = true;
+        try {
+          await api.openAccessibilitySettings();
+        } catch (e) {
+          showToast(i18n.t('settings.openclawNode.saveFailed'), 'error');
+        } finally {
+          enableService.disabled = false;
+        }
+      });
+    }
+    if (!this._ocTimer) this._ocTimer = setInterval(() => this._refreshOpenClawNode(), 2000);
   }
 
   // ── Models & Providers ─────────────────────────────────────────────
@@ -1572,7 +1842,17 @@ export class SettingsController {
 
   /* Diagnostica e opzioni da power user: versione, modalità avanzata,
      statistiche di utilizzo token. */
-  _renderSystem(d) {
+  /* ── Aggiornamento dell'app (sezione dedicata) ───────────────────────
+
+     Prima viveva dentro "Sistema", in fondo a un elenco lungo: per chi non sa
+     che esiste, un update non arrivava mai (il job periodico gira ogni 24h e
+     l'unica affordance era un bottone sepolto). Qui è un accordion a sé, il
+     primo dopo i banner di recovery: versione corrente, badge quando c'è una
+     release nuova, card con "Installa ora", e il blocco di diagnostica del
+     check con il suo "Controlla ora". All'apertura della sezione il check
+     parte da solo se l'ultimo tentativo è vecchio (>= 1h), così basta aprire
+     le impostazioni per sapere se c'è qualcosa di nuovo. */
+  _renderUpdates(d) {
     const v = d.version || {};
     return `
       <div class="settings-field-row">
@@ -1581,7 +1861,11 @@ export class SettingsController {
       </div>
       ${this._renderUpdateCard(v)}
       ${this._renderUpdateCheck(v)}
-      <div class="settings-divider"></div>
+      <p class="settings-hint" style="margin:6px 0 0;font-size:12px;color:var(--text-faint)">${i18n.t('settings.updates.hint')}</p>`;
+  }
+
+  _renderSystem(d) {
+    return `
       <div class="settings-field settings-toggle-row">
         <label class="settings-label">${i18n.t('settings.advancedMode')}</label>
         <label class="toggle-switch">
@@ -1782,6 +2066,18 @@ export class SettingsController {
     showToast(v.update_available
       ? i18n.t('settings.update.available', { version: v.latest || '' })
       : i18n.t('settings.update.checkUpToDate'));
+  }
+
+  /* Auto-check all'apertura della sezione "Оновлення". Non si fa mai più di
+     una volta l'ora e mai mentre un check è già in volo: il doppio tap non
+     deve raddoppiare la rete, e riaprire la sezione subito dopo non deve
+     rifare una GET finita da dieci secondi. */
+  _autoUpdateCheckOnOpen() {
+    if (this._checking) return;
+    const v = this.data?.version || {};
+    const last = Number(v.last_check) || 0;
+    if (Date.now() - last < 3600000) return; // 1h: ancora fresca
+    this._runUpdateCheck();
   }
 
   /* Chiave della riga di fase. `idle` non ne ha una: prima di premere il
@@ -2180,6 +2476,19 @@ export class SettingsController {
       this._tgWidget.refresh();
     }
 
+    // Cloud sync (Drive): stato dal gateway, ridisegnato in-place (nessun
+    // widget dedicato — la card non serve polling, solo un refresh dopo azioni).
+    if (this.contentEl.querySelector('#drivesync-body')) {
+      this._refreshDriveSyncStatus();
+    }
+
+    // OpenClaw node: stato vivo dal gateway, ridisegnato mentre la sezione è
+    // aperta (pairing/approvazione arrivano dal lato gateway, non da un evento).
+    if (this.contentEl.querySelector('#openclaw-node-body')) {
+      this._wireOpenClawNode();
+      this._refreshOpenClawNode();
+    }
+
     // Attività in background: stessa card condivisa con onboarding e Telegram.
     // Qui `grantedKey` è d'obbligo — è l'unica superficie che l'utente apre
     // apposta per controllare, e "nessun messaggio" non è una risposta.
@@ -2375,9 +2684,12 @@ export class SettingsController {
   }
 
   /* keepStoredKey: il provider ha già una chiave salvata, quindi un campo
-     vuoto significa "lasciala com'è" e non va segnalato come errore. */
-  async _saveProvider(name, format, apiKey, apiBase, { keepStoredKey = false } = {}) {
-    if (!name || (!apiKey && !keepStoredKey)) {
+     vuoto significa "lasciala com'è" e non va segnalato come errore.
+     tier: un profilo ``local``/``subscription`` non ha una chiave, ed è lui a
+     dire al backend che non è un errore averla lasciata vuota. */
+  async _saveProvider(name, format, apiKey, apiBase, { keepStoredKey = false, tier = 'api' } = {}) {
+    const keyOptional = keepStoredKey || tier !== 'api';
+    if (!name || (!apiKey && !keyOptional)) {
       showToast(i18n.t('settings.nameAndKeyRequired'), 'error');
       return;
     }
@@ -2393,7 +2705,7 @@ export class SettingsController {
     buttons.forEach(b => { b.disabled = true; });
 
     try {
-      await api.updateProvider({ name, format, api_key: apiKey, api_base: apiBase });
+      await api.updateProvider({ name, format, api_key: apiKey, api_base: apiBase, tier });
     } catch (e) {
       showToast(e.message, 'error');
       return;
@@ -2533,6 +2845,15 @@ export class SettingsController {
     });
   }
 
+  /* Il nome tradotto di un preset, col nome del backend come ripiego: se la
+     locale non conosce ancora l'id, cade sul testo che arriva da Python invece
+     di mostrare la chiave i18n grezza. */
+  _providerPresetLabel(preset) {
+    const key = { 'home-bridge-tailscale': 'settings.presetHomeBridge' }[preset.id];
+    const translated = key ? i18n.t(key) : '';
+    return translated && translated !== key ? translated : preset.name;
+  }
+
   _showAddProviderDialog(existingProvider) {
     const isEdit = !!existingProvider;
     // La chiave salvata non torna mai al client: il backend manda solo un
@@ -2542,6 +2863,23 @@ export class SettingsController {
     const keyPlaceholder = hasStoredKey
       ? existingProvider.api_key_hint
       : i18n.t('settings.apiKeyPlaceholder');
+    // Il tier decide se la chiave è obbligatoria: un endpoint locale o un
+    // bridge di abbonamento non ne hanno una, e pretenderla era l'unico modo
+    // per cui non si potevano salvare dalla UI.
+    const tier = (isEdit && existingProvider.tier) || 'api';
+    // I preset arrivano dal backend (``provider_presets``): sono un punto di
+    // partenza per i campi, non un profilo speciale. In modifica non si offrono
+    // — il provider esiste già e si sta solo cambiandolo.
+    const presets = isEdit ? [] : (this.data?.provider_presets || []);
+    const presetField = presets.length ? `
+        <div class="settings-field">
+          <label class="settings-label">${i18n.t('settings.preset')}</label>
+          <select class="settings-select" id="dlg-provider-preset">
+            <option value="">${i18n.t('settings.presetNone')}</option>
+            ${presets.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(this._providerPresetLabel(p))}</option>`).join('')}
+          </select>
+          <span class="settings-field-hint" id="dlg-preset-hint">${i18n.t('settings.presetHint')}</span>
+        </div>` : '';
     const dialog = document.createElement('dialog');
     dialog.className = 'oc-dialog';
     dialog.id = 'provider-dialog';
@@ -2550,6 +2888,7 @@ export class SettingsController {
         <h3 style="margin:0 0 16px;font-size:15px;font-weight:600">
           ${isEdit ? i18n.t('settings.editProvider') : i18n.t('settings.addProviderTitle')}
         </h3>
+        ${presetField}
         <div class="settings-field">
           <label class="settings-label">${i18n.t('settings.name')}</label>
           <input type="text" class="settings-input" id="dlg-provider-name" placeholder="${i18n.t('settings.namePlaceholder')}"
@@ -2575,6 +2914,15 @@ export class SettingsController {
           <input type="text" class="settings-input" id="dlg-api-base" placeholder="https://api.openai.com/v1"
             value="${isEdit ? escapeHtml(existingProvider.api_base || '') : ''}" />
         </div>
+        <div class="settings-field">
+          <label class="settings-label">${i18n.t('settings.providerTier')}</label>
+          <select class="settings-select" id="dlg-provider-tier">
+            <option value="api" ${tier === 'api' ? 'selected' : ''}>${i18n.t('settings.tierApi')}</option>
+            <option value="subscription" ${tier === 'subscription' ? 'selected' : ''}>${i18n.t('settings.tierSubscription')}</option>
+            <option value="local" ${tier === 'local' ? 'selected' : ''}>${i18n.t('settings.tierLocal')}</option>
+          </select>
+          <span class="settings-field-hint">${i18n.t('settings.tierHint')}</span>
+        </div>
         <div class="oc-dialog-buttons" style="margin-top:16px">
           <button class="oc-btn oc-btn-cancel" id="dlg-provider-cancel">${i18n.t('common.cancel')}</button>
           <button class="oc-btn oc-btn-confirm" id="dlg-provider-save">${i18n.t('settings.save')}</button>
@@ -2593,6 +2941,27 @@ export class SettingsController {
       baseInput.placeholder = defaults[formatSelect.value] || '';
     });
 
+    // Scegliere un preset riempie i campi e basta: dopo resta tutto modificabile
+    // (nome, URL, token), ed è il salvataggio normale a scrivere il provider.
+    const presetSelect = dialog.querySelector('#dlg-provider-preset');
+    if (presetSelect) {
+      presetSelect.addEventListener('change', () => {
+        const preset = presets.find(p => p.id === presetSelect.value);
+        const hint = dialog.querySelector('#dlg-preset-hint');
+        if (!preset) {
+          if (hint) hint.textContent = i18n.t('settings.presetHint');
+          return;
+        }
+        dialog.querySelector('#dlg-provider-name').value = preset.name;
+        formatSelect.value = preset.format;
+        dialog.querySelector('#dlg-provider-tier').value = preset.tier;
+        baseInput.value = preset.api_base;
+        if (hint && preset.models && preset.models.length) {
+          hint.textContent = i18n.t('settings.presetModels', { models: preset.models.join(', ') });
+        }
+      });
+    }
+
     // Anche Annulla passa dal `cancel` annullabile, come Esc e il tasto
     // Indietro: chiamando close() dritto scavalcava il guard del salvataggio in
     // volo, e restava l'unica via per perdere la chiave API a metà richiesta.
@@ -2604,9 +2973,10 @@ export class SettingsController {
       const format = dialog.querySelector('#dlg-provider-format').value;
       const apiKey = dialog.querySelector('#dlg-api-key').value.trim();
       const apiBase = dialog.querySelector('#dlg-api-base').value.trim();
+      const tier = dialog.querySelector('#dlg-provider-tier').value;
       // In modifica il campo vuoto vale sempre "tieni la chiave salvata":
       // il provider esiste già, non serve ridigitarla per cambiare l'URL.
-      this._saveProvider(name, format, apiKey, apiBase, { keepStoredKey: isEdit });
+      this._saveProvider(name, format, apiKey, apiBase, { keepStoredKey: isEdit, tier });
     });
     // Il congedo (Indietro, Esc, catena della shell) passa da un `cancel`
     // annullabile: durante un salvataggio in volo lo si rifiuta, altrimenti il

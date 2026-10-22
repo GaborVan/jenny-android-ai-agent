@@ -273,6 +273,56 @@ class TestConvertMessages:
 
 
 # ======================================================================
+# converters - tool message image content (function_call_output has no
+# native image block, unlike Anthropic's tool_result)
+# ======================================================================
+
+
+class TestToolMessageImageContent:
+    def test_image_url_list_content_becomes_text_reference(self):
+        """A read_file-on-image tool result must not leak raw base64 JSON."""
+        _, items = convert_messages([{
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,AAAA"},
+                    "_meta": {"path": "/tmp/x.png"},
+                },
+                {"type": "text", "text": "(Image file: /tmp/x.png)"},
+            ],
+        }])
+        output = items[0]["output"]
+        assert "data:image" not in output
+        assert "AAAA" not in output
+        assert "/tmp/x.png" in output
+        assert "(Image file: /tmp/x.png)" in output
+
+    def test_image_url_without_meta_path_still_hides_the_data_url(self):
+        _, items = convert_messages([{
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+            ],
+        }])
+        output = items[0]["output"]
+        assert "data:image" not in output
+        assert "AAAA" not in output
+
+    def test_non_image_list_content_keeps_json_behavior(self):
+        """Regression: lists without image_url blocks still JSON-stringify as before."""
+        content = [{"type": "text", "text": "hi"}, {"type": "text", "text": "bye"}]
+        _, items = convert_messages([{
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": content,
+        }])
+        assert items[0]["output"] == json.dumps(content, ensure_ascii=False)
+
+
+# ======================================================================
 # converters - convert_tools
 # ======================================================================
 

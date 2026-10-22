@@ -3,6 +3,7 @@
 import pytest
 
 from jenny.config.schema import Config, ProviderConfig, ProvidersConfig
+from jenny.pydantic_compat import ValidationError
 
 
 class TestProviderConfig:
@@ -30,7 +31,7 @@ class TestProviderConfig:
         assert p.format == "anthropic"
 
     def test_invalid_format(self):
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             ProviderConfig.model_validate({"name": "bad", "format": "invalid"})
 
     def test_serialization_camel_case(self):

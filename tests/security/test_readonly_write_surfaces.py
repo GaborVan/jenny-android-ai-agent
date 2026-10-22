@@ -77,6 +77,7 @@ from jenny.agent.tools.download import DownloadFileTool
 from jenny.agent.tools.journal import JournalAppendTool
 from jenny.agent.tools.long_task import LongTaskTool
 from jenny.agent.tools.python_exec import PythonNamespace
+from jenny.agent.tools.voice import TranscribeAudioTool
 from jenny.apps.manifest import STORAGE_OPS, AppAction
 from jenny.apps.storage import _MUTATING_OPS, execute_storage_action
 from jenny.security.workspace_access import (
@@ -165,12 +166,25 @@ _ASKS_FOR_ITSELF = {
     "agent/tools/journal.py": (
         "appende al diario del progetto: non passa dai tool file, ha il suo gate"
     ),
+    "agent/tools/voice.py": (
+        "non scrive nel workspace, ma esce dal telefono: manda l'audio al motore "
+        "di riconoscimento, che può stare altrove. In sola lettura si chiude "
+        "esattamente per questo, ed è una scelta, non un effetto collaterale"
+    ),
     # T4.6/T4.7: nessuna primitiva di scrittura, e per questo è stato invisibile
     # a questo file. Scrive ``metadata[goal_state]`` e chiama ``sessions.save``:
     # stato che sopravvive al turno, alla conversazione e al riavvio, e che cambia
     # il comportamento futuro (wall timeout, chip del goal, iniezione «keep
     # working»). Stessa famiglia di un job cron, stesso rifiuto.
     "agent/tools/long_task.py": "registra un goal sostenuto via sessions.save, non un path",
+    # T4.8: skill_create/skill_sync scrivono sotto ``<workspace>/skills/`` —
+    # destinazione fissa, fuori dai cancelli dei tool file (init_skill e il
+    # download del sync scrivono da soli), quindi il cancello non le vede e
+    # devono chiedere.
+    "agent/tools/skill_creator.py": (
+        "crea/sincronizza skill sotto <workspace>/skills/: destinazione fissa, "
+        "non passa dai tool file"
+    ),
 }
 
 # Chi scrive ma **non deve** chiedere, con la ragione. Non è una lista di
@@ -493,6 +507,55 @@ async def _probe_long_task(root: Path, readonly: bool) -> str:
     return out
 
 
+async def _probe_skill_creator(root: Path, readonly: bool) -> str:
+    from unittest.mock import patch
+
+    from jenny.agent.tools.skill_creator import SkillCreateTool
+
+    tool = SkillCreateTool()
+    # Il tool risolve il workspace via get_workspace_path: lo si punta su root
+    # perché la sonda scriva nel tmp e si possa osservare l'effetto.
+    with patch(
+        "jenny.agent.tools.skill_creator.get_workspace_path", return_value=root
+    ):
+        with _turn(root, readonly):
+            out = await tool.execute(name="probe-skill")
+    if readonly:
+        assert not (root / "skills" / "probe-skill").exists(), (
+            "in sola lettura la skill non deve nascere"
+        )
+    return out
+
+
+async def _probe_voice(root: Path, readonly: bool) -> str:
+    # Non tocca il disco, quindi non c'è nessun file da cercare dopo: l'effetto
+    # da osservare è l'uscita dal telefono, cioè la chiamata al livello runtime.
+    # La sonda monta un finto che registra, così "rifiutato prima" è misurato
+    # invece che dedotto dal testo del rifiuto.
+    (root / "voice.ogg").write_bytes(b"x")
+    called: list[str] = []
+
+    async def _fake(path: str, *, language: str = "", prefer_offline: bool = False):
+        called.append(path)
+        return {"ok": True, "text": "ciao"}
+
+    import jenny.runtime.stt as runtime_stt
+
+    original = runtime_stt.transcribe_file
+    runtime_stt.transcribe_file = _fake
+    try:
+        tool = TranscribeAudioTool(
+            config=SimpleNamespace(prefer_offline=False), workspace=root
+        )
+        with _turn(root, readonly):
+            out = await tool.execute(path="voice.ogg")
+    finally:
+        runtime_stt.transcribe_file = original
+    if readonly:
+        assert not called, "in sola lettura l'audio non deve uscire dal telefono"
+    return out
+
+
 _PROBES: dict[str, Probe] = {
     "agent/tools/download.py": _probe_download,
     "apps/storage.py": _probe_app_storage,
@@ -500,6 +563,8 @@ _PROBES: dict[str, Probe] = {
     "agent/tools/app_update.py": _probe_app_update,
     "agent/tools/journal.py": _probe_journal,
     "agent/tools/long_task.py": _probe_long_task,
+    "agent/tools/skill_creator.py": _probe_skill_creator,
+    "agent/tools/voice.py": _probe_voice,
 }
 
 

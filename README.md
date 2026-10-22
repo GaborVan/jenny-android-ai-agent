@@ -93,6 +93,12 @@ rather than a plain fetch, so JavaScript-rendered pages work.
 → [Scheduling](https://jenny.flagdizero.com/docs/using/scheduling/) ·
 [Tools](https://jenny.flagdizero.com/docs/reference/tools/)
 
+**🗣️ It speaks, and it listens.** A reply can be read aloud through the phone's own
+text-to-speech engine (`speak`), and a voice note sent to it on Telegram comes back to the
+agent as text — transcribed on the device by Android's speech recogniser, with no key and no
+service of ours behind it. → [Tools](https://jenny.flagdizero.com/docs/reference/tools/) ·
+[Privacy](https://jenny.flagdizero.com/docs/internals/privacy/)
+
 **🛠️ It writes its own Android mini-apps.** Describe one in chat — "something to track my
 plants" — and the agent builds it: UI, typed actions, persistent storage, installed into its
 own app grid. Each action becomes a callable tool, so the same app is usable by you, by the
@@ -110,6 +116,14 @@ be a bad one — no widgets, folders or icon packs. The launcher part is the *ho
 reaching the agent from anywhere — outbound-only, your own bot token, so nothing on your
 network becomes reachable from the internet. Messages through it pass through Telegram's
 servers; your memory and files never do. Off by default.
+
+**🏠 Home bridge over Tailscale.** If the subscription you want to use is a CLI on your own
+PC, point Jenny at a bridge that exposes it as an OpenAI-compatible API, reached through your
+private tailnet instead of the open internet. **Add provider** now offers a
+**Home bridge (Tailscale)** preset that fills the URL and the subscription tier, and a failed
+call to a `.ts.net` address is reported as what it is — Tailscale off, wrong token, or the
+CLI behind the bridge out of session — instead of a raw server payload.
+→ [Connecting through Tailscale](docs/reference/providers.md#connecting-through-tailscale-home-bridge)
 
 ## Quick start
 
@@ -141,10 +155,15 @@ is served on **loopback by default** (`127.0.0.1`) — no port exposed to your n
 to reverse-proxy, no inbound attack surface unless you deliberately rebind it. The API is
 token-gated even on loopback, because Android does not isolate loopback TCP between apps.
 
-Jenny makes six kinds of outbound connection — your provider, Bing when it searches,
+Jenny makes seven kinds of outbound connection — your provider, Bing when it searches,
 `api.telegram.org` if you enabled the bridge, any URL you or the agent explicitly fetch,
-OpenRouter's attribution headers when that's your provider, and a daily check for a new
-release. **None of them carries anything about you.** The update check is a plain `GET` of the
+OpenRouter's attribution headers when that's your provider, your phone's speech-recognition
+engine when you send a voice note, and a daily check for a new
+release. **None of them carries anything about you** — no identifier, no install ID, no
+analytics, no query string of ours. Two of them do carry content you chose to send: your
+messages go to your provider and to Telegram, and a voice note's audio goes to whichever
+speech engine your phone uses (`voice.prefer_offline` asks it to do the work on-device
+instead). The update check is a plain `GET` of the
 `latest.json` published with the release: no identifier, no version, no headers of ours, no
 query string — a public file fetched and compared on the device. It is the only one that goes
 to a server this project controls, and the only one you did not switch on: it runs every 24h,
@@ -197,9 +216,14 @@ Collected in one place rather than scattered, so you can judge before installing
 **Pre-release prototype.** It works, it's been my daily driver for months, and it has rough
 edges — onboarding most of all, which is exactly where feedback is worth most.
 
-Not promised, roughly in order: measured battery numbers · voice in and out · a credential
-store so mini-apps can reach authenticated servers · the agent operating other apps on the
-phone · richer system surfaces.
+Not promised, roughly in order: measured battery numbers · voice **input**, and a spoken loop
+that doesn't need an explicit tool call · a credential store so mini-apps can reach
+authenticated servers · the agent operating other apps on the phone · richer system surfaces.
+
+Voice *output* is no longer on that list: the agent can read a reply aloud with the `speak`
+tool, through the phone's own text-to-speech engine (nothing leaves the device, no permission
+involved). It still takes a tool call, though — this is not a conversation you can simply talk
+to.
 
 ## Contributing
 

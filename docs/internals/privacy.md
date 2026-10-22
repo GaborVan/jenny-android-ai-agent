@@ -8,9 +8,9 @@ Jenny does not phone home. There is no analytics SDK, no crash reporter, and no 
 
 The WebUI itself is served entirely from `127.0.0.1` — no page, font, or script it loads comes from the internet.
 
-## The five data recipients
+## The six data recipients
 
-Data only leaves the phone through one of these five paths, each gated by a condition you control.
+Data only leaves the phone through one of these six paths, each gated by a condition you control.
 
 | Recipient | What it receives | Condition |
 |---|---|---|
@@ -19,6 +19,7 @@ Data only leaves the phone through one of these five paths, each gated by a cond
 | **Sites visited by `web_fetch` / `download_file`** | Whatever a normal browser visit to that site would reveal: the site sees the request coming from a real, hidden Android WebView, with the phone's own IP address, user-agent, and WebView cookies — not an anonymized fetch. | Only when the agent calls `web_fetch` or `download_file` on a URL. |
 | **`api.telegram.org`** | Messages, if you've paired a Telegram bot: your conversation transits Telegram's servers under Telegram's terms, not Jenny's. | Only if `telegram.enabled` is `true` (default `false` — off until you explicitly connect a bot). |
 | **The SSH hosts you registered** | The commands the agent runs on that machine, and — through `ssh_transfer` — the content of any workspace file it uploads there. Files fetched with `ssh_transfer` travel the other way, from the server into the workspace. | Only if `tools.ssh.enable` is `true` (default `false`), only for an alias a person registered in Settings → SSH whose host key you accepted by hand, and only through a `sysadmin` subagent. The agent can never name an address, only one of your aliases. |
+| **Your phone's speech-recognition service** (in practice Google's) | The audio of a voice note, or of an audio file you ask the agent to transcribe — decoded to PCM and handed to the engine. Whether the engine then uploads that audio to its own servers is the engine's decision, not Jenny's. | Only when a voice note arrives on Telegram (`voice.enable`, default `true`) or when the agent calls `transcribe_audio` on a workspace file. `voice.prefer_offline: true` asks the engine to work on-device, but it cannot force it — with no offline model installed, asking for one means not recognising at all. Dictating from the app's microphone button is not affected by `voice.enable`: that path is the WebView's own bridge. |
 
 One more, smaller case: if your configured provider is OpenRouter, Jenny adds fixed attribution headers to every request (`HTTP-Referer` pointing at Jenny's GitHub repo, `X-OpenRouter-Title: Jenny`) so OpenRouter can attribute traffic to the app. This doesn't add a new recipient — OpenRouter is already your chosen LLM provider — but it does add identifying metadata to that traffic.
 

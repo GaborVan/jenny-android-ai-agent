@@ -1,0 +1,20 @@
+<resources>
+    <string name="gateway_notification_title">Apex працює</string>
+    <string name="gateway_notification_text">Готова відповідати та виконувати заплановані завдання</string>
+    <string name="gateway_channel_name">Фонова служба</string>
+    <string name="gateway_channel_description">Показується, поки Apex працює у фоновому режимі. Android цього вимагає, і сповіщення залишається, доки Apex не буде зупинено. Торкніться, щоб відкрити Apex.</string>
+
+    <string name="alerts_channel_name">Сповіщення</string>
+    <string name="alerts_channel_description">Нагадування та повідомлення, які Apex надсилає з власної ініціативи</string>
+
+    <string name="update_channel_name">Оновлення застосунку</string>
+    <string name="update_channel_description">Показується, коли завантажене оновлення очікує на ваше підтвердження для встановлення</string>
+    <string name="update_notification_title">Оновлення готове до встановлення</string>
+    <string name="update_notification_text">Торкніться, щоб підтвердити — після цього Apex перезапуститься сама</string>
+
+    <string name="accessibility_service_label">Керування інтерфейсом Apex</string>
+    <string name="accessibility_service_description">Дозволяє Apex бачити вміст екрана та виконувати дотики, свайпи й введення тексту в інших застосунках на ваш запит.</string>
+
+    <string name="notification_listener_label">Доступ Apex до сповіщень</string>
+    <string name="notification_listener_description">Дозволяє Apex читати та закривати сповіщення з інших застосунків на ваш запит.</string>
+</resources>

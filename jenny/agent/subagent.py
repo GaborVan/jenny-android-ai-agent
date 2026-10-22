@@ -613,7 +613,7 @@ def split_allow_by_scope(
     scope", e resta ``None`` per ogni scope.
     """
     if agent_type.tools is None:
-        return {scope: None for scope in agent_type.scopes}
+        return dict.fromkeys(agent_type.scopes)
 
     discovered = loader.discover()
     by_scope: dict[str, frozenset[str] | None] = {}

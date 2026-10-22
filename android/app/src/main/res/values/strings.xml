@@ -1,34 +1,34 @@
 <resources>
-    <string name="app_name">Jenny</string>
+    <string name="app_name">Apex</string>
 
     <!-- Foreground service: the ongoing notification Android requires while the
          gateway runs. Wording has to answer "what is this and why can't I
          dismiss it?", because that is the only question it ever raises. -->
-    <string name="gateway_notification_title">Jenny is running</string>
+    <string name="gateway_notification_title">Apex is running</string>
     <string name="gateway_notification_text">Ready to reply and to run scheduled tasks</string>
     <string name="gateway_channel_name">Background service</string>
-    <string name="gateway_channel_description">Shown while Jenny runs in the background. Android requires it, and it stays until Jenny is stopped. Tap it to open Jenny.</string>
+    <string name="gateway_channel_description">Shown while Apex runs in the background. Android requires it, and it stays until Apex is stopped. Tap it to open Apex.</string>
 
     <!-- Proactive alerts posted by the agent (the message itself comes from
          Python; only the channel is described here). -->
     <string name="alerts_channel_name">Alerts</string>
-    <string name="alerts_channel_description">Reminders and messages Jenny sends on her own initiative</string>
+    <string name="alerts_channel_description">Reminders and messages Apex sends on her own initiative</string>
 
     <!-- App update waiting for the user to confirm it in the system installer
-         (UpdateBridge). Its own channel, not the agent's: silencing Jenny's
+         (UpdateBridge). Its own channel, not the agent's: silencing Apex's
          alerts must not hide an update that is stuck waiting for a tap. -->
     <string name="update_channel_name">App updates</string>
     <string name="update_channel_description">Shown when a downloaded update needs your confirmation to install</string>
     <string name="update_notification_title">Update ready to install</string>
-    <string name="update_notification_text">Tap to confirm — Jenny restarts on her own afterwards</string>
+    <string name="update_notification_text">Tap to confirm — Apex restarts on her own afterwards</string>
 
     <!-- Accessibility service (UiAutomationService): what the user enables in
-         Settings → Accessibility so Jenny can see and touch other apps. -->
-    <string name="accessibility_service_label">Jenny UI control</string>
-    <string name="accessibility_service_description">Lets Jenny see the screen content and perform taps, swipes and typing in other apps, on your request.</string>
+         Settings → Accessibility so Apex can see and touch other apps. -->
+    <string name="accessibility_service_label">Apex UI control</string>
+    <string name="accessibility_service_description">Lets Apex see the screen content and perform taps, swipes and typing in other apps, on your request.</string>
 
     <!-- Notification listener (NotificationListenerBridge): what the user
-         enables so Jenny can read and dismiss notifications from other apps. -->
-    <string name="notification_listener_label">Jenny notifications access</string>
-    <string name="notification_listener_description">Lets Jenny read and dismiss notifications from other apps on your request.</string>
+         enables so Apex can read and dismiss notifications from other apps. -->
+    <string name="notification_listener_label">Apex notifications access</string>
+    <string name="notification_listener_description">Lets Apex read and dismiss notifications from other apps on your request.</string>
 </resources>

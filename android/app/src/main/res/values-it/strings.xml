@@ -1,14 +1,14 @@
 <resources>
-    <string name="gateway_notification_title">Jenny è attiva</string>
+    <string name="gateway_notification_title">Apex è attiva</string>
     <string name="gateway_notification_text">Pronta a rispondere e a eseguire le attività programmate</string>
     <string name="gateway_channel_name">Servizio in background</string>
-    <string name="gateway_channel_description">Mostrata mentre Jenny è attiva in background. Android la richiede e resta finché Jenny non viene fermata. Toccala per aprire Jenny.</string>
+    <string name="gateway_channel_description">Mostrata mentre Apex è attiva in background. Android la richiede e resta finché Apex non viene fermata. Toccala per aprire Apex.</string>
 
     <string name="alerts_channel_name">Avvisi</string>
-    <string name="alerts_channel_description">Promemoria e messaggi che Jenny manda di sua iniziativa</string>
+    <string name="alerts_channel_description">Promemoria e messaggi che Apex manda di sua iniziativa</string>
 
     <string name="update_channel_name">Aggiornamenti dell\'app</string>
     <string name="update_channel_description">Mostrata quando un aggiornamento già scaricato aspetta la tua conferma per installarsi</string>
     <string name="update_notification_title">Aggiornamento pronto da installare</string>
-    <string name="update_notification_text">Tocca per confermare — poi Jenny riparte da sola</string>
+    <string name="update_notification_text">Tocca per confermare — poi Apex riparte da sola</string>
 </resources>

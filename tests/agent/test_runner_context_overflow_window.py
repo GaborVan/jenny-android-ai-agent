@@ -36,13 +36,13 @@ def _tools():
 def _spec(**overrides):
     from jenny.agent.runner import AgentRunSpec
 
-    kwargs = dict(
-        initial_messages=[{"role": "user", "content": "hi"}],
-        tools=_tools(),
-        model="test-model",
-        max_iterations=4,
-        max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
-    )
+    kwargs = {
+        "initial_messages": [{"role": "user", "content": "hi"}],
+        "tools": _tools(),
+        "model": "test-model",
+        "max_iterations": 4,
+        "max_tool_result_chars": _MAX_TOOL_RESULT_CHARS,
+    }
     kwargs.update(overrides)
     return AgentRunSpec(**kwargs)
 

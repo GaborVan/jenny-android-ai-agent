@@ -37,7 +37,9 @@ class UiViewTool(Tool, ContextAware):
 
     def __init__(self, ui_query: Any) -> None:
         self._ui_query = ui_query
-        self._metadata: ContextVar[dict[str, Any]] = ContextVar("ui_view_metadata", default={})
+        self._metadata: ContextVar[dict[str, Any] | None] = ContextVar(
+            "ui_view_metadata", default=None
+        )
 
     @property
     def name(self) -> str:
@@ -74,7 +76,7 @@ class UiViewTool(Tool, ContextAware):
         self._metadata.set(dict(ctx.metadata or {}))
 
     async def execute(self, **kwargs: Any) -> ToolResult:
-        conn_id = self._metadata.get().get("conn_id")
+        conn_id = (self._metadata.get() or {}).get("conn_id")
         if not conn_id:
             return ToolResult.failure(
                 "No WebUI client is attached to this turn (the request did not come from "

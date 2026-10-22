@@ -8,6 +8,8 @@ There's nothing Jenny-specific about self-hosted inference: you configure it exa
 
 Jenny itself needs no internet access to run — the gateway, the WebUI, and the agent loop are entirely local to the phone. But the *provider call* still has to reach wherever your model server lives, over the network, from the phone. If that server is your own laptop or a box on your LAN, the phone has to be able to open a connection to it — same as any other app making an HTTP request. There is no special local-inference mode that keeps traffic off the network; a self-hosted `openai_compat` endpoint is called the exact same way a hosted one would be.
 
+Nothing here changes if the endpoint behind that URL is not a model server but a **bridge that exposes a CLI subscription** (Codex CLI, Claude CLI, Gemini CLI) as an OpenAI-compatible API. It is the same request to a different port on the same machine, so everything below still applies; the only extra piece is the provider's `tier`, which says that such a profile does not need an API key — see [Provider tiers](./providers.md#provider-tiers-pay-per-use-subscription-local).
+
 Concretely, the endpoint must be **reachable from the phone itself** — not from a desktop browser, not from the machine running the model server. If your phone and your model server aren't on the same network (or connected through a VPN), the request will simply fail to connect, the same as pointing a browser at an address it can't route to.
 
 ## Cleartext HTTP is blocked except on loopback

@@ -70,13 +70,29 @@ Telegram is a much narrower surface than the WebUI. Be clear-eyed about the gap:
 |---|---|---|
 | Text messages in | Yes | Yes |
 | Location sharing in | Yes (see [below](#sharing-your-location-from-telegram)) | N/A (uses phone GPS automatically) |
-| Photos / voice notes / documents / stickers / video in | **No** — any of these gets the reply "📎 Photos, voice notes and documents are coming soon: text only for now." | Yes |
+| Photos / documents / audio / video in | Yes — downloaded into the workspace and handed to the agent as attachments | Yes |
+| Voice notes in | Yes — transcribed to text on the phone (see [below](#voice-notes)) | Yes (microphone button in the composer) |
+| Stickers in | Emoji only, when the sticker carries one | Yes |
 | Live streaming of the reply | **No** — only the finished message | Yes |
 | Tool-use / progress indicators | **No** | Yes (expandable tool pills) |
 | "Show reasoning" block | **No** | Yes, model-dependent |
 | Typing indicator while Jenny works | **No** — the bot gives no signal at all until the final message arrives | N/A |
 
-That "coming soon" line is a fixed message baked into the bot's replies today, not a release date or a promise — treat it as "not supported."
+That "coming soon" line is a fixed message baked into the bot's replies today, not a release date or a promise — treat it as "not supported". It now only appears for the few update types nothing handles (`video_note`, `animation`, `contact`, `poll`, an emoji-less sticker).
+
+### Voice notes
+
+A voice note sent to the bot is **transcribed on the phone** and delivered to the agent as
+text, with the original audio still attached. The engine is the one Android has installed
+(usually Google's) — Jenny ships no model and no key. Two consequences worth knowing:
+
+- Who hears the audio is that engine, and it may upload it. `voice.prefer_offline: true` asks
+  it to stay on-device; with no offline model installed, asking for one means not recognising
+  at all. `voice.enable: false` turns transcription off entirely, and then a voice note arrives
+  as an audio file with the placeholder text `🎤 voice message`, as it always did.
+- Transcribing an **audio file** needs Android 13 or newer (`EXTRA_AUDIO_SOURCE`). Below that
+  the bot answers with a short "I couldn't transcribe this voice note" and does not start a
+  turn — see [Tools](../reference/tools.md) for the matching limit on `transcribe_audio`.
 
 ### Commands
 

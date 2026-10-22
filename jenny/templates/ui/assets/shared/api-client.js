@@ -429,6 +429,44 @@ class ApiClient {
     return res.json();
   }
 
+  // ── OpenClaw node ──
+  // La credenziale viaggia come `credential_token`: il nome contiene "token",
+  // quindi `redact_query_secrets` la maschera nei log del gateway. Diverso da
+  // `_postWithQuery`, qui i valori vuoti si conservano: svuotare la credenziale
+  // deve essere possibile.
+  async _openclawNodeCall(path, params = null) {
+    const qs = new URLSearchParams();
+    if (params) for (const [k, v] of Object.entries(params)) qs.set(k, v == null ? '' : String(v));
+    const url = qs.toString() ? `${path}?${qs}` : path;
+    const res = await this._fetch(url);
+    if (!res.ok) throw new Error(await this._errorText(res, 'OpenClaw node request failed'));
+    return res.json();
+  }
+
+  async getOpenClawNodeStatus() {
+    return this._openclawNodeCall('/api/settings/openclaw-node/status');
+  }
+
+  async updateOpenClawNode(params) {
+    return this._openclawNodeCall('/api/settings/openclaw-node/update', params);
+  }
+
+  async connectOpenClawNode(params) {
+    return this._openclawNodeCall('/api/settings/openclaw-node/connect', params);
+  }
+
+  async getAccessibilityStatus() {
+    const res = await this._fetch('/api/settings/accessibility/status');
+    if (!res.ok) throw new Error(await this._errorText(res, 'Accessibility status failed'));
+    return res.json();
+  }
+
+  async openAccessibilitySettings() {
+    const res = await this._fetch('/api/settings/accessibility/open');
+    if (!res.ok) throw new Error(await this._errorText(res, 'Open accessibility settings failed'));
+    return res.json();
+  }
+
   // ── SSH APIs ──
   // Helper dedicato invece di _postWithQuery: quello scarta i valori vuoti, e
   // qui un campo svuotato (es. la descrizione di un host) deve poter arrivare
@@ -534,6 +572,29 @@ class ApiClient {
 
   async disableTelegram() {
     return this._telegramGet('/api/telegram/disable');
+  }
+
+  // ── Drive sync APIs ──
+
+  async _driveSyncGet(url) {
+    const res = await this._fetch(url);
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(text || `Drive sync request failed: ${res.status}`);
+    }
+    return res.json();
+  }
+
+  async getDriveSyncStatus() {
+    return this._driveSyncGet('/api/drivesync/status');
+  }
+
+  async runDriveSyncNow() {
+    return this._driveSyncGet('/api/drivesync/sync');
+  }
+
+  async updateDriveSyncSettings({ enabled }) {
+    return this._driveSyncGet(`/api/drivesync/update?enabled=${enabled ? '1' : '0'}`);
   }
 
   // ── Backup APIs ──

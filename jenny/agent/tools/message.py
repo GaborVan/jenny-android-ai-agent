@@ -159,9 +159,9 @@ class MessageTool(Tool, ContextAware):
             "message_default_message_id",
             default=default_message_id,
         )
-        self._default_metadata: ContextVar[dict[str, Any]] = ContextVar(
+        self._default_metadata: ContextVar[dict[str, Any] | None] = ContextVar(
             "message_default_metadata",
-            default={},
+            default=None,
         )
         # I flag per-turno vivono DENTRO un dict mutabile tenuto dalla ContextVar,
         # non come valore della ContextVar stessa. Il tool viene eseguito in un
@@ -366,7 +366,7 @@ class MessageTool(Tool, ContextAware):
             except (OSError, PermissionError, ValueError) as e:
                 return f"Error: media path is not allowed: {str(e)}"
 
-        metadata = dict(self._default_metadata.get()) if same_target else {}
+        metadata = dict(self._default_metadata.get() or {}) if same_target else {}
         # La visibilità del turno sopravvive al cambio di target. Un invio
         # cross-channel butta via lo stato di *routing* dell'origine (message_id
         # su tutti: instraderebbe la risposta nella chat sbagliata), ma la

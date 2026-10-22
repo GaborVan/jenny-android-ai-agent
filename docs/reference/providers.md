@@ -46,12 +46,89 @@ The full field set, only reachable by hand-editing `providers.providers[]` in `c
 |---|---|---|
 | `name` | yes | Free-form identifier, referenced by `providers.default` and by any `modelPresets.<preset>.provider`. |
 | `format` | yes | `"anthropic"` or `"openai_compat"`. The only field that picks the backend. |
-| `apiKey` | yes | The gateway refuses to start a provider without one — see the exact error below. Local servers that don't check keys still need a placeholder like `"EMPTY"`. |
-| `apiBase` | no | Full HTTP base URL, version path included where the service expects it (e.g. `/v1`). Omit to use the format's default. |
+| `apiKey` | yes for `tier: "api"`, no otherwise | A provider with `tier: "api"` refuses to start without one — see the exact error below. `tier: "local"` and `tier: "subscription"` do not need a key at all: that is the whole point of those tiers. |
+| `apiBase` | no | Full HTTP base URL, version path included where the service expects it (e.g. `/v1`). Omit to use the format's default. Anything goes here — a LAN address, a Tailscale hostname, a bridge on your own machine — subject to the HTTPS rule in [Local models](./local-models.md). |
+| `tier` | no | `"api"` (default), `"subscription"`, or `"local"`. Says how the endpoint is paid for, and the only thing it changes is whether `apiKey` is required. See [Provider tiers](#provider-tiers-pay-per-use-subscription-local). |
 | `apiType` | no, `openai_compat` only | `"auto"` (default), `"chat_completions"`, or `"responses"`. See [Chat Completions vs. Responses API](#chat-completions-vs-responses-api-openai_compat-only). Config-only — not in Settings. |
 | `extraHeaders` / `extraBody` / `extraQuery` | no | Extra request headers, body fields, and query params merged into every request to this provider. Config-only. |
 
 Keys may be written as camelCase or snake_case in the file; Jenny always writes camelCase back when it saves.
+
+### Provider tiers: pay-per-use, subscription, local
+
+A **profile** is one entry in `providers.providers`: its own `apiBase`, its own model, its own key or none. Several can coexist, and switching between them is a matter of which one `providers.default` names — or which one a `modelPresets` entry names for one conversation. Nothing else is needed: the agent loop asks the active profile for a completion and does not care where it points.
+
+| Tier | What it is | Key needed? |
+|---|---|---|
+| `api` (default) | A hosted service billed per token. | Yes — startup fails without one. |
+| `subscription` | A bridge on a machine you own that exposes a CLI subscription (Codex CLI, Claude CLI, Gemini CLI, …) behind an OpenAI-compatible endpoint. | No. |
+| `local` | A model server on a machine you own: loopback, LAN, or Tailscale. | No. |
+
+**Pointing Jenny at a local bridge.** On your PC, run the bridge on a port and terminate TLS in front of it, because Android refuses plaintext HTTP to anything but `127.0.0.1` — that rule and its reasons are in [Local models](./local-models.md), and it is the step people trip on. A Tailscale hostname with `tailscale serve` is the least fiddly way to get a valid certificate. Then, in `workspace/config.json`:
+
+```json
+{
+  "providers": {
+    "providers": [
+      { "name": "paid", "format": "openai_compat", "apiKey": "sk-real", "tier": "api" },
+      { "name": "bridge", "format": "openai_compat", "apiBase": "https://my-pc.tailnet-name.ts.net/v1", "tier": "subscription" }
+    ],
+    "default": "bridge"
+  },
+  "agents": { "defaults": { "model": "the-model-your-bridge-exposes" } },
+  "modelPresets": {
+    "cheap": { "provider": "bridge", "model": "the-model-your-bridge-exposes" },
+    "frontier": { "provider": "paid", "model": "gpt-5" }
+  }
+}
+```
+
+Or from **Settings → Model → Providers**: the add/edit dialog has a **How it's paid** selector with the same three tiers, and picking `subscription` or `local` makes the API-key field optional instead of mandatory. The field exists because the alternative was a false one: before tiers, a keyless endpoint could only be configured by inventing a dummy key.
+
+A keyless profile does not send an empty header: the request goes out with `Authorization: Bearer no-key`, the same placeholder a keyless provider always sent. Bridges and local servers ignore it; if yours rejects it, give the profile any string as `apiKey`.
+
+What a tier does **not** do: it does not change the timeout, the retry policy, or the SSRF guard. Provider traffic is never SSRF-checked in the first place (v. [Local models](./local-models.md)), and a LAN or Tailscale endpoint is treated as an ordinary remote endpoint for timeouts.
+
+## Connecting through Tailscale (home bridge)
+
+A **bridge** is a small server on a machine you own that exposes CLI subscriptions (Codex CLI, Claude CLI, Gemini CLI) behind an OpenAI-compatible API, so Jenny can use the subscription you already pay for. When that machine is your home PC and the phone is somewhere else, **Tailscale** is what makes the address reachable without opening a port to the internet: both devices join the same private tailnet, and the bridge is reached through its MagicDNS name (`<machine>.<tailnet>.ts.net`), which also carries a real TLS certificate — so the HTTPS requirement in [Local models](./local-models.md) is satisfied by the certificate Tailscale issues, not by a self-signed one.
+
+### The built-in preset
+
+Settings → **Model** → **API keys** → **Add provider** now starts with a **Preset** selector. Choosing **Home bridge (Tailscale)** fills the form in:
+
+| Field | Value it fills in |
+|---|---|
+| Name | `Домашній міст (Tailscale)` — a label, rename it freely |
+| Format | `openai_compat` |
+| Base URL | the bridge's default URL, `<machine>.<tailnet>.ts.net:8899/v1` by default |
+| How it's paid | `subscription` — which is what makes the key field optional |
+
+The preset is a **starting point, not a fixed value**: every field stays editable, and what gets saved is an ordinary provider entry. Change the port, point it at another tailnet host, or edit the profile later exactly like any other one. The preset carries no credential at all — the token is yours and is never shipped with the app.
+
+### The token
+
+The bridge authenticates requests with a bearer token, and that token comes from your PC: it is whatever your bridge is configured with (the `Authorization: Bearer …` value it validates — check the bridge's own start-up output or its config for the exact string). Jenny never ships a token, never guesses one, and sends none until you paste it into the profile's **API Key** field. Because the profile's tier is `subscription`, saving with that field empty is allowed; a bridge that requires auth will simply answer `401`, which the app reports as a rejected token rather than as a broken profile.
+
+Then pick the model. The list comes from the bridge's own `GET /v1/models` (Jenny accepts `data[].id`, `models[].name`, or a bare list), so it names exactly what the bridge exposes (`codex`, `claude`, `gemini`, or whatever its adapters are called). Settings → Model → **Change model** probes that endpoint through the existing model picker; you can also type an ID by hand, which is the fallback when the probe cannot reach the bridge.
+
+### On the phone
+
+1. Install Tailscale and sign in to the **same tailnet** as the PC. Without it the `.ts.net` name does not resolve at all.
+2. Turn **MagicDNS** on in the Tailscale app — it is what makes the machine name resolvable instead of requiring a bare IP.
+3. Keep Tailscale connected while using Jenny. Android can drop the VPN under battery pressure, so the battery-optimization exemption described in [Troubleshooting](../using/troubleshooting.md) applies to the Tailscale app too.
+
+### When it fails
+
+For an endpoint whose host ends in `.ts.net`, Jenny replaces the raw server payload with a short, classified message (the strings are Ukrainian, the language of the device this was built for):
+
+| You see | What it means |
+|---|---|
+| *Схоже, Tailscale вимкнено або недоступний. Увімкніть VPN-з'єднання Tailscale на телефоні (і переконайтеся, що MagicDNS увімкнений).* — "It looks like Tailscale is off or unreachable: enable the Tailscale VPN on the phone, and make sure MagicDNS is on." | No response arrived at all (connection failure or timeout). The VPN is off, the phone is on another tailnet, or MagicDNS is disabled. The bridge is not the problem. |
+| `Токен відхилено (HTTP 401).` — "Token rejected." | The bridge answered and refused the credential. Re-paste the token; check it is the bridge's token and not another service's key. |
+| `Бекенд моделі недоступний (HTTP 502/503/504).` — "Model backend unavailable." | Tailscale works and the bridge is up, but the CLI behind it is not answering — most often an exhausted session limit. Retry later, or switch to another model. |
+
+Only `.ts.net` endpoints get this rewriting. For every other endpoint the server's own message (status, URL, body) is kept as it is: there it is the better diagnosis, and replacing it would only remove information.
 
 ## Choosing the active provider
 

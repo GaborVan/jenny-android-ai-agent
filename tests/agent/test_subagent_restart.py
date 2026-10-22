@@ -25,15 +25,15 @@ from jenny.providers.base import LLMProvider
 def _manager(tmp_path: Path, **kw) -> SubagentManager:
     provider = MagicMock(spec=LLMProvider)
     provider.get_default_model.return_value = "test-model"
-    defaults = dict(
-        provider=provider,
-        workspace=tmp_path,
-        bus=MessageBus(),
-        model="test-model",
-        max_tool_result_chars=16_000,
+    defaults = {
+        "provider": provider,
+        "workspace": tmp_path,
+        "bus": MessageBus(),
+        "model": "test-model",
+        "max_tool_result_chars": 16_000,
         # Watchdog spento: lo stallo ha i suoi test, qui non deve interferire.
-        stall_threshold_s=0.0,
-    )
+        "stall_threshold_s": 0.0,
+    }
     defaults.update(kw)
     return SubagentManager(**defaults)
 

@@ -1119,9 +1119,12 @@ def _fenced_payload(section: str) -> str:
     backtick, almeno tanti quanti l'apertura: è la regola che applica chi legge.
     """
     lines = section.split("\n")
-    for start, line in enumerate(lines):
+    start = 0
+    opened = 0
+    for index, line in enumerate(lines):
         if match := _FENCE_OPEN_RE.match(line):
             opened = len(match.group(1))
+            start = index
             break
     else:
         raise AssertionError("nessun recinto aperto nella sezione")
