@@ -4,7 +4,16 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [main]
+    # Tests used to run only on main, so every feature branch — where the work
+    # actually happens — built an APK without ever running the suite. Branch
+    # work must be gated, otherwise the only signal arrives after a release.
+    branches: [main, "feat/**", "chore/**", "fix/**"]
+
+# A new push to the same branch makes the previous run pointless: cancel it
+# instead of paying for both.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   # Enforces the DCO sign-off promised in CONTRIBUTING.md. Deliberately an
