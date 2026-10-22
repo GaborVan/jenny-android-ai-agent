@@ -62,7 +62,22 @@ jobs:
       # BLOCKING: restricted to the already-error-clean subset — must stay green.
       - run: npx --yes pyright@1.1.411 jenny/bus jenny/command jenny/runtime jenny/session
       # NON-BLOCKING visibility: full perimeter, surfaces residual errors without failing CI.
-      - run: npx --yes pyright@1.1.411 || true
+      # Gate on the DIRECTION instead of the absolute: the full perimeter is not
+      # clean yet (244 errors at the 2026-10-22 merge), and a big-bang cleanup is
+      # riskier than it is valuable. Growing debt, however, means a new mistake —
+      # that fails here. Lower the baseline whenever a fix lands.
+      - name: Full pyright debt must not grow
+        run: |
+          set +e
+          out=$(npx --yes pyright@1.1.411 2>&1)
+          count=$(printf '%s\n' "$out" | grep -cE ' - error: ')
+          baseline=244
+          echo "full pyright errors: $count (baseline $baseline)"
+          if [ "$count" -gt "$baseline" ]; then
+            printf '%s\n' "$out" | grep -E ' - error: ' | head -40
+            echo "::error::pyright errors grew from $baseline to $count"
+            exit 1
+          fi
       # pip-audit: le CVE note nelle dipendenze *installate* sono un cancello, non
       # un avviso. Gira qui e non nel job `test` perche' quello installa anche i
       # backend di solo sviluppo (`cryptography`, `asyncssh`, mai nell'APK): qui
