@@ -63,15 +63,20 @@ jobs:
       - run: npx --yes pyright@1.1.411 jenny/bus jenny/command jenny/runtime jenny/session
       # NON-BLOCKING visibility: full perimeter, surfaces residual errors without failing CI.
       # Gate on the DIRECTION instead of the absolute: the full perimeter is not
-      # clean yet (244 errors at the 2026-10-22 merge), and a big-bang cleanup is
-      # riskier than it is valuable. Growing debt, however, means a new mistake —
-      # that fails here. Lower the baseline whenever a fix lands.
+      # clean yet, and a big-bang cleanup is riskier than it is valuable. Growing
+      # debt, however, means a new mistake — that fails here. Lower the baseline
+      # whenever a fix lands.
+      #
+      # 343 is measured in THIS job's environment (runtime deps only). A local run
+      # with the test extras installed reports fewer errors (244) because more
+      # modules resolve; the two numbers are not comparable, so keep the baseline
+      # in sync with CI, not with a laptop.
       - name: Full pyright debt must not grow
         run: |
           set +e
           out=$(npx --yes pyright@1.1.411 2>&1)
           count=$(printf '%s\n' "$out" | grep -cE ' - error: ')
-          baseline=244
+          baseline=343
           echo "full pyright errors: $count (baseline $baseline)"
           if [ "$count" -gt "$baseline" ]; then
             printf '%s\n' "$out" | grep -E ' - error: ' | head -40
