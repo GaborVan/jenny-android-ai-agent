@@ -87,9 +87,11 @@ async def test_status_no_hardware():
 def test_enable_toggle():
     config = ToolsConfig()
     ctx = SimpleNamespace(config=config, android_context=object())
-    assert not ObdTool.enabled(ctx)
-    config.obd.enable = True
+    # On by default: without an adapter the tool answers with a clear error, so
+    # the user should not have to hunt for a switch before the first connection.
     assert ObdTool.enabled(ctx)
+    config.obd.enable = False
+    assert not ObdTool.enabled(ctx)
     assert isinstance(ObdTool.create(ctx), ObdTool)
     assert ObdTool in ToolLoader().discover()
     assert ObdTool.config_cls() is ObdConfig

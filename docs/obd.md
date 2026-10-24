@@ -1,9 +1,11 @@
 # OBD-II car diagnostics
 
 Jenny's optional `obd` tool reads standard emissions-related OBD-II diagnostics
-through ELM327-compatible adapters. It is disabled by default. Enable
-`tools.obd.enable` in Jenny's configuration (programmatic changes must use
-`jenny.config.store.mutate`). `tools.obd.idleTimeoutS` defaults to 300 seconds.
+through ELM327-compatible adapters. It is enabled by default — with no adapter
+connected every action answers with a clear error instead of touching hardware,
+so there is nothing to switch on before the first use. Set `tools.obd.enable` to
+`false` in Jenny's configuration to hide it entirely (programmatic changes must
+use `jenny.config.store.mutate`). `tools.obd.idleTimeoutS` defaults to 300 seconds.
 The tool maintains one in-memory connection, serializes requests, and closes
 idle or failed connections. Gateway restart requires reconnecting.
 

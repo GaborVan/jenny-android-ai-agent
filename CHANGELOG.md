@@ -6,15 +6,35 @@ at [Semantic Versioning](https://semver.org/spec/v2.0.0.html) for the versions
 that reach Releases — each release page carries its own notes, and this file
 carries the reasoning that outlives them.
 
-## [Unreleased]
+## [0.9.24] — 2026-10-24
 
 ### Added
+
+- **OBD-II car diagnostics.** A new opt-in `obd` tool talks to an ELM327 adapter over
+  Bluetooth SPP (or a serial port on a desktop) and exposes seven actions: `status`,
+  `connect`, `read_codes`, `clear_codes`, `live`, `vin` and `readiness`. Stored, pending
+  and permanent fault codes are decoded into the usual `P0301` / `P0420` / `U0100` form;
+  live values cover rpm, speed, coolant and intake temperature, MAF, throttle position,
+  fuel level and module voltage; readiness reports the monitor set and what is still
+  incomplete. `clear_codes` refuses to run without an explicit `confirm=true`, because it
+  wipes the codes *and* the readiness monitors. The tool is off by default
+  (`tools.obd.enable`), and Android 12+ needs `BLUETOOTH_CONNECT`. Standard OBD-II only —
+  manufacturer-specific modules are out of scope.
 
 - OpenClaw node commands `ui.tap`, `ui.swipe`, `ui.type`, `ui.press`, and
   `voice.listen` for gestures, text input, navigation, and microphone dictation,
   with the announced command list visible in Settings.
 
 ### Fixed
+
+- **The pyright baseline now measures the code, not the pydantic shim.** `Field()` is
+  annotated `Any`, because every `x: int = Field(...)` declaration was reported as
+  “FieldInfo is not assignable to int” — 111 of the 345 full-perimeter errors were that
+  one false positive. Debt is 234 on the same tree, and the gate was lowered to match.
+
+- **`filelock` 3.x → 4.2.1.** Three advisories (CVE-2026-112907, -112913, -112940) that
+  the `pip-audit` gate refused; bumped in `pyproject.toml`, the Android requirements and
+  the lock file.
 
 - **The OpenClaw node pairing survives restarts and app updates.** The device token the
   gateway issues now lives in an Android Keystore-encrypted store (`SecureStoreBridge`,

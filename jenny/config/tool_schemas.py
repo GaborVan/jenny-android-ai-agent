@@ -332,5 +332,8 @@ class SkillCreatorConfig(Base):
 class ObdConfig(Base):
     """Diagnostica OBD-II opzionale e durata della sessione inattiva."""
 
-    enable: bool = False
+    # Attivo di default: senza un adattatore collegato il tool risponde con un
+    # errore chiaro, quindi non c'è motivo di nasconderlo dietro un interruttore
+    # che l'utente dovrebbe trovare e attivare a mano.
+    enable: bool = True
     idle_timeout_s: float = Field(default=300, ge=0.01)
