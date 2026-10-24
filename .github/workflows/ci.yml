@@ -67,16 +67,18 @@ jobs:
       # debt, however, means a new mistake — that fails here. Lower the baseline
       # whenever a fix lands.
       #
-      # 343 is measured in THIS job's environment (runtime deps only). A local run
-      # with the test extras installed reports fewer errors (244) because more
-      # modules resolve; the two numbers are not comparable, so keep the baseline
-      # in sync with CI, not with a laptop.
+      # 234 is measured in THIS job's environment (runtime deps only). A local run
+      # with the test extras installed reports fewer errors because more modules
+      # resolve; the two numbers are not comparable, so keep the baseline in sync
+      # with CI, not with a laptop. Was 343 before `Field()` started returning
+      # `Any`: one annotation removed 111 false "FieldInfo is not assignable"
+      # errors across every pydantic-style declaration.
       - name: Full pyright debt must not grow
         run: |
           set +e
           out=$(npx --yes pyright@1.1.411 2>&1)
           count=$(printf '%s\n' "$out" | grep -cE ' - error: ')
-          baseline=343
+          baseline=234
           echo "full pyright errors: $count (baseline $baseline)"
           if [ "$count" -gt "$baseline" ]; then
             printf '%s\n' "$out" | grep -E ' - error: ' | head -40

@@ -63,8 +63,15 @@ def Field(  # noqa: N802
     serialization_alias: str | None = None,
     exclude: bool = False,
     repr: bool = True,
-) -> FieldInfo:
-    """Declare a field with validation metadata."""
+) -> Any:
+    """Declare a field with validation metadata.
+
+    Returns the field metadata object, but is annotated ``Any`` on purpose: a
+    pydantic-style declaration writes ``x: int = Field(...)``, and the checker
+    would otherwise report every one of those defaults as "FieldInfo is not
+    assignable to int". The value is consumed by the model metaclass, never used
+    as the field's value, so the honest annotation for the checker is ``Any``.
+    """
     return FieldInfo(
         default=default,
         default_factory=default_factory,
