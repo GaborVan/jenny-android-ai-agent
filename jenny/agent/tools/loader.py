@@ -64,6 +64,7 @@ _HARDCODED_TOOL_MODULES = [
     "browser",
     "download",
     "location",
+    "obd",
     "long_task",
     "spawn",
     "subagent_control",

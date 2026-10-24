@@ -133,3 +133,20 @@ async def test_run_shutdown_snapshot_failure_is_swallowed() -> None:
     container = _bare_container(order, fail_shutdown=True)
     await container.run()  # non solleva
     assert order[-1] == "snapshot:shutdown"
+
+
+async def test_shutdown_closes_obd_session() -> None:
+    """Il gateway chiude RFCOMM senza attendere la scadenza della sessione."""
+    from jenny.agent.tools.obd import ObdTool
+    from jenny.agent.tools.registry import ToolRegistry
+    from jenny.obd.transport import MockTransport
+
+    transport = MockTransport(["ELM327>"] + ["OK>"] * 4)
+    tool = ObdTool(transport_factory=lambda _: transport)
+    await tool.execute("connect", device="OBD")
+    container = _bare_container([])
+    container._agent.tools = ToolRegistry()
+    container._agent.tools.register(tool)
+    await container.run()
+    assert transport.closed
+    assert tool._idle_task is None

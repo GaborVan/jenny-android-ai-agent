@@ -15,6 +15,7 @@ from jenny.config.tool_schemas import (
     LocationConfig,
     MyToolConfig,
     NotificationsConfig,
+    ObdConfig,
     PythonExecConfig,
     SkillCreatorConfig,
     SshConfig,
@@ -553,6 +554,7 @@ class ToolsConfig(Base):
     )
     file: FileToolsConfig = Field(default_factory=FileToolsConfig)
     location: LocationConfig = Field(default_factory=LocationConfig)
+    obd: ObdConfig = Field(default_factory=ObdConfig)
     my: MyToolConfig = Field(default_factory=MyToolConfig)
     introspect: IntrospectToolConfig = Field(default_factory=IntrospectToolConfig)
     diagnostics: DiagnosticsToolConfig = Field(default_factory=DiagnosticsToolConfig)

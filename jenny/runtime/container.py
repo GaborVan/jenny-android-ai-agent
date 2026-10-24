@@ -645,6 +645,13 @@ class GatewayContainer:
                 # PRIMA del flush_all(), così nessun writer di session.messages
                 # è attivo durante il flush.
                 await self._agent.shutdown()
+                # La sessione OBD appartiene al registry principale, non ai subagent.
+                from jenny.agent.tools.obd import ObdTool
+
+                registry = getattr(self._agent, "tools", None)
+                obd = registry.get("obd") if registry is not None else None
+                if isinstance(obd, ObdTool):
+                    await obd.close()
             await self.channels.stop()
             from jenny.agent.tools.exec_session import DEFAULT_EXEC_SESSION_MANAGER
 

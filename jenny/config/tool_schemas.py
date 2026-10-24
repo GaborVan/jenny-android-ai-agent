@@ -327,3 +327,10 @@ class SkillCreatorConfig(Base):
     sync_repo: str = ""
     # Ramo da cui scaricare le skill quando ``sync_repo`` è "owner/repo".
     sync_branch: str = "main"
+
+
+class ObdConfig(Base):
+    """Diagnostica OBD-II opzionale e durata della sessione inattiva."""
+
+    enable: bool = False
+    idle_timeout_s: float = Field(default=300, ge=0.01)

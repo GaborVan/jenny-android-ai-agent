@@ -2,13 +2,16 @@
 
 Every permission Jenny's manifest declares, why it's there, and what happens if you refuse or revoke it.
 
-Jenny asks for a short, deliberately narrow list. Two permissions are requested at runtime (notifications, location) with an Android system prompt; the rest are either automatic (granted at install, no prompt) or "special" permissions that route through a system settings screen instead of a normal dialog.
+Jenny asks for a short, deliberately narrow list. Notifications, location, and microphone access use runtime system prompts. Optional OBD-II Bluetooth access requires a Nearby devices grant in Android app settings. Other permissions are automatic (granted at install, no prompt) or "special" permissions that route through a system settings screen.
 
 ## Requested permissions
 
 | Permission | Type | Why Jenny wants it | If you deny it |
 |---|---|---|---|
 | `INTERNET` | Normal (install-time, no prompt) | Talking to your configured LLM provider, web search/fetch, Telegram, downloads — essentially everything Jenny does over the network. | Can't be denied on Android; without it the app cannot function at all. |
+| `BLUETOOTH` / `BLUETOOTH_ADMIN` | Normal, Android 11 and earlier only | Connect to paired ELM327 OBD-II adapters and cancel discovery before connecting. The OBD tool is disabled by default. | Required for Bluetooth OBD on these versions; unrelated features are unaffected. |
+| `BLUETOOTH_CONNECT` | **Runtime**, Android 12+ (Nearby devices; grant in app settings) | Read paired devices and open the OBD adapter's Bluetooth Classic SPP connection. | OBD connect returns a permission error. See [OBD-II diagnostics](../obd.md). |
+| `BLUETOOTH_SCAN` | **Runtime**, Android 12+ (Nearby devices; grant in app settings) | Cancel discovery before opening the OBD connection; Jenny does not discover new devices or derive location from scans (`neverForLocation`). | OBD connect returns a permission error; pair devices through Android settings. |
 | `ACCESS_NETWORK_STATE` | Normal (install-time) | Lets the app check network connectivity state. | Can't be denied; no user-visible effect either way. |
 | `FOREGROUND_SERVICE` | Normal (install-time) | Lets the gateway run as a foreground service so it keeps working with the screen off or the app backgrounded. | Can't be denied; required for the agent to run at all. |
 | `FOREGROUND_SERVICE_SPECIAL_USE` | Normal (install-time) | Declares the foreground service's category as "special use" (running a local agent runtime doesn't fit Android's other foreground-service categories like media playback or navigation). | Can't be denied; part of how the persistent service is allowed to exist on modern Android. |
